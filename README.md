@@ -1,4 +1,4 @@
-# ghidra-mcp
+# GhidraMCP　headless
 
 PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとして公開する Python パッケージです。従来の Jython スクリプトによる HTTP サーバーを置き換え、純粋な Python 3.10 以降の環境で Ghidra プロジェクトを操作できます。
 
