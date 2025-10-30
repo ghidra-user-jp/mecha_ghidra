@@ -37,7 +37,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 
 5. **MCP サーバーの起動**
    ```bash
- uv run ghidra-mcp --project-dir /Users/samsepi0l/ghidra_project.gpr --project-name ghidra_project --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
+   uv run ghidra-mcp --project-dir /Users/samsepi0l/ghidra_project.gpr --project-name ghidra_project --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
    ```
 - `--binary-path` を指定すればプロジェクトを経由せず直接バイナリを開けます。
 - `--transport sse` を選ぶと FastMCP の SSE モードで起動できます。
