@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/ghidra_headless/__init__.py
+src/ghidra_headless/session.py
+src/ghidra_headless/handlers/__init__.py
+src/ghidra_headless/handlers/core.py
+src/ghidra_mcp/__init__.py
+src/ghidra_mcp/cli.py
+src/ghidra_mcp.egg-info/PKG-INFO
+src/ghidra_mcp.egg-info/SOURCES.txt
+src/ghidra_mcp.egg-info/dependency_links.txt
+src/ghidra_mcp.egg-info/entry_points.txt
+src/ghidra_mcp.egg-info/requires.txt
+src/ghidra_mcp.egg-info/top_level.txt
+tests/test_cli_session.py

@@ -1,0 +1,2 @@
+[console_scripts]
+ghidra-mcp = ghidra_mcp.cli:main
