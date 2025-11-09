@@ -1,2 +1,0 @@
-ghidra_headless
-ghidra_mcp
