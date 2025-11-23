@@ -91,12 +91,23 @@ class SessionRegistry:
         with self._registry_lock:
             return sorted(self._sessions.keys())
 
-    def list_programs(self, name: str):
-        session = self.ensure(name)
-        if not session.is_project_session():
-            raise RuntimeError("バイナリセッションではプログラム一覧を取得できません")
-        with self.lock(name):
-            return session.project_handle.list_programs()
+    def list_programs(self, name: str | None):
+        if name:
+            session = self.ensure(name)
+            if not session.is_project_session():
+                raise RuntimeError("バイナリセッションではプログラム一覧を取得できません")
+            with self.lock(name):
+                return session.project_handle.list_programs()
+        targets = self._project_session_targets()
+        if not targets:
+            raise RuntimeError("プロジェクトセッションが存在しないためプログラム一覧を取得できません")
+        return [
+            {
+                "project_name": self.ensure(target).project_handle.resolved_name,
+                "programs": self._list_programs_for_target(target),
+            }
+            for target in targets
+        ]
 
     def load_program(self, name: str, domain_path: str) -> None:
         session = self.ensure(name)
@@ -161,6 +172,27 @@ class SessionRegistry:
             self._project_handles[key] = handle
         return handle
 
+    def _list_programs_for_target(self, target: str):
+        session = self.ensure(target)
+        if not session.is_project_session():
+            raise RuntimeError("バイナリセッションではプログラム一覧を取得できません")
+        with self.lock(target):
+            return session.project_handle.list_programs()
+
+    def _project_session_targets(self) -> List[str]:
+        with self._registry_lock:
+            seen_projects: set[object] = set()
+            targets: list[str] = []
+            for name, session in sorted(self._sessions.items()):
+                if not session.is_project_session():
+                    continue
+                handle = session.project_handle
+                dedup_key = getattr(handle, "key", None)
+                if dedup_key is None or dedup_key in seen_projects:
+                    continue
+                seen_projects.add(dedup_key)
+                targets.append(name)
+            return targets
 
 _registry = SessionRegistry()
 
@@ -573,7 +605,7 @@ def list_targets() -> List[str]:
 
 
 @mcp.tool()
-def list_project_programs(target: str):
+def list_project_programs(target: str | None = None):
     return _registry.list_programs(target)
 
 

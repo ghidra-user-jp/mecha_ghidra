@@ -1,3 +1,4 @@
+import threading
 import types
 
 import pytest
@@ -31,26 +32,27 @@ def dummy_core(monkeypatch):
 
 
 class DummySession:
-    def __init__(self, *, binary_path=None):
+    def __init__(self, *, binary_path=None, project_handle=None):
         self.args = {
             "binary_path": binary_path,
         }
         self.program = object()
         self.closed = False
-        self.project_handle = None
+        self.project_handle = project_handle
 
     def close(self):
         self.closed = True
 
     def is_project_session(self):
-        return False
+        return self.project_handle is not None
 
 
 class DummyHandle:
-    def __init__(self, key=("/project", "Sample")):
+    def __init__(self, key=("/project", "Sample"), name="Sample"):
         self.key = key
         self.closed = False
         self.last_domain = None
+        self.resolved_name = name
 
     def is_closed(self):
         return self.closed
@@ -138,6 +140,55 @@ def test_registry_reuses_active_project_handle(monkeypatch):
     assert session.project_handle is handle
     assert handle.last_domain == "/folder/main"
     assert calls["initialize"] == [(session.program, "reuse")]
+
+
+def test_list_programs_without_target_returns_all_projects():
+    registry = cli.SessionRegistry()
+    handle_a = DummyHandle(name="A")
+    handle_b = DummyHandle(key=("/project", "B"), name="B")
+    session_a = DummySession(project_handle=handle_a)
+    session_b = DummySession(project_handle=handle_b)
+    with registry._registry_lock:
+        registry._sessions["a"] = session_a
+        registry._locks["a"] = threading.RLock()
+        registry._sessions["b"] = session_b
+        registry._locks["b"] = threading.RLock()
+
+    result = registry.list_programs(None)
+
+    assert result == [
+        {"project_name": handle_a.resolved_name, "programs": handle_a.list_programs()},
+        {"project_name": handle_b.resolved_name, "programs": handle_b.list_programs()},
+    ]
+
+
+def test_list_programs_without_target_requires_project_session():
+    registry = cli.SessionRegistry()
+    session = DummySession()
+    with registry._registry_lock:
+        registry._sessions["bin"] = session
+        registry._locks["bin"] = threading.RLock()
+
+    with pytest.raises(RuntimeError):
+        registry.list_programs(None)
+
+
+def test_list_programs_without_target_deduplicates_projects():
+    registry = cli.SessionRegistry()
+    shared_handle = DummyHandle()
+    session_a = DummySession(project_handle=shared_handle)
+    session_b = DummySession(project_handle=shared_handle)
+    with registry._registry_lock:
+        registry._sessions["a"] = session_a
+        registry._locks["a"] = threading.RLock()
+        registry._sessions["b"] = session_b
+        registry._locks["b"] = threading.RLock()
+
+    result = registry.list_programs(None)
+
+    assert result == [
+        {"project_name": shared_handle.resolved_name, "programs": shared_handle.list_programs()}
+    ]
 
 
 def test_add_bookmark_tool_invokes_core(monkeypatch):
