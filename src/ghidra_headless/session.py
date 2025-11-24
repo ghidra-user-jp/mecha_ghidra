@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import pathlib
 import threading
-from typing import Optional
+from typing import Dict, Optional
 
 import pyghidra
 import pyghidra.core as pycore
@@ -74,6 +74,22 @@ class ProgramSession:
 
     def is_project_session(self) -> bool:
         return self.project_handle is not None
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        project_name: Optional[str] = None
+        project_path: Optional[str] = None
+        dmain_path: Optional[str] = _domain_path(self.program)
+
+        handle = self.project_handle
+        if handle:
+            project_name = handle.resolved_name
+            project_path = str(handle.project_dir)
+
+        return {
+            "project_name": project_name,
+            "project_dir": project_path,
+            "domain_path": dmain_path
+        }
 
 
 class ProjectHandle:
@@ -249,13 +265,26 @@ def _collect_program_files(folder, results):
         if domain_file.getContentType() == "Program":
             results.append(
                 {
-                    "path": domain_file.getPathname(),
-                    "name": domain_file.getName(),
+                    "domain_path": domain_file.getPathname(),
+                    "domain_name": domain_file.getName(),
                     "contentType": domain_file.getContentType(),
                 }
             )
     for sub in list(folder.getFolders()):
         _collect_program_files(sub, results)
+
+
+def _domain_path(program, domain_file=None) -> Optional[str]:
+    if program is None:
+        return None
+
+    if domain_file is None:
+        domain_file = program.getDomainFile()
+        if domain_file is None:
+            return None
+    if domain_file is not None:
+        return domain_file.getPathname()
+    return None
 
 
 def _remove_lock_dirs(root_dir: Optional[pathlib.Path], project_name: Optional[str]) -> None:

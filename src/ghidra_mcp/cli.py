@@ -87,9 +87,9 @@ class SessionRegistry:
                 raise RuntimeError(f"セッション '{name}' は初期化されていません")
             return lock
 
-    def list_targets(self) -> List[str]:
+    def list_targets(self) -> List[Dict[str, Optional[str]]]:
         with self._registry_lock:
-            return sorted(self._sessions.keys())
+            return [{"target": name, **session.to_dict()} for name, session in sorted(self._sessions.items())]
 
     def list_programs(self, name: str | None):
         if name:
@@ -600,7 +600,7 @@ def add_bookmark(
 
 
 @mcp.tool()
-def list_targets() -> List[str]:
+def list_targets() -> List[Dict[str, Optional[str]]]:
     return _registry.list_targets()
 
 

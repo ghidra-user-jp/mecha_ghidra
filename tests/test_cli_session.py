@@ -1,5 +1,6 @@
 import threading
 import types
+from pathlib import Path
 
 import pytest
 
@@ -32,19 +33,33 @@ def dummy_core(monkeypatch):
 
 
 class DummySession:
-    def __init__(self, *, binary_path=None, project_handle=None):
+    def __init__(self, *, binary_path=None, project_handle=None, domain_path=None):
         self.args = {
             "binary_path": binary_path,
         }
         self.program = object()
         self.closed = False
         self.project_handle = project_handle
+        self.domain_path = domain_path or ("/" + Path(binary_path).name if binary_path else None)
 
     def close(self):
         self.closed = True
 
     def is_project_session(self):
         return self.project_handle is not None
+
+    def to_dict(self):
+        project_name = getattr(self.project_handle, "resolved_name", None) if self.project_handle else None
+        project_path = None
+        if self.project_handle:
+            project_dir = getattr(self.project_handle, "project_dir", None)
+            if project_dir:
+                project_path = str(project_dir)
+        return {
+            "domain_path": self.domain_path,
+            "project_name": project_name,
+            "project_dir": project_path,
+        }
 
 
 class DummyHandle:
@@ -59,7 +74,7 @@ class DummyHandle:
 
     def open_program(self, domain_path):
         self.last_domain = domain_path
-        session = DummySession(binary_path=None)
+        session = DummySession(binary_path=None, domain_path=domain_path)
         session.project_handle = self
         session.program = object()
         return session
@@ -100,7 +115,14 @@ def test_session_registry_create_close(monkeypatch):
     registry = cli.SessionRegistry()
     session = registry.create_session("fw", binary_path="/tmp/fw.bin")
 
-    assert "fw" in registry.list_targets()
+    assert registry.list_targets() == [
+        {
+            "target": "fw",
+            "domain_path": "/fw.bin",
+            "project_name": None,
+            "project_dir": None,
+        }
+    ]
     assert session.args["binary_path"] == "/tmp/fw.bin"
     assert calls["initialize"] == [(session.program, "fw")]
 
@@ -140,6 +162,52 @@ def test_registry_reuses_active_project_handle(monkeypatch):
     assert session.project_handle is handle
     assert handle.last_domain == "/folder/main"
     assert calls["initialize"] == [(session.program, "reuse")]
+
+
+def test_program_session_to_dict_binary():
+    class DummyProgram:
+        def getDomainFile(self):
+            class DummyDomainFile:
+                def getPathname(self):
+                    return "/fw.bin"
+            return DummyDomainFile()
+
+    session = cli.ProgramSession(
+        flat_api=None,
+        program=DummyProgram(),
+        context=None,
+        project_handle=None,
+    )
+
+    assert session.to_dict() == {
+        "domain_path": "/fw.bin",
+        "project_name": None,
+        "project_dir": None,
+    }
+
+
+def test_program_session_to_dict_project():
+    class DummyProgram:
+        def getDomainFile(self):
+            class DummyDomainFile:
+                def getPathname(self):
+                    return "/main.bin"
+            return DummyDomainFile()
+
+    handle = DummyHandle(name="ProjectX")
+    handle.project_dir = Path("/projects/ProjectX")
+    session = cli.ProgramSession(
+        flat_api=None,
+        program=DummyProgram(),
+        context=None,
+        project_handle=handle,
+    )
+
+    assert session.to_dict() == {
+        "domain_path": "/main.bin",
+        "project_name": "ProjectX",
+        "project_dir": str(Path("/projects/ProjectX")),
+    }
 
 
 def test_list_programs_without_target_returns_all_projects():
