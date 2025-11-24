@@ -53,7 +53,7 @@ class ProgramSession:
             raise ValueError(f"バイナリが存在しません: {binary_path}")
         context = pyghidra.open_program(str(path))
         flat_api = context.__enter__()
-        program = flat_api.getProgram()
+        program = flat_api.getCurrentProgram()
         return cls(flat_api, program, context=context)
 
     def close(self) -> None:
