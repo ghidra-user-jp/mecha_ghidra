@@ -64,11 +64,12 @@ class ProgramSession:
             self.project_handle.release_program(self.program)
             self.project_handle = None
         else:
-            if self.program is not None and hasattr(self.program, "release"):
-                try:
-                    self.program.release()
-                except Exception:
-                    pass
+            if self.program is not None:
+                for consumer in self.program.getConsumerList():
+                    try:
+                        self.program.release(consumer)
+                    except Exception:
+                        pass
         self.flat_api = None
         self.program = None
 
@@ -144,11 +145,12 @@ class ProjectHandle:
                     self.project.save(program)
             except Exception:
                 pass
-            try:
-                if program is not None and hasattr(program, "release"):
-                    program.release()
-            except Exception:
-                pass
+            if program is not None:
+                for consumer in program.getConsumerList():
+                    try:
+                        program.release(consumer)
+                    except Exception:
+                        pass
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
                 self._close_project_locked()
