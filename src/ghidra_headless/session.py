@@ -186,7 +186,6 @@ class ProjectHandle:
         except Exception:
             pass
         self._closed = True
-        _remove_lock_dirs(self.root_dir, self.resolved_name)
 
 
 # ----------------------------------------------------------------------
@@ -210,18 +209,13 @@ def _project_location_and_name(project_dir: str, project_name: Optional[str]):
 
 def _resolve_domain_file(project, domain_path: Optional[str]):
     data = project.getProjectData()
-    root = data.getRootFolder()
     if not domain_path:
         domain_path = _find_first_program_path(project)
     if not domain_path:
         raise ValueError("プロジェクト内にプログラムが見つかりません")
-    folder_path, program_name = _split_domain_path(domain_path)
-    folder = _get_folder(root, folder_path)
-    if folder is None:
-        raise ValueError(f"フォルダ '{folder_path}' が見つかりません")
-    domain_file = folder.getFile(program_name)
+    domain_file = data.getFile(domain_path)
     if domain_file is None:
-        raise ValueError(f"プログラム '{program_name}' が見つかりません ({folder_path})")
+        raise ValueError(f"プログラム '{domain_path}' が見つかりません")
     return domain_file
 
 
@@ -235,31 +229,6 @@ def _find_first_program_path(project) -> Optional[str]:
                 return f.getPathname()
         queue.extend(list(folder.getFolders()))
     return None
-
-
-def _split_domain_path(domain_path: Optional[str]) -> tuple[str, Optional[str]]:
-    if not domain_path:
-        return "/", None
-    clean = domain_path.strip("/")
-    if not clean:
-        return "/", None
-    if "/" in clean:
-        folder, _, name = clean.rpartition("/")
-        return f"/{folder}", name
-    return "/", clean
-
-
-def _get_folder(root_folder, folder_path: str):
-    if folder_path == "/":
-        return root_folder
-    current = root_folder
-    for segment in folder_path.strip("/").split("/"):
-        if not segment:
-            continue
-        current = current.getFolder(segment)
-        if current is None:
-            break
-    return current
 
 
 def _collect_program_files(folder, results):
@@ -282,35 +251,6 @@ def _domain_path(program, domain_file=None) -> Optional[str]:
 
     if domain_file is None:
         domain_file = program.getDomainFile()
-        if domain_file is None:
-            return None
     if domain_file is not None:
         return domain_file.getPathname()
     return None
-
-
-def _remove_lock_dirs(root_dir: Optional[pathlib.Path], project_name: Optional[str]) -> None:
-    if root_dir is None:
-        return
-    candidates = set()
-    if project_name:
-        candidates.add(root_dir / f"{project_name}.lock")
-    candidates.add(root_dir.parent / f"{root_dir.name}.lock")
-    for path in candidates:
-        try:
-            if path.exists():
-                if path.is_dir():
-                    _remove_tree(path)
-                else:
-                    path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-def _remove_tree(path: pathlib.Path) -> None:
-    for child in path.iterdir():
-        if child.is_dir():
-            _remove_tree(child)
-        else:
-            child.unlink(missing_ok=True)
-    path.rmdir()
