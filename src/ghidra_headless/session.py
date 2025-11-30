@@ -46,6 +46,12 @@ class ProgramSession:
         self._context = context
         self.project_handle = project_handle
 
+    def get_program(self):
+        return self.program
+
+    def get_project_handle(self) -> Optional["ProjectHandle"]:
+        return self.project_handle
+
     @classmethod
     def from_binary(cls, binary_path: str) -> "ProgramSession":
         path = pathlib.Path(binary_path)
@@ -81,10 +87,10 @@ class ProgramSession:
         project_location: Optional[str] = None
         dmain_path: Optional[str] = _domain_path(self.program)
 
-        handle = self.project_handle
+        handle = self.get_project_handle()
         if handle:
-            project_name = handle.project_name
-            project_location = handle.project_location
+            project_name = handle.get_project_name()
+            project_location = handle.get_project_location()
 
         return {
             "project_name": project_name,
@@ -127,6 +133,15 @@ class ProjectHandle:
     @staticmethod
     def make_key(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
         return ProjectHandle.resolve_project_location_and_file(project_location, project_name)
+
+    def get_project_location(self) -> str:
+        return self.project_location
+
+    def get_project_name(self) -> str:
+        return self.project_name
+
+    def get_key(self) -> tuple[str, str]:
+        return self.key
 
     def open_program(self, domain_path: Optional[str] = None) -> ProgramSession:
         with self._lock:

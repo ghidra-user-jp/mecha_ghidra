@@ -43,6 +43,12 @@ class DummySession:
         self.project_handle = project_handle
         self.domain_path = domain_path or ("/" + Path(binary_path).name if binary_path else None)
 
+    def get_program(self):
+        return self.program
+
+    def get_project_handle(self):
+        return self.project_handle
+
     def close(self):
         self.closed = True
 
@@ -50,10 +56,8 @@ class DummySession:
         return self.project_handle is not None
 
     def to_dict(self):
-        project_name = getattr(self.project_handle, "resolved_name", None) if self.project_handle else None
-        project_location = None
-        if self.project_handle:
-            project_location = getattr(self.project_handle, "project_location", None)
+        project_name = self.project_handle.get_project_name() if self.project_handle else None
+        project_location = self.project_handle.get_project_location() if self.project_handle else None
         return {
             "domain_path": self.domain_path,
             "project_name": project_name,
@@ -68,6 +72,15 @@ class DummyHandle:
         self.last_domain = None
         self.project_location = key[0]
         self.project_name = name
+
+    def get_project_location(self):
+        return self.project_location
+
+    def get_project_name(self):
+        return self.project_name
+
+    def get_key(self):
+        return self.key
 
     def is_closed(self):
         return self.closed
@@ -189,11 +202,11 @@ def test_registry_reuses_active_project_handle(monkeypatch):
     registry = cli.SessionRegistry()
     handle = DummyHandle()
     with registry._registry_lock:
-        registry._project_handles[handle.key] = handle
+        registry._project_handles[handle.get_key()] = handle
 
     session = registry.create_session("reuse", domain_path="/folder/main")
 
-    assert session.project_handle is handle
+    assert session.get_project_handle() is handle
     assert handle.last_domain == "/folder/main"
     assert calls["initialize"] == [(session.program, "reuse")]
 
@@ -258,8 +271,16 @@ def test_list_programs_without_target_returns_all_projects():
     result = registry.list_programs(None)
 
     assert result == [
-        {"project_location": handle_a.project_location, "project_name": handle_a.project_name, "programs": handle_a.list_programs()},
-        {"project_location": handle_b.project_location, "project_name": handle_b.project_name, "programs": handle_b.list_programs()},
+        {
+            "project_location": handle_a.get_project_location(),
+            "project_name": handle_a.get_project_name(),
+            "programs": handle_a.list_programs(),
+        },
+        {
+            "project_location": handle_b.get_project_location(),
+            "project_name": handle_b.get_project_name(),
+            "programs": handle_b.list_programs(),
+        },
     ]
 
 
@@ -288,7 +309,11 @@ def test_list_programs_without_target_deduplicates_projects():
     result = registry.list_programs(None)
 
     assert result == [
-        {"project_location": shared_handle.project_location, "project_name": shared_handle.project_name, "programs": shared_handle.list_programs()}
+        {
+            "project_location": shared_handle.get_project_location(),
+            "project_name": shared_handle.get_project_name(),
+            "programs": shared_handle.list_programs(),
+        }
     ]
 
 
