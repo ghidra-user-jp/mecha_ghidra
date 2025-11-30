@@ -37,7 +37,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 
 5. **MCP サーバーの起動**
    ```bash
-   uv run ghidra-mcp --project-dir /Users/samsepi0l/ghidra_project.gpr --project-name ghidra_project --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
+   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
    ```
 - `--binary-path` を指定すればプロジェクトを経由せず直接バイナリを開けます。
 - `--transport sse` を選ぶと FastMCP の SSE モードで起動できます。
@@ -46,7 +46,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 
 1. **セッション作成（プロジェクトを開く）**
    ```bash
-   create_session(target="fw", project_dir="/path/project", project_name="Sample")
+   create_session(target="fw", project_location="/path/project", project_name="Sample")
    ```
 2. **プログラム一覧確認**
    ```bash
@@ -65,7 +65,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 1. MCP サーバー起動（プログラムAを読み込む）
    ```bash
    uv run ghidra-mcp \
-       --project-dir /path/to/projectDir \
+       --project-location /path/to/projectDir \
        --project-name SampleProject \
        --domain-path /folder/programA \
        --target-name targetA \
@@ -76,7 +76,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
    ```python
    create_session(
        target="targetB",
-       project_dir="/path/to/projectDir",
+       project_location="/path/to/projectDir",
        project_name="SampleProject",
        domain_path="/folder/programB"
    )
@@ -109,14 +109,14 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 ```bash
 uv run ghidra-mcp \
     --session name=firmware,binary_path=/path/fw.bin \
-    --session name=game,project_dir=/path/game_project,project_name=GameProj,domain_path=/main \
+    --session name=game,project_location=/path/game_project,project_name=GameProj,domain_path=/main \
     --transport stdio
 ```
 
 MCP ツール呼び出し時は `target="firmware"` のようにターゲット名を指定することで、操作対象プログラムを切り替えられます。現在登録済みのターゲットは `list_targets` ツールで確認できます。
 
 サーバー起動後でも、`create_session` ツールを呼び出すことで新しいターゲットを追加できます（例: `create_session(target="patch", binary_path="/tmp/patch.bin")`）。不要になったターゲットは `close_session(target="patch")` で解放してください。
-既に1件のプロジェクトセッションが開いている場合は、`create_session(target="analysis")` のように `project_dir` や `binary_path` を省略して同じプロジェクトを再利用することもできます。
+既に1件のプロジェクトセッションが開いている場合は、`create_session(target="analysis")` のように `project_location` や `binary_path` を省略して同じプロジェクトを再利用することもできます。
 
 ## 主要機能
 
@@ -151,10 +151,8 @@ Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` 
         "/Users/samsepi0l/GhidraMCP_headless",
         "run",
         "ghidra-mcp",
-        "--project-dir",
+        "--project-location",
         "/Users/samsepi0l/ghidra_project.gpr",
-        "--project-name",
-        "ghidra_project",
         "--transport",
         "stdio"
       ],

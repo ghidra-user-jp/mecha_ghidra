@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ghidra_mcp import cli
+from ghidra_headless import session
 
 
 def dummy_core(monkeypatch):
@@ -50,15 +51,13 @@ class DummySession:
 
     def to_dict(self):
         project_name = getattr(self.project_handle, "resolved_name", None) if self.project_handle else None
-        project_path = None
+        project_location = None
         if self.project_handle:
-            project_dir = getattr(self.project_handle, "project_dir", None)
-            if project_dir:
-                project_path = str(project_dir)
+            project_location = getattr(self.project_handle, "project_location", None)
         return {
             "domain_path": self.domain_path,
             "project_name": project_name,
-            "project_dir": project_path,
+            "project_location": project_location,
         }
 
 
@@ -67,7 +66,8 @@ class DummyHandle:
         self.key = key
         self.closed = False
         self.last_domain = None
-        self.resolved_name = name
+        self.project_location = key[0]
+        self.project_name = name
 
     def is_closed(self):
         return self.closed
@@ -104,6 +104,40 @@ def test_parse_session_definition_invalid(text):
         cli._parse_session_definition(text)
 
 
+def test_project_key_requires_existing_gpr(tmp_path):
+    project_file = tmp_path / "sample.gpr"
+    project_file.write_text("")
+
+    assert session.ProjectHandle.make_key(str(project_file), None) == (
+        str(project_file.parent),
+        "sample",
+    )
+
+    with pytest.raises(ValueError):
+        session.ProjectHandle.make_key(str(tmp_path / "missing.gpr"), None)
+
+
+def test_project_key_requires_existing(tmp_path):
+    project_file = tmp_path / "sample.gpr"
+    project_file.write_text("")
+
+    assert session.ProjectHandle.make_key(str(project_file.parent), "sample") == (
+        str(project_file.parent),
+        "sample",
+    )
+
+    with pytest.raises(ValueError):
+        session.ProjectHandle.make_key(str(tmp_path / "missing.gpr"), None)
+
+
+def test_project_key_rejects_non_gpr(tmp_path):
+    non_gpr_path = tmp_path / "project_dir"
+    non_gpr_path.mkdir()
+
+    with pytest.raises(ValueError):
+        session.ProjectHandle.make_key(str(non_gpr_path), None)
+
+
 def test_session_registry_create_close(monkeypatch):
     calls = dummy_core(monkeypatch)
     monkeypatch.setattr(
@@ -120,7 +154,7 @@ def test_session_registry_create_close(monkeypatch):
             "target": "fw",
             "domain_path": "/fw.bin",
             "project_name": None,
-            "project_dir": None,
+            "project_location": None,
         }
     ]
     assert session.args["binary_path"] == "/tmp/fw.bin"
@@ -182,7 +216,7 @@ def test_program_session_to_dict_binary():
     assert session.to_dict() == {
         "domain_path": "/fw.bin",
         "project_name": None,
-        "project_dir": None,
+        "project_location": None,
     }
 
 
@@ -194,8 +228,7 @@ def test_program_session_to_dict_project():
                     return "/main.bin"
             return DummyDomainFile()
 
-    handle = DummyHandle(name="ProjectX")
-    handle.project_dir = Path("/projects/ProjectX")
+    handle = DummyHandle(key=("/projects", "ProjectX.gpr"), name="ProjectX")
     session = cli.ProgramSession(
         flat_api=None,
         program=DummyProgram(),
@@ -206,7 +239,7 @@ def test_program_session_to_dict_project():
     assert session.to_dict() == {
         "domain_path": "/main.bin",
         "project_name": "ProjectX",
-        "project_dir": str(Path("/projects/ProjectX")),
+        "project_location": "/projects",
     }
 
 
@@ -225,8 +258,8 @@ def test_list_programs_without_target_returns_all_projects():
     result = registry.list_programs(None)
 
     assert result == [
-        {"project_name": handle_a.resolved_name, "programs": handle_a.list_programs()},
-        {"project_name": handle_b.resolved_name, "programs": handle_b.list_programs()},
+        {"project_location": handle_a.project_location, "project_name": handle_a.project_name, "programs": handle_a.list_programs()},
+        {"project_location": handle_b.project_location, "project_name": handle_b.project_name, "programs": handle_b.list_programs()},
     ]
 
 
@@ -255,7 +288,7 @@ def test_list_programs_without_target_deduplicates_projects():
     result = registry.list_programs(None)
 
     assert result == [
-        {"project_name": shared_handle.resolved_name, "programs": shared_handle.list_programs()}
+        {"project_location": shared_handle.project_location, "project_name": shared_handle.project_name, "programs": shared_handle.list_programs()}
     ]
 
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import pathlib
 import signal
 import sys
 import threading
@@ -40,7 +39,7 @@ class SessionRegistry:
         self,
         name: str,
         *,
-        project_dir: str | None = None,
+        project_location: str | None = None,
         project_name: str | None = None,
         domain_path: str | None = None,
         binary_path: str | None = None,
@@ -50,8 +49,8 @@ class SessionRegistry:
                 raise ValueError(f"セッション '{name}' は既に存在します")
 
             handle: ProjectHandle | None = None
-            if project_dir:
-                handle = self._get_or_create_project_handle(project_dir, project_name)
+            if project_location:
+                handle = self._get_or_create_project_handle(project_location, project_name)
                 session = handle.open_program(domain_path)
             elif binary_path:
                 session = ProgramSession.from_binary(binary_path)
@@ -59,11 +58,11 @@ class SessionRegistry:
                 active_handles = [h for h in self._project_handles.values() if not h.is_closed()]
                 if not active_handles:
                     raise ValueError(
-                        "binary_path または project_dir のいずれかが必要です (開いているプロジェクトがありません)"
+                        "binary_path または project_location のいずれかが必要です (開いているプロジェクトがありません)"
                     )
                 if len(active_handles) > 1:
                     raise ValueError(
-                        "複数のプロジェクトが開いているため project_dir を指定してください"
+                        "複数のプロジェクトが開いているため project_location を指定してください"
                     )
                 handle = active_handles[0]
                 session = handle.open_program(domain_path)
@@ -103,7 +102,8 @@ class SessionRegistry:
             raise RuntimeError("プロジェクトセッションが存在しないためプログラム一覧を取得できません")
         return [
             {
-                "project_name": self.ensure(target).project_handle.resolved_name,
+                "project_location": self.ensure(target).project_handle.project_location,
+                "project_name": self.ensure(target).project_handle.project_name,
                 "programs": self._list_programs_for_target(target),
             }
             for target in targets
@@ -164,11 +164,11 @@ class SessionRegistry:
         with self._registry_lock:
             return bool(self._sessions)
 
-    def _get_or_create_project_handle(self, project_dir: str, project_name: Optional[str]) -> ProjectHandle:
-        key = _normalize_project_key(project_dir, project_name)
+    def _get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
+        key = ProjectHandle.make_key(project_location, project_name)
         handle = self._project_handles.get(key)
         if handle is None or handle.is_closed():
-            handle = ProjectHandle(project_dir, project_name)
+            handle = ProjectHandle(project_location, project_name)
             self._project_handles[key] = handle
         return handle
 
@@ -620,14 +620,14 @@ def create_session(
     target: str,
     *,
     binary_path: str | None = None,
-    project_dir: str | None = None,
+    project_location: str | None = None,
     project_name: str | None = None,
     domain_path: str | None = None,
 ):
     try:
         _registry.create_session(
             target,
-            project_dir=project_dir,
+            project_location=project_location,
             project_name=project_name,
             domain_path=domain_path,
             binary_path=binary_path,
@@ -662,14 +662,14 @@ def _parse_session_definition(text: str) -> Dict[str, str]:
         result[key.strip()] = value.strip()
     if "name" not in result:
         raise ValueError("session定義にはname=...が必須です")
-    if "binary_path" not in result and "project_dir" not in result:
-        raise ValueError("session定義にはbinary_pathまたはproject_dirが必要です")
+    if "binary_path" not in result and "project_location" not in result:
+        raise ValueError("session定義にはbinary_pathまたはproject_locationが必要です")
     return result
 
 
 def parse_args(argv: list[str]):
     parser = argparse.ArgumentParser(description="PyGhidraベースのGhidra MCPサーバー")
-    parser.add_argument("--project-dir", help="デフォルトセッション用のGhidraプロジェクトディレクトリ")
+    parser.add_argument("--project-location", help="デフォルトセッション用のGhidraプロジェクトディレクトリ")
     parser.add_argument("--project-name", help="デフォルトセッションのプロジェクト名")
     parser.add_argument("--domain-path", help="デフォルトセッションのドメインパス (例: /folder/program)")
     parser.add_argument("--binary-path", help="デフォルトセッションで直接開くバイナリまたはGhidraアーカイブ(.gzf)のパス")
@@ -709,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
                 config = _parse_session_definition(definition)
                 _registry.create_session(
                     config["name"],
-                    project_dir=config.get("project_dir"),
+                    project_location=config.get("project_location"),
                     project_name=config.get("project_name"),
                     domain_path=config.get("domain_path"),
                     binary_path=config.get("binary_path"),
@@ -720,11 +720,11 @@ def main(argv: list[str] | None = None) -> int:
                 _registry.close_all()
                 return 1
 
-    if args.project_dir or args.binary_path:
+    if args.project_location or args.binary_path:
         try:
             _registry.create_session(
                 args.target_name,
-                project_dir=args.project_dir,
+                project_location=args.project_location,
                 project_name=args.project_name,
                 domain_path=args.domain_path,
                 binary_path=args.binary_path,
@@ -736,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if not _registry.has_sessions():
-        logger.error("少なくとも1つのセッションを --session または --binary-path/--project-dir で指定してください")
+        logger.error("少なくとも1つのセッションを --session または --binary-path/--project-location で指定してください")
         return 1
 
     _core_module = _core()
@@ -757,17 +757,6 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         _registry.close_all()
     return 0
-
-
-def _normalize_project_key(project_dir: str, project_name: Optional[str]) -> tuple[str, str]:
-    path = pathlib.Path(project_dir).resolve()
-    if path.is_file() and path.suffix == ".gpr":
-        effective = project_name or path.stem
-        location = path.parent
-    else:
-        effective = project_name or path.name
-        location = path
-    return (str(location), effective)
 
 
 def configure_mcp_for_sse(args) -> None:

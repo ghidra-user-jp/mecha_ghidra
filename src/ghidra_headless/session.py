@@ -78,17 +78,17 @@ class ProgramSession:
 
     def to_dict(self) -> Dict[str, Optional[str]]:
         project_name: Optional[str] = None
-        project_path: Optional[str] = None
+        project_location: Optional[str] = None
         dmain_path: Optional[str] = _domain_path(self.program)
 
         handle = self.project_handle
         if handle:
-            project_name = handle.resolved_name
-            project_path = str(handle.project_dir)
+            project_name = handle.project_name
+            project_location = handle.project_location
 
         return {
             "project_name": project_name,
-            "project_dir": project_path,
+            "project_location": project_location,
             "domain_path": dmain_path
         }
 
@@ -96,28 +96,37 @@ class ProgramSession:
 class ProjectHandle:
     """Shared handle for a Ghidra project, allowing multiple program sessions."""
 
-    def __init__(self, project_dir: str, project_name: Optional[str]) -> None:
+    def __init__(self, project_location: str, project_name: Optional[str]) -> None:
         self._lock = threading.RLock()
-        self.project_dir = pathlib.Path(project_dir)
-        self.requested_name = project_name
-
-        location, resolved_name, nested = _project_location_and_name(project_dir, project_name)
-        self.project_location = location
-        self.resolved_name = resolved_name
-        self.nested = nested
-        self.root_dir = (location / resolved_name) if nested else location
-        self.key = (str(location.resolve()), resolved_name)
+        self.project_location, self.project_name = self.resolve_project_location_and_file(project_location, project_name)
+        self.key = self.make_key(project_location, project_name)
 
         self.project, program = pycore._setup_project(
             None,
-            location,
-            resolved_name,
+            self.project_location,
+            self.project_name,
             program_name=None,
-            nested_project_location=nested,
+            nested_project_location=False,
         )
         self._initial_program = program
         self._refcount = 0
         self._closed = False
+
+    @staticmethod
+    def resolve_project_location_and_file(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
+        path = pathlib.Path(project_location).expanduser().resolve()
+        if project_name is None and path.suffix.lower() != ".gpr":
+            raise ValueError("project_location には .gpr のGhidraプロジェクトファイルを指定してください")
+        if project_name is None and not path.is_file():
+            raise ValueError(f"指定した .gpr ファイルが見つかりません: {path}")
+        if project_name is None and path.is_dir():
+            raise ValueError("project_name を指定してください")
+        effective = project_name or path.stem
+        return (str(path.parent if path.is_file() else path), effective)
+
+    @staticmethod
+    def make_key(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
+        return ProjectHandle.resolve_project_location_and_file(project_location, project_name)
 
     def open_program(self, domain_path: Optional[str] = None) -> ProgramSession:
         with self._lock:
@@ -190,21 +199,6 @@ class ProjectHandle:
 
 # ----------------------------------------------------------------------
 # helper functions
-
-
-def _project_location_and_name(project_dir: str, project_name: Optional[str]):
-    path = pathlib.Path(project_dir)
-    nested = True
-    inferred = project_name
-    if path.suffix == ".gpr" and path.is_file():
-        inferred = inferred or path.stem
-        location = path.parent
-        nested = False
-    else:
-        location = path
-        if inferred is None:
-            inferred = path.name
-    return location, inferred, nested
 
 
 def _resolve_domain_file(project, domain_path: Optional[str]):
