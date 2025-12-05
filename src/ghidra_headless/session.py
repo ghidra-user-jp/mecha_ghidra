@@ -114,7 +114,6 @@ class ProjectHandle:
             program_name=None,
             nested_project_location=False,
         )
-        self._initial_program = program
         self._refcount = 0
         self._closed = False
 
@@ -148,17 +147,45 @@ class ProjectHandle:
             if self._closed:
                 raise RuntimeError("プロジェクトは既にクローズされています")
             monitor = _console_monitor()
-            if self._initial_program is not None and (not domain_path or domain_path in {"", "/"}):
-                program = self._initial_program
-                self._initial_program = None
-            else:
-                domain_file = _resolve_domain_file(self.project, domain_path)
-                program = domain_file.getDomainObject(self.project, True, False, monitor)
+            domain_file = _resolve_domain_file(self.project, domain_path)
+            program = domain_file.getDomainObject(self.project, True, False, monitor)
             if program is None:
                 raise RuntimeError("プログラムを取得できませんでした")
             flat_api = _flat_program_api_class()(program, monitor)
             self._refcount += 1
             return ProgramSession(flat_api, program, project_handle=self)
+
+    def import_program(self, binary_path: str):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトは既にクローズされています")
+            path = pathlib.Path(binary_path)
+            if not path.exists():
+                raise ValueError(f"バイナリが存在しません: {binary_path}")
+            program_dir = "/"
+            program_name = path.name
+            data = self.project.getProjectData()
+            domain_file = data.getFile(program_dir + program_name)
+            if domain_file is not None:
+                raise RuntimeError(f"プログラムはすでに存在します: {domain_file.getPathname()}")
+            program = None
+
+            try:
+                java_file = pycore.JClass("java.io.File")(str(path))
+                program = self.project.importProgram(java_file)
+                self.project.saveAs(program, program_dir, program_name, True)
+                domain_file = program.getDomainFile()
+            finally:
+                if program is not None:
+                    self.project.close(program)
+            if domain_file is None:
+                raise RuntimeError(f"プログラムの追加に失敗しました: {binary_path}")
+
+            return domain_file
+
+    def open_program_by_importing(self, binary_path: str) -> ProgramSession:
+        domain_path = self.import_program(binary_path)
+        return self.open_program(domain_path.getPathname())
 
     def release_program(self, program) -> None:
         with self._lock:

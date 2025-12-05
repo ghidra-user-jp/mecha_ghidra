@@ -66,7 +66,8 @@ class DummySession:
 
 
 class DummyHandle:
-    def __init__(self, key=("/project", "Sample"), name="Sample"):
+    def __init__(self, key=("./project", "Sample"), name="Sample"):
+        key = (str(Path(key[0]).resolve()), key[1])
         self.key = key
         self.closed = False
         self.last_domain = None
@@ -151,16 +152,22 @@ def test_project_key_rejects_non_gpr(tmp_path):
         session.ProjectHandle.make_key(str(non_gpr_path), None)
 
 
-def test_session_registry_create_close(monkeypatch):
+def test_session_registry_create_close(tmp_path, monkeypatch):
+    project_file = tmp_path / "sample.gpr"
+    project_file.write_text("")
+    binary_file = tmp_path / "fw.bin"
+    binary_file.write_text("")
     calls = dummy_core(monkeypatch)
+
+    dummy_handle = types.SimpleNamespace(open_program_by_importing=lambda path: DummySession(binary_path=path))
     monkeypatch.setattr(
-        cli.ProgramSession,
-        "from_binary",
-        classmethod(lambda cls, path: DummySession(binary_path=path)),
+        cli.SessionRegistry,
+        "_get_or_create_project_handle",
+        lambda self, project_location, project_name: dummy_handle,
     )
 
     registry = cli.SessionRegistry()
-    session = registry.create_session("fw", binary_path="/tmp/fw.bin")
+    session = registry.create_session("fw", project_location=str(project_file), binary_path="/tmp/fw.bin")
 
     assert registry.list_targets() == [
         {
@@ -181,10 +188,11 @@ def test_session_registry_create_close(monkeypatch):
 
 def test_registry_close_all(monkeypatch):
     calls = dummy_core(monkeypatch)
+    dummy_handle = types.SimpleNamespace(open_program_by_importing=lambda path: DummySession(binary_path=path))
     monkeypatch.setattr(
-        cli.ProgramSession,
-        "from_binary",
-        classmethod(lambda cls, path: DummySession(binary_path=path)),
+        cli.SessionRegistry,
+        "_get_or_create_project_handle",
+        lambda self, project_location, project_name: dummy_handle,
     )
 
     registry = cli.SessionRegistry()
@@ -204,7 +212,7 @@ def test_registry_reuses_active_project_handle(monkeypatch):
     with registry._registry_lock:
         registry._project_handles[handle.get_key()] = handle
 
-    session = registry.create_session("reuse", domain_path="/folder/main")
+    session = registry.create_session("reuse", project_location=handle.get_key()[0], project_name=handle.get_key()[1], domain_path="/folder/main")
 
     assert session.get_project_handle() is handle
     assert handle.last_domain == "/folder/main"
@@ -241,7 +249,7 @@ def test_program_session_to_dict_project():
                     return "/main.bin"
             return DummyDomainFile()
 
-    handle = DummyHandle(key=("/projects", "ProjectX.gpr"), name="ProjectX")
+    handle = DummyHandle(key=("./projects", "ProjectX.gpr"), name="ProjectX")
     session = cli.ProgramSession(
         flat_api=None,
         program=DummyProgram(),
@@ -252,7 +260,7 @@ def test_program_session_to_dict_project():
     assert session.to_dict() == {
         "domain_path": "/main.bin",
         "project_name": "ProjectX",
-        "project_location": "/projects",
+        "project_location": str(Path("./projects").resolve()),
     }
 
 

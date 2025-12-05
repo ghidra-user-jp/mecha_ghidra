@@ -132,7 +132,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 ### 提供ツール一覧
 
-- **ターゲット管理**: `list_targets`, `create_session`, `close_session`, `list_project_programs`, `load_project_program`
+- **ターゲット管理**: `list_targets`, `create_session`, `create_session_by_importing`, `close_session`, `list_project_programs`, `load_project_program`
 - **解析支援**: `list_methods`, `list_functions`, `list_classes`, `list_namespaces`, `list_segments`, `list_imports`, `list_exports`, `list_data_items`, `list_strings`, `search_functions_by_name`, `search_bytes`, `get_function_by_address`, `get_function_xrefs`, `get_xrefs_to`, `get_xrefs_from`, `get_callee`, `get_data_by_label`, `get_bytes`, `decompile_function`, `decompile_function_by_address`, `disassemble_function`
 - **シンボル／コメント編集**: `rename_function`, `rename_function_by_address`, `rename_variable`, `rename_data`, `set_function_prototype`, `set_local_variable_type`, `set_global_data_type`, `set_bytes`, `add_bookmark`, `set_decompiler_comment`, `set_disassembly_comment`
 - **データ型操作**: `create_struct`, `add_struct_members`, `clear_struct`, `remove_struct_members`, `get_struct`, `create_enum`, `add_enum_values`, `get_enum`, `remove_enum_values`, `add_class_members`, `remove_class_members`

@@ -49,11 +49,15 @@ class SessionRegistry:
                 raise ValueError(f"セッション '{name}' は既に存在します")
 
             handle: ProjectHandle | None = None
-            if project_location:
+            if domain_path:
                 handle = self._get_or_create_project_handle(project_location, project_name)
                 session = handle.open_program(domain_path)
             elif binary_path:
-                session = ProgramSession.from_binary(binary_path)
+                handle = self._get_or_create_project_handle(project_location, project_name)
+                session = handle.open_program_by_importing(binary_path)
+            elif project_location:
+                handle = self._get_or_create_project_handle(project_location, project_name)
+                session = handle.open_program(domain_path)
             else:
                 active_handles = [h for h in self._project_handles.values() if not h.is_closed()]
                 if not active_handles:
@@ -635,11 +639,9 @@ def load_project_program(target: str, domain_path: str):
 @mcp.tool()
 def create_session(
     target: str,
-    *,
-    binary_path: str | None = None,
-    project_location: str | None = None,
-    project_name: str | None = None,
+    project_location: str,
     domain_path: str | None = None,
+    project_name: str | None = None,
 ):
     try:
         _registry.create_session(
@@ -647,10 +649,29 @@ def create_session(
             project_location=project_location,
             project_name=project_name,
             domain_path=domain_path,
+            binary_path=None,
+        )
+        return {"status": "ok", "target": target}
+    except Exception as exc:
+        raise RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
+
+
+@mcp.tool()
+def create_session_by_importing(
+    target: str,
+    binary_path: str,
+    project_location: str,
+    project_name: str | None = None,
+):
+    try:
+        _registry.create_session(
+            target,
+            project_location=project_location,
+            project_name=project_name,
             binary_path=binary_path,
         )
         return {"status": "ok", "target": target}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
 
 
