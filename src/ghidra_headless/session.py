@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import contextlib
 import pathlib
 import threading
 from typing import Dict, Optional
 
-import pyghidra
 import pyghidra.core as pycore
 
 __all__ = ["ProgramSession", "ProjectHandle"]
@@ -37,14 +35,11 @@ class ProgramSession:
         self,
         flat_api,
         program,
-        *,
-        context: Optional[contextlib.AbstractContextManager] = None,
-        project_handle: Optional["ProjectHandle"] = None,
+        project_handle: "ProjectHandle",
     ) -> None:
         self.flat_api = flat_api
         self.program = program
-        self._context = context
-        self.project_handle = project_handle
+        self.project_handle: Optional["ProjectHandle"] = project_handle
 
     def get_program(self):
         return self.program
@@ -52,20 +47,7 @@ class ProgramSession:
     def get_project_handle(self) -> Optional["ProjectHandle"]:
         return self.project_handle
 
-    @classmethod
-    def from_binary(cls, binary_path: str) -> "ProgramSession":
-        path = pathlib.Path(binary_path)
-        if not path.exists():
-            raise ValueError(f"バイナリが存在しません: {binary_path}")
-        context = pyghidra.open_program(str(path))
-        flat_api = context.__enter__()
-        program = flat_api.getCurrentProgram()
-        return cls(flat_api, program, context=context)
-
     def close(self) -> None:
-        if self._context is not None:
-            self._context.__exit__(None, None, None)
-            self._context = None
         if self.project_handle is not None:
             self.project_handle.release_program(self.program)
             self.project_handle = None
@@ -106,14 +88,10 @@ class ProjectHandle:
         self._lock = threading.RLock()
         self.project_location, self.project_name = self.resolve_project_location_and_file(project_location, project_name)
         self.key = self.make_key(project_location, project_name)
+        self._open_programs: set[tuple[str, str]] = set()
 
-        self.project, program = pycore._setup_project(
-            None,
-            self.project_location,
-            self.project_name,
-            program_name=None,
-            nested_project_location=False,
-        )
+        from ghidra.base.project import GhidraProject
+        self.project = GhidraProject.openProject(self.project_location, self.project_name, True)
         self._refcount = 0
         self._closed = False
 
@@ -147,12 +125,16 @@ class ProjectHandle:
             if self._closed:
                 raise RuntimeError("プロジェクトは既にクローズされています")
             monitor = _console_monitor()
-            domain_file = _resolve_domain_file(self.project, domain_path)
-            program = domain_file.getDomainObject(self.project, True, False, monitor)
+            domain_dir, domain_name = _parse_domain_path(self.project, domain_path)
+            domain_path_key = (domain_dir, domain_name)
+            if domain_path_key in self._open_programs:
+                raise RuntimeError(f"プログラムには既にセッションがあります: {domain_path_key}")
+            program = self.project.openProgram(domain_dir, domain_name, False)
             if program is None:
-                raise RuntimeError("プログラムを取得できませんでした")
+                raise RuntimeError(f"プログラムを取得できませんでした: {domain_path}")
             flat_api = _flat_program_api_class()(program, monitor)
             self._refcount += 1
+            self._open_programs.add(domain_path_key)
             return ProgramSession(flat_api, program, project_handle=self)
 
     def import_program(self, binary_path: str):
@@ -191,17 +173,19 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 return
+            domain_path = _domain_path(program)
             try:
                 if program is not None:
                     self.project.save(program)
             except Exception:
                 pass
-            if program is not None:
-                for consumer in program.getConsumerList():
-                    try:
-                        program.release(consumer)
-                    except Exception:
-                        pass
+            try:
+                if program is not None:
+                    self.project.close(program)
+            except Exception:
+                pass
+            if domain_path is not None:
+                self._open_programs.discard(_parse_domain_path(self.project, domain_path))
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
                 self._close_project_locked()
@@ -236,6 +220,7 @@ class ProjectHandle:
             self.project.close()
         except Exception:
             pass
+        self._open_programs.clear()
         self._closed = True
 
 
@@ -243,16 +228,13 @@ class ProjectHandle:
 # helper functions
 
 
-def _resolve_domain_file(project, domain_path: Optional[str]):
-    data = project.getProjectData()
+def _parse_domain_path(project, domain_path: Optional[str]):
     if not domain_path:
         domain_path = _find_first_program_path(project)
     if not domain_path:
         raise ValueError("プロジェクト内にプログラムが見つかりません")
-    domain_file = data.getFile(domain_path)
-    if domain_file is None:
-        raise ValueError(f"プログラム '{domain_path}' が見つかりません")
-    return domain_file
+    domain_file = pathlib.PurePosixPath(domain_path)
+    return domain_file.parent.as_posix(), domain_file.name
 
 
 def _find_first_program_path(project) -> Optional[str]:

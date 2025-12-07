@@ -186,7 +186,7 @@ def test_session_registry_create_close(tmp_path, monkeypatch):
     assert calls["remove"] == ["fw"]
 
 
-def test_registry_close_all(monkeypatch):
+def test_registry_close_all(tmp_path, monkeypatch):
     calls = dummy_core(monkeypatch)
     dummy_handle = types.SimpleNamespace(open_program_by_importing=lambda path: DummySession(binary_path=path))
     monkeypatch.setattr(
@@ -196,8 +196,8 @@ def test_registry_close_all(monkeypatch):
     )
 
     registry = cli.SessionRegistry()
-    registry.create_session("a", binary_path="/tmp/a.bin")
-    registry.create_session("b", binary_path="/tmp/b.bin")
+    registry.create_session("a", project_location=str(tmp_path), project_name="sample", binary_path="/tmp/a.bin")
+    registry.create_session("b", project_location=str(tmp_path / "sample.gpr"), binary_path="/tmp/b.bin")
 
     registry.close_all()
     assert registry.list_targets() == []
@@ -219,7 +219,7 @@ def test_registry_reuses_active_project_handle(monkeypatch):
     assert calls["initialize"] == [(session.program, "reuse")]
 
 
-def test_program_session_to_dict_binary():
+def test_program_session_to_dict_binary(tmp_path):
     class DummyProgram:
         def getDomainFile(self):
             class DummyDomainFile:
@@ -230,14 +230,13 @@ def test_program_session_to_dict_binary():
     session = cli.ProgramSession(
         flat_api=None,
         program=DummyProgram(),
-        context=None,
-        project_handle=None,
+        project_handle=DummyHandle(key=(str(tmp_path), "Sample")),
     )
 
     assert session.to_dict() == {
         "domain_path": "/fw.bin",
-        "project_name": None,
-        "project_location": None,
+        "project_name": "Sample",
+        "project_location": str(tmp_path),
     }
 
 
@@ -253,7 +252,6 @@ def test_program_session_to_dict_project():
     session = cli.ProgramSession(
         flat_api=None,
         program=DummyProgram(),
-        context=None,
         project_handle=handle,
     )
 

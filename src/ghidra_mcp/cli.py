@@ -38,8 +38,8 @@ class SessionRegistry:
     def create_session(
         self,
         name: str,
+        project_location: str,
         *,
-        project_location: str | None = None,
         project_name: str | None = None,
         domain_path: str | None = None,
         binary_path: str | None = None,
@@ -49,26 +49,11 @@ class SessionRegistry:
                 raise ValueError(f"セッション '{name}' は既に存在します")
 
             handle: ProjectHandle | None = None
-            if domain_path:
-                handle = self._get_or_create_project_handle(project_location, project_name)
-                session = handle.open_program(domain_path)
-            elif binary_path:
+            if binary_path:
                 handle = self._get_or_create_project_handle(project_location, project_name)
                 session = handle.open_program_by_importing(binary_path)
-            elif project_location:
-                handle = self._get_or_create_project_handle(project_location, project_name)
-                session = handle.open_program(domain_path)
             else:
-                active_handles = [h for h in self._project_handles.values() if not h.is_closed()]
-                if not active_handles:
-                    raise ValueError(
-                        "binary_path または project_location のいずれかが必要です (開いているプロジェクトがありません)"
-                    )
-                if len(active_handles) > 1:
-                    raise ValueError(
-                        "複数のプロジェクトが開いているため project_location を指定してください"
-                    )
-                handle = active_handles[0]
+                handle = self._get_or_create_project_handle(project_location, project_name)
                 session = handle.open_program(domain_path)
             self._sessions[name] = session
             self._locks[name] = threading.RLock()
