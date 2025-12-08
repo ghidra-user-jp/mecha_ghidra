@@ -127,7 +127,7 @@ class SessionRegistry:
                 with self._registry_lock:
                     self._project_handles.pop(handle.get_key(), None)
 
-    def close_session(self, name: str) -> None:
+    def close_session(self, name: str, *, remove_program: bool = False) -> None:
         with self._registry_lock:
             session = self._sessions.pop(name, None)
             if session is None:
@@ -135,7 +135,7 @@ class SessionRegistry:
             handle = session.get_project_handle() if session.is_project_session() else None
             self._locks.pop(name, None)
         try:
-            session.close()
+            session.close(remove_program=remove_program)
         finally:
             _core().remove_context(name)
             if handle is not None and handle.is_closed():
@@ -667,6 +667,15 @@ def close_session(target: str):
         return {"status": "ok", "target": target}
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"セッション '{target}' のクローズに失敗しました: {exc}")
+
+
+@mcp.tool()
+def close_session_and_remove_program(target: str):
+    try:
+        _registry.close_session(target, remove_program=True)
+        return {"status": "ok", "target": target}
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました: {exc}")
 
 
 def configure_logging(level: int) -> None:

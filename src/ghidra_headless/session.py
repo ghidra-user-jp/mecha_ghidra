@@ -47,9 +47,9 @@ class ProgramSession:
     def get_project_handle(self) -> Optional["ProjectHandle"]:
         return self.project_handle
 
-    def close(self) -> None:
+    def close(self, *, remove_program: bool = False) -> None:
         if self.project_handle is not None:
-            self.project_handle.release_program(self.program)
+            self.project_handle.release_program(self.program, remove_program=remove_program)
             self.project_handle = None
         else:
             if self.program is not None:
@@ -60,9 +60,6 @@ class ProgramSession:
                         pass
         self.flat_api = None
         self.program = None
-
-    def is_project_session(self) -> bool:
-        return self.project_handle is not None
 
     def to_dict(self) -> Dict[str, Optional[str]]:
         project_name: Optional[str] = None
@@ -169,11 +166,14 @@ class ProjectHandle:
         domain_path = self.import_program(binary_path)
         return self.open_program(domain_path.getPathname())
 
-    def release_program(self, program) -> None:
+    def release_program(self, program, *, remove_program: bool = False) -> None:
         with self._lock:
             if self._closed:
                 return
             domain_path = _domain_path(program)
+            if domain_path is None:
+                raise RuntimeError("削除対象プログラムのパスを取得できません")
+            domain_key = _parse_domain_path(self.project, domain_path)
             try:
                 if program is not None:
                     self.project.save(program)
@@ -184,8 +184,9 @@ class ProjectHandle:
                     self.project.close(program)
             except Exception:
                 pass
-            if domain_path is not None:
-                self._open_programs.discard(_parse_domain_path(self.project, domain_path))
+            if remove_program:
+                self._delete_program_locked(domain_path)
+            self._open_programs.discard(domain_key)
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
                 self._close_project_locked()
@@ -222,6 +223,18 @@ class ProjectHandle:
             pass
         self._open_programs.clear()
         self._closed = True
+
+    def _delete_program_locked(self, domain_path: str) -> None:
+        if self._closed:
+            return
+        data = self.project.getProjectData()
+        domain_file = data.getFile(domain_path)
+        if domain_file is None:
+            raise RuntimeError(f"削除対象のプログラムが見つかりません: {domain_path}")
+        try:
+            domain_file.delete()
+        except Exception:
+            pass
 
 
 # ----------------------------------------------------------------------

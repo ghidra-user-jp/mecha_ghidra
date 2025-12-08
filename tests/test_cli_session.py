@@ -49,8 +49,10 @@ class DummySession:
     def get_project_handle(self):
         return self.project_handle
 
-    def close(self):
+    def close(self, remove_program: bool = False):
         self.closed = True
+        if self.project_handle is not None:
+            self.project_handle.release_program(self.program, remove_program=remove_program)
 
     def is_project_session(self):
         return self.project_handle is not None
@@ -73,6 +75,9 @@ class DummyHandle:
         self.last_domain = None
         self.project_location = key[0]
         self.project_name = name
+        self.releases = []
+        self.deleted_programs = []
+        self.program_paths: dict[object, str | None] = {}
 
     def get_project_location(self):
         return self.project_location
@@ -91,6 +96,14 @@ class DummyHandle:
         session = DummySession(binary_path=None, domain_path=domain_path)
         session.project_handle = self
         session.program = object()
+        self.program_paths[session.program] = session.domain_path
+        return session
+
+    def open_program_by_importing(self, path):
+        session = DummySession(binary_path=path)
+        session.project_handle = self
+        session.program = object()
+        self.program_paths[session.program] = session.domain_path
         return session
 
     def list_programs(self):
@@ -99,8 +112,11 @@ class DummyHandle:
     def close(self):
         self.closed = True
 
-    def release_program(self, program):
-        pass
+    def release_program(self, program, *, remove_program: bool = False):
+        self.releases.append({"program": program, "remove_program": remove_program})
+        domain_path = self.program_paths.pop(program, None)
+        if remove_program and domain_path:
+            self.deleted_programs.append(domain_path)
 
 
 def test_parse_session_definition_minimal():
@@ -159,12 +175,8 @@ def test_session_registry_create_close(tmp_path, monkeypatch):
     binary_file.write_text("")
     calls = dummy_core(monkeypatch)
 
-    dummy_handle = types.SimpleNamespace(open_program_by_importing=lambda path: DummySession(binary_path=path))
-    monkeypatch.setattr(
-        cli.SessionRegistry,
-        "_get_or_create_project_handle",
-        lambda self, project_location, project_name: dummy_handle,
-    )
+    dummy_handle = DummyHandle(key=(str(project_file.parent), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
 
     registry = cli.SessionRegistry()
     session = registry.create_session("fw", project_location=str(project_file), binary_path="/tmp/fw.bin")
@@ -173,8 +185,8 @@ def test_session_registry_create_close(tmp_path, monkeypatch):
         {
             "target": "fw",
             "domain_path": "/fw.bin",
-            "project_name": None,
-            "project_location": None,
+            "project_name": "Sample",
+            "project_location": str(tmp_path),
         }
     ]
     assert session.args["binary_path"] == "/tmp/fw.bin"
@@ -184,16 +196,34 @@ def test_session_registry_create_close(tmp_path, monkeypatch):
     assert registry.list_targets() == []
     assert session.closed is True
     assert calls["remove"] == ["fw"]
+    assert dummy_handle.releases == [{"program": session.program, "remove_program": False}]
+
+
+def test_session_registry_close_and_remove_program(tmp_path, monkeypatch):
+    project_file = tmp_path / "sample.gpr"
+    project_file.write_text("")
+    binary_file = tmp_path / "fw.bin"
+    binary_file.write_text("")
+    calls = dummy_core(monkeypatch)
+
+    dummy_handle = DummyHandle(key=(str(project_file.parent), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+
+    registry = cli.SessionRegistry()
+    session = registry.create_session("fw", project_location=str(project_file), binary_path=str(binary_file))
+
+    registry.close_session("fw", remove_program=True)
+    assert registry.list_targets() == []
+    assert session.closed is True
+    assert calls["remove"] == ["fw"]
+    assert dummy_handle.releases == [{"program": session.program, "remove_program": True}]
+    assert dummy_handle.deleted_programs == ["/fw.bin"]
 
 
 def test_registry_close_all(tmp_path, monkeypatch):
     calls = dummy_core(monkeypatch)
-    dummy_handle = types.SimpleNamespace(open_program_by_importing=lambda path: DummySession(binary_path=path))
-    monkeypatch.setattr(
-        cli.SessionRegistry,
-        "_get_or_create_project_handle",
-        lambda self, project_location, project_name: dummy_handle,
-    )
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
 
     registry = cli.SessionRegistry()
     registry.create_session("a", project_location=str(tmp_path), project_name="sample", binary_path="/tmp/a.bin")
@@ -353,3 +383,18 @@ def test_add_bookmark_tool_invokes_core(monkeypatch):
         },
         "target": "note",
     }
+
+
+def test_close_session_and_remove_program_tool(monkeypatch):
+    called = {}
+
+    def fake_close(name, *, remove_program=False):
+        called["target"] = name
+        called["remove_program"] = remove_program
+
+    monkeypatch.setattr(cli._registry, "close_session", fake_close)
+
+    result = cli.close_session_and_remove_program("target1")
+
+    assert result == {"status": "ok", "target": "target1"}
+    assert called == {"target": "target1", "remove_program": True}

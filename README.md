@@ -57,7 +57,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
    load_project_program(target="fw", domain_path="/folder/program2")
    ```
 4. **解析ツール呼び出し**（例: `list_methods(target="fw")`）
-5. **不要になったら `close_session(target="fw")` でクリーンアップ**
+5. **不要になったら `close_session(target="fw")` でクリーンアップ（プロジェクトからプログラムも消す場合は `close_session_and_remove_program(target="fw")`）**
 
 #### プログラムA/Bを別セッションで解析する例
 
@@ -95,7 +95,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
    load_project_program(target="targetB", domain_path="/folder/programC")
    ```
 
-5. 作業終了後はセッションを順に閉じる
+5. 作業終了後はセッションを順に閉じる（プロジェクトから削除したい場合は `close_session_and_remove_program` を使用）
    ```python
    close_session(target="targetB")
    close_session(target="targetA")
@@ -115,7 +115,7 @@ uv run ghidra-mcp \
 
 MCP ツール呼び出し時は `target="firmware"` のようにターゲット名を指定することで、操作対象プログラムを切り替えられます。現在登録済みのターゲットは `list_targets` ツールで確認できます。
 
-サーバー起動後でも、`create_session` ツールを呼び出すことで新しいターゲットを追加できます（例: `create_session(target="patch", binary_path="/tmp/patch.bin")`）。不要になったターゲットは `close_session(target="patch")` で解放してください。
+サーバー起動後でも、`create_session` ツールを呼び出すことで新しいターゲットを追加できます（例: `create_session(target="patch", binary_path="/tmp/patch.bin")`）。不要になったターゲットは `close_session(target="patch")` またはプロジェクトから削除する `close_session_and_remove_program(target="patch")` で解放してください。
 既に1件のプロジェクトセッションが開いている場合は、`create_session(target="analysis")` のように `project_location` や `binary_path` を省略して同じプロジェクトを再利用することもできます。
 
 ## 主要機能
@@ -132,7 +132,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 ### 提供ツール一覧
 
-- **ターゲット管理**: `list_targets`, `create_session`, `create_session_by_importing`, `close_session`, `list_project_programs`, `load_project_program`
+- **ターゲット管理**: `list_targets`, `create_session`, `create_session_by_importing`, `close_session`, `close_session_and_remove_program`, `list_project_programs`, `load_project_program`
 - **解析支援**: `list_methods`, `list_functions`, `list_classes`, `list_namespaces`, `list_segments`, `list_imports`, `list_exports`, `list_data_items`, `list_strings`, `search_functions_by_name`, `search_bytes`, `get_function_by_address`, `get_function_xrefs`, `get_xrefs_to`, `get_xrefs_from`, `get_callee`, `get_data_by_label`, `get_bytes`, `decompile_function`, `decompile_function_by_address`, `disassemble_function`
 - **シンボル／コメント編集**: `rename_function`, `rename_function_by_address`, `rename_variable`, `rename_data`, `set_function_prototype`, `set_local_variable_type`, `set_global_data_type`, `set_bytes`, `add_bookmark`, `set_decompiler_comment`, `set_disassembly_comment`
 - **データ型操作**: `create_struct`, `add_struct_members`, `clear_struct`, `remove_struct_members`, `get_struct`, `create_enum`, `add_enum_values`, `get_enum`, `remove_enum_values`, `add_class_members`, `remove_class_members`
@@ -162,7 +162,8 @@ Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` 
         "decompile_function",
         "rename_function",
         "create_session",
-        "close_session"
+        "close_session",
+        "close_session_and_remove_program"
       ],
       "timeout": 300,
       "disabled": true
