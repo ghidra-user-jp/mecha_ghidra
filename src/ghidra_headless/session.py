@@ -42,25 +42,21 @@ class ProgramSession:
         self.project_handle: Optional["ProjectHandle"] = project_handle
 
     def get_program(self):
+        if self.program is None:
+            raise RuntimeError("セッションはすでにクローズしています")
         return self.program
 
-    def get_project_handle(self) -> Optional["ProjectHandle"]:
+    def get_project_handle(self) -> "ProjectHandle":
+        if self.project_handle is None:
+            raise RuntimeError("セッションはすでにクローズしています")
         return self.project_handle
 
-    def is_project_session(self) -> bool:
-        return self.project_handle is not None
-
     def close(self, *, remove_program: bool = False) -> None:
-        if self.project_handle is not None:
-            self.project_handle.release_program(self.program, remove_program=remove_program)
-            self.project_handle = None
-        else:
-            if self.program is not None:
-                for consumer in self.program.getConsumerList():
-                    try:
-                        self.program.release(consumer)
-                    except Exception:
-                        pass
+        if self.project_handle is None:
+            raise RuntimeError("セッションはすでにクローズしています")
+        self.project_handle.release_program(self.program, remove_program=remove_program)
+
+        self.project_handle = None
         self.flat_api = None
         self.program = None
 
@@ -70,9 +66,8 @@ class ProgramSession:
         dmain_path: Optional[str] = _domain_path(self.program)
 
         handle = self.get_project_handle()
-        if handle:
-            project_name = handle.get_project_name()
-            project_location = handle.get_project_location()
+        project_name = handle.get_project_name()
+        project_location = handle.get_project_location()
 
         return {
             "project_name": project_name,

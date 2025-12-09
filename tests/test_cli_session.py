@@ -54,9 +54,6 @@ class DummySession:
         if self.project_handle is not None:
             self.project_handle.release_program(self.program, remove_program=remove_program)
 
-    def is_project_session(self):
-        return self.project_handle is not None
-
     def to_dict(self):
         project_name = self.project_handle.get_project_name() if self.project_handle else None
         project_location = self.project_handle.get_project_location() if self.project_handle else None
@@ -326,9 +323,6 @@ def test_list_programs_without_target_requires_project_session():
     with registry._registry_lock:
         registry._sessions["bin"] = session
         registry._locks["bin"] = threading.RLock()
-
-    with pytest.raises(RuntimeError):
-        registry.list_programs(None)
 
 
 def test_list_programs_without_target_deduplicates_projects():

@@ -59,8 +59,7 @@ class SessionRegistry:
             self._sessions[name] = session
             self._locks[name] = threading.RLock()
             program = session.get_program()
-            if program is not None:
-                _core().initialize(program, key=name)
+            _core().initialize(program, key=name)
             return session
 
     def ensure(self, name: str) -> ProgramSession:
@@ -84,21 +83,15 @@ class SessionRegistry:
     def list_programs(self, name: str | None):
         if name:
             session = self.ensure(name)
-            if not session.is_project_session():
-                raise RuntimeError("バイナリセッションではプログラム一覧を取得できません")
             with self.lock(name):
                 handle = session.get_project_handle()
-                if handle is None:
-                    raise RuntimeError("プロジェクトハンドルが初期化されていません")
                 return handle.list_programs()
         targets = self._project_session_targets()
         if not targets:
-            raise RuntimeError("プロジェクトセッションが存在しないためプログラム一覧を取得できません")
+            raise RuntimeError("セッションが存在しないためプログラム一覧を取得できません")
         results: list[dict] = []
         for target in targets:
             handle = self.ensure(target).get_project_handle()
-            if handle is None:
-                raise RuntimeError("プロジェクトハンドルが初期化されていません")
             results.append(
                 {
                     "project_location": handle.get_project_location(),
@@ -110,19 +103,14 @@ class SessionRegistry:
 
     def load_program(self, name: str, domain_path: str) -> None:
         session = self.ensure(name)
-        if not session.is_project_session():
-            raise RuntimeError("バイナリセッションではプログラムを切り替えられません")
         with self.lock(name):
             handle = session.get_project_handle()
-            if handle is None:
-                raise RuntimeError("プロジェクトハンドルが初期化されていません")
             new_session = handle.open_program(domain_path)
             with self._registry_lock:
                 old_session = self._sessions[name]
                 self._sessions[name] = new_session
             new_program = new_session.get_program()
-            if new_program is not None:
-                _core().initialize(new_program, key=name)
+            _core().initialize(new_program, key=name)
             old_session.close()
             if handle.is_closed():
                 with self._registry_lock:
@@ -133,7 +121,7 @@ class SessionRegistry:
             session = self._sessions.pop(name, None)
             if session is None:
                 raise RuntimeError(f"セッション '{name}' は存在しません")
-            handle = session.get_project_handle() if session.is_project_session() else None
+            handle = session.get_project_handle()
             self._locks.pop(name, None)
         try:
             session.close(remove_program=remove_program)
@@ -176,12 +164,8 @@ class SessionRegistry:
 
     def _list_programs_for_target(self, target: str):
         session = self.ensure(target)
-        if not session.is_project_session():
-            raise RuntimeError("バイナリセッションではプログラム一覧を取得できません")
         with self.lock(target):
             handle = session.get_project_handle()
-            if handle is None:
-                raise RuntimeError("プロジェクトハンドルが初期化されていません")
             return handle.list_programs()
 
     def _project_session_targets(self) -> List[str]:
@@ -189,11 +173,7 @@ class SessionRegistry:
             seen_projects: set[object] = set()
             targets: list[str] = []
             for name, session in sorted(self._sessions.items()):
-                if not session.is_project_session():
-                    continue
                 handle = session.get_project_handle()
-                if handle is None:
-                    continue
                 dedup_key = handle.get_key()
                 if dedup_key is None or dedup_key in seen_projects:
                     continue
