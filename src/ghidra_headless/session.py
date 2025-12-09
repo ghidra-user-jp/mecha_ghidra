@@ -47,6 +47,9 @@ class ProgramSession:
     def get_project_handle(self) -> Optional["ProjectHandle"]:
         return self.project_handle
 
+    def is_project_session(self) -> bool:
+        return self.project_handle is not None
+
     def close(self, *, remove_program: bool = False) -> None:
         if self.project_handle is not None:
             self.project_handle.release_program(self.program, remove_program=remove_program)
