@@ -15,7 +15,8 @@ import os
 import signal
 import sys
 import threading
-from typing import Any, Dict, List, Optional
+from pydantic import Field
+from typing import Annotated, Any, Dict, List, Optional
 
 import pyghidra
 from mcp.server.fastmcp import FastMCP
@@ -621,12 +622,12 @@ def load_project_program(target: str, domain_path: str):
     return {"status": "ok", "target": target, "program": domain_path}
 
 
-@mcp.tool()
+@mcp.tool(description="Open an existing program inside a Ghidra project and create a session")
 def create_session(
     target: str,
-    project_location: str,
-    domain_path: str | None = None,
-    project_name: str | None = None,
+    project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
+    project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
+    domain_path: Annotated[str | None, Field(description="Domain path of the program to open (e.g. /folder/program). If omitted, the first program is chosen automatically")] = None,
 ):
     try:
         _registry.create_session(
@@ -641,12 +642,12 @@ def create_session(
         raise RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
 
 
-@mcp.tool()
+@mcp.tool(description="Import a binary or Ghidra archive into a project and create a session")
 def create_session_by_importing(
     target: str,
-    binary_path: str,
-    project_location: str,
-    project_name: str | None = None,
+    binary_path: Annotated[str, Field(description="Path to the binary or Ghidra archive (.gzf) to import and open")],
+    project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
+    project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
 ):
     try:
         _registry.create_session(
