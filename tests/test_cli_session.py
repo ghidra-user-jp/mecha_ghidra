@@ -1,4 +1,3 @@
-import threading
 import types
 from pathlib import Path
 
@@ -236,7 +235,7 @@ def test_registry_reuses_active_project_handle(monkeypatch):
     calls = dummy_core(monkeypatch)
     registry = cli.SessionRegistry()
     handle = DummyHandle()
-    with registry._registry_lock:
+    with registry._registry_lock.write_lock():
         registry._project_handles[handle.get_key()] = handle
 
     session = registry.create_session("reuse", project_location=handle.get_key()[0], project_name=handle.get_key()[1], domain_path="/folder/main")
@@ -295,11 +294,9 @@ def test_list_programs_without_target_returns_all_projects():
     handle_b = DummyHandle(key=("/project", "B"), name="B")
     session_a = DummySession(project_handle=handle_a)
     session_b = DummySession(project_handle=handle_b)
-    with registry._registry_lock:
+    with registry._registry_lock.write_lock():
         registry._sessions["a"] = session_a
-        registry._locks["a"] = threading.RLock()
         registry._sessions["b"] = session_b
-        registry._locks["b"] = threading.RLock()
 
     result = registry.list_programs(None)
 
@@ -320,9 +317,8 @@ def test_list_programs_without_target_returns_all_projects():
 def test_list_programs_without_target_requires_project_session():
     registry = cli.SessionRegistry()
     session = DummySession()
-    with registry._registry_lock:
+    with registry._registry_lock.write_lock():
         registry._sessions["bin"] = session
-        registry._locks["bin"] = threading.RLock()
 
 
 def test_list_programs_without_target_deduplicates_projects():
@@ -330,11 +326,9 @@ def test_list_programs_without_target_deduplicates_projects():
     shared_handle = DummyHandle()
     session_a = DummySession(project_handle=shared_handle)
     session_b = DummySession(project_handle=shared_handle)
-    with registry._registry_lock:
+    with registry._registry_lock.write_lock():
         registry._sessions["a"] = session_a
-        registry._locks["a"] = threading.RLock()
         registry._sessions["b"] = session_b
-        registry._locks["b"] = threading.RLock()
 
     result = registry.list_programs(None)
 
@@ -350,13 +344,13 @@ def test_list_programs_without_target_deduplicates_projects():
 def test_add_bookmark_tool_invokes_core(monkeypatch):
     recorded = {}
 
-    def fake_call(command, params, target):
+    def fake_call(self, command, params, target):
         recorded["command"] = command
         recorded["params"] = params
         recorded["target"] = target
         return {"status": "ok"}
 
-    monkeypatch.setattr(cli, "_call", fake_call)
+    monkeypatch.setattr(cli.SessionRegistry, "call", fake_call)
 
     result = cli.add_bookmark(
         address="0x401000",
