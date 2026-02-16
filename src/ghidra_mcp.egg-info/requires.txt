@@ -1,7 +1,0 @@
-requests<3,>=2
-mcp<2,>=1.2.0
-pyghidra>=2.0.0
-
-[test]
-pytest>=8
-pytest-mock>=3

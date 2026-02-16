@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import contextlib
 import pathlib
 import threading
-from typing import Optional
+from typing import Dict, Optional
 
-import pyghidra
 import pyghidra.core as pycore
 
 __all__ = ["ProgramSession", "ProjectHandle"]
@@ -37,102 +35,156 @@ class ProgramSession:
         self,
         flat_api,
         program,
-        *,
-        context: Optional[contextlib.AbstractContextManager] = None,
-        project_handle: Optional["ProjectHandle"] = None,
+        project_handle: "ProjectHandle",
     ) -> None:
         self.flat_api = flat_api
         self.program = program
-        self._context = context
-        self.project_handle = project_handle
+        self.project_handle: Optional["ProjectHandle"] = project_handle
 
-    @classmethod
-    def from_binary(cls, binary_path: str) -> "ProgramSession":
-        path = pathlib.Path(binary_path)
-        if not path.exists():
-            raise ValueError(f"バイナリが存在しません: {binary_path}")
-        context = pyghidra.open_program(str(path))
-        flat_api = context.__enter__()
-        program = flat_api.getProgram()
-        return cls(flat_api, program, context=context)
+    def get_program(self):
+        if self.program is None:
+            raise RuntimeError("セッションはすでにクローズしています")
+        return self.program
 
-    def close(self) -> None:
-        if self._context is not None:
-            self._context.__exit__(None, None, None)
-            self._context = None
-        if self.project_handle is not None:
-            self.project_handle.release_program(self.program)
-            self.project_handle = None
-        else:
-            if self.program is not None and hasattr(self.program, "release"):
-                try:
-                    self.program.release()
-                except Exception:
-                    pass
+    def get_project_handle(self) -> "ProjectHandle":
+        if self.project_handle is None:
+            raise RuntimeError("セッションはすでにクローズしています")
+        return self.project_handle
+
+    def close(self, *, remove_program: bool = False) -> None:
+        if self.project_handle is None:
+            raise RuntimeError("セッションはすでにクローズしています")
+        self.project_handle.release_program(self.program, remove_program=remove_program)
+
+        self.project_handle = None
         self.flat_api = None
         self.program = None
 
-    def is_project_session(self) -> bool:
-        return self.project_handle is not None
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        project_name: Optional[str] = None
+        project_location: Optional[str] = None
+        dmain_path: Optional[str] = _domain_path(self.program)
+
+        handle = self.get_project_handle()
+        project_name = handle.get_project_name()
+        project_location = handle.get_project_location()
+
+        return {
+            "project_name": project_name,
+            "project_location": project_location,
+            "domain_path": dmain_path
+        }
 
 
 class ProjectHandle:
     """Shared handle for a Ghidra project, allowing multiple program sessions."""
 
-    def __init__(self, project_dir: str, project_name: Optional[str]) -> None:
+    def __init__(self, project_location: str, project_name: Optional[str]) -> None:
         self._lock = threading.RLock()
-        self.project_dir = pathlib.Path(project_dir)
-        self.requested_name = project_name
+        self.project_location, self.project_name = self.resolve_project_location_and_file(project_location, project_name)
+        self.key = self.make_key(project_location, project_name)
+        self._open_programs: set[tuple[str, str]] = set()
 
-        location, resolved_name, nested = _project_location_and_name(project_dir, project_name)
-        self.project_location = location
-        self.resolved_name = resolved_name
-        self.nested = nested
-        self.root_dir = (location / resolved_name) if nested else location
-        self.key = (str(location.resolve()), resolved_name)
-
-        self.project, program = pycore._setup_project(
-            None,
-            location,
-            resolved_name,
-            program_name=None,
-            nested_project_location=nested,
-        )
-        self._initial_program = program
+        from ghidra.base.project import GhidraProject
+        self.project = GhidraProject.openProject(self.project_location, self.project_name, True)
         self._refcount = 0
         self._closed = False
+
+    @staticmethod
+    def resolve_project_location_and_file(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
+        path = pathlib.Path(project_location).expanduser().resolve()
+        if project_name is None and path.suffix.lower() != ".gpr":
+            raise ValueError("project_location には .gpr のGhidraプロジェクトファイルを指定してください")
+        if project_name is None and not path.is_file():
+            raise ValueError(f"指定した .gpr ファイルが見つかりません: {path}")
+        if project_name is None and path.is_dir():
+            raise ValueError("project_name を指定してください")
+        effective = project_name or path.stem
+        return (str(path.parent if path.is_file() else path), effective)
+
+    @staticmethod
+    def make_key(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
+        return ProjectHandle.resolve_project_location_and_file(project_location, project_name)
+
+    def get_project_location(self) -> str:
+        return self.project_location
+
+    def get_project_name(self) -> str:
+        return self.project_name
+
+    def get_key(self) -> tuple[str, str]:
+        return self.key
 
     def open_program(self, domain_path: Optional[str] = None) -> ProgramSession:
         with self._lock:
             if self._closed:
                 raise RuntimeError("プロジェクトは既にクローズされています")
             monitor = _console_monitor()
-            if self._initial_program is not None and (not domain_path or domain_path in {"", "/"}):
-                program = self._initial_program
-                self._initial_program = None
-            else:
-                domain_file = _resolve_domain_file(self.project, domain_path)
-                program = domain_file.getDomainObject(self.project, True, False, monitor)
+            domain_dir, domain_name = _parse_domain_path(self.project, domain_path)
+            domain_path_key = (domain_dir, domain_name)
+            if domain_path_key in self._open_programs:
+                raise RuntimeError(f"プログラムには既にセッションがあります: {domain_path_key}")
+            program = self.project.openProgram(domain_dir, domain_name, False)
             if program is None:
-                raise RuntimeError("プログラムを取得できませんでした")
+                raise RuntimeError(f"プログラムを取得できませんでした: {domain_path}")
             flat_api = _flat_program_api_class()(program, monitor)
             self._refcount += 1
+            self._open_programs.add(domain_path_key)
             return ProgramSession(flat_api, program, project_handle=self)
 
-    def release_program(self, program) -> None:
+    def import_program(self, binary_path: str):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトは既にクローズされています")
+            path = pathlib.Path(binary_path)
+            if not path.exists():
+                raise ValueError(f"バイナリが存在しません: {binary_path}")
+            program_dir = "/"
+            program_name = path.name
+            data = self.project.getProjectData()
+            domain_file = data.getFile(program_dir + program_name)
+            if domain_file is not None:
+                raise RuntimeError(f"プログラムはすでに存在します: {domain_file.getPathname()}")
+            program = None
+
+            try:
+                java_file = pycore.JClass("java.io.File")(str(path))
+                program = self.project.importProgram(java_file)
+                self.project.saveAs(program, program_dir, program_name, True)
+                domain_file = program.getDomainFile()
+            finally:
+                if program is not None:
+                    self.project.close(program)
+            if domain_file is None:
+                raise RuntimeError(f"プログラムの追加に失敗しました: {binary_path}")
+
+            return domain_file
+
+    def open_program_by_importing(self, binary_path: str) -> ProgramSession:
+        domain_path = self.import_program(binary_path)
+        return self.open_program(domain_path.getPathname())
+
+    def release_program(self, program, *, remove_program: bool = False) -> None:
         with self._lock:
             if self._closed:
                 return
+            domain_path = _domain_path(program)
+            if domain_path is None:
+                raise RuntimeError("削除対象プログラムのパスを取得できません")
+            domain_key = _parse_domain_path(self.project, domain_path)
             try:
                 if program is not None:
                     self.project.save(program)
             except Exception:
                 pass
             try:
-                if program is not None and hasattr(program, "release"):
-                    program.release()
+                if program is not None:
+                    self.project.close(program)
             except Exception:
                 pass
+            if remove_program:
+                self._delete_program_locked(domain_path)
+            self._open_programs.discard(domain_key)
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
                 self._close_project_locked()
@@ -167,44 +219,33 @@ class ProjectHandle:
             self.project.close()
         except Exception:
             pass
+        self._open_programs.clear()
         self._closed = True
-        _remove_lock_dirs(self.root_dir, self.resolved_name)
+
+    def _delete_program_locked(self, domain_path: str) -> None:
+        if self._closed:
+            return
+        data = self.project.getProjectData()
+        domain_file = data.getFile(domain_path)
+        if domain_file is None:
+            raise RuntimeError(f"削除対象のプログラムが見つかりません: {domain_path}")
+        try:
+            domain_file.delete()
+        except Exception:
+            pass
 
 
 # ----------------------------------------------------------------------
 # helper functions
 
 
-def _project_location_and_name(project_dir: str, project_name: Optional[str]):
-    path = pathlib.Path(project_dir)
-    nested = True
-    inferred = project_name
-    if path.suffix == ".gpr" and path.is_file():
-        inferred = inferred or path.stem
-        location = path.parent
-        nested = False
-    else:
-        location = path
-        if inferred is None:
-            inferred = path.name
-    return location, inferred, nested
-
-
-def _resolve_domain_file(project, domain_path: Optional[str]):
-    data = project.getProjectData()
-    root = data.getRootFolder()
+def _parse_domain_path(project, domain_path: Optional[str]):
     if not domain_path:
         domain_path = _find_first_program_path(project)
     if not domain_path:
         raise ValueError("プロジェクト内にプログラムが見つかりません")
-    folder_path, program_name = _split_domain_path(domain_path)
-    folder = _get_folder(root, folder_path)
-    if folder is None:
-        raise ValueError(f"フォルダ '{folder_path}' が見つかりません")
-    domain_file = folder.getFile(program_name)
-    if domain_file is None:
-        raise ValueError(f"プログラム '{program_name}' が見つかりません ({folder_path})")
-    return domain_file
+    domain_file = pathlib.PurePosixPath(domain_path)
+    return domain_file.parent.as_posix(), domain_file.name
 
 
 def _find_first_program_path(project) -> Optional[str]:
@@ -219,38 +260,13 @@ def _find_first_program_path(project) -> Optional[str]:
     return None
 
 
-def _split_domain_path(domain_path: Optional[str]) -> tuple[str, Optional[str]]:
-    if not domain_path:
-        return "/", None
-    clean = domain_path.strip("/")
-    if not clean:
-        return "/", None
-    if "/" in clean:
-        folder, _, name = clean.rpartition("/")
-        return f"/{folder}", name
-    return "/", clean
-
-
-def _get_folder(root_folder, folder_path: str):
-    if folder_path == "/":
-        return root_folder
-    current = root_folder
-    for segment in folder_path.strip("/").split("/"):
-        if not segment:
-            continue
-        current = current.getFolder(segment)
-        if current is None:
-            break
-    return current
-
-
 def _collect_program_files(folder, results):
     for domain_file in list(folder.getFiles()):
         if domain_file.getContentType() == "Program":
             results.append(
                 {
-                    "path": domain_file.getPathname(),
-                    "name": domain_file.getName(),
+                    "domain_path": domain_file.getPathname(),
+                    "domain_name": domain_file.getName(),
                     "contentType": domain_file.getContentType(),
                 }
             )
@@ -258,28 +274,12 @@ def _collect_program_files(folder, results):
         _collect_program_files(sub, results)
 
 
-def _remove_lock_dirs(root_dir: Optional[pathlib.Path], project_name: Optional[str]) -> None:
-    if root_dir is None:
-        return
-    candidates = set()
-    if project_name:
-        candidates.add(root_dir / f"{project_name}.lock")
-    candidates.add(root_dir.parent / f"{root_dir.name}.lock")
-    for path in candidates:
-        try:
-            if path.exists():
-                if path.is_dir():
-                    _remove_tree(path)
-                else:
-                    path.unlink(missing_ok=True)
-        except Exception:
-            pass
+def _domain_path(program, domain_file=None) -> Optional[str]:
+    if program is None:
+        return None
 
-
-def _remove_tree(path: pathlib.Path) -> None:
-    for child in path.iterdir():
-        if child.is_dir():
-            _remove_tree(child)
-        else:
-            child.unlink(missing_ok=True)
-    path.rmdir()
+    if domain_file is None:
+        domain_file = program.getDomainFile()
+    if domain_file is not None:
+        return domain_file.getPathname()
+    return None

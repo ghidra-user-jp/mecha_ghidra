@@ -4,6 +4,7 @@
 #     "requests>=2,<3",
 #     "mcp>=1.2.0,<2",
 #     "pyghidra>=2.0.0",
+#     "fasteners>=0.19",
 # ]
 # ///
 
@@ -12,11 +13,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import pathlib
 import signal
 import sys
+import fasteners
 import threading
-from typing import Any, Dict, List, Optional
+from pydantic import Field
+from typing import Annotated, Any, Dict, List, Optional
 
 import pyghidra
 from mcp.server.fastmcp import FastMCP
@@ -34,111 +36,129 @@ class SessionRegistry:
         self._sessions: Dict[str, ProgramSession] = {}
         self._locks: Dict[str, threading.RLock] = {}
         self._project_handles: Dict[tuple[str, str], ProjectHandle] = {}
-        self._registry_lock = threading.RLock()
+        self._registry_lock = fasteners.ReaderWriterLock()
 
     def create_session(
         self,
         name: str,
+        project_location: str,
         *,
-        project_dir: str | None = None,
         project_name: str | None = None,
         domain_path: str | None = None,
         binary_path: str | None = None,
     ) -> ProgramSession:
-        with self._registry_lock:
+        handle: ProjectHandle | None = None
+        session: ProgramSession | None = None
+        with self._registry_lock.write_lock():
             if name in self._sessions:
                 raise ValueError(f"セッション '{name}' は既に存在します")
 
-            handle: ProjectHandle | None = None
-            if project_dir:
-                handle = self._get_or_create_project_handle(project_dir, project_name)
-                session = handle.open_program(domain_path)
-            elif binary_path:
-                session = ProgramSession.from_binary(binary_path)
-            else:
-                active_handles = [h for h in self._project_handles.values() if not h.is_closed()]
-                if not active_handles:
-                    raise ValueError(
-                        "binary_path または project_dir のいずれかが必要です (開いているプロジェクトがありません)"
-                    )
-                if len(active_handles) > 1:
-                    raise ValueError(
-                        "複数のプロジェクトが開いているため project_dir を指定してください"
-                    )
-                handle = active_handles[0]
-                session = handle.open_program(domain_path)
-            self._sessions[name] = session
+            handle = self._get_or_create_project_handle(project_location, project_name)
+            session = handle.open_program_by_importing(binary_path) if binary_path else handle.open_program(domain_path)
             self._locks[name] = threading.RLock()
-            if session.program is not None:
-                _core().initialize(session.program, key=name)
-            return session
+            self._sessions[name] = session
 
-    def ensure(self, name: str) -> ProgramSession:
-        with self._registry_lock:
             try:
-                return self._sessions[name]
-            except KeyError:
-                raise RuntimeError(f"セッション '{name}' は初期化されていません")
+                program = session.get_program()
+                _core().initialize(program, key=name)
+                return session
+            except Exception:
+                self._cleanup_session(name, session, handle, remove_registry_entry=True)
+                raise
 
-    def lock(self, name: str) -> threading.RLock:
-        with self._registry_lock:
-            lock = self._locks.get(name)
-            if lock is None:
-                raise RuntimeError(f"セッション '{name}' は初期化されていません")
-            return lock
+    def _ensure(self, name: str) -> ProgramSession:
+        try:
+            return self._sessions[name]
+        except KeyError:
+            raise RuntimeError(f"セッション '{name}' は初期化されていません")
 
-    def list_targets(self) -> List[str]:
-        with self._registry_lock:
-            return sorted(self._sessions.keys())
+    def _lock(self, name: str) -> threading.RLock:
+        try:
+            return self._locks[name]
+        except KeyError:
+            raise RuntimeError(f"セッション '{name}' は初期化されていません")
 
-    def list_programs(self, name: str):
-        session = self.ensure(name)
-        if not session.is_project_session():
-            raise RuntimeError("バイナリセッションではプログラム一覧を取得できません")
-        with self.lock(name):
-            return session.project_handle.list_programs()
+    def list_targets(self) -> List[Dict[str, Optional[str]]]:
+        with self._registry_lock.read_lock():
+            return [
+                {"target": name, **session.to_dict()}
+                for name, session in sorted(self._sessions.items(), key=lambda item: item[0])
+            ]
+
+    def list_programs(self, name: str | None):
+        with self._registry_lock.read_lock():
+            if name:
+                session = self._ensure(name)
+                handle = session.get_project_handle()
+                return handle.list_programs()
+            targets = self._project_session_targets()
+            if not targets:
+                raise RuntimeError("セッションが存在しないためプログラム一覧を取得できません")
+            results: list[dict] = []
+            for target in targets:
+                handle = self._ensure(target).get_project_handle()
+                results.append(
+                    {
+                        "project_location": handle.get_project_location(),
+                        "project_name": handle.get_project_name(),
+                        "programs": self._list_programs_for_target(target),
+                    }
+                )
+            return results
 
     def load_program(self, name: str, domain_path: str) -> None:
-        session = self.ensure(name)
-        if not session.is_project_session():
-            raise RuntimeError("バイナリセッションではプログラムを切り替えられません")
-        with self.lock(name):
-            handle = session.project_handle
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            handle = session.get_project_handle()
             new_session = handle.open_program(domain_path)
-            with self._registry_lock:
-                old_session = self._sessions[name]
-                self._sessions[name] = new_session
-            if new_session.program is not None:
-                _core().initialize(new_session.program, key=name)
-            old_session.close()
-            if handle.is_closed():
-                with self._registry_lock:
-                    self._project_handles.pop(handle.key, None)
+            try:
+                new_program = new_session.get_program()
+                _core().initialize(new_program, key=name)
+            except Exception:
+                self._cleanup_session(
+                    name,
+                    new_session,
+                    handle,
+                    remove_registry_entry=False,
+                    remove_context=False,
+                )
+                raise
 
-    def close_session(self, name: str) -> None:
-        with self._registry_lock:
-            session = self._sessions.pop(name, None)
-            if session is None:
-                raise RuntimeError(f"セッション '{name}' は存在しません")
-            handle = session.project_handle if session.is_project_session() else None
-            self._locks.pop(name, None)
-        try:
-            session.close()
-        finally:
-            _core().remove_context(name)
-            if handle is not None and handle.is_closed():
-                with self._registry_lock:
-                    self._project_handles.pop(handle.key, None)
+            old_session = self._sessions.get(name)
+            self._sessions[name] = new_session
+            try:
+                if old_session is not None:
+                    old_session.close()
+            finally:
+                if handle.is_closed():
+                    self._project_handles.pop(handle.get_key(), None)
+
+    def close_session(self, name: str, *, remove_program: bool = False) -> None:
+        with self._registry_lock.write_lock():
+            self._close_session_locked(name, remove_program=remove_program)
+
+    def _close_session_locked(self, name: str, *, remove_program: bool) -> None:
+        session = self._sessions.pop(name, None)
+        if session is None:
+            raise RuntimeError(f"セッション '{name}' は存在しません")
+        self._locks.pop(name, None)
+        handle = session.get_project_handle()
+        self._cleanup_session(
+            name,
+            session,
+            handle,
+            remove_registry_entry=False,
+            remove_program=remove_program,
+        )
 
     def close_all(self) -> None:
-        with self._registry_lock:
+        with self._registry_lock.write_lock():
             names = list(self._sessions.keys())
-        for name in names:
-            try:
-                self.close_session(name)
-            except Exception:  # noqa: BLE001
-                pass
-        with self._registry_lock:
+            for name in names:
+                try:
+                    self._close_session_locked(name, remove_program=False)
+                except Exception:  # noqa: BLE001
+                    pass
             self._sessions.clear()
             self._locks.clear()
             for handle in list(self._project_handles.values()):
@@ -147,20 +167,74 @@ class SessionRegistry:
                 except Exception:
                     pass
             self._project_handles.clear()
-        _core().clear_contexts()
+            _core().clear_contexts()
+
+    def _cleanup_session(
+        self,
+        name: str,
+        session: ProgramSession | None,
+        handle: ProjectHandle | None,
+        *,
+        remove_registry_entry: bool,
+        remove_context: bool = True,
+        remove_program: bool = False,
+    ) -> None:
+        if remove_registry_entry:
+            self._sessions.pop(name, None)
+            self._locks.pop(name, None)
+
+        try:
+            if session is not None:
+                session.close(remove_program=remove_program)
+        except Exception:
+            pass
+
+        if remove_context:
+            _core().remove_context(name)
+
+        if handle is not None and handle.is_closed():
+            self._project_handles.pop(handle.get_key(), None)
 
     def has_sessions(self) -> bool:
-        with self._registry_lock:
+        with self._registry_lock.read_lock():
             return bool(self._sessions)
 
-    def _get_or_create_project_handle(self, project_dir: str, project_name: Optional[str]) -> ProjectHandle:
-        key = _normalize_project_key(project_dir, project_name)
+    def _get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
+        key = ProjectHandle.make_key(project_location, project_name)
         handle = self._project_handles.get(key)
         if handle is None or handle.is_closed():
-            handle = ProjectHandle(project_dir, project_name)
+            handle = ProjectHandle(project_location, project_name)
             self._project_handles[key] = handle
         return handle
 
+    def _list_programs_for_target(self, target: str):
+        session = self._ensure(target)
+        handle = session.get_project_handle()
+        return handle.list_programs()
+
+    def _project_session_targets(self) -> List[str]:
+        seen_projects: set[object] = set()
+        targets: list[str] = []
+        for name, session in sorted(self._sessions.items(), key=lambda item: item[0]):
+            handle = session.get_project_handle()
+            dedup_key = handle.get_key()
+            if dedup_key is None or dedup_key in seen_projects:
+                continue
+            seen_projects.add(dedup_key)
+            targets.append(name)
+        return targets
+
+    def call(
+        self,
+        command: str,
+        params: Dict[str, Any] | None = None,
+        target: str = "default",
+    ) -> Any:
+        with self._registry_lock.read_lock():
+            _registry._ensure(target)
+            lock = _registry._lock(target)
+            with lock:
+                return _core().execute(command, params or {}, key=target)
 
 _registry = SessionRegistry()
 
@@ -173,31 +247,24 @@ def _core():
     return _core_module
 
 
-def _call(command: str, params: Dict[str, Any] | None = None, target: str = "default") -> Any:
-    _registry.ensure(target)
-    lock = _registry.lock(target)
-    with lock:
-        return _core().execute(command, params or {}, key=target)
-
-
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100, target: str = "default") -> List[str]:
-    return _call("list_methods", {"offset": offset, "limit": limit}, target)
+    return _registry.call("list_methods", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()
 def list_classes(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call("list_classes", {"offset": offset, "limit": limit}, target)
+    return _registry.call("list_classes", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()
 def decompile_function(name: str, target: str = "default") -> str:
-    return _call("decompile_function", {"name": name}, target)
+    return _registry.call("decompile_function", {"name": name}, target)
 
 
 @mcp.tool()
 def rename_function(old_name: str, new_name: str, target: str = "default"):
-    return _call(
+    return _registry.call(
         "rename_function",
         {"oldName": old_name, "newName": new_name},
         target,
@@ -206,32 +273,32 @@ def rename_function(old_name: str, new_name: str, target: str = "default"):
 
 @mcp.tool()
 def rename_data(address: str, new_name: str, target: str = "default"):
-    return _call("rename_data", {"address": address, "newName": new_name}, target)
+    return _registry.call("rename_data", {"address": address, "newName": new_name}, target)
 
 
 @mcp.tool()
 def list_segments(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call("list_segments", {"offset": offset, "limit": limit}, target)
+    return _registry.call("list_segments", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()
 def list_imports(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call("list_imports", {"offset": offset, "limit": limit}, target)
+    return _registry.call("list_imports", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()
 def list_exports(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call("list_exports", {"offset": offset, "limit": limit}, target)
+    return _registry.call("list_exports", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()
 def list_namespaces(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call("list_namespaces", {"offset": offset, "limit": limit}, target)
+    return _registry.call("list_namespaces", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()
 def list_data_items(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call("list_data_items", {"offset": offset, "limit": limit}, target)
+    return _registry.call("list_data_items", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()
@@ -243,7 +310,7 @@ def search_functions_by_name(
 ):
     if not query:
         return ["Error: query string is required"]
-    return _call(
+    return _registry.call(
         "search_functions_by_name",
         {"query": query, "offset": offset, "limit": limit},
         target,
@@ -257,7 +324,7 @@ def rename_variable(
     new_name: str,
     target: str = "default",
 ):
-    return _call(
+    return _registry.call(
         "rename_variable",
         {"functionName": function_name, "oldName": old_name, "newName": new_name},
         target,
@@ -266,27 +333,27 @@ def rename_variable(
 
 @mcp.tool()
 def get_function_by_address(address: str, target: str = "default"):
-    return _call("get_function_by_address", {"address": address}, target)
+    return _registry.call("get_function_by_address", {"address": address}, target)
 
 
 @mcp.tool()
 def list_functions(target: str = "default"):
-    return _call("list_functions", {}, target)
+    return _registry.call("list_functions", {}, target)
 
 
 @mcp.tool()
 def decompile_function_by_address(address: str, target: str = "default") -> str:
-    return _call("decompile_function_by_address", {"address": address}, target)
+    return _registry.call("decompile_function_by_address", {"address": address}, target)
 
 
 @mcp.tool()
 def disassemble_function(address: str, target: str = "default"):
-    return _call("disassemble_function", {"address": address}, target)
+    return _registry.call("disassemble_function", {"address": address}, target)
 
 
 @mcp.tool()
 def set_decompiler_comment(address: str, comment: str, target: str = "default"):
-    return _call(
+    return _registry.call(
         "set_decompiler_comment",
         {"address": address, "comment": comment},
         target,
@@ -295,7 +362,7 @@ def set_decompiler_comment(address: str, comment: str, target: str = "default"):
 
 @mcp.tool()
 def set_disassembly_comment(address: str, comment: str, target: str = "default"):
-    return _call(
+    return _registry.call(
         "set_disassembly_comment",
         {"address": address, "comment": comment},
         target,
@@ -304,7 +371,7 @@ def set_disassembly_comment(address: str, comment: str, target: str = "default")
 
 @mcp.tool()
 def rename_function_by_address(function_address: str, new_name: str, target: str = "default"):
-    return _call(
+    return _registry.call(
         "rename_function_by_address",
         {"function_address": function_address, "new_name": new_name},
         target,
@@ -313,7 +380,7 @@ def rename_function_by_address(function_address: str, new_name: str, target: str
 
 @mcp.tool()
 def set_function_prototype(function_address: str, prototype: str, target: str = "default"):
-    return _call(
+    return _registry.call(
         "set_function_prototype",
         {"function_address": function_address, "prototype": prototype},
         target,
@@ -327,7 +394,7 @@ def set_local_variable_type(
     new_type: str,
     target: str = "default",
 ):
-    return _call(
+    return _registry.call(
         "set_local_variable_type",
         {
             "function_address": function_address,
@@ -340,14 +407,14 @@ def set_local_variable_type(
 
 @mcp.tool()
 def get_xrefs_to(address: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call(
+    return _registry.call(
         "get_xrefs_to", {"address": address, "offset": offset, "limit": limit}, target
     )
 
 
 @mcp.tool()
 def get_xrefs_from(address: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call(
+    return _registry.call(
         "get_xrefs_from",
         {"address": address, "offset": offset, "limit": limit},
         target,
@@ -356,7 +423,7 @@ def get_xrefs_from(address: str, offset: int = 0, limit: int = 100, target: str 
 
 @mcp.tool()
 def get_function_xrefs(name: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call(
+    return _registry.call(
         "get_function_xrefs",
         {"name": name, "offset": offset, "limit": limit},
         target,
@@ -373,7 +440,7 @@ def list_strings(
     params = {"offset": offset, "limit": limit}
     if filter:
         params["filter"] = filter
-    return _call("list_strings", params, target)
+    return _registry.call("list_strings", params, target)
 
 
 @mcp.tool()
@@ -389,7 +456,7 @@ def create_struct(
         params["category"] = category
     if members:
         params["members"] = members
-    return _call("create_struct", params, target)
+    return _registry.call("create_struct", params, target)
 
 
 @mcp.tool()
@@ -402,7 +469,7 @@ def add_struct_members(
     params: Dict[str, Any] = {"struct_name": struct_name, "members": members}
     if category:
         params["category"] = category
-    return _call("add_struct_members", params, target)
+    return _registry.call("add_struct_members", params, target)
 
 
 @mcp.tool()
@@ -410,7 +477,7 @@ def clear_struct(struct_name: str, category: str | None = None, target: str = "d
     params: Dict[str, Any] = {"struct_name": struct_name}
     if category:
         params["category"] = category
-    return _call("clear_struct", params, target)
+    return _registry.call("clear_struct", params, target)
 
 
 @mcp.tool()
@@ -418,22 +485,22 @@ def get_struct(name: str, category: str | None = None, target: str = "default"):
     params: Dict[str, Any] = {"name": name}
     if category:
         params["category"] = category
-    return _call("get_struct", params, target)
+    return _registry.call("get_struct", params, target)
 
 
 @mcp.tool()
 def get_data_by_label(label: str, target: str = "default"):
-    return _call("get_data_by_label", {"label": label}, target)
+    return _registry.call("get_data_by_label", {"label": label}, target)
 
 
 @mcp.tool()
 def get_bytes(address: str, size: int = 16, target: str = "default"):
-    return _call("get_bytes", {"address": address, "size": size}, target)
+    return _registry.call("get_bytes", {"address": address, "size": size}, target)
 
 
 @mcp.tool()
 def search_bytes(pattern: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _call(
+    return _registry.call(
         "search_bytes",
         {"bytes": pattern, "offset": offset, "limit": limit},
         target,
@@ -453,7 +520,7 @@ def create_enum(
         params["category"] = category
     if values:
         params["values"] = values
-    return _call("create_enum", params, target)
+    return _registry.call("create_enum", params, target)
 
 
 @mcp.tool()
@@ -466,7 +533,7 @@ def add_enum_values(
     params: Dict[str, Any] = {"enum_name": enum_name, "values": values}
     if category:
         params["category"] = category
-    return _call("add_enum_values", params, target)
+    return _registry.call("add_enum_values", params, target)
 
 
 @mcp.tool()
@@ -474,7 +541,7 @@ def get_enum(name: str, category: str | None = None, target: str = "default"):
     params: Dict[str, Any] = {"name": name}
     if category:
         params["category"] = category
-    return _call("get_enum", params, target)
+    return _registry.call("get_enum", params, target)
 
 
 @mcp.tool()
@@ -487,7 +554,7 @@ def set_global_data_type(
     params: Dict[str, Any] = {"address": address, "data_type": data_type}
     if length is not None:
         params["length"] = length
-    return _call("set_global_data_type", params, target)
+    return _registry.call("set_global_data_type", params, target)
 
 
 @mcp.tool()
@@ -500,7 +567,7 @@ def add_class_members(
     params: Dict[str, Any] = {"class_name": class_name, "members": members}
     if parent_namespace:
         params["parent_namespace"] = parent_namespace
-    return _call("add_class_members", params, target)
+    return _registry.call("add_class_members", params, target)
 
 
 @mcp.tool()
@@ -513,7 +580,7 @@ def remove_class_members(
     params: Dict[str, Any] = {"class_name": class_name, "members": members}
     if parent_namespace:
         params["parent_namespace"] = parent_namespace
-    return _call("remove_class_members", params, target)
+    return _registry.call("remove_class_members", params, target)
 
 
 @mcp.tool()
@@ -526,7 +593,7 @@ def remove_enum_values(
     params: Dict[str, Any] = {"enum_name": enum_name, "values": values}
     if category:
         params["category"] = category
-    return _call("remove_enum_values", params, target)
+    return _registry.call("remove_enum_values", params, target)
 
 
 @mcp.tool()
@@ -539,17 +606,17 @@ def remove_struct_members(
     params: Dict[str, Any] = {"struct_name": struct_name, "members": members}
     if category:
         params["category"] = category
-    return _call("remove_struct_members", params, target)
+    return _registry.call("remove_struct_members", params, target)
 
 
 @mcp.tool()
 def set_bytes(address: str, bytes_hex: str, target: str = "default"):
-    return _call("set_bytes", {"address": address, "bytes": bytes_hex}, target)
+    return _registry.call("set_bytes", {"address": address, "bytes": bytes_hex}, target)
 
 
 @mcp.tool()
 def get_callee(address: str, target: str = "default"):
-    return _call("get_callee", {"address": address}, target)
+    return _registry.call("get_callee", {"address": address}, target)
 
 
 @mcp.tool()
@@ -560,7 +627,7 @@ def add_bookmark(
     type: str,
     target: str = "default",
 ):
-    return _call(
+    return _registry.call(
         "add_bookmark",
         {"address": address, "category": category, "comment": comment, "type": type},
         target,
@@ -568,12 +635,12 @@ def add_bookmark(
 
 
 @mcp.tool()
-def list_targets() -> List[str]:
+def list_targets() -> List[Dict[str, Optional[str]]]:
     return _registry.list_targets()
 
 
 @mcp.tool()
-def list_project_programs(target: str):
+def list_project_programs(target: str | None = None):
     return _registry.list_programs(target)
 
 
@@ -583,25 +650,42 @@ def load_project_program(target: str, domain_path: str):
     return {"status": "ok", "target": target, "program": domain_path}
 
 
-@mcp.tool()
+@mcp.tool(description="Open an existing program inside a Ghidra project and create a session")
 def create_session(
     target: str,
-    *,
-    binary_path: str | None = None,
-    project_dir: str | None = None,
-    project_name: str | None = None,
-    domain_path: str | None = None,
+    project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
+    project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
+    domain_path: Annotated[str | None, Field(description="Domain path of the program to open (e.g. /folder/program). If omitted, the first program is chosen automatically")] = None,
 ):
     try:
         _registry.create_session(
             target,
-            project_dir=project_dir,
+            project_location=project_location,
             project_name=project_name,
             domain_path=domain_path,
+            binary_path=None,
+        )
+        return {"status": "ok", "target": target}
+    except Exception as exc:
+        raise RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
+
+
+@mcp.tool(description="Import a binary or Ghidra archive into a project and create a session")
+def create_session_by_importing(
+    target: str,
+    binary_path: Annotated[str, Field(description="Path to the binary or Ghidra archive (.gzf) to import and open")],
+    project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
+    project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
+):
+    try:
+        _registry.create_session(
+            target,
+            project_location=project_location,
+            project_name=project_name,
             binary_path=binary_path,
         )
         return {"status": "ok", "target": target}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
 
 
@@ -612,6 +696,15 @@ def close_session(target: str):
         return {"status": "ok", "target": target}
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"セッション '{target}' のクローズに失敗しました: {exc}")
+
+
+@mcp.tool()
+def close_session_and_remove_program(target: str):
+    try:
+        _registry.close_session(target, remove_program=True)
+        return {"status": "ok", "target": target}
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました: {exc}")
 
 
 def configure_logging(level: int) -> None:
@@ -630,14 +723,14 @@ def _parse_session_definition(text: str) -> Dict[str, str]:
         result[key.strip()] = value.strip()
     if "name" not in result:
         raise ValueError("session定義にはname=...が必須です")
-    if "binary_path" not in result and "project_dir" not in result:
-        raise ValueError("session定義にはbinary_pathまたはproject_dirが必要です")
+    if "binary_path" not in result and "project_location" not in result:
+        raise ValueError("session定義にはbinary_pathまたはproject_locationが必要です")
     return result
 
 
 def parse_args(argv: list[str]):
     parser = argparse.ArgumentParser(description="PyGhidraベースのGhidra MCPサーバー")
-    parser.add_argument("--project-dir", help="デフォルトセッション用のGhidraプロジェクトディレクトリ")
+    parser.add_argument("--project-location", help="デフォルトセッション用のGhidraプロジェクトディレクトリ")
     parser.add_argument("--project-name", help="デフォルトセッションのプロジェクト名")
     parser.add_argument("--domain-path", help="デフォルトセッションのドメインパス (例: /folder/program)")
     parser.add_argument("--binary-path", help="デフォルトセッションで直接開くバイナリまたはGhidraアーカイブ(.gzf)のパス")
@@ -677,7 +770,7 @@ def main(argv: list[str] | None = None) -> int:
                 config = _parse_session_definition(definition)
                 _registry.create_session(
                     config["name"],
-                    project_dir=config.get("project_dir"),
+                    project_location=config.get("project_location"),
                     project_name=config.get("project_name"),
                     domain_path=config.get("domain_path"),
                     binary_path=config.get("binary_path"),
@@ -688,11 +781,11 @@ def main(argv: list[str] | None = None) -> int:
                 _registry.close_all()
                 return 1
 
-    if args.project_dir or args.binary_path:
+    if args.project_location or args.binary_path:
         try:
             _registry.create_session(
                 args.target_name,
-                project_dir=args.project_dir,
+                project_location=args.project_location,
                 project_name=args.project_name,
                 domain_path=args.domain_path,
                 binary_path=args.binary_path,
@@ -704,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if not _registry.has_sessions():
-        logger.error("少なくとも1つのセッションを --session または --binary-path/--project-dir で指定してください")
+        logger.error("少なくとも1つのセッションを --session または --binary-path/--project-location で指定してください")
         return 1
 
     _core_module = _core()
@@ -725,17 +818,6 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         _registry.close_all()
     return 0
-
-
-def _normalize_project_key(project_dir: str, project_name: Optional[str]) -> tuple[str, str]:
-    path = pathlib.Path(project_dir).resolve()
-    if path.is_file() and path.suffix == ".gpr":
-        effective = project_name or path.stem
-        location = path.parent
-    else:
-        effective = project_name or path.name
-        location = path
-    return (str(location), effective)
 
 
 def configure_mcp_for_sse(args) -> None:
