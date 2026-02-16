@@ -52,6 +52,8 @@ class SessionRegistry:
         with self._registry_lock.write_lock():
             if name in self._sessions:
                 raise ValueError(f"セッション '{name}' は既に存在します")
+            if domain_path and binary_path:
+                raise ValueError("domain_path と binary_path は同時に指定できません")
 
             handle = self._get_or_create_project_handle(project_location, project_name)
             session = handle.open_program_by_importing(binary_path) if binary_path else handle.open_program(domain_path)
@@ -106,11 +108,22 @@ class SessionRegistry:
                 )
             return results
 
-    def load_program(self, name: str, domain_path: str) -> None:
+    def load_program(
+        self,
+        name: str,
+        domain_path: str | None = None,
+        binary_path: str | None = None,
+    ) -> str:
         with self._registry_lock.write_lock():
+            if domain_path and binary_path:
+                raise ValueError("domain_path と binary_path は同時に指定できません")
+            if not domain_path and not binary_path:
+                raise ValueError("domain_path または binary_path のいずれかを指定してください")
+
             session = self._ensure(name)
             handle = session.get_project_handle()
-            new_session = handle.open_program(domain_path)
+            new_session = handle.open_program_by_importing(binary_path) if binary_path else handle.open_program(domain_path)
+            loaded_domain_path = new_session.to_dict().get("domain_path") or ""
             try:
                 new_program = new_session.get_program()
                 _core().initialize(new_program, key=name)
@@ -132,6 +145,7 @@ class SessionRegistry:
             finally:
                 if handle.is_closed():
                     self._project_handles.pop(handle.get_key(), None)
+            return loaded_domain_path
 
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
         with self._registry_lock.write_lock():
@@ -644,18 +658,23 @@ def list_project_programs(target: str | None = None):
     return _registry.list_programs(target)
 
 
-@mcp.tool()
-def load_project_program(target: str, domain_path: str):
-    _registry.load_program(target, domain_path)
-    return {"status": "ok", "target": target, "program": domain_path}
+@mcp.tool(description="Load an existing project program by domain path or import a binary and switch the target to it")
+def load_project_program(
+    target: str,
+    domain_path: Annotated[str | None, Field(description="Domain path of the program to open (e.g. /folder/program)")] = None,
+    binary_path: Annotated[str | None, Field(description="Path to the binary or Ghidra archive (.gzf) to import and open")] = None,
+):
+    loaded_domain_path = _registry.load_program(target, domain_path=domain_path, binary_path=binary_path)
+    return {"status": "ok", "target": target, "program": loaded_domain_path}
 
 
-@mcp.tool(description="Open an existing program inside a Ghidra project and create a session")
+@mcp.tool(description="Create a session by opening an existing project program or importing a binary into the project")
 def create_session(
     target: str,
     project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
     project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
     domain_path: Annotated[str | None, Field(description="Domain path of the program to open (e.g. /folder/program). If omitted, the first program is chosen automatically")] = None,
+    binary_path: Annotated[str | None, Field(description="Path to the binary or Ghidra archive (.gzf) to import and open")] = None,
 ):
     try:
         _registry.create_session(
@@ -663,25 +682,6 @@ def create_session(
             project_location=project_location,
             project_name=project_name,
             domain_path=domain_path,
-            binary_path=None,
-        )
-        return {"status": "ok", "target": target}
-    except Exception as exc:
-        raise RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
-
-
-@mcp.tool(description="Import a binary or Ghidra archive into a project and create a session")
-def create_session_by_importing(
-    target: str,
-    binary_path: Annotated[str, Field(description="Path to the binary or Ghidra archive (.gzf) to import and open")],
-    project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
-    project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
-):
-    try:
-        _registry.create_session(
-            target,
-            project_location=project_location,
-            project_name=project_name,
             binary_path=binary_path,
         )
         return {"status": "ok", "target": target}

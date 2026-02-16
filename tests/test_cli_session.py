@@ -69,6 +69,7 @@ class DummyHandle:
         self.key = key
         self.closed = False
         self.last_domain = None
+        self.last_import_path = None
         self.project_location = key[0]
         self.project_name = name
         self.releases = []
@@ -96,6 +97,7 @@ class DummyHandle:
         return session
 
     def open_program_by_importing(self, path):
+        self.last_import_path = path
         session = DummySession(binary_path=path)
         session.project_handle = self
         session.program = object()
@@ -245,6 +247,49 @@ def test_registry_reuses_active_project_handle(monkeypatch):
     assert calls["initialize"] == [(session.program, "reuse")]
 
 
+def test_registry_load_program_by_importing(tmp_path, monkeypatch):
+    calls = dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+
+    registry = cli.SessionRegistry()
+    old_session = registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+    old_program = old_session.program
+
+    loaded_path = registry.load_program("fw", binary_path="/tmp/new.bin")
+
+    assert loaded_path == "/new.bin"
+    assert registry.list_targets() == [
+        {
+            "target": "fw",
+            "domain_path": "/new.bin",
+            "project_name": "Sample",
+            "project_location": str(tmp_path),
+        }
+    ]
+    assert dummy_handle.last_import_path == "/tmp/new.bin"
+    assert dummy_handle.releases == [{"program": old_program, "remove_program": False}]
+    assert len(calls["initialize"]) == 2
+    assert calls["initialize"][0] == (old_program, "fw")
+    assert calls["initialize"][1][1] == "fw"
+
+
+def test_registry_load_program_requires_single_selector(tmp_path, monkeypatch):
+    calls = dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    with pytest.raises(ValueError, match="いずれか"):
+        registry.load_program("fw")
+    with pytest.raises(ValueError, match="同時に指定"):
+        registry.load_program("fw", domain_path="/folder/a", binary_path="/tmp/a.bin")
+
+    assert len(calls["initialize"]) == 1
+
+
 def test_program_session_to_dict_binary(tmp_path):
     class DummyProgram:
         def getDomainFile(self):
@@ -386,3 +431,73 @@ def test_close_session_and_remove_program_tool(monkeypatch):
 
     assert result == {"status": "ok", "target": "target1"}
     assert called == {"target": "target1", "remove_program": True}
+
+
+def test_create_session_tool_accepts_binary_path(monkeypatch):
+    called = {}
+
+    def fake_create_session(name, project_location, *, project_name=None, domain_path=None, binary_path=None):
+        called["name"] = name
+        called["project_location"] = project_location
+        called["project_name"] = project_name
+        called["domain_path"] = domain_path
+        called["binary_path"] = binary_path
+
+    monkeypatch.setattr(cli._registry, "create_session", fake_create_session)
+
+    result = cli.create_session(
+        target="fw",
+        project_location="/tmp/sample.gpr",
+        binary_path="/tmp/fw.bin",
+    )
+
+    assert result == {"status": "ok", "target": "fw"}
+    assert called == {
+        "name": "fw",
+        "project_location": "/tmp/sample.gpr",
+        "project_name": None,
+        "domain_path": None,
+        "binary_path": "/tmp/fw.bin",
+    }
+
+
+def test_load_project_program_tool_accepts_binary_path(monkeypatch):
+    called = {}
+
+    def fake_load_program(target, domain_path=None, binary_path=None):
+        called["target"] = target
+        called["domain_path"] = domain_path
+        called["binary_path"] = binary_path
+        return "/imported/fw.bin"
+
+    monkeypatch.setattr(cli._registry, "load_program", fake_load_program)
+
+    result = cli.load_project_program(target="fw", binary_path="/tmp/fw.bin")
+
+    assert result == {"status": "ok", "target": "fw", "program": "/imported/fw.bin"}
+    assert called == {
+        "target": "fw",
+        "domain_path": None,
+        "binary_path": "/tmp/fw.bin",
+    }
+
+
+def test_load_project_program_tool_accepts_domain_path(monkeypatch):
+    called = {}
+
+    def fake_load_program(target, domain_path=None, binary_path=None):
+        called["target"] = target
+        called["domain_path"] = domain_path
+        called["binary_path"] = binary_path
+        return domain_path
+
+    monkeypatch.setattr(cli._registry, "load_program", fake_load_program)
+
+    result = cli.load_project_program(target="fw", domain_path="/folder/current.bin")
+
+    assert result == {"status": "ok", "target": "fw", "program": "/folder/current.bin"}
+    assert called == {
+        "target": "fw",
+        "domain_path": "/folder/current.bin",
+        "binary_path": None,
+    }
