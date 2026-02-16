@@ -46,21 +46,23 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 
 1. **セッション作成（プロジェクトを開く）**
    ```bash
-   create_session(target="fw", project_location="/path/project", project_name="Sample")
+   create_session(target="fw", project_location="/path/project", project_name="Sample", domain_path="/folder/program1")
    ```
 2. **プログラム一覧確認**
    ```bash
    list_project_programs(target="fw")
    ```
-3. **別プログラムを読み込み（既存プログラム切替 or 新規インポート）**
+   - `target` は必須です。
+3. **（任意）新しいバイナリをプロジェクトに追加**
+   ```bash
+   import_program(target="fw", binary_path="/tmp/new_firmware.bin")
+   ```
+4. **別プログラムを読み込み（既存プログラムへ切替）**
    ```bash
    load_project_program(target="fw", domain_path="/folder/program2")
    ```
-   ```bash
-   load_project_program(target="fw", binary_path="/tmp/new_firmware.bin")
-   ```
-4. **解析ツール呼び出し**（例: `list_methods(target="fw")`）
-5. **不要になったら `close_session(target="fw")` でクリーンアップ（プロジェクトからプログラムも消す場合は `close_session_and_remove_program(target="fw")`）**
+5. **解析ツール呼び出し**（例: `list_methods(target="fw")`）
+6. **不要になったら `close_session(target="fw")` でクリーンアップ（プロジェクトからプログラムも消す場合は `close_session_and_remove_program(target="fw")`）**
 
 #### プログラムA/Bを別セッションで解析する例
 
@@ -95,8 +97,10 @@ get_function_xrefs(name="init", target="targetA")
 ```python
 list_project_programs(target="targetB")
 load_project_program(target="targetB", domain_path="/folder/programC")
-load_project_program(target="targetB", binary_path="/tmp/programD.bin")
+import_program(target="targetB", binary_path="/tmp/programD.bin")
+load_project_program(target="targetB", domain_path="/programD.bin")
 ```
+- `import_program` は追加のみを行い、現在の解析対象は切り替えません。必要なら続けて `load_project_program` を呼び出してください。
 
 5. 作業終了後はセッションを順に閉じる（プロジェクトから削除したい場合は `close_session_and_remove_program` を使用）
 ```python
@@ -117,7 +121,8 @@ uv run ghidra-mcp \
 
 MCP ツール呼び出し時は `target="firmware"` のようにターゲット名を指定することで、操作対象プログラムを切り替えられます。現在登録済みのターゲットは `list_targets` ツールで確認できます。
 
-サーバー起動後でも、`create_session` ツールを呼び出すことで新しいターゲットを追加できます（例: `create_session(target="patch", project_location="/path/to/project.gpr", binary_path="/tmp/patch.bin")`）。不要になったターゲットは `close_session(target="patch")` またはプロジェクトから削除する `close_session_and_remove_program(target="patch")` で解放してください。
+サーバー起動後でも、`create_session` ツールを呼び出すことで新しいターゲットを追加できます（例: `create_session(target="patch", project_location="/path/to/project.gpr", domain_path="/folder/programX")`）。
+新規バイナリを解析対象にしたい場合は、`import_program(target="patch", binary_path="/tmp/patch.bin")` で追加してから `load_project_program(target="patch", domain_path="/patch.bin")` で切り替えてください。不要になったターゲットは `close_session(target="patch")` またはプロジェクトから削除する `close_session_and_remove_program(target="patch")` で解放してください。
 
 ## 主要機能
 
@@ -127,13 +132,13 @@ MCP ツール呼び出し時は `target="firmware"` のようにターゲット�
 - **コメント付与**: 逆アセンブリ／デコンパイラコメントの設定が可能。
 - **PyGhidra ベース**: Jython ではなく CPython 上で Ghidra API を直接呼び出します。
 - **複数ターゲット管理**: 同一プロセスで複数セッションを保持し、ターゲット名で切り替えながら解析できます。
-- **プロジェクト操作**: `list_project_programs` でプロジェクト内のプログラム一覧を取得し、`load_project_program` で既存プログラム切替または新規バイナリのインポート＋切替が可能です。
+- **プロジェクト操作**: `list_project_programs` でプロジェクト内のプログラム一覧を取得し、`import_program` で新規バイナリを追加、`load_project_program` で既存プログラムへ切り替えできます。
 
 FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、MCP クライアントからは `ghidra_mcp.cli` を通じて利用できます。詳しいオプションは `uv run ghidra-mcp --help` を参照してください。
 
 ### 提供ツール一覧
 
-- **ターゲット管理**: `list_targets`, `create_session`, `close_session`, `close_session_and_remove_program`, `list_project_programs`, `load_project_program`
+- **ターゲット管理**: `list_targets`, `create_session`, `close_session`, `close_session_and_remove_program`, `list_project_programs`, `import_program`, `load_project_program`
 - **解析支援**: `list_methods`, `list_functions`, `list_classes`, `list_namespaces`, `list_segments`, `list_imports`, `list_exports`, `list_data_items`, `list_strings`, `search_functions_by_name`, `search_bytes`, `get_function_by_address`, `get_function_xrefs`, `get_xrefs_to`, `get_xrefs_from`, `get_callee`, `get_data_by_label`, `get_bytes`, `decompile_function`, `decompile_function_by_address`, `disassemble_function`
 - **シンボル／コメント編集**: `rename_function`, `rename_function_by_address`, `rename_variable`, `rename_data`, `set_function_prototype`, `set_local_variable_type`, `set_global_data_type`, `set_bytes`, `add_bookmark`, `set_decompiler_comment`, `set_disassembly_comment`
 - **データ型操作**: `create_struct`, `add_struct_members`, `clear_struct`, `remove_struct_members`, `get_struct`, `create_enum`, `add_enum_values`, `get_enum`, `remove_enum_values`, `add_class_members`, `remove_class_members`
@@ -184,6 +189,7 @@ SSE モードであれば、以下のようにエンドポイントを指定し�
       "alwaysAllow": [
         "list_targets",
         "list_project_programs",
+        "import_program",
         "load_project_program",
         "decompile_function",
         "get_data_by_label",

@@ -87,42 +87,24 @@ class SessionRegistry:
                 for name, session in sorted(self._sessions.items(), key=lambda item: item[0])
             ]
 
-    def list_programs(self, name: str | None):
+    def list_programs(self, name: str):
         with self._registry_lock.read_lock():
-            if name:
-                session = self._ensure(name)
-                handle = session.get_project_handle()
-                return handle.list_programs()
-            targets = self._project_session_targets()
-            if not targets:
-                raise RuntimeError("セッションが存在しないためプログラム一覧を取得できません")
-            results: list[dict] = []
-            for target in targets:
-                handle = self._ensure(target).get_project_handle()
-                results.append(
-                    {
-                        "project_location": handle.get_project_location(),
-                        "project_name": handle.get_project_name(),
-                        "programs": self._list_programs_for_target(target),
-                    }
-                )
-            return results
+            session = self._ensure(name)
+            handle = session.get_project_handle()
+            return handle.list_programs()
 
     def load_program(
         self,
         name: str,
-        domain_path: str | None = None,
-        binary_path: str | None = None,
+        domain_path: str,
     ) -> str:
         with self._registry_lock.write_lock():
-            if domain_path and binary_path:
-                raise ValueError("domain_path と binary_path は同時に指定できません")
-            if not domain_path and not binary_path:
-                raise ValueError("domain_path または binary_path のいずれかを指定してください")
+            if not domain_path:
+                raise ValueError("domain_path を指定してください")
 
             session = self._ensure(name)
             handle = session.get_project_handle()
-            new_session = handle.open_program_by_importing(binary_path) if binary_path else handle.open_program(domain_path)
+            new_session = handle.open_program(domain_path)
             loaded_domain_path = new_session.to_dict().get("domain_path") or ""
             try:
                 new_program = new_session.get_program()
@@ -146,6 +128,15 @@ class SessionRegistry:
                 if handle.is_closed():
                     self._project_handles.pop(handle.get_key(), None)
             return loaded_domain_path
+
+    def import_program(self, name: str, binary_path: str) -> str:
+        with self._registry_lock.write_lock():
+            if not binary_path:
+                raise ValueError("binary_path を指定してください")
+            session = self._ensure(name)
+            handle = session.get_project_handle()
+            domain_file = handle.import_program(binary_path)
+            return domain_file.getPathname()
 
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
         with self._registry_lock.write_lock():
@@ -220,23 +211,6 @@ class SessionRegistry:
             handle = ProjectHandle(project_location, project_name)
             self._project_handles[key] = handle
         return handle
-
-    def _list_programs_for_target(self, target: str):
-        session = self._ensure(target)
-        handle = session.get_project_handle()
-        return handle.list_programs()
-
-    def _project_session_targets(self) -> List[str]:
-        seen_projects: set[object] = set()
-        targets: list[str] = []
-        for name, session in sorted(self._sessions.items(), key=lambda item: item[0]):
-            handle = session.get_project_handle()
-            dedup_key = handle.get_key()
-            if dedup_key is None or dedup_key in seen_projects:
-                continue
-            seen_projects.add(dedup_key)
-            targets.append(name)
-        return targets
 
     def call(
         self,
@@ -654,27 +628,34 @@ def list_targets() -> List[Dict[str, Optional[str]]]:
 
 
 @mcp.tool()
-def list_project_programs(target: str | None = None):
+def list_project_programs(target: str):
     return _registry.list_programs(target)
 
 
-@mcp.tool(description="Load an existing project program by domain path or import a binary and switch the target to it")
+@mcp.tool(description="Load an existing program in the current target's project by domain path")
 def load_project_program(
     target: str,
-    domain_path: Annotated[str | None, Field(description="Domain path of the program to open (e.g. /folder/program)")] = None,
-    binary_path: Annotated[str | None, Field(description="Path to the binary or Ghidra archive (.gzf) to import and open")] = None,
+    domain_path: Annotated[str, Field(description="Domain path of the program to open (e.g. /folder/program)")],
 ):
-    loaded_domain_path = _registry.load_program(target, domain_path=domain_path, binary_path=binary_path)
+    loaded_domain_path = _registry.load_program(target, domain_path=domain_path)
     return {"status": "ok", "target": target, "program": loaded_domain_path}
 
 
-@mcp.tool(description="Create a session by opening an existing project program or importing a binary into the project")
+@mcp.tool(description="Import a binary or Ghidra archive (.gzf) into the current target's project")
+def import_program(
+    target: str,
+    binary_path: Annotated[str, Field(description="Path to the binary or Ghidra archive (.gzf) to import")],
+):
+    imported_domain_path = _registry.import_program(target, binary_path=binary_path)
+    return {"status": "ok", "target": target, "program": imported_domain_path}
+
+
+@mcp.tool(description="Create a session by opening an existing program in a Ghidra project")
 def create_session(
     target: str,
     project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
+    domain_path: Annotated[str, Field(description="Domain path of the program to open (e.g. /folder/program)")],
     project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
-    domain_path: Annotated[str | None, Field(description="Domain path of the program to open (e.g. /folder/program). If omitted, the first program is chosen automatically")] = None,
-    binary_path: Annotated[str | None, Field(description="Path to the binary or Ghidra archive (.gzf) to import and open")] = None,
 ):
     try:
         _registry.create_session(
@@ -682,7 +663,7 @@ def create_session(
             project_location=project_location,
             project_name=project_name,
             domain_path=domain_path,
-            binary_path=binary_path,
+            binary_path=None,
         )
         return {"status": "ok", "target": target}
     except Exception as exc:
