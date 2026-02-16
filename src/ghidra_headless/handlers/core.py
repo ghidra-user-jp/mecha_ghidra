@@ -1188,7 +1188,6 @@ SUPPORTED_COMMANDS = {
     "search_functions_by_name": search_functions_by_name,
     "rename_variable": rename_variable,
     "get_function_by_address": get_function_by_address,
-    "list_functions_detailed": list_functions,
     "disassemble_function": disassemble_function,
     "set_decompiler_comment": set_decompiler_comment,
     "rename_function_by_address": rename_function_by_address,

@@ -45,18 +45,15 @@ class SessionRegistry:
         *,
         project_name: str | None = None,
         domain_path: str | None = None,
-        binary_path: str | None = None,
     ) -> ProgramSession:
         handle: ProjectHandle | None = None
         session: ProgramSession | None = None
         with self._registry_lock.write_lock():
             if name in self._sessions:
                 raise ValueError(f"セッション '{name}' は既に存在します")
-            if domain_path and binary_path:
-                raise ValueError("domain_path と binary_path は同時に指定できません")
 
             handle = self._get_or_create_project_handle(project_location, project_name)
-            session = handle.open_program_by_importing(binary_path) if binary_path else handle.open_program(domain_path)
+            session = handle.open_program(domain_path)
             self._locks[name] = threading.RLock()
             self._sessions[name] = session
 
@@ -663,7 +660,6 @@ def create_session(
             project_location=project_location,
             project_name=project_name,
             domain_path=domain_path,
-            binary_path=None,
         )
         return {"status": "ok", "target": target}
     except Exception as exc:
@@ -704,8 +700,8 @@ def _parse_session_definition(text: str) -> Dict[str, str]:
         result[key.strip()] = value.strip()
     if "name" not in result:
         raise ValueError("session定義にはname=...が必須です")
-    if "binary_path" not in result and "project_location" not in result:
-        raise ValueError("session定義にはbinary_pathまたはproject_locationが必要です")
+    if "project_location" not in result:
+        raise ValueError("session定義にはproject_locationが必要です")
     return result
 
 
@@ -714,12 +710,11 @@ def parse_args(argv: list[str]):
     parser.add_argument("--project-location", help="デフォルトセッション用のGhidraプロジェクトディレクトリ")
     parser.add_argument("--project-name", help="デフォルトセッションのプロジェクト名")
     parser.add_argument("--domain-path", help="デフォルトセッションのドメインパス (例: /folder/program)")
-    parser.add_argument("--binary-path", help="デフォルトセッションで直接開くバイナリまたはGhidraアーカイブ(.gzf)のパス")
     parser.add_argument("--target-name", default="default", help="デフォルトセッションのターゲット名")
     parser.add_argument(
         "--session",
         action="append",
-        metavar="name=...,binary_path=...",
+        metavar="name=...,project_location=...,domain_path=...",
         help="追加セッション定義をカンマ区切りで指定 (繰り返し可)",
     )
     parser.add_argument("--ghidra-path", help="Ghidraインストールパス。未指定時は環境変数GHIDRA_INSTALL_DIRを利用")
@@ -754,7 +749,6 @@ def main(argv: list[str] | None = None) -> int:
                     project_location=config.get("project_location"),
                     project_name=config.get("project_name"),
                     domain_path=config.get("domain_path"),
-                    binary_path=config.get("binary_path"),
                 )
                 logger.info("セッション '%s' をロードしました", config["name"])
             except Exception as exc:  # noqa: BLE001
@@ -762,14 +756,13 @@ def main(argv: list[str] | None = None) -> int:
                 _registry.close_all()
                 return 1
 
-    if args.project_location or args.binary_path:
+    if args.project_location:
         try:
             _registry.create_session(
                 args.target_name,
                 project_location=args.project_location,
                 project_name=args.project_name,
                 domain_path=args.domain_path,
-                binary_path=args.binary_path,
             )
             logger.info("デフォルトターゲット '%s' をロードしました", args.target_name)
         except Exception as exc:  # noqa: BLE001
@@ -778,7 +771,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if not _registry.has_sessions():
-        logger.error("少なくとも1つのセッションを --session または --binary-path/--project-location で指定してください")
+        logger.error("少なくとも1つのセッションを --session または --project-location で指定してください")
         return 1
 
     _core_module = _core()

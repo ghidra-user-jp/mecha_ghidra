@@ -37,9 +37,8 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 
 5. **MCP サーバーの起動**
    ```bash
-   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
+   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
    ```
-- `--binary-path` は `--project-location` と組み合わせて、起動時にバイナリをインポートして開く用途で利用できます。
 - `--transport sse` を選ぶと FastMCP の SSE モードで起動できます。
 
 ### プロジェクト内でのプログラム追加・切り替え
@@ -110,11 +109,11 @@ close_session(target="targetA")
 
 ### 複数ターゲットを同時にロードする例
 
-複数のバイナリ／プロジェクトを同時に開きたい場合は、`--session` オプションを複数回指定します。各定義はカンマ区切りで `name=...` とファイル情報を渡してください。
+複数のバイナリ／プロジェクトを同時に開きたい場合は、`--session` オプションを複数回指定します。各定義はカンマ区切りで `name=...`, `project_location=...`, `domain_path=...`（必要なら `project_name=...`）を渡してください。
 
 ```bash
 uv run ghidra-mcp \
-    --session name=firmware,binary_path=/path/fw.bin \
+    --session name=firmware,project_location=/path/fw_project.gpr,domain_path=/firmware.bin \
     --session name=game,project_location=/path/game_project,project_name=GameProj,domain_path=/main \
     --transport stdio
 ```

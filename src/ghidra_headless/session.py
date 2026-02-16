@@ -160,10 +160,6 @@ class ProjectHandle:
 
             return domain_file
 
-    def open_program_by_importing(self, binary_path: str) -> ProgramSession:
-        domain_path = self.import_program(binary_path)
-        return self.open_program(domain_path.getPathname())
-
     def release_program(self, program, *, remove_program: bool = False) -> None:
         with self._lock:
             if self._closed:
@@ -197,10 +193,6 @@ class ProjectHandle:
             root = self.project.getProjectData().getRootFolder()
             _collect_program_files(root, results)
             return results
-
-    def is_active(self) -> bool:
-        with self._lock:
-            return self._refcount > 0
 
     def is_closed(self) -> bool:
         with self._lock:

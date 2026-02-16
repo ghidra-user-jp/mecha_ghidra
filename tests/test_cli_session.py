@@ -33,14 +33,11 @@ def dummy_core(monkeypatch):
 
 
 class DummySession:
-    def __init__(self, *, binary_path=None, project_handle=None, domain_path=None):
-        self.args = {
-            "binary_path": binary_path,
-        }
+    def __init__(self, *, project_handle=None, domain_path=None):
         self.program = object()
         self.closed = False
         self.project_handle = project_handle
-        self.domain_path = domain_path or ("/" + Path(binary_path).name if binary_path else None)
+        self.domain_path = domain_path
 
     def get_program(self):
         return self.program
@@ -90,15 +87,7 @@ class DummyHandle:
 
     def open_program(self, domain_path):
         self.last_domain = domain_path
-        session = DummySession(binary_path=None, domain_path=domain_path)
-        session.project_handle = self
-        session.program = object()
-        self.program_paths[session.program] = session.domain_path
-        return session
-
-    def open_program_by_importing(self, path):
-        self.last_import_path = path
-        session = DummySession(binary_path=path)
+        session = DummySession(domain_path=domain_path)
         session.project_handle = self
         session.program = object()
         self.program_paths[session.program] = session.domain_path
@@ -130,14 +119,15 @@ class DummyHandle:
 
 
 def test_parse_session_definition_minimal():
-    cfg = cli._parse_session_definition("name=fw,binary_path=/tmp/fw.bin")
+    cfg = cli._parse_session_definition("name=fw,project_location=/tmp/sample.gpr,domain_path=/folder/fw.bin")
     assert cfg["name"] == "fw"
-    assert cfg["binary_path"] == "/tmp/fw.bin"
+    assert cfg["project_location"] == "/tmp/sample.gpr"
+    assert cfg["domain_path"] == "/folder/fw.bin"
 
 
 @pytest.mark.parametrize(
     "text",
-    ["binary_path=/tmp/fw.bin", "name=fw"],
+    ["project_location=/tmp/sample.gpr", "name=fw,domain_path=/folder/fw.bin"],
 )
 def test_parse_session_definition_invalid(text):
     with pytest.raises(ValueError):
@@ -181,25 +171,23 @@ def test_project_key_rejects_non_gpr(tmp_path):
 def test_session_registry_create_close(tmp_path, monkeypatch):
     project_file = tmp_path / "sample.gpr"
     project_file.write_text("")
-    binary_file = tmp_path / "fw.bin"
-    binary_file.write_text("")
     calls = dummy_core(monkeypatch)
 
     dummy_handle = DummyHandle(key=(str(project_file.parent), "sample"))
     monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
 
     registry = cli.SessionRegistry()
-    session = registry.create_session("fw", project_location=str(project_file), binary_path="/tmp/fw.bin")
+    session = registry.create_session("fw", project_location=str(project_file), domain_path="/folder/fw.bin")
 
     assert registry.list_targets() == [
         {
             "target": "fw",
-            "domain_path": "/fw.bin",
+            "domain_path": "/folder/fw.bin",
             "project_name": "Sample",
             "project_location": str(tmp_path),
         }
     ]
-    assert session.args["binary_path"] == "/tmp/fw.bin"
+    assert dummy_handle.last_domain == "/folder/fw.bin"
     assert calls["initialize"] == [(session.program, "fw")]
 
     registry.close_session("fw")
@@ -212,22 +200,20 @@ def test_session_registry_create_close(tmp_path, monkeypatch):
 def test_session_registry_close_and_remove_program(tmp_path, monkeypatch):
     project_file = tmp_path / "sample.gpr"
     project_file.write_text("")
-    binary_file = tmp_path / "fw.bin"
-    binary_file.write_text("")
     calls = dummy_core(monkeypatch)
 
     dummy_handle = DummyHandle(key=(str(project_file.parent), "sample"))
     monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
 
     registry = cli.SessionRegistry()
-    session = registry.create_session("fw", project_location=str(project_file), binary_path=str(binary_file))
+    session = registry.create_session("fw", project_location=str(project_file), domain_path="/folder/fw.bin")
 
     registry.close_session("fw", remove_program=True)
     assert registry.list_targets() == []
     assert session.closed is True
     assert calls["remove"] == ["fw"]
     assert dummy_handle.releases == [{"program": session.program, "remove_program": True}]
-    assert dummy_handle.deleted_programs == ["/fw.bin"]
+    assert dummy_handle.deleted_programs == ["/folder/fw.bin"]
 
 
 def test_registry_close_all(tmp_path, monkeypatch):
@@ -236,8 +222,8 @@ def test_registry_close_all(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
 
     registry = cli.SessionRegistry()
-    registry.create_session("a", project_location=str(tmp_path), project_name="sample", binary_path="/tmp/a.bin")
-    registry.create_session("b", project_location=str(tmp_path / "sample.gpr"), binary_path="/tmp/b.bin")
+    registry.create_session("a", project_location=str(tmp_path), project_name="sample", domain_path="/folder/a.bin")
+    registry.create_session("b", project_location=str(tmp_path / "sample.gpr"), domain_path="/folder/b.bin")
 
     registry.close_all()
     assert registry.list_targets() == []
@@ -344,8 +330,8 @@ def test_list_programs_for_target_returns_programs():
     registry = cli.SessionRegistry()
     handle_a = DummyHandle(name="A")
     handle_b = DummyHandle(key=("/project", "B"), name="B")
-    session_a = DummySession(project_handle=handle_a)
-    session_b = DummySession(project_handle=handle_b)
+    session_a = DummySession(project_handle=handle_a, domain_path="/folder/A")
+    session_b = DummySession(project_handle=handle_b, domain_path="/folder/B")
     with registry._registry_lock.write_lock():
         registry._sessions["a"] = session_a
         registry._sessions["b"] = session_b
@@ -411,12 +397,11 @@ def test_close_session_and_remove_program_tool(monkeypatch):
 def test_create_session_tool_uses_domain_path(monkeypatch):
     called = {}
 
-    def fake_create_session(name, project_location, *, project_name=None, domain_path=None, binary_path=None):
+    def fake_create_session(name, project_location, *, project_name=None, domain_path=None):
         called["name"] = name
         called["project_location"] = project_location
         called["project_name"] = project_name
         called["domain_path"] = domain_path
-        called["binary_path"] = binary_path
 
     monkeypatch.setattr(cli._registry, "create_session", fake_create_session)
 
@@ -432,7 +417,6 @@ def test_create_session_tool_uses_domain_path(monkeypatch):
         "project_location": "/tmp/sample.gpr",
         "project_name": None,
         "domain_path": "/folder/fw.bin",
-        "binary_path": None,
     }
 
 
