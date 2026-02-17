@@ -1238,7 +1238,7 @@ def parse_args(argv: list[str]):
         "--transport",
         type=str,
         default="stdio",
-        choices=["stdio", "sse", "stream-http", "streamable-http"],
+        choices=["stdio", "sse", "http", "streamable-http"],
         help="MCPのトランスポート",
     )
     parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="SSE/Streamable HTTPホスト (stdioでは未使用)")
@@ -1254,7 +1254,7 @@ def parse_args(argv: list[str]):
 
 
 def _normalize_transport(transport: str) -> str:
-    return "streamable-http" if transport == "stream-http" else transport
+    return "streamable-http" if transport == "http" else transport
 
 
 def _normalize_streamable_http_path(path: str) -> str:

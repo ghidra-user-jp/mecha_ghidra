@@ -800,7 +800,7 @@ def test_register_shared_project_sync_tools(monkeypatch):
     ]
 
 
-def test_parse_args_accepts_stream_http():
+def test_parse_args_accepts_http():
     args = cli.parse_args(
         [
             "--project-location",
@@ -808,7 +808,7 @@ def test_parse_args_accepts_stream_http():
             "--domain-path",
             "/main",
             "--transport",
-            "stream-http",
+            "http",
             "--mcp-host",
             "0.0.0.0",
             "--mcp-port",
@@ -818,10 +818,24 @@ def test_parse_args_accepts_stream_http():
         ]
     )
 
-    assert args.transport == "stream-http"
+    assert args.transport == "http"
     assert args.mcp_host == "0.0.0.0"
     assert args.mcp_port == 9090
     assert args.mcp_path == "/mcp"
+
+
+def test_parse_args_rejects_stream_http():
+    with pytest.raises(SystemExit):
+        cli.parse_args(
+            [
+                "--project-location",
+                "/tmp/sample.gpr",
+                "--domain-path",
+                "/main",
+                "--transport",
+                "stream-http",
+            ]
+        )
 
 
 def test_parse_args_enable_shared_project_sync():
@@ -855,7 +869,7 @@ def test_parse_args_ghidra_server_auth_options():
 
 
 def test_normalize_transport_alias():
-    assert cli._normalize_transport("stream-http") == "streamable-http"
+    assert cli._normalize_transport("http") == "streamable-http"
     assert cli._normalize_transport("sse") == "sse"
 
 
