@@ -183,6 +183,26 @@ class ProjectHandle:
             monitor = _console_monitor()
             return bool(domain_file.checkout(bool(exclusive), monitor))
 
+    def add_program_to_version_control(
+        self,
+        domain_path: str,
+        comment: str,
+        *,
+        keep_checked_out: bool = False,
+    ) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            text = (comment or "").strip()
+            if not text:
+                raise ValueError("comment を指定してください")
+            domain_file = self._get_domain_file_locked(domain_path)
+            can_add = _safe_call(domain_file, "canAddToRepository")
+            if can_add is False:
+                raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControlできない状態です")
+            monitor = _console_monitor()
+            domain_file.addToVersionControl(text, bool(keep_checked_out), monitor)
+
     def commit_program(
         self,
         domain_path: str,
@@ -400,6 +420,7 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
         "is_checked_out_exclusive": bool(_required_call(domain_file, "isCheckedOutExclusive")),
         "is_latest_version": bool(_required_call(domain_file, "isLatestVersion")),
         "modified_since_checkout": bool(_required_call(domain_file, "modifiedSinceCheckout")),
+        "can_add_to_repository": bool(_safe_call(domain_file, "canAddToRepository")),
         "can_checkout": bool(_required_call(domain_file, "canCheckout")),
         "can_checkin": bool(_required_call(domain_file, "canCheckin")),
         "can_merge": bool(_required_call(domain_file, "canMerge")),

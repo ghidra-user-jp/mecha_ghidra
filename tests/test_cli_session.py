@@ -95,6 +95,7 @@ class DummyHandle:
             "is_checked_out_exclusive": False,
             "is_latest_version": True,
             "modified_since_checkout": False,
+            "can_add_to_repository": False,
             "can_checkout": True,
             "can_checkin": False,
             "can_merge": False,
@@ -160,6 +161,15 @@ class DummyHandle:
         self.sync_status["is_checked_out"] = True
         self.sync_status["is_checked_out_exclusive"] = bool(exclusive)
         return True
+
+    def add_program_to_version_control(self, domain_path, comment, *, keep_checked_out=False):
+        self.sync_calls.append(("add_program_to_version_control", domain_path, comment, keep_checked_out))
+        self.sync_status["is_versioned"] = True
+        self.sync_status["can_add_to_repository"] = False
+        self.sync_status["version"] = max(1, int(self.sync_status.get("version") or 0))
+        self.sync_status["latest_version"] = self.sync_status["version"]
+        self.sync_status["is_latest_version"] = True
+        self.sync_status["is_checked_out"] = bool(keep_checked_out)
 
     def commit_program(self, domain_path, message, *, keep_checked_out=False, create_keep_file=False):
         self.sync_calls.append(("commit_program", domain_path, message, keep_checked_out, create_keep_file))
@@ -596,6 +606,26 @@ def test_registry_checkout_project_program(tmp_path, monkeypatch):
     assert ("checkout_program", "/folder/old", True) in dummy_handle.sync_calls
 
 
+def test_registry_add_project_program_to_version_control(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    dummy_handle.sync_status["is_versioned"] = False
+    dummy_handle.sync_status["can_add_to_repository"] = True
+    dummy_handle.sync_status["version"] = 0
+    dummy_handle.sync_status["latest_version"] = 0
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.add_project_program_to_version_control("fw", "enable shared", keep_checked_out=True)
+
+    assert result["status"] == "ok"
+    assert result["is_versioned"] is True
+    assert result["effective_keep_checked_out"] is True
+    assert any(call[0] == "add_program_to_version_control" for call in dummy_handle.sync_calls)
+    assert len(dummy_handle.releases) == 1
+
+
 def test_registry_commit_project_program(tmp_path, monkeypatch):
     dummy_core(monkeypatch)
     dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
@@ -663,6 +693,24 @@ def test_registry_terminate_project_program_checkout(tmp_path, monkeypatch):
     assert ("terminate_checkout_program", "/folder/old", 12) in dummy_handle.sync_calls
 
 
+def test_registry_reload_project_program(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.reload_project_program("fw")
+
+    assert result == {
+        "status": "ok",
+        "target": "fw",
+        "program": "/folder/old",
+        "reloaded": True,
+    }
+    assert len(dummy_handle.releases) == 1
+
+
 def test_shared_project_sync_tool_wrappers(monkeypatch):
     called = {}
 
@@ -696,19 +744,35 @@ def test_shared_project_sync_tool_wrappers(monkeypatch):
         "terminate_project_program_checkout",
         lambda target, checkout_id: called.setdefault("terminate", (target, checkout_id)) or {},
     )
+    monkeypatch.setattr(
+        cli._registry,
+        "add_project_program_to_version_control",
+        lambda target, comment, keep_checked_out=False: called.setdefault(
+            "add", (target, comment, keep_checked_out)
+        ) or {},
+    )
+    monkeypatch.setattr(
+        cli._registry,
+        "reload_project_program",
+        lambda target: called.setdefault("reload", (target,)) or {},
+    )
 
     assert cli.get_project_sync_status("fw") == {"target": "fw"}
     cli.checkout_project_program("fw", exclusive=True)
+    cli.add_project_program_to_version_control("fw", comment="enable shared", keep_checked_out=False)
     cli.commit_project_program("fw", "msg", keep_checked_out=True, auto_checkout=False)
     cli.pull_project_program("fw", on_local_changes="discard")
     cli.undo_checkout_project_program("fw", discard_local_changes=False)
     cli.terminate_project_program_checkout("fw", checkout_id=7)
+    cli.reload_project_program("fw")
 
     assert called["checkout"] == ("fw", True)
+    assert called["add"] == ("fw", "enable shared", False)
     assert called["commit"] == ("fw", "msg", True, False)
     assert called["pull"] == ("fw", "discard")
     assert called["undo"] == ("fw", False)
     assert called["terminate"] == ("fw", 7)
+    assert called["reload"] == ("fw",)
 
 
 def test_register_shared_project_sync_tools(monkeypatch):
@@ -727,10 +791,12 @@ def test_register_shared_project_sync_tools(monkeypatch):
     assert names == [
         "get_project_sync_status",
         "checkout_project_program",
+        "add_project_program_to_version_control",
         "commit_project_program",
         "pull_project_program",
         "undo_checkout_project_program",
         "terminate_project_program_checkout",
+        "reload_project_program",
     ]
 
 
@@ -769,6 +835,23 @@ def test_parse_args_enable_shared_project_sync():
         ]
     )
     assert args.enable_shared_project_sync is True
+
+
+def test_parse_args_ghidra_server_auth_options():
+    args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--ghidra-server-user",
+            "alice",
+            "--ghidra-server-password-env",
+            "GHIDRA_SERVER_PASSWORD",
+        ]
+    )
+    assert args.ghidra_server_user == "alice"
+    assert args.ghidra_server_password_env == "GHIDRA_SERVER_PASSWORD"
 
 
 def test_normalize_transport_alias():
@@ -811,3 +894,66 @@ def test_configure_mcp_for_streamable_http(monkeypatch):
     assert fake_mcp.settings.host == "0.0.0.0"
     assert fake_mcp.settings.port == 9090
     assert fake_mcp.settings.streamable_http_path == "/custom"
+
+
+def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
+    called = {}
+
+    class FakePasswordAuthenticator:
+        def __init__(self, username, password):
+            called["constructor"] = (username, password)
+
+    class FakeClientUtil:
+        @staticmethod
+        def setClientAuthenticator(authenticator):
+            called["authenticator"] = authenticator
+
+    monkeypatch.setenv("GHIDRA_SERVER_PASSWORD", "secret")
+    monkeypatch.setattr(cli, "_password_client_authenticator_class", lambda: FakePasswordAuthenticator)
+    monkeypatch.setattr(cli, "_client_util_class", lambda: FakeClientUtil)
+
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
+    )
+    cli.configure_ghidra_server_auth(args)
+
+    assert called["constructor"] == ("alice", "secret")
+    assert isinstance(called["authenticator"], FakePasswordAuthenticator)
+
+
+@pytest.mark.parametrize(
+    ("username", "password_env_name"),
+    [
+        ("alice", ""),
+        ("", "GHIDRA_SERVER_PASSWORD"),
+    ],
+)
+def test_configure_ghidra_server_auth_requires_user_and_env(monkeypatch, username, password_env_name):
+    monkeypatch.delenv("GHIDRA_SERVER_PASSWORD", raising=False)
+    args = types.SimpleNamespace(
+        ghidra_server_user=username,
+        ghidra_server_password_env=password_env_name,
+    )
+    with pytest.raises(ValueError, match="セットで指定してください"):
+        cli.configure_ghidra_server_auth(args)
+
+
+def test_configure_ghidra_server_auth_requires_non_empty_env_value(monkeypatch):
+    monkeypatch.setenv("GHIDRA_SERVER_PASSWORD", "")
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
+    )
+    with pytest.raises(ValueError, match="空です"):
+        cli.configure_ghidra_server_auth(args)
+
+
+def test_configure_ghidra_server_auth_requires_existing_env(monkeypatch):
+    monkeypatch.delenv("GHIDRA_SERVER_PASSWORD", raising=False)
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
+    )
+    with pytest.raises(ValueError, match="未設定です"):
+        cli.configure_ghidra_server_auth(args)

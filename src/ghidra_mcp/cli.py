@@ -21,6 +21,7 @@ from pydantic import Field
 from typing import Annotated, Any, Dict, List, Optional
 
 import pyghidra
+import pyghidra.core as pycore
 from mcp.server.fastmcp import FastMCP
 
 from ghidra_headless.session import ProgramSession, ProjectHandle
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("GhidraMCP Headless")
 _core_module = None
 _shared_project_sync_tools_registered = False
+_PASSWORD_CLIENT_AUTHENTICATOR_CLASS = None
+_CLIENT_UTIL_CLASS = None
 
 
 class SessionRegistry:
@@ -172,6 +175,54 @@ class SessionRegistry:
                     "checked_out": bool(checked_out),
                     "already_checked_out": False,
                     "exclusive": bool(exclusive),
+                }
+
+    def add_project_program_to_version_control(
+        self,
+        name: str,
+        comment: str,
+        *,
+        keep_checked_out: bool = False,
+    ) -> Dict[str, Any]:
+        text = (comment or "").strip()
+        if not text:
+            raise ValueError("comment を指定してください")
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                domain_path = self._session_domain_path(session)
+                status = self._current_sync_status_locked(name)
+                if status.get("is_versioned"):
+                    return {
+                        "status": "noop",
+                        "reason": "already_versioned",
+                        "target": name,
+                        "program": domain_path,
+                        "version": status.get("version"),
+                    }
+                if not status.get("can_add_to_repository"):
+                    raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControlできない状態です")
+
+                self._run_with_reopened_program_locked(
+                    name,
+                    operation=lambda active_handle, active_domain_path: active_handle.add_program_to_version_control(
+                        active_domain_path,
+                        text,
+                        keep_checked_out=keep_checked_out,
+                    ),
+                    save_before_close=True,
+                )
+                updated = self._current_sync_status_locked(name)
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": domain_path,
+                    "is_versioned": bool(updated.get("is_versioned")),
+                    "version": updated.get("version"),
+                    "latest_version": updated.get("latest_version"),
+                    "checked_out": bool(updated.get("is_checked_out")),
+                    "effective_keep_checked_out": bool(updated.get("is_checked_out")),
                 }
 
     def commit_project_program(
@@ -340,6 +391,24 @@ class SessionRegistry:
                     "program": domain_path,
                     "checkout_id": int(checkout_id),
                     "active_checkouts": updated.get("checkouts"),
+                }
+
+    def reload_project_program(self, name: str) -> Dict[str, Any]:
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                domain_path = self._session_domain_path(session)
+                self._run_with_reopened_program_locked(
+                    name,
+                    operation=lambda active_handle, active_domain_path: None,
+                    save_before_close=True,
+                )
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": domain_path,
+                    "reloaded": True,
                 }
 
     def _current_sync_status_locked(self, name: str) -> Dict[str, Any]:
@@ -547,6 +616,20 @@ def _core():
         from ghidra_headless.handlers import core as core_module
         _core_module = core_module
     return _core_module
+
+
+def _password_client_authenticator_class():
+    global _PASSWORD_CLIENT_AUTHENTICATOR_CLASS
+    if _PASSWORD_CLIENT_AUTHENTICATOR_CLASS is None:
+        _PASSWORD_CLIENT_AUTHENTICATOR_CLASS = pycore.JClass("ghidra.framework.client.PasswordClientAuthenticator")
+    return _PASSWORD_CLIENT_AUTHENTICATOR_CLASS
+
+
+def _client_util_class():
+    global _CLIENT_UTIL_CLASS
+    if _CLIENT_UTIL_CLASS is None:
+        _CLIENT_UTIL_CLASS = pycore.JClass("ghidra.framework.client.ClientUtil")
+    return _CLIENT_UTIL_CLASS
 
 
 @mcp.tool()
@@ -1012,6 +1095,18 @@ def checkout_project_program(
     return _registry.checkout_project_program(target, exclusive=exclusive)
 
 
+def add_project_program_to_version_control(
+    target: str,
+    comment: Annotated[str, Field(description="バージョン管理追加時のコメント")],
+    keep_checked_out: Annotated[bool, Field(description="追加後もcheckout状態を維持する")] = False,
+):
+    return _registry.add_project_program_to_version_control(
+        target,
+        comment=comment,
+        keep_checked_out=keep_checked_out,
+    )
+
+
 def commit_project_program(
     target: str,
     message: Annotated[str, Field(description="check-in時のコメント")],
@@ -1053,6 +1148,10 @@ def terminate_project_program_checkout(
     return _registry.terminate_project_program_checkout(target, checkout_id=checkout_id)
 
 
+def reload_project_program(target: str):
+    return _registry.reload_project_program(target)
+
+
 def register_shared_project_sync_tools() -> None:
     global _shared_project_sync_tools_registered
     if _shared_project_sync_tools_registered:
@@ -1065,6 +1164,10 @@ def register_shared_project_sync_tools() -> None:
     mcp.add_tool(
         checkout_project_program,
         description="Checkout the target program in a shared project",
+    )
+    mcp.add_tool(
+        add_project_program_to_version_control,
+        description="Add the target program to shared-project version control",
     )
     mcp.add_tool(
         commit_project_program,
@@ -1081,6 +1184,10 @@ def register_shared_project_sync_tools() -> None:
     mcp.add_tool(
         terminate_project_program_checkout,
         description="Terminate a stale checkout by checkout id for the target program",
+    )
+    mcp.add_tool(
+        reload_project_program,
+        description="Reload the target program by closing and reopening the current domain path",
     )
     _shared_project_sync_tools_registered = True
 
@@ -1120,6 +1227,14 @@ def parse_args(argv: list[str]):
     )
     parser.add_argument("--ghidra-path", help="Ghidraインストールパス。未指定時は環境変数GHIDRA_INSTALL_DIRを利用")
     parser.add_argument(
+        "--ghidra-server-user",
+        help="shared project接続時に利用するGhidra serverユーザー名",
+    )
+    parser.add_argument(
+        "--ghidra-server-password-env",
+        help="Ghidra serverパスワードを保持した環境変数名",
+    )
+    parser.add_argument(
         "--transport",
         type=str,
         default="stdio",
@@ -1151,6 +1266,29 @@ def _normalize_streamable_http_path(path: str) -> str:
     return normalized
 
 
+def configure_ghidra_server_auth(args) -> None:
+    username = (getattr(args, "ghidra_server_user", None) or "").strip()
+    password_env_name = (getattr(args, "ghidra_server_password_env", None) or "").strip()
+    if not username and not password_env_name:
+        return
+    if not username or not password_env_name:
+        raise ValueError("--ghidra-server-user と --ghidra-server-password-env はセットで指定してください")
+
+    password = os.environ.get(password_env_name)
+    if password is None:
+        raise ValueError(f"環境変数 '{password_env_name}' が未設定です")
+    if password == "":
+        raise ValueError(f"環境変数 '{password_env_name}' が空です")
+
+    authenticator = _password_client_authenticator_class()(username, password)
+    _client_util_class().setClientAuthenticator(authenticator)
+    logger.info(
+        "Ghidra server認証を設定しました (user=%s, password_env=%s)",
+        username,
+        password_env_name,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     global _core_module
     if argv is None:
@@ -1165,6 +1303,12 @@ def main(argv: list[str] | None = None) -> int:
         pyghidra.start(install_dir=ghidra_path)
     else:
         pyghidra.start()
+
+    try:
+        configure_ghidra_server_auth(args)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Ghidra server認証設定に失敗: %s", exc)
+        return 1
 
     if args.session:
         for definition in args.session:
