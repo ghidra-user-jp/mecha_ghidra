@@ -718,11 +718,31 @@ def parse_args(argv: list[str]):
         help="追加セッション定義をカンマ区切りで指定 (繰り返し可)",
     )
     parser.add_argument("--ghidra-path", help="Ghidraインストールパス。未指定時は環境変数GHIDRA_INSTALL_DIRを利用")
-    parser.add_argument("--transport", type=str, default="stdio", choices=["stdio", "sse"], help="MCPのトランスポート")
-    parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="SSEホスト (stdioでは未使用)")
-    parser.add_argument("--mcp-port", type=int, help="SSEポート (stdioでは未使用)")
+    parser.add_argument(
+        "--transport",
+        type=str,
+        default="stdio",
+        choices=["stdio", "sse", "stream-http", "streamable-http"],
+        help="MCPのトランスポート",
+    )
+    parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="SSE/Streamable HTTPホスト (stdioでは未使用)")
+    parser.add_argument("--mcp-port", type=int, help="SSE/Streamable HTTPポート (stdioでは未使用)")
+    parser.add_argument("--mcp-path", type=str, default="/mcp", help="Streamable HTTPパス (例: /mcp)")
     parser.add_argument("--log-level", default="INFO", help="ログレベル")
     return parser.parse_args(argv)
+
+
+def _normalize_transport(transport: str) -> str:
+    return "streamable-http" if transport == "stream-http" else transport
+
+
+def _normalize_streamable_http_path(path: str) -> str:
+    normalized = (path or "").strip()
+    if not normalized:
+        return "/mcp"
+    if not normalized.startswith("/"):
+        return "/" + normalized
+    return normalized
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -784,11 +804,14 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
 
-    if args.transport == "sse":
+    transport = _normalize_transport(args.transport)
+    if transport == "sse":
         configure_mcp_for_sse(args)
+    elif transport == "streamable-http":
+        configure_mcp_for_streamable_http(args)
 
     try:
-        mcp.run(transport=args.transport)
+        mcp.run(transport=transport)
     finally:
         _registry.close_all()
     return 0
@@ -800,6 +823,20 @@ def configure_mcp_for_sse(args) -> None:
     mcp.settings.host = args.mcp_host
     mcp.settings.port = args.mcp_port or 8081
     logger.info("MCPをSSEモードで起動: http://%s:%s/sse", mcp.settings.host, mcp.settings.port)
+
+
+def configure_mcp_for_streamable_http(args) -> None:
+    logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
+    mcp.settings.log_level = args.log_level.upper()
+    mcp.settings.host = args.mcp_host
+    mcp.settings.port = args.mcp_port or 8081
+    mcp.settings.streamable_http_path = _normalize_streamable_http_path(args.mcp_path)
+    logger.info(
+        "MCPをStreamable HTTPモードで起動: http://%s:%s%s",
+        mcp.settings.host,
+        mcp.settings.port,
+        mcp.settings.streamable_http_path,
+    )
 
 
 if __name__ == "__main__":

@@ -493,3 +493,69 @@ def test_load_project_program_tool_accepts_domain_path(monkeypatch):
         "target": "fw",
         "domain_path": "/folder/current.bin",
     }
+
+
+def test_parse_args_accepts_stream_http():
+    args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--transport",
+            "stream-http",
+            "--mcp-host",
+            "0.0.0.0",
+            "--mcp-port",
+            "9090",
+            "--mcp-path",
+            "/mcp",
+        ]
+    )
+
+    assert args.transport == "stream-http"
+    assert args.mcp_host == "0.0.0.0"
+    assert args.mcp_port == 9090
+    assert args.mcp_path == "/mcp"
+
+
+def test_normalize_transport_alias():
+    assert cli._normalize_transport("stream-http") == "streamable-http"
+    assert cli._normalize_transport("sse") == "sse"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("mcp", "/mcp"),
+        ("/mcp", "/mcp"),
+        ("", "/mcp"),
+    ],
+)
+def test_normalize_streamable_http_path(raw, expected):
+    assert cli._normalize_streamable_http_path(raw) == expected
+
+
+def test_configure_mcp_for_streamable_http(monkeypatch):
+    fake_mcp = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            log_level="INFO",
+            host="127.0.0.1",
+            port=8081,
+            streamable_http_path="/mcp",
+        )
+    )
+    monkeypatch.setattr(cli, "mcp", fake_mcp)
+
+    args = types.SimpleNamespace(
+        log_level="DEBUG",
+        mcp_host="0.0.0.0",
+        mcp_port=9090,
+        mcp_path="custom",
+    )
+    cli.configure_mcp_for_streamable_http(args)
+
+    assert fake_mcp.settings.log_level == "DEBUG"
+    assert fake_mcp.settings.host == "0.0.0.0"
+    assert fake_mcp.settings.port == 9090
+    assert fake_mcp.settings.streamable_http_path == "/custom"

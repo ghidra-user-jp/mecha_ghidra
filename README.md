@@ -37,9 +37,10 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 
 5. **MCP サーバーの起動**
    ```bash
-   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport sse --mcp-host 127.0.0.1 --mcp-port 8081
+   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport stream-http --mcp-host 127.0.0.1 --mcp-port 8081 --mcp-path /mcp
    ```
-- `--transport sse` を選ぶと FastMCP の SSE モードで起動できます。
+- 推奨は `--transport stream-http` です。FastMCP の Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
+- 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
 
 ### プロジェクト内でのプログラム追加・切り替え
 
@@ -177,14 +178,14 @@ Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` 
 }
 ```
 
-SSE モードであれば、以下のようにエンドポイントを指定します。
+Streamable HTTP モードであれば、以下のようにエンドポイントを指定します。
 
 ```json
     "ghidra_headless": {
       "disabled": false,
       "timeout": 60,
-      "type": "sse",
-      "url": "http://127.0.0.1:8081/sse",
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8081/mcp",
       "alwaysAllow": [
         "list_targets",
         "list_project_programs",
@@ -200,6 +201,8 @@ SSE モードであれば、以下のようにエンドポイントを指定し�
       ]
     },
 ```
+
+SSE を使う必要があるクライアントでは `--transport sse` で起動し、`http://127.0.0.1:8081/sse` を指定してください。
 
 各 JSON は Kilocode/Roocode の MCP 設定画面に貼り付け、必要に応じて `--session` の内容（追加ターゲット）やポート番号を調整してください。設定後を再読み込みすると、`list_methods` や `create_session` など本パッケージの MCP ツールを利用できます。
 
