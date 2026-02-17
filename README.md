@@ -28,13 +28,17 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
    ```
    `uv` が自動的に仮想環境を作成し、`pyproject.toml` に定義された依存パッケージ（`requests`, `mcp`, `pyghidra` など）をインストールします。
 
-4. **Ghidra パスの設定**
+4. **環境変数の設定**
    ```bash
    export GHIDRA_INSTALL_DIR=/path/to/ghidra
    ```
    PyGhidra が Ghidra 本体を見つけられるようにしてください。
 
-5. **MCP サーバーの起動**
+   Ghidra Serverを利用する場合は、ユーザ作成時に変更したパスワードを環境変数に設定する。
+   ```
+   export GHIDRA_SERVER_PASSWORD='your-password'
+   ```
+6. **MCP サーバーの起動**
    ```bash
    uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport http --mcp-host 127.0.0.1 --mcp-port 8081 --mcp-path /mcp
    ```
