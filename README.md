@@ -1,5 +1,4 @@
-# GhidraMCP headless
-
+# Mecha Ghidra — Headless Ghidra MCP for Ghidra Server
 PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとして公開する Python パッケージです。従来の Jython スクリプトによる HTTP サーバーを置き換え、純粋な Python 3.10 以降の環境で Ghidra プロジェクトを操作できます。
 
 ## 動作要件
@@ -164,6 +163,64 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - **データ型操作**: `create_struct`, `add_struct_members`, `clear_struct`, `remove_struct_members`, `get_struct`, `create_enum`, `add_enum_values`, `get_enum`, `remove_enum_values`, `add_class_members`, `remove_class_members`
 - **shared project 同期（`--enable-shared-project-sync` 指定時のみ）**: `get_project_sync_status`, `checkout_project_program`, `add_project_program_to_version_control`, `commit_project_program`, `pull_project_program`, `undo_checkout_project_program`, `terminate_project_program_checkout`, `reload_project_program`
 
+## Ghidra Serverの設定
+
+### インストール・ユーザ設定
+
+サーバーのインストール
+```
+sudo GHIDRA_INSTALL_DIR/server/svrInstall 
+```
+
+自分自身のユーザとmecha ghidra用のユーザを登録
+```
+sudo GHIDRA_INSTALL_DIR/server/svrAdmin -add your_username
+sudo GHIDRA_INSTALL_DIR/server/svrAdmin -add mecha-ghidra
+```
+
+GHIDRA_INSTALL_DIR/server/server.confを編集して、ユーザ名を指定して接続できるようにする。
+* ${ghidra.repositories.dir}は必ず最後に指定する
+```
+wrapper.app.parameter.1=-a0
+wrapper.app.parameter.2=-u
+wrapper.app.parameter.3=${ghidra.repositories.dir}
+```
+
+ghidraを起動する
+```
+sudo server/ghidraSvr restart
+```
+
+New　ProjectからShared Projectを作成
+
+<img width="508" height="388" alt="Image" src="https://github.com/user-attachments/assets/1091c615-1590-4a49-aa2c-7628d6efed70" />
+
+localhostに接続
+
+<img width="508" height="388" alt="image" src="https://github.com/user-attachments/assets/0d1a0cef-fbee-4513-af18-3193a3529c2f" />
+
+作成したユーザでログインする
+初回パスワードは`changeme`
+
+<img width="350" height="179" alt="image" src="https://github.com/user-attachments/assets/e03718b4-89df-4a2b-8609-521a42dd1878" />
+
+初回ログイン時にパスワードを変更するように言われるので、作成したユーザ2つのユーザのパスワードを変更する
+
+<img width="353" height="181" alt="image" src="https://github.com/user-attachments/assets/24da9ede-db7b-4ba2-8107-2fb7fe895968" />
+
+
+プロジェクトを作成する。LLMのアカウントはRead/Writeに設定。
+
+<img width="652" height="383" alt="image" src="https://github.com/user-attachments/assets/3da1693c-3dd7-4ba8-a6e6-95b4767cf95c" />
+
+
+
+<img width="531" height="389" alt="image" src="https://github.com/user-attachments/assets/76ef63d5-de7a-48ca-8758-76b5157a98c3" />
+
+
+<img width="531" height="389" alt="image" src="https://github.com/user-attachments/assets/80a8aa7e-659b-4d8e-bf5f-65eea292dc7f" />
+
+
 ## Kilocode / Roocode での MCP 設定
 
 Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` でサーバーを起動する場合の例:
@@ -223,7 +280,7 @@ Streamable HTTP モードであれば、以下のようにエンドポイント�
     },
 ```
 
-SSE を使う必要があるクライアントでは `--transport sse` で起動し、`http://127.0.0.1:8081/sse` を指定してください。
+streamable-http を使う必要があるクライアントでは `--transport http` で起動し、`http://127.0.0.1:8081/mcp` を指定してください。
 
 各 JSON は Kilocode/Roocode の MCP 設定画面に貼り付け、必要に応じて `--session` の内容（追加ターゲット）やポート番号を調整してください。設定後を再読み込みすると、`list_methods` や `create_session` など本パッケージの MCP ツールを利用できます。
 
