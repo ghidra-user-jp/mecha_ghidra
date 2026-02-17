@@ -90,3 +90,21 @@ def test_open_program_allows_reopen_after_release(monkeypatch):
     new_handle = build_handle(monkeypatch)
     session_two = new_handle.open_program("/folder/app")
     assert session_two.get_program().getDomainFile().getPathname() == "/folder/app"
+
+
+def test_sync_status_raises_when_required_call_fails():
+    class BrokenDomainFile:
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _):
+            return None
+
+        def isVersioned(self):
+            raise RuntimeError("backend unavailable")
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
+        session._sync_status_from_domain_file(BrokenDomainFile())

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP("GhidraMCP Headless")
 _core_module = None
+_shared_project_sync_tools_registered = False
 
 
 class SessionRegistry:
@@ -135,6 +136,306 @@ class SessionRegistry:
             domain_file = handle.import_program(binary_path)
             return domain_file.getPathname()
 
+    def get_project_sync_status(self, name: str) -> Dict[str, Any]:
+        with self._registry_lock.read_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                handle = session.get_project_handle()
+                domain_path = self._session_domain_path(session)
+                status = handle.get_sync_status(domain_path)
+                return {"target": name, "program": domain_path, **status}
+
+    def checkout_project_program(self, name: str, *, exclusive: bool = False) -> Dict[str, Any]:
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                handle = session.get_project_handle()
+                domain_path = self._session_domain_path(session)
+                status = handle.get_sync_status(domain_path)
+                self._ensure_versioned_project(status)
+                if status.get("is_checked_out"):
+                    return {
+                        "status": "ok",
+                        "target": name,
+                        "program": domain_path,
+                        "checked_out": True,
+                        "already_checked_out": True,
+                        "exclusive": bool(status.get("is_checked_out_exclusive")),
+                    }
+                checked_out = handle.checkout_program(domain_path, exclusive=exclusive)
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": domain_path,
+                    "checked_out": bool(checked_out),
+                    "already_checked_out": False,
+                    "exclusive": bool(exclusive),
+                }
+
+    def commit_project_program(
+        self,
+        name: str,
+        message: str,
+        *,
+        keep_checked_out: bool = False,
+        auto_checkout: bool = True,
+    ) -> Dict[str, Any]:
+        text = (message or "").strip()
+        if not text:
+            raise ValueError("message を指定してください")
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                handle = session.get_project_handle()
+                domain_path = self._session_domain_path(session)
+
+                status = handle.get_sync_status(domain_path)
+                self._ensure_versioned_project(status)
+                if not status.get("is_checked_out"):
+                    if auto_checkout and status.get("can_checkout"):
+                        handle.checkout_program(domain_path, exclusive=False)
+                        status = handle.get_sync_status(domain_path)
+                    else:
+                        raise RuntimeError("NOT_CHECKED_OUT: checkout済みではありません")
+
+                status = handle.get_sync_status(domain_path)
+                if not status.get("can_checkin"):
+                    if not status.get("modified_since_checkout"):
+                        return {
+                            "status": "noop",
+                            "reason": "not_modified",
+                            "target": name,
+                            "program": domain_path,
+                            "checked_out": bool(status.get("is_checked_out")),
+                            "version": status.get("version"),
+                        }
+                    raise RuntimeError("CHECKIN_NOT_ALLOWED: checkinできない状態です")
+
+                self._run_with_reopened_program_locked(
+                    name,
+                    operation=lambda active_handle, active_domain_path: active_handle.commit_program(
+                        active_domain_path,
+                        text,
+                        keep_checked_out=keep_checked_out,
+                    ),
+                    save_before_close=True,
+                )
+                updated = self._current_sync_status_locked(name)
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": domain_path,
+                    "new_version": updated.get("version"),
+                    "checked_out": bool(updated.get("is_checked_out")),
+                    "effective_keep_checked_out": bool(updated.get("is_checked_out")),
+                    "is_latest_version": bool(updated.get("is_latest_version")),
+                }
+
+    def pull_project_program(
+        self,
+        name: str,
+        *,
+        on_local_changes: str = "abort",
+    ) -> Dict[str, Any]:
+        normalized = (on_local_changes or "abort").strip().lower()
+        if normalized not in {"abort", "discard"}:
+            raise ValueError("on_local_changes は 'abort' または 'discard' を指定してください")
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                domain_path = self._session_domain_path(session)
+                status = self._current_sync_status_locked(name)
+                self._ensure_versioned_project(status)
+
+                if status.get("modified_since_checkout") and normalized == "abort":
+                    raise RuntimeError("LOCAL_CHANGES_EXIST: ローカル変更があるためpullを中止しました")
+
+                needs_operation = bool(status.get("modified_since_checkout")) or bool(status.get("can_merge"))
+                action = {
+                    "discarded_local_changes": False,
+                    "merged": False,
+                }
+                if needs_operation:
+                    action = self._run_with_reopened_program_locked(
+                        name,
+                        operation=lambda active_handle, active_domain_path: self._pull_operation(
+                            active_handle,
+                            active_domain_path,
+                            on_local_changes=normalized,
+                        ),
+                        save_before_close=False,
+                    )
+
+                updated = self._current_sync_status_locked(name)
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": domain_path,
+                    "updated": bool(action["merged"] or action["discarded_local_changes"]),
+                    "merged": bool(action["merged"]),
+                    "discarded_local_changes": bool(action["discarded_local_changes"]),
+                    "version": updated.get("version"),
+                    "latest_version": updated.get("latest_version"),
+                    "is_latest_version": bool(updated.get("is_latest_version")),
+                }
+
+    def undo_checkout_project_program(
+        self,
+        name: str,
+        *,
+        discard_local_changes: bool = True,
+    ) -> Dict[str, Any]:
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                domain_path = self._session_domain_path(session)
+                status = self._current_sync_status_locked(name)
+                self._ensure_versioned_project(status)
+                if not status.get("is_checked_out"):
+                    return {
+                        "status": "noop",
+                        "reason": "not_checked_out",
+                        "target": name,
+                        "program": domain_path,
+                    }
+
+                keep = not bool(discard_local_changes)
+                self._run_with_reopened_program_locked(
+                    name,
+                    operation=lambda active_handle, active_domain_path: active_handle.undo_checkout_program(
+                        active_domain_path,
+                        keep=keep,
+                    ),
+                    save_before_close=False,
+                )
+                updated = self._current_sync_status_locked(name)
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": domain_path,
+                    "checked_out": bool(updated.get("is_checked_out")),
+                    "version": updated.get("version"),
+                    "is_latest_version": bool(updated.get("is_latest_version")),
+                }
+
+    def terminate_project_program_checkout(self, name: str, checkout_id: int) -> Dict[str, Any]:
+        with self._registry_lock.write_lock():
+            session = self._ensure(name)
+            lock = self._lock(name)
+            with lock:
+                handle = session.get_project_handle()
+                domain_path = self._session_domain_path(session)
+                status = handle.get_sync_status(domain_path)
+                self._ensure_versioned_project(status)
+                handle.terminate_checkout_program(domain_path, checkout_id)
+                updated = handle.get_sync_status(domain_path)
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": domain_path,
+                    "checkout_id": int(checkout_id),
+                    "active_checkouts": updated.get("checkouts"),
+                }
+
+    def _current_sync_status_locked(self, name: str) -> Dict[str, Any]:
+        session = self._ensure(name)
+        handle = session.get_project_handle()
+        domain_path = self._session_domain_path(session)
+        return handle.get_sync_status(domain_path)
+
+    def _run_with_reopened_program_locked(
+        self,
+        name: str,
+        operation,
+        *,
+        save_before_close: bool,
+    ):
+        session = self._ensure(name)
+        handle = session.get_project_handle()
+        project_location = handle.get_project_location()
+        project_name = handle.get_project_name()
+        domain_path = self._session_domain_path(session)
+        program = session.get_program()
+
+        if save_before_close:
+            try:
+                handle.project.save(program)
+            except Exception:
+                pass
+
+        session.close()
+        if handle.is_closed():
+            self._project_handles.pop(handle.get_key(), None)
+
+        active_handle = self._get_or_create_project_handle(project_location, project_name)
+        operation_error = None
+        operation_result = None
+        try:
+            operation_result = operation(active_handle, domain_path)
+        except Exception as exc:  # noqa: BLE001
+            operation_error = exc
+
+        reopen_error = None
+        try:
+            reopened = active_handle.open_program(domain_path)
+            try:
+                _core().initialize(reopened.get_program(), key=name)
+                self._sessions[name] = reopened
+            except Exception:
+                try:
+                    reopened.close()
+                except Exception:
+                    pass
+                raise
+        except Exception as exc:  # noqa: BLE001
+            reopen_error = exc
+
+        if active_handle.is_closed():
+            self._project_handles.pop(active_handle.get_key(), None)
+
+        if reopen_error is not None:
+            self._sessions.pop(name, None)
+            self._locks.pop(name, None)
+            try:
+                _core().remove_context(name)
+            except Exception:
+                pass
+            if operation_error is not None:
+                raise RuntimeError(
+                    f"SYNC_OPERATION_FAILED: {operation_error}; REOPEN_FAILED: {reopen_error}"
+                ) from operation_error
+            raise RuntimeError(f"REOPEN_FAILED: {reopen_error}") from reopen_error
+
+        if operation_error is not None:
+            raise operation_error
+
+        return operation_result
+
+    @staticmethod
+    def _pull_operation(handle: ProjectHandle, domain_path: str, *, on_local_changes: str) -> Dict[str, bool]:
+        status = handle.get_sync_status(domain_path)
+        discarded_local_changes = False
+        if status.get("modified_since_checkout"):
+            if on_local_changes == "abort":
+                raise RuntimeError("LOCAL_CHANGES_EXIST: ローカル変更があるためpullを中止しました")
+            handle.undo_checkout_program(domain_path, keep=False)
+            discarded_local_changes = True
+            status = handle.get_sync_status(domain_path)
+
+        merged = False
+        if status.get("can_merge"):
+            handle.merge_program(domain_path, ok_to_upgrade=True)
+            merged = True
+        return {
+            "discarded_local_changes": discarded_local_changes,
+            "merged": merged,
+        }
+
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
         with self._registry_lock.write_lock():
             self._close_session_locked(name, remove_program=remove_program)
@@ -208,6 +509,22 @@ class SessionRegistry:
             handle = ProjectHandle(project_location, project_name)
             self._project_handles[key] = handle
         return handle
+
+    @staticmethod
+    def _session_domain_path(session: ProgramSession) -> str:
+        program = session.get_program()
+        domain_file = program.getDomainFile()
+        if domain_file is None:
+            raise RuntimeError("現在のプログラムにDomainFileがありません")
+        path = domain_file.getPathname()
+        if not path:
+            raise RuntimeError("現在のプログラムのdomain pathを取得できません")
+        return path
+
+    @staticmethod
+    def _ensure_versioned_project(status: Dict[str, Any]) -> None:
+        if not status.get("is_versioned"):
+            raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
 
     def call(
         self,
@@ -684,6 +1001,90 @@ def close_session_and_remove_program(target: str):
         raise RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました: {exc}")
 
 
+def get_project_sync_status(target: str):
+    return _registry.get_project_sync_status(target)
+
+
+def checkout_project_program(
+    target: str,
+    exclusive: Annotated[bool, Field(description="Trueの場合は排他的checkoutを試行")] = False,
+):
+    return _registry.checkout_project_program(target, exclusive=exclusive)
+
+
+def commit_project_program(
+    target: str,
+    message: Annotated[str, Field(description="check-in時のコメント")],
+    keep_checked_out: Annotated[bool, Field(description="check-in後もcheckout状態を維持する")] = False,
+    auto_checkout: Annotated[bool, Field(description="未checkout時に自動checkoutを試行する")] = True,
+):
+    return _registry.commit_project_program(
+        target,
+        message=message,
+        keep_checked_out=keep_checked_out,
+        auto_checkout=auto_checkout,
+    )
+
+
+def pull_project_program(
+    target: str,
+    on_local_changes: Annotated[
+        str,
+        Field(description="ローカル変更がある場合の挙動: abort または discard"),
+    ] = "abort",
+):
+    return _registry.pull_project_program(target, on_local_changes=on_local_changes)
+
+
+def undo_checkout_project_program(
+    target: str,
+    discard_local_changes: Annotated[bool, Field(description="Trueならローカル変更を破棄")] = True,
+):
+    return _registry.undo_checkout_project_program(
+        target,
+        discard_local_changes=discard_local_changes,
+    )
+
+
+def terminate_project_program_checkout(
+    target: str,
+    checkout_id: Annotated[int, Field(description="終了したいcheckout id")],
+):
+    return _registry.terminate_project_program_checkout(target, checkout_id=checkout_id)
+
+
+def register_shared_project_sync_tools() -> None:
+    global _shared_project_sync_tools_registered
+    if _shared_project_sync_tools_registered:
+        return
+
+    mcp.add_tool(
+        get_project_sync_status,
+        description="Get shared-project version-control status for the target program",
+    )
+    mcp.add_tool(
+        checkout_project_program,
+        description="Checkout the target program in a shared project",
+    )
+    mcp.add_tool(
+        commit_project_program,
+        description="Check-in changes of the target program to the shared project server",
+    )
+    mcp.add_tool(
+        pull_project_program,
+        description="Pull/merge latest remote changes for the target program",
+    )
+    mcp.add_tool(
+        undo_checkout_project_program,
+        description="Undo checkout for the target program (optionally discard local changes)",
+    )
+    mcp.add_tool(
+        terminate_project_program_checkout,
+        description="Terminate a stale checkout by checkout id for the target program",
+    )
+    _shared_project_sync_tools_registered = True
+
+
 def configure_logging(level: int) -> None:
     logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -728,6 +1129,11 @@ def parse_args(argv: list[str]):
     parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="SSE/Streamable HTTPホスト (stdioでは未使用)")
     parser.add_argument("--mcp-port", type=int, help="SSE/Streamable HTTPポート (stdioでは未使用)")
     parser.add_argument("--mcp-path", type=str, default="/mcp", help="Streamable HTTPパス (例: /mcp)")
+    parser.add_argument(
+        "--enable-shared-project-sync",
+        action="store_true",
+        help="shared project向けのcommit/pull/checkout系ツールを公開する",
+    )
     parser.add_argument("--log-level", default="INFO", help="ログレベル")
     return parser.parse_args(argv)
 
@@ -803,6 +1209,10 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
+
+    if args.enable_shared_project_sync:
+        register_shared_project_sync_tools()
+        logger.info("shared project同期ツールを有効化しました")
 
     transport = _normalize_transport(args.transport)
     if transport == "sse":

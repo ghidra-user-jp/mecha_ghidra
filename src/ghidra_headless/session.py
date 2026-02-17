@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import threading
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import pyghidra.core as pycore
 
@@ -12,6 +12,7 @@ __all__ = ["ProgramSession", "ProjectHandle"]
 
 _FLAT_API_CLASS = None
 _CONSOLE_MONITOR_CLASS = None
+_DEFAULT_CHECKIN_HANDLER_CLASS = None
 
 
 def _flat_program_api_class():
@@ -26,6 +27,13 @@ def _console_monitor():
     if _CONSOLE_MONITOR_CLASS is None:
         _CONSOLE_MONITOR_CLASS = pycore.JClass("ghidra.util.task.ConsoleTaskMonitor")
     return _CONSOLE_MONITOR_CLASS()
+
+
+def _default_checkin_handler_class():
+    global _DEFAULT_CHECKIN_HANDLER_CLASS
+    if _DEFAULT_CHECKIN_HANDLER_CLASS is None:
+        _DEFAULT_CHECKIN_HANDLER_CLASS = pycore.JClass("ghidra.framework.data.DefaultCheckinHandler")
+    return _DEFAULT_CHECKIN_HANDLER_CLASS
 
 
 class ProgramSession:
@@ -160,6 +168,62 @@ class ProjectHandle:
 
             return domain_file
 
+    def get_sync_status(self, domain_path: str) -> Dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            domain_file = self._get_domain_file_locked(domain_path)
+            return _sync_status_from_domain_file(domain_file)
+
+    def checkout_program(self, domain_path: str, *, exclusive: bool = False) -> bool:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            domain_file = self._get_domain_file_locked(domain_path)
+            monitor = _console_monitor()
+            return bool(domain_file.checkout(bool(exclusive), monitor))
+
+    def commit_program(
+        self,
+        domain_path: str,
+        message: str,
+        *,
+        keep_checked_out: bool = False,
+        create_keep_file: bool = False,
+    ) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            text = (message or "").strip()
+            if not text:
+                raise ValueError("message を指定してください")
+            domain_file = self._get_domain_file_locked(domain_path)
+            monitor = _console_monitor()
+            handler = _default_checkin_handler_class()(text, bool(keep_checked_out), bool(create_keep_file))
+            domain_file.checkin(handler, monitor)
+
+    def merge_program(self, domain_path: str, *, ok_to_upgrade: bool = True) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            domain_file = self._get_domain_file_locked(domain_path)
+            monitor = _console_monitor()
+            domain_file.merge(bool(ok_to_upgrade), monitor)
+
+    def undo_checkout_program(self, domain_path: str, *, keep: bool = False) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            domain_file = self._get_domain_file_locked(domain_path)
+            domain_file.undoCheckout(bool(keep))
+
+    def terminate_checkout_program(self, domain_path: str, checkout_id: int) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            domain_file = self._get_domain_file_locked(domain_path)
+            domain_file.terminateCheckout(int(checkout_id))
+
     def release_program(self, program, *, remove_program: bool = False) -> None:
         with self._lock:
             if self._closed:
@@ -226,6 +290,15 @@ class ProjectHandle:
         except Exception:
             pass
 
+    def _get_domain_file_locked(self, domain_path: str):
+        if not domain_path:
+            raise ValueError("domain_path を指定してください")
+        data = self.project.getProjectData()
+        domain_file = data.getFile(domain_path)
+        if domain_file is None:
+            raise RuntimeError(f"プログラムが見つかりません: {domain_path}")
+        return domain_file
+
 
 # ----------------------------------------------------------------------
 # helper functions
@@ -275,3 +348,65 @@ def _domain_path(program, domain_file=None) -> Optional[str]:
     if domain_file is not None:
         return domain_file.getPathname()
     return None
+
+
+def _safe_call(obj, name: str, *args):
+    method = getattr(obj, name, None)
+    if method is None:
+        return None
+    try:
+        return method(*args)
+    except Exception:
+        return None
+
+
+def _required_call(obj, name: str, *args):
+    method = getattr(obj, name, None)
+    if method is None:
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: DomainFile.{name} が利用できません")
+    try:
+        return method(*args)
+    except Exception as exc:
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: DomainFile.{name} の取得に失敗しました: {exc}")
+
+
+def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
+    if status is None:
+        return None
+    checkout_type = _safe_call(status, "getCheckoutType")
+    return {
+        "checkout_id": _safe_call(status, "getCheckoutId"),
+        "checkout_type": None if checkout_type is None else str(checkout_type),
+        "user": _safe_call(status, "getUser"),
+        "checkout_version": _safe_call(status, "getCheckoutVersion"),
+        "checkout_time": _safe_call(status, "getCheckoutTime"),
+    }
+
+
+def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
+    checkout_status = _to_checkout_status_dict(_safe_call(domain_file, "getCheckoutStatus"))
+    checkouts = _safe_call(domain_file, "getCheckouts")
+    checkouts_list = []
+    if checkouts:
+        for item in list(checkouts):
+            converted = _to_checkout_status_dict(item)
+            if converted is not None:
+                checkouts_list.append(converted)
+    shared_url = _safe_call(domain_file, "getSharedProjectURL", None)
+
+    return {
+        "is_versioned": bool(_required_call(domain_file, "isVersioned")),
+        "is_checked_out": bool(_required_call(domain_file, "isCheckedOut")),
+        "is_checked_out_exclusive": bool(_required_call(domain_file, "isCheckedOutExclusive")),
+        "is_latest_version": bool(_required_call(domain_file, "isLatestVersion")),
+        "modified_since_checkout": bool(_required_call(domain_file, "modifiedSinceCheckout")),
+        "can_checkout": bool(_required_call(domain_file, "canCheckout")),
+        "can_checkin": bool(_required_call(domain_file, "canCheckin")),
+        "can_merge": bool(_required_call(domain_file, "canMerge")),
+        "is_hijacked": bool(_required_call(domain_file, "isHijacked")),
+        "version": _required_call(domain_file, "getVersion"),
+        "latest_version": _required_call(domain_file, "getLatestVersion"),
+        "checkout_status": checkout_status,
+        "checkouts": checkouts_list,
+        "shared_project_url": None if shared_url is None else str(shared_url),
+    }

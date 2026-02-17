@@ -41,6 +41,9 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
    ```
 - 推奨は `--transport stream-http` です。FastMCP の Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
+- `commit/pull/checkout` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
+- shared project 同期ツールの `commit/pull/undo_checkout` は、`DomainFile` の in-use 制約を回避するため内部で対象プログラムを一度閉じて再オープンします。
+- `pull_project_program(on_local_changes="discard")` は `undoCheckout(keep=False)` のみを使用し、force 破棄は行いません。
 
 ### プロジェクト内でのプログラム追加・切り替え
 
@@ -142,6 +145,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - **解析支援**: `list_methods`, `list_functions`, `list_classes`, `list_namespaces`, `list_segments`, `list_imports`, `list_exports`, `list_data_items`, `list_strings`, `search_functions_by_name`, `search_bytes`, `get_function_by_address`, `get_function_xrefs`, `get_xrefs_to`, `get_xrefs_from`, `get_callee`, `get_data_by_label`, `get_bytes`, `decompile_function`, `decompile_function_by_address`, `disassemble_function`
 - **シンボル／コメント編集**: `rename_function`, `rename_function_by_address`, `rename_variable`, `rename_data`, `set_function_prototype`, `set_local_variable_type`, `set_global_data_type`, `set_bytes`, `add_bookmark`, `set_decompiler_comment`, `set_disassembly_comment`
 - **データ型操作**: `create_struct`, `add_struct_members`, `clear_struct`, `remove_struct_members`, `get_struct`, `create_enum`, `add_enum_values`, `get_enum`, `remove_enum_values`, `add_class_members`, `remove_class_members`
+- **shared project 同期（`--enable-shared-project-sync` 指定時のみ）**: `get_project_sync_status`, `checkout_project_program`, `commit_project_program`, `pull_project_program`, `undo_checkout_project_program`, `terminate_project_program_checkout`
 
 ## Kilocode / Roocode での MCP 設定
 

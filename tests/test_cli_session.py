@@ -60,6 +60,22 @@ class DummySession:
         }
 
 
+class DummyDomainFileRef:
+    def __init__(self, path):
+        self._path = path
+
+    def getPathname(self):
+        return self._path
+
+
+class DummyProgramRef:
+    def __init__(self, path):
+        self._domain_file = DummyDomainFileRef(path)
+
+    def getDomainFile(self):
+        return self._domain_file
+
+
 class DummyHandle:
     def __init__(self, key=("./project", "Sample"), name="Sample"):
         key = (str(Path(key[0]).resolve()), key[1])
@@ -72,6 +88,24 @@ class DummyHandle:
         self.releases = []
         self.deleted_programs = []
         self.program_paths: dict[object, str | None] = {}
+        self.sync_calls = []
+        self.sync_status = {
+            "is_versioned": True,
+            "is_checked_out": False,
+            "is_checked_out_exclusive": False,
+            "is_latest_version": True,
+            "modified_since_checkout": False,
+            "can_checkout": True,
+            "can_checkin": False,
+            "can_merge": False,
+            "is_hijacked": False,
+            "version": 1,
+            "latest_version": 1,
+            "checkout_status": None,
+            "checkouts": [],
+            "shared_project_url": "ghidra://server/repo",
+        }
+        self.project = types.SimpleNamespace(save=lambda program: None)
 
     def get_project_location(self):
         return self.project_location
@@ -89,7 +123,7 @@ class DummyHandle:
         self.last_domain = domain_path
         session = DummySession(domain_path=domain_path)
         session.project_handle = self
-        session.program = object()
+        session.program = DummyProgramRef(domain_path)
         self.program_paths[session.program] = session.domain_path
         return session
 
@@ -116,6 +150,42 @@ class DummyHandle:
         domain_path = self.program_paths.pop(program, None)
         if remove_program and domain_path:
             self.deleted_programs.append(domain_path)
+
+    def get_sync_status(self, domain_path):
+        self.sync_calls.append(("get_sync_status", domain_path))
+        return dict(self.sync_status)
+
+    def checkout_program(self, domain_path, *, exclusive=False):
+        self.sync_calls.append(("checkout_program", domain_path, exclusive))
+        self.sync_status["is_checked_out"] = True
+        self.sync_status["is_checked_out_exclusive"] = bool(exclusive)
+        return True
+
+    def commit_program(self, domain_path, message, *, keep_checked_out=False, create_keep_file=False):
+        self.sync_calls.append(("commit_program", domain_path, message, keep_checked_out, create_keep_file))
+        self.sync_status["version"] = int(self.sync_status.get("version") or 0) + 1
+        self.sync_status["latest_version"] = self.sync_status["version"]
+        self.sync_status["is_latest_version"] = True
+        self.sync_status["modified_since_checkout"] = False
+        self.sync_status["can_checkin"] = False
+        self.sync_status["is_checked_out"] = bool(keep_checked_out)
+
+    def merge_program(self, domain_path, *, ok_to_upgrade=True):
+        self.sync_calls.append(("merge_program", domain_path, ok_to_upgrade))
+        self.sync_status["latest_version"] = int(self.sync_status.get("latest_version") or 0) + 1
+        self.sync_status["version"] = self.sync_status["latest_version"]
+        self.sync_status["is_latest_version"] = True
+        self.sync_status["can_merge"] = False
+
+    def undo_checkout_program(self, domain_path, *, keep=False):
+        self.sync_calls.append(("undo_checkout_program", domain_path, keep))
+        self.sync_status["is_checked_out"] = False
+        self.sync_status["is_checked_out_exclusive"] = False
+        if not keep:
+            self.sync_status["modified_since_checkout"] = False
+
+    def terminate_checkout_program(self, domain_path, checkout_id):
+        self.sync_calls.append(("terminate_checkout_program", domain_path, int(checkout_id)))
 
 
 def test_parse_session_definition_minimal():
@@ -495,6 +565,175 @@ def test_load_project_program_tool_accepts_domain_path(monkeypatch):
     }
 
 
+def test_registry_get_project_sync_status(tmp_path, monkeypatch):
+    calls = dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    status = registry.get_project_sync_status("fw")
+
+    assert status["target"] == "fw"
+    assert status["program"] == "/folder/old"
+    assert status["is_versioned"] is True
+    assert len(calls["initialize"]) == 1
+
+
+def test_registry_checkout_project_program(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.checkout_project_program("fw", exclusive=True)
+
+    assert result["status"] == "ok"
+    assert result["checked_out"] is True
+    assert result["exclusive"] is True
+    assert ("checkout_program", "/folder/old", True) in dummy_handle.sync_calls
+
+
+def test_registry_commit_project_program(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    dummy_handle.sync_status["is_checked_out"] = True
+    dummy_handle.sync_status["can_checkin"] = True
+    dummy_handle.sync_status["modified_since_checkout"] = True
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.commit_project_program("fw", "sync result")
+
+    assert result["status"] == "ok"
+    assert result["new_version"] == 2
+    assert result["effective_keep_checked_out"] is False
+    assert any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
+    assert len(dummy_handle.releases) == 1
+
+
+def test_registry_pull_project_program_with_discard(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    dummy_handle.sync_status["is_checked_out"] = True
+    dummy_handle.sync_status["modified_since_checkout"] = True
+    dummy_handle.sync_status["can_merge"] = True
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.pull_project_program("fw", on_local_changes="discard")
+
+    assert result["status"] == "ok"
+    assert result["discarded_local_changes"] is True
+    assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
+    assert len(dummy_handle.releases) == 1
+
+
+def test_registry_undo_checkout_project_program(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    dummy_handle.sync_status["is_checked_out"] = True
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.undo_checkout_project_program("fw", discard_local_changes=True)
+
+    assert result["status"] == "ok"
+    assert result["checked_out"] is False
+    assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
+    assert len(dummy_handle.releases) == 1
+
+
+def test_registry_terminate_project_program_checkout(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.terminate_project_program_checkout("fw", checkout_id=12)
+
+    assert result["status"] == "ok"
+    assert result["checkout_id"] == 12
+    assert ("terminate_checkout_program", "/folder/old", 12) in dummy_handle.sync_calls
+
+
+def test_shared_project_sync_tool_wrappers(monkeypatch):
+    called = {}
+
+    monkeypatch.setattr(cli._registry, "get_project_sync_status", lambda target: {"target": target})
+    monkeypatch.setattr(
+        cli._registry,
+        "checkout_project_program",
+        lambda target, exclusive=False: called.setdefault("checkout", (target, exclusive)) or {},
+    )
+    monkeypatch.setattr(
+        cli._registry,
+        "commit_project_program",
+        lambda target, message, keep_checked_out=False, auto_checkout=True: called.setdefault(
+            "commit", (target, message, keep_checked_out, auto_checkout)
+        ) or {},
+    )
+    monkeypatch.setattr(
+        cli._registry,
+        "pull_project_program",
+        lambda target, on_local_changes="abort": called.setdefault("pull", (target, on_local_changes)) or {},
+    )
+    monkeypatch.setattr(
+        cli._registry,
+        "undo_checkout_project_program",
+        lambda target, discard_local_changes=True: called.setdefault(
+            "undo", (target, discard_local_changes)
+        ) or {},
+    )
+    monkeypatch.setattr(
+        cli._registry,
+        "terminate_project_program_checkout",
+        lambda target, checkout_id: called.setdefault("terminate", (target, checkout_id)) or {},
+    )
+
+    assert cli.get_project_sync_status("fw") == {"target": "fw"}
+    cli.checkout_project_program("fw", exclusive=True)
+    cli.commit_project_program("fw", "msg", keep_checked_out=True, auto_checkout=False)
+    cli.pull_project_program("fw", on_local_changes="discard")
+    cli.undo_checkout_project_program("fw", discard_local_changes=False)
+    cli.terminate_project_program_checkout("fw", checkout_id=7)
+
+    assert called["checkout"] == ("fw", True)
+    assert called["commit"] == ("fw", "msg", True, False)
+    assert called["pull"] == ("fw", "discard")
+    assert called["undo"] == ("fw", False)
+    assert called["terminate"] == ("fw", 7)
+
+
+def test_register_shared_project_sync_tools(monkeypatch):
+    recorded = []
+
+    def fake_add_tool(fn, **kwargs):
+        recorded.append((fn.__name__, kwargs.get("description")))
+
+    monkeypatch.setattr(cli, "_shared_project_sync_tools_registered", False)
+    monkeypatch.setattr(cli.mcp, "add_tool", fake_add_tool)
+
+    cli.register_shared_project_sync_tools()
+    cli.register_shared_project_sync_tools()
+
+    names = [name for name, _ in recorded]
+    assert names == [
+        "get_project_sync_status",
+        "checkout_project_program",
+        "commit_project_program",
+        "pull_project_program",
+        "undo_checkout_project_program",
+        "terminate_project_program_checkout",
+    ]
+
+
 def test_parse_args_accepts_stream_http():
     args = cli.parse_args(
         [
@@ -517,6 +756,19 @@ def test_parse_args_accepts_stream_http():
     assert args.mcp_host == "0.0.0.0"
     assert args.mcp_port == 9090
     assert args.mcp_path == "/mcp"
+
+
+def test_parse_args_enable_shared_project_sync():
+    args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--enable-shared-project-sync",
+        ]
+    )
+    assert args.enable_shared_project_sync is True
 
 
 def test_normalize_transport_alias():
