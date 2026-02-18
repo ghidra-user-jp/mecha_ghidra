@@ -48,7 +48,8 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 - shared project の認証が必要な場合は `--ghidra-server-user` と `--ghidra-server-password-env` をセットで指定してください（パスワードの直接引数は未対応）。
 - `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
-- shared project 同期ツールの `commit/pull/undo_checkout` は、`DomainFile` の in-use 制約を回避するため内部で対象プログラムを一度閉じて再オープンします。
+- shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
+- shared project 同期ツールの `commit/pull/undo_checkout` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
 - Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
 - `pull_project_program(on_local_changes="discard")` は `undoCheckout(keep=False)` のみを使用し、force 破棄は行いません。
 - `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでローカル変更を破棄して最新状態へ追従し、`status=noop` / `reason=conflict_discarded` を返します（人間側の更新を優先）。
@@ -232,6 +233,8 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `remove_class_members` - クラス相当データ型からメンバーを削除
 
 #### Shared Project Sync (`--enable-shared-project-sync` 指定時のみ)
+
+`get_project_sync_status` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` は `domain_path` を任意指定できます（未指定時は現在ロード中のprogram）。
 
 - `get_project_sync_status` - shared project 上の同期状態を取得
 - `checkout_project_program` - プログラムを checkout（排他指定可）

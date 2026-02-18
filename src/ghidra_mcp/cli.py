@@ -200,39 +200,41 @@ class SessionRegistry:
             self._target_projects[name] = handle.get_key()
             return domain_file.getPathname()
 
-    def get_project_sync_status(self, name: str) -> Dict[str, Any]:
-        with self._registry_lock.read_lock():
-            session = self._ensure(name)
-            lock = self._lock(name)
-            with lock:
-                handle = session.get_project_handle()
-                domain_path = self._session_domain_path(session)
-                status = handle.get_sync_status(domain_path)
-                return {"target": name, "program": domain_path, **status}
-
-    def checkout_project_program(self, name: str, *, exclusive: bool = False) -> Dict[str, Any]:
+    def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         with self._registry_lock.write_lock():
-            session = self._ensure(name)
             lock = self._lock(name)
             with lock:
-                handle = session.get_project_handle()
-                domain_path = self._session_domain_path(session)
-                status = handle.get_sync_status(domain_path)
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
+                return {"target": name, "program": resolved_domain_path, **status}
+
+    def checkout_project_program(
+        self,
+        name: str,
+        *,
+        exclusive: bool = False,
+        domain_path: str | None = None,
+    ) -> Dict[str, Any]:
+        with self._registry_lock.write_lock():
+            lock = self._lock(name)
+            with lock:
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
                 self._ensure_versioned_project(status)
                 if status.get("is_checked_out"):
                     return {
                         "status": "ok",
                         "target": name,
-                        "program": domain_path,
+                        "program": resolved_domain_path,
                         "checked_out": True,
                         "already_checked_out": True,
                         "exclusive": bool(status.get("is_checked_out_exclusive")),
                     }
-                checked_out = handle.checkout_program(domain_path, exclusive=exclusive)
+                checked_out = handle.checkout_program(resolved_domain_path, exclusive=exclusive)
                 return {
                     "status": "ok",
                     "target": name,
-                    "program": domain_path,
+                    "program": resolved_domain_path,
                     "checked_out": bool(checked_out),
                     "already_checked_out": False,
                     "exclusive": bool(exclusive),
@@ -244,29 +246,30 @@ class SessionRegistry:
         comment: str,
         *,
         keep_checked_out: bool = False,
+        domain_path: str | None = None,
     ) -> Dict[str, Any]:
         text = (comment or "").strip()
         if not text:
             raise ValueError("comment を指定してください")
         with self._registry_lock.write_lock():
-            session = self._ensure(name)
             lock = self._lock(name)
             with lock:
-                domain_path = self._session_domain_path(session)
-                status = self._current_sync_status_locked(name)
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
                 if status.get("is_versioned"):
                     return {
                         "status": "noop",
                         "reason": "already_versioned",
                         "target": name,
-                        "program": domain_path,
+                        "program": resolved_domain_path,
                         "version": status.get("version"),
                     }
                 if not status.get("can_add_to_repository"):
                     raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControlできない状態です")
 
-                self._run_with_reopened_program_locked(
+                self._run_sync_operation_for_domain_locked(
                     name,
+                    resolved_domain_path,
                     operation=lambda active_handle, active_domain_path: active_handle.add_program_to_version_control(
                         active_domain_path,
                         text,
@@ -274,11 +277,11 @@ class SessionRegistry:
                     ),
                     save_before_close=True,
                 )
-                updated = self._current_sync_status_locked(name)
+                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
                 return {
                     "status": "ok",
                     "target": name,
-                    "program": domain_path,
+                    "program": resolved_domain_path,
                     "is_versioned": bool(updated.get("is_versioned")),
                     "version": updated.get("version"),
                     "latest_version": updated.get("latest_version"),
@@ -293,23 +296,22 @@ class SessionRegistry:
         *,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        domain_path: str | None = None,
     ) -> Dict[str, Any]:
         text = (message or "").strip()
         if not text:
             raise ValueError("message を指定してください")
         with self._registry_lock.write_lock():
-            session = self._ensure(name)
             lock = self._lock(name)
             with lock:
-                handle = session.get_project_handle()
-                domain_path = self._session_domain_path(session)
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
 
-                status = handle.get_sync_status(domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
                 self._ensure_versioned_project(status)
                 if not status.get("is_checked_out"):
                     if auto_checkout and status.get("can_checkout"):
-                        checked_out = handle.checkout_program(domain_path, exclusive=False)
-                        status = handle.get_sync_status(domain_path)
+                        checked_out = handle.checkout_program(resolved_domain_path, exclusive=False)
+                        status = handle.get_sync_status(resolved_domain_path)
                         if not status.get("is_checked_out"):
                             if not checked_out:
                                 raise RuntimeError("AUTO_CHECKOUT_FAILED: checkoutに失敗しました")
@@ -317,22 +319,23 @@ class SessionRegistry:
                     else:
                         raise RuntimeError("NOT_CHECKED_OUT: checkout済みではありません")
 
-                status = handle.get_sync_status(domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
                 if status.get("can_merge"):
-                    action = self._run_with_reopened_program_locked(
+                    action = self._run_sync_operation_for_domain_locked(
                         name,
+                        resolved_domain_path,
                         operation=lambda active_handle, active_domain_path: self._discard_conflict_checkout_operation(
                             active_handle,
                             active_domain_path,
                         ),
                         save_before_close=False,
                     )
-                    updated = self._current_sync_status_locked(name)
+                    updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
                     return {
                         "status": "noop",
                         "reason": "conflict_discarded",
                         "target": name,
-                        "program": domain_path,
+                        "program": resolved_domain_path,
                         "discarded_local_changes": bool(action["discarded_local_changes"]),
                         "merged": bool(action["merged"]),
                         "version": updated.get("version"),
@@ -346,14 +349,15 @@ class SessionRegistry:
                             "status": "noop",
                             "reason": "not_modified",
                             "target": name,
-                            "program": domain_path,
+                            "program": resolved_domain_path,
                             "checked_out": bool(status.get("is_checked_out")),
                             "version": status.get("version"),
                         }
                     raise RuntimeError("CHECKIN_NOT_ALLOWED: checkinできない状態です")
 
-                self._run_with_reopened_program_locked(
+                self._run_sync_operation_for_domain_locked(
                     name,
+                    resolved_domain_path,
                     operation=lambda active_handle, active_domain_path: active_handle.commit_program(
                         active_domain_path,
                         text,
@@ -361,11 +365,11 @@ class SessionRegistry:
                     ),
                     save_before_close=True,
                 )
-                updated = self._current_sync_status_locked(name)
+                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
                 return {
                     "status": "ok",
                     "target": name,
-                    "program": domain_path,
+                    "program": resolved_domain_path,
                     "new_version": updated.get("version"),
                     "checked_out": bool(updated.get("is_checked_out")),
                     "effective_keep_checked_out": bool(updated.get("is_checked_out")),
@@ -377,16 +381,16 @@ class SessionRegistry:
         name: str,
         *,
         on_local_changes: str = "abort",
+        domain_path: str | None = None,
     ) -> Dict[str, Any]:
         normalized = (on_local_changes or "abort").strip().lower()
         if normalized not in {"abort", "discard"}:
             raise ValueError("on_local_changes は 'abort' または 'discard' を指定してください")
         with self._registry_lock.write_lock():
-            session = self._ensure(name)
             lock = self._lock(name)
             with lock:
-                domain_path = self._session_domain_path(session)
-                status = self._current_sync_status_locked(name)
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
                 self._ensure_versioned_project(status)
 
                 if status.get("modified_since_checkout") and normalized == "abort":
@@ -398,8 +402,9 @@ class SessionRegistry:
                     "merged": False,
                 }
                 if needs_operation:
-                    action = self._run_with_reopened_program_locked(
+                    action = self._run_sync_operation_for_domain_locked(
                         name,
+                        resolved_domain_path,
                         operation=lambda active_handle, active_domain_path: self._pull_operation(
                             active_handle,
                             active_domain_path,
@@ -408,11 +413,11 @@ class SessionRegistry:
                         save_before_close=False,
                     )
 
-                updated = self._current_sync_status_locked(name)
+                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
                 return {
                     "status": "ok",
                     "target": name,
-                    "program": domain_path,
+                    "program": resolved_domain_path,
                     "updated": bool(action["merged"] or action["discarded_local_changes"]),
                     "merged": bool(action["merged"]),
                     "discarded_local_changes": bool(action["discarded_local_changes"]),
@@ -426,83 +431,126 @@ class SessionRegistry:
         name: str,
         *,
         discard_local_changes: bool = True,
+        domain_path: str | None = None,
     ) -> Dict[str, Any]:
         with self._registry_lock.write_lock():
-            session = self._ensure(name)
             lock = self._lock(name)
             with lock:
-                domain_path = self._session_domain_path(session)
-                status = self._current_sync_status_locked(name)
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
                 self._ensure_versioned_project(status)
                 if not status.get("is_checked_out"):
                     return {
                         "status": "noop",
                         "reason": "not_checked_out",
                         "target": name,
-                        "program": domain_path,
+                        "program": resolved_domain_path,
                     }
 
                 keep = not bool(discard_local_changes)
-                self._run_with_reopened_program_locked(
+                self._run_sync_operation_for_domain_locked(
                     name,
+                    resolved_domain_path,
                     operation=lambda active_handle, active_domain_path: active_handle.undo_checkout_program(
                         active_domain_path,
                         keep=keep,
                     ),
                     save_before_close=False,
                 )
-                updated = self._current_sync_status_locked(name)
+                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
                 return {
                     "status": "ok",
                     "target": name,
-                    "program": domain_path,
+                    "program": resolved_domain_path,
                     "checked_out": bool(updated.get("is_checked_out")),
                     "version": updated.get("version"),
                     "is_latest_version": bool(updated.get("is_latest_version")),
                 }
 
-    def terminate_project_program_checkout(self, name: str, checkout_id: int) -> Dict[str, Any]:
+    def terminate_project_program_checkout(
+        self,
+        name: str,
+        checkout_id: int,
+        *,
+        domain_path: str | None = None,
+    ) -> Dict[str, Any]:
         with self._registry_lock.write_lock():
-            session = self._ensure(name)
             lock = self._lock(name)
             with lock:
-                handle = session.get_project_handle()
-                domain_path = self._session_domain_path(session)
-                status = handle.get_sync_status(domain_path)
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                status = handle.get_sync_status(resolved_domain_path)
                 self._ensure_versioned_project(status)
-                handle.terminate_checkout_program(domain_path, checkout_id)
-                updated = handle.get_sync_status(domain_path)
+                handle.terminate_checkout_program(resolved_domain_path, checkout_id)
+                updated = handle.get_sync_status(resolved_domain_path)
                 return {
                     "status": "ok",
                     "target": name,
-                    "program": domain_path,
+                    "program": resolved_domain_path,
                     "checkout_id": int(checkout_id),
                     "active_checkouts": updated.get("checkouts"),
                 }
 
-    def reload_project_program(self, name: str) -> Dict[str, Any]:
+    def reload_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         with self._registry_lock.write_lock():
-            session = self._ensure(name)
             lock = self._lock(name)
             with lock:
-                domain_path = self._session_domain_path(session)
-                self._run_with_reopened_program_locked(
-                    name,
-                    operation=lambda active_handle, active_domain_path: None,
-                    save_before_close=True,
-                )
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                if self._is_active_domain_path_locked(name, resolved_domain_path):
+                    self._run_with_reopened_program_locked(
+                        name,
+                        operation=lambda _active_handle, _active_domain_path: None,
+                        save_before_close=True,
+                    )
+                else:
+                    temporary_session = handle.open_program(resolved_domain_path)
+                    temporary_session.close()
                 return {
                     "status": "ok",
                     "target": name,
-                    "program": domain_path,
+                    "program": resolved_domain_path,
                     "reloaded": True,
                 }
 
-    def _current_sync_status_locked(self, name: str) -> Dict[str, Any]:
+    def _current_sync_status_locked(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
+        handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+        return handle.get_sync_status(resolved_domain_path)
+
+    def _resolve_sync_target_locked(
+        self,
+        name: str,
+        domain_path: str | None,
+    ) -> tuple[ProjectHandle, str]:
+        resolved_domain_path = (domain_path or "").strip()
+        if resolved_domain_path:
+            handle = self._get_target_handle_locked(name)
+            return handle, resolved_domain_path
+
         session = self._ensure(name)
         handle = session.get_project_handle()
-        domain_path = self._session_domain_path(session)
-        return handle.get_sync_status(domain_path)
+        return handle, self._session_domain_path(session)
+
+    def _is_active_domain_path_locked(self, name: str, domain_path: str) -> bool:
+        session = self._sessions.get(name)
+        if session is None:
+            return False
+        return self._session_domain_path(session) == domain_path
+
+    def _run_sync_operation_for_domain_locked(
+        self,
+        name: str,
+        domain_path: str,
+        operation,
+        *,
+        save_before_close: bool,
+    ):
+        if self._is_active_domain_path_locked(name, domain_path):
+            return self._run_with_reopened_program_locked(
+                name,
+                operation=operation,
+                save_before_close=save_before_close,
+            )
+        handle = self._get_target_handle_locked(name)
+        return operation(handle, domain_path)
 
     def _run_with_reopened_program_locked(
         self,
@@ -1273,26 +1321,32 @@ def close_session_and_remove_program(target: str):
         raise RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました: {exc}")
 
 
-def get_project_sync_status(target: str):
-    return _registry.get_project_sync_status(target)
+def get_project_sync_status(
+    target: str,
+    domain_path: Annotated[str | None, Field(description="同期対象のdomain path。未指定時は現在ロード中のprogram")] = None,
+):
+    return _registry.get_project_sync_status(target, domain_path=domain_path)
 
 
 def checkout_project_program(
     target: str,
     exclusive: Annotated[bool, Field(description="Trueの場合は排他的checkoutを試行")] = False,
+    domain_path: Annotated[str | None, Field(description="checkout対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.checkout_project_program(target, exclusive=exclusive)
+    return _registry.checkout_project_program(target, exclusive=exclusive, domain_path=domain_path)
 
 
 def add_project_program_to_version_control(
     target: str,
     comment: Annotated[str, Field(description="バージョン管理追加時のコメント")],
     keep_checked_out: Annotated[bool, Field(description="追加後もcheckout状態を維持する")] = False,
+    domain_path: Annotated[str | None, Field(description="対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
     return _registry.add_project_program_to_version_control(
         target,
         comment=comment,
         keep_checked_out=keep_checked_out,
+        domain_path=domain_path,
     )
 
 
@@ -1301,12 +1355,14 @@ def commit_project_program(
     message: Annotated[str, Field(description="check-in時のコメント")],
     keep_checked_out: Annotated[bool, Field(description="check-in後もcheckout状態を維持する")] = False,
     auto_checkout: Annotated[bool, Field(description="未checkout時に自動checkoutを試行する")] = True,
+    domain_path: Annotated[str | None, Field(description="check-in対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
     return _registry.commit_project_program(
         target,
         message=message,
         keep_checked_out=keep_checked_out,
         auto_checkout=auto_checkout,
+        domain_path=domain_path,
     )
 
 
@@ -1316,29 +1372,36 @@ def pull_project_program(
         str,
         Field(description="ローカル変更がある場合の挙動: abort または discard"),
     ] = "abort",
+    domain_path: Annotated[str | None, Field(description="pull対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.pull_project_program(target, on_local_changes=on_local_changes)
+    return _registry.pull_project_program(target, on_local_changes=on_local_changes, domain_path=domain_path)
 
 
 def undo_checkout_project_program(
     target: str,
     discard_local_changes: Annotated[bool, Field(description="Trueならローカル変更を破棄")] = True,
+    domain_path: Annotated[str | None, Field(description="undo対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
     return _registry.undo_checkout_project_program(
         target,
         discard_local_changes=discard_local_changes,
+        domain_path=domain_path,
     )
 
 
 def terminate_project_program_checkout(
     target: str,
     checkout_id: Annotated[int, Field(description="終了したいcheckout id")],
+    domain_path: Annotated[str | None, Field(description="終了対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.terminate_project_program_checkout(target, checkout_id=checkout_id)
+    return _registry.terminate_project_program_checkout(target, checkout_id=checkout_id, domain_path=domain_path)
 
 
-def reload_project_program(target: str):
-    return _registry.reload_project_program(target)
+def reload_project_program(
+    target: str,
+    domain_path: Annotated[str | None, Field(description="再読み込み対象のdomain path。未指定時は現在ロード中のprogram")] = None,
+):
+    return _registry.reload_project_program(target, domain_path=domain_path)
 
 
 def register_shared_project_sync_tools() -> None:
