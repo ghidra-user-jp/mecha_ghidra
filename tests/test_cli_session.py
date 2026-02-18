@@ -1,4 +1,5 @@
 import types
+import threading
 from pathlib import Path
 
 import pytest
@@ -520,6 +521,27 @@ def test_add_bookmark_tool_invokes_core(monkeypatch):
     }
 
 
+def test_list_functions_tool_forwards_offset_and_limit(monkeypatch):
+    recorded = {}
+
+    def fake_call(self, command, params, target):
+        recorded["command"] = command
+        recorded["params"] = params
+        recorded["target"] = target
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli.SessionRegistry, "call", fake_call)
+
+    result = cli.list_functions(offset=7, limit=3, target="fw")
+
+    assert result == {"status": "ok"}
+    assert recorded == {
+        "command": "list_functions",
+        "params": {"offset": 7, "limit": 3},
+        "target": "fw",
+    }
+
+
 def test_search_functions_by_name_tool_requires_query():
     with pytest.raises(ValueError, match="query"):
         cli.search_functions_by_name("")
@@ -538,6 +560,75 @@ def test_close_session_and_remove_program_tool(monkeypatch):
 
     assert result == {"status": "ok", "target": "target1"}
     assert called == {"target": "target1", "remove_program": True}
+
+
+def test_cleanup_session_raises_when_session_close_fails(monkeypatch):
+    registry = cli.SessionRegistry()
+    removed = []
+    monkeypatch.setattr(cli, "_core", lambda: types.SimpleNamespace(remove_context=lambda name: removed.append(name)))
+
+    class BrokenSession:
+        def close(self, remove_program=False):
+            raise RuntimeError("close failed")
+
+    class DummyHandleForCleanup:
+        def is_closed(self):
+            return False
+
+        def get_key(self):
+            return ("/project", "Sample")
+
+    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED"):
+        registry._cleanup_session(
+            "fw",
+            BrokenSession(),
+            DummyHandleForCleanup(),
+            remove_registry_entry=False,
+            remove_context=True,
+            remove_program=False,
+        )
+
+    assert removed == ["fw"]
+
+
+def test_registry_call_uses_instance_methods_instead_of_global_registry(monkeypatch):
+    registry = cli.SessionRegistry()
+    used = {}
+
+    lock = threading.RLock()
+
+    def fake_ensure(name):
+        used["ensure"] = name
+
+    def fake_lock(name):
+        used["lock"] = name
+        return lock
+
+    monkeypatch.setattr(registry, "_ensure", fake_ensure)
+    monkeypatch.setattr(registry, "_lock", fake_lock)
+    monkeypatch.setattr(
+        cli,
+        "_core",
+        lambda: types.SimpleNamespace(
+            execute=lambda command, params, key: {"command": command, "params": params, "key": key}
+        ),
+    )
+
+    monkeypatch.setattr(
+        cli._registry,
+        "_ensure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("global ensure should not be used")),
+    )
+    monkeypatch.setattr(
+        cli._registry,
+        "_lock",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("global lock should not be used")),
+    )
+
+    result = registry.call("list_methods", {"offset": 0, "limit": 1}, target="fw")
+
+    assert result == {"command": "list_methods", "params": {"offset": 0, "limit": 1}, "key": "fw"}
+    assert used == {"ensure": "fw", "lock": "fw"}
 
 
 def test_create_session_tool_uses_domain_path(monkeypatch):

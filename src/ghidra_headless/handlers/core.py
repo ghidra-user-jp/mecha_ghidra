@@ -138,6 +138,10 @@ def _get_address(ctx, address_text):
 
 
 def _collect(iterator, offset, limit, to_value):
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     result = []
     idx = 0
     while iterator.hasNext():

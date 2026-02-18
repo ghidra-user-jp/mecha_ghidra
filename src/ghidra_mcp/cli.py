@@ -651,17 +651,21 @@ class SessionRegistry:
             self._sessions.pop(name, None)
             self._locks.pop(name, None)
 
+        close_error = None
         try:
             if session is not None:
                 session.close(remove_program=remove_program)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            close_error = exc
 
         if remove_context:
             _core().remove_context(name)
 
         if handle is not None and handle.is_closed():
             self._project_handles.pop(handle.get_key(), None)
+
+        if close_error is not None:
+            raise RuntimeError(f"SESSION_CLOSE_FAILED: {close_error}")
 
     def has_sessions(self) -> bool:
         with self._registry_lock.read_lock():
@@ -722,8 +726,8 @@ class SessionRegistry:
         target: str = "default",
     ) -> Any:
         with self._registry_lock.read_lock():
-            _registry._ensure(target)
-            lock = _registry._lock(target)
+            self._ensure(target)
+            lock = self._lock(target)
             with lock:
                 return _core().execute(command, params or {}, key=target)
 
@@ -852,8 +856,8 @@ def get_function_by_address(address: str, target: str = "default"):
         idempotentHint=True,
     ),
 )
-def list_functions(target: str = "default"):
-    return _registry.call("list_functions", {}, target)
+def list_functions(offset: int = 0, limit: int = 100, target: str = "default"):
+    return _registry.call("list_functions", {"offset": offset, "limit": limit}, target)
 
 
 @mcp.tool()

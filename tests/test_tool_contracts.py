@@ -191,3 +191,37 @@ def test_default_operand_representation_is_called_with_operand_index():
             )
 
     assert not invalid_calls, "\n".join(invalid_calls)
+
+
+def test_collect_has_non_positive_limit_guard():
+    core_module = _load_ast(CORE_PATH)
+    collect = None
+    for node in core_module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_collect":
+            collect = node
+            break
+    assert collect is not None
+
+    guard_found = False
+    for statement in collect.body:
+        if not isinstance(statement, ast.If):
+            continue
+        test = statement.test
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "limit"
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.LtE)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == 0
+            and statement.body
+            and isinstance(statement.body[0], ast.Return)
+            and isinstance(statement.body[0].value, ast.List)
+            and not statement.body[0].value.elts
+        ):
+            guard_found = True
+            break
+
+    assert guard_found, "_collect に limit <= 0 の早期returnガードが必要です"
