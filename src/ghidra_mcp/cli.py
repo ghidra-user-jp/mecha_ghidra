@@ -23,6 +23,7 @@ from typing import Annotated, Any, Dict, List, Optional
 import pyghidra
 import pyghidra.core as pycore
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from ghidra_headless.session import ProgramSession, ProjectHandle
 
@@ -840,7 +841,17 @@ def get_function_by_address(address: str, target: str = "default"):
     return _registry.call("get_function_by_address", {"address": address}, target)
 
 
-@mcp.tool()
+@mcp.tool(
+    description=(
+        "List all functions in the loaded program for the target session. "
+        "Requires an initialized target with a loaded program; call list_targets first, "
+        "then use create_session or load_project_program when needed."
+    ),
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
 def list_functions(target: str = "default"):
     return _registry.call("list_functions", {}, target)
 
@@ -1138,7 +1149,16 @@ def add_bookmark(
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    description=(
+        "List registered targets and their state, including project info and whether a program "
+        "is loaded (domain_path). Call this before target-scoped operations."
+    ),
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        idempotentHint=True,
+    ),
+)
 def list_targets() -> List[Dict[str, Optional[str]]]:
     return _registry.list_targets()
 
@@ -1148,7 +1168,17 @@ def list_project_programs(target: str):
     return _registry.list_programs(target)
 
 
-@mcp.tool(description="Load an existing program in the current target's project by domain path")
+@mcp.tool(
+    description=(
+        "Load or switch a program for an existing target by domain path. "
+        "Use this for targets that already exist (including project-only targets) "
+        "instead of create_session."
+    ),
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        idempotentHint=False,
+    ),
+)
 def load_project_program(
     target: str,
     domain_path: Annotated[str, Field(description="Domain path of the program to open (e.g. /folder/program)")],
@@ -1166,7 +1196,17 @@ def import_program(
     return {"status": "ok", "target": target, "program": imported_domain_path}
 
 
-@mcp.tool(description="Create a session by opening an existing program in a Ghidra project")
+@mcp.tool(
+    description=(
+        "Create a new target session by opening a program in a Ghidra project. "
+        "This is non-idempotent and fails if the target already exists. "
+        "If the target already exists, use load_project_program."
+    ),
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        idempotentHint=False,
+    ),
+)
 def create_session(
     target: str,
     project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
