@@ -164,11 +164,81 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 ### 提供ツール一覧
 
-- **ターゲット管理**: `list_targets`, `create_session`, `close_session`, `close_session_and_remove_program`, `list_project_programs`, `import_program`, `load_project_program`
-- **解析支援**: `list_methods`, `list_functions`, `list_classes`, `list_namespaces`, `list_segments`, `list_imports`, `list_exports`, `list_data_items`, `list_strings`, `search_functions_by_name`, `search_bytes`, `get_function_by_address`, `get_function_xrefs`, `get_xrefs_to`, `get_xrefs_from`, `get_callee`, `get_data_by_label`, `get_bytes`, `decompile_function`, `decompile_function_by_address`, `disassemble_function`
-- **シンボル／コメント編集**: `rename_function`, `rename_function_by_address`, `rename_variable`, `rename_data`, `set_function_prototype`, `set_local_variable_type`, `set_global_data_type`, `set_bytes`, `add_bookmark`, `set_decompiler_comment`, `set_disassembly_comment`
-- **データ型操作**: `create_struct`, `add_struct_members`, `clear_struct`, `remove_struct_members`, `get_struct`, `create_enum`, `add_enum_values`, `get_enum`, `remove_enum_values`, `add_class_members`, `remove_class_members`
-- **shared project 同期（`--enable-shared-project-sync` 指定時のみ）**: `get_project_sync_status`, `checkout_project_program`, `add_project_program_to_version_control`, `commit_project_program`, `pull_project_program`, `undo_checkout_project_program`, `terminate_project_program_checkout`, `reload_project_program`
+#### Core Operations
+
+- `list_targets` - 登録済みターゲットと紐づくプロジェクト情報を一覧表示
+- `create_session` - 既存プロジェクトのプログラムを開いてターゲットを追加
+- `close_session` - ターゲットのセッションをクローズ
+- `close_session_and_remove_program` - セッションを閉じたうえでプログラムをプロジェクトから削除
+- `list_project_programs` - ターゲットが開いているプロジェクト内プログラム一覧を取得
+- `import_program` - バイナリまたは `.gzf` をプロジェクトへインポート
+- `load_project_program` - 既存プログラムを指定 `domain_path` でロード
+
+#### Function Analysis
+
+- `list_methods` - メソッド一覧を取得（ページング対応）
+- `list_functions` - 関数一覧を取得
+- `list_classes` - クラス一覧を取得
+- `list_namespaces` - 名前空間一覧を取得（ページング対応）
+- `search_functions_by_name` - 関数名の部分一致検索
+- `decompile_function` - 関数名指定で C 擬似コードを取得
+- `decompile_function_by_address` - アドレス指定で C 擬似コードを取得
+- `disassemble_function` - 関数の逆アセンブル結果を取得
+- `get_function_by_address` - アドレスに対応する関数情報を取得
+- `get_function_xrefs` - 関数名を起点に参照元/参照先を取得
+- `get_callee` - 指定アドレスの呼び出し先関数を取得
+
+#### Memory & Data
+
+- `list_segments` - メモリセグメント/レイアウト情報を取得
+- `list_imports` - インポートシンボル一覧を取得
+- `list_exports` - エクスポートシンボル一覧を取得
+- `list_data_items` - データアイテム一覧を取得
+- `list_strings` - 文字列一覧を取得（フィルタ対応）
+- `get_xrefs_to` - 指定アドレスへのクロスリファレンスを取得
+- `get_xrefs_from` - 指定アドレスからのクロスリファレンスを取得
+- `get_data_by_label` - ラベル名からデータを取得
+- `get_bytes` - 指定アドレスのバイト列を取得
+- `search_bytes` - バイトパターン検索
+
+#### Symbol & Comment Editing
+
+- `rename_function` - 関数名を変更（名前指定）
+- `rename_function_by_address` - 関数名を変更（アドレス指定）
+- `rename_variable` - ローカル変数名を変更
+- `rename_data` - データラベル名を変更
+- `set_function_prototype` - 関数プロトタイプを設定
+- `set_local_variable_type` - ローカル変数の型を設定
+- `set_global_data_type` - グローバルデータの型を設定
+- `set_bytes` - メモリ内容をバイト列で書き換え
+- `set_decompiler_comment` - デコンパイラコメントを設定
+- `set_disassembly_comment` - 逆アセンブリコメントを設定
+- `add_bookmark` - ブックマークを追加
+
+#### Data Type Operations
+
+- `create_struct` - 構造体を作成
+- `add_struct_members` - 構造体メンバーを追加
+- `clear_struct` - 構造体メンバーを全削除
+- `remove_struct_members` - 構造体メンバーを選択削除
+- `get_struct` - 構造体定義を取得
+- `create_enum` - 列挙体を作成
+- `add_enum_values` - 列挙体の値を追加
+- `remove_enum_values` - 列挙体の値を削除
+- `get_enum` - 列挙体定義を取得
+- `add_class_members` - クラス相当データ型へメンバーを追加
+- `remove_class_members` - クラス相当データ型からメンバーを削除
+
+#### Shared Project Sync (`--enable-shared-project-sync` 指定時のみ)
+
+- `get_project_sync_status` - shared project 上の同期状態を取得
+- `checkout_project_program` - プログラムを checkout（排他指定可）
+- `add_project_program_to_version_control` - private プログラムを shared 管理へ追加
+- `commit_project_program` - checkout 中の変更を check-in
+- `pull_project_program` - 最新状態を取得（必要に応じて破棄/追従）
+- `undo_checkout_project_program` - checkout を取り消し（ローカル変更破棄可）
+- `terminate_project_program_checkout` - 既存 checkout を checkout ID で強制終了
+- `reload_project_program` - 現在プログラムを再ロード
 
 ## Ghidra Serverの設定
 
