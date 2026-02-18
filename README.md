@@ -148,6 +148,7 @@ uv run ghidra-mcp \
 MCP ツール呼び出し時は `target="firmware"` のようにターゲット名を指定することで、操作対象プログラムを切り替えられます。現在登録済みのターゲットは `list_targets` ツールで確認できます。
 
 サーバー起動後でも、`create_session` ツールを呼び出すことで新しいターゲットを追加できます（例: `create_session(target="patch", project_location="/path/to/project.gpr", domain_path="/folder/programX")`）。
+`domain_path` がまだない場合は、`register_target(target="patch", project_location="/path/to/project.gpr")` で project-only ターゲットを先に登録し、`import_program` と `load_project_program` を続けて呼び出してください。
 新規バイナリを解析対象にしたい場合は、`import_program(target="patch", binary_path="/tmp/patch.bin")` で追加してから `load_project_program(target="patch", domain_path="/patch.bin")` で切り替えてください。不要になったターゲットは `close_session(target="patch")` またはプロジェクトから削除する `close_session_and_remove_program(target="patch")` で解放してください。
 
 ## 主要機能
@@ -168,6 +169,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 - `list_targets` - 登録済みターゲットと紐づくプロジェクト情報を一覧表示
 - `create_session` - 既存プロジェクトのプログラムを開いてターゲットを追加
+- `register_target` - プログラムを開かずにターゲットへプロジェクト情報のみ登録
 - `close_session` - ターゲットのセッションをクローズ
 - `close_session_and_remove_program` - セッションを閉じたうえでプログラムをプロジェクトから削除
 - `list_project_programs` - ターゲットが開いているプロジェクト内プログラム一覧を取得

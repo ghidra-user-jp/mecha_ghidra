@@ -308,8 +308,12 @@ class SessionRegistry:
                 self._ensure_versioned_project(status)
                 if not status.get("is_checked_out"):
                     if auto_checkout and status.get("can_checkout"):
-                        handle.checkout_program(domain_path, exclusive=False)
+                        checked_out = handle.checkout_program(domain_path, exclusive=False)
                         status = handle.get_sync_status(domain_path)
+                        if not status.get("is_checked_out"):
+                            if not checked_out:
+                                raise RuntimeError("AUTO_CHECKOUT_FAILED: checkoutに失敗しました")
+                            raise RuntimeError("AUTO_CHECKOUT_FAILED: checkout後の状態確認に失敗しました")
                     else:
                         raise RuntimeError("NOT_CHECKED_OUT: checkout済みではありません")
 
@@ -517,8 +521,8 @@ class SessionRegistry:
         if save_before_close:
             try:
                 handle.project.save(program)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"SAVE_FAILED: プログラム保存に失敗しました: {exc}") from exc
 
         session.close()
         if handle.is_closed():
@@ -1170,6 +1174,28 @@ def list_targets() -> List[Dict[str, Optional[str]]]:
 @mcp.tool()
 def list_project_programs(target: str):
     return _registry.list_programs(target)
+
+
+@mcp.tool(
+    description=(
+        "Register a target with project information only, without loading a program yet. "
+        "Use load_project_program later to open a domain path."
+    ),
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        idempotentHint=False,
+    ),
+)
+def register_target(
+    target: str,
+    project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
+    project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
+):
+    return _registry.register_target(
+        target,
+        project_location=project_location,
+        project_name=project_name,
+    )
 
 
 @mcp.tool(

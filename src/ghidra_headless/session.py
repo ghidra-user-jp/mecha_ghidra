@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import threading
 from typing import Any, Dict, Optional
@@ -9,6 +10,8 @@ from typing import Any, Dict, Optional
 import pyghidra.core as pycore
 
 __all__ = ["ProgramSession", "ProjectHandle"]
+
+logger = logging.getLogger(__name__)
 
 _FLAT_API_CLASS = None
 _CONSOLE_MONITOR_CLASS = None
@@ -255,13 +258,13 @@ class ProjectHandle:
             try:
                 if program is not None:
                     self.project.save(program)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("program save failed before close: %s", exc)
             try:
                 if program is not None:
                     self.project.close(program)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("program close failed: %s", exc)
             if remove_program:
                 self._delete_program_locked(domain_path)
             self._open_programs.discard(domain_key)
@@ -293,8 +296,8 @@ class ProjectHandle:
             return
         try:
             self.project.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("project close failed: %s", exc)
         self._open_programs.clear()
         self._closed = True
 

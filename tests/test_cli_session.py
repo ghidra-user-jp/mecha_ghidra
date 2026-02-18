@@ -674,6 +674,30 @@ def test_create_session_tool_requires_domain_path():
         )
 
 
+def test_register_target_tool(monkeypatch):
+    called = {}
+
+    def fake_register_target(name, project_location, *, project_name=None):
+        called["name"] = name
+        called["project_location"] = project_location
+        called["project_name"] = project_name
+        return {"status": "ok", "target": name}
+
+    monkeypatch.setattr(cli._registry, "register_target", fake_register_target)
+
+    result = cli.register_target(
+        target="fw",
+        project_location="/tmp/sample.gpr",
+    )
+
+    assert result == {"status": "ok", "target": "fw"}
+    assert called == {
+        "name": "fw",
+        "project_location": "/tmp/sample.gpr",
+        "project_name": None,
+    }
+
+
 def test_list_project_programs_tool_requires_target():
     with pytest.raises(TypeError):
         cli.list_project_programs()
@@ -802,6 +826,30 @@ def test_registry_commit_project_program(tmp_path, monkeypatch):
     assert len(dummy_handle.releases) == 1
 
 
+def test_registry_commit_project_program_auto_checkout_failure(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    dummy_handle.sync_status["is_checked_out"] = False
+    dummy_handle.sync_status["can_checkout"] = True
+    dummy_handle.sync_status["can_checkin"] = False
+    dummy_handle.sync_status["modified_since_checkout"] = False
+
+    def checkout_fail(domain_path, *, exclusive=False):
+        dummy_handle.sync_calls.append(("checkout_program", domain_path, exclusive))
+        return False
+
+    dummy_handle.checkout_program = checkout_fail
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    with pytest.raises(RuntimeError, match="AUTO_CHECKOUT_FAILED"):
+        registry.commit_project_program("fw", "sync result", auto_checkout=True)
+
+    assert any(call[0] == "checkout_program" for call in dummy_handle.sync_calls)
+    assert not any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
+
+
 def test_registry_commit_project_program_discards_on_conflict(tmp_path, monkeypatch):
     dummy_core(monkeypatch)
     dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
@@ -918,6 +966,25 @@ def test_registry_reload_project_program(tmp_path, monkeypatch):
         "reloaded": True,
     }
     assert len(dummy_handle.releases) == 1
+
+
+def test_registry_reload_project_program_fails_when_pre_save_fails(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+
+    class FailingProject:
+        def save(self, _program):
+            raise RuntimeError("save failed")
+
+    dummy_handle.project = FailingProject()
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED"):
+        registry.reload_project_program("fw")
+
+    assert dummy_handle.releases == []
 
 
 def test_shared_project_sync_tool_wrappers(monkeypatch):
