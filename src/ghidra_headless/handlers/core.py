@@ -511,9 +511,15 @@ def rename_data(params):
 
 def list_segments(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     blocks = ctx.program.getMemory().getBlocks()
     result = []
+    idx = 0
     for block in blocks:
+        if idx < offset:
+            idx += 1
+            continue
         entry = {
             "name": block.getName(),
             "start": str(block.getStart()),
@@ -526,40 +532,64 @@ def list_segments(params):
             },
         }
         result.append(entry)
+        if len(result) >= limit:
+            break
+        idx += 1
     return result
 
 
 def list_imports(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     iterator = ctx.symbol_table.getExternalSymbols()
     items = []
+    idx = 0
     while iterator.hasNext():
         symbol = iterator.next()
-        items.append(symbol.getName(True))
+        if idx >= offset:
+            items.append(symbol.getName(True))
+            if len(items) >= limit:
+                break
+        idx += 1
     return items
 
 
 def list_exports(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     iterator = ctx.function_manager.getFunctions(True)
     exports = []
+    idx = 0
     while iterator.hasNext():
         function = iterator.next()
         symbol = function.getSymbol()
         if symbol is not None and symbol.isExported():
-            exports.append(symbol.getName(True))
+            if idx >= offset:
+                exports.append(symbol.getName(True))
+                if len(exports) >= limit:
+                    break
+            idx += 1
     return exports
 
 
 def list_namespaces(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     iterator = ctx.namespace_manager.getNamespaces(True)
     result = []
+    idx = 0
     while iterator.hasNext():
         namespace = iterator.next()
         if namespace.isGlobal():
             continue
-        result.append(namespace.getName(True))
+        if idx >= offset:
+            result.append(namespace.getName(True))
+            if len(result) >= limit:
+                break
+        idx += 1
     return result
 
 
