@@ -814,7 +814,7 @@ def search_functions_by_name(
     target: str = "default",
 ):
     if not query:
-        return ["Error: query string is required"]
+        raise ValueError("queryが必要です")
     return _registry.call(
         "search_functions_by_name",
         {"query": query, "offset": offset, "limit": limit},

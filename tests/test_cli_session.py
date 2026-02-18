@@ -520,6 +520,11 @@ def test_add_bookmark_tool_invokes_core(monkeypatch):
     }
 
 
+def test_search_functions_by_name_tool_requires_query():
+    with pytest.raises(ValueError, match="query"):
+        cli.search_functions_by_name("")
+
+
 def test_close_session_and_remove_program_tool(monkeypatch):
     called = {}
 

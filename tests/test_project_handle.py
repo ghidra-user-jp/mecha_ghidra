@@ -108,3 +108,24 @@ def test_sync_status_raises_when_required_call_fails():
 
     with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
         session._sync_status_from_domain_file(BrokenDomainFile())
+
+
+def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class FailingDomainFile:
+        def delete(self):
+            raise RuntimeError("delete failed")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return FailingDomainFile()
+
+    class DummyProjectWithFailingDelete(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+    handle.project = DummyProjectWithFailingDelete()
+
+    with pytest.raises(RuntimeError, match="プログラム削除に失敗しました"):
+        handle._delete_program_locked("/folder/app")

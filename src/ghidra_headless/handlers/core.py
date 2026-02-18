@@ -160,9 +160,10 @@ def _parse_data_type(ctx, type_str):
 
     dtm = _dt_manager(ctx)
     text = type_str.strip()
-    for needle in (" const", " volatile", "\t", "\n", "\r"):
+    for needle in ("\t", "\n", "\r"):
         text = text.replace(needle, " ")
     text = " ".join(text.split())
+    text = " ".join([token for token in text.split(" ") if token.lower() not in {"const", "volatile"}])
 
     pointer_depth = 0
     while text.endswith("*"):
@@ -479,6 +480,8 @@ def rename_function_by_address(params):
     ctx = ensure_context()
     address_text = params.get("function_address")
     new_name = params.get("new_name") or params.get("newName")
+    if not address_text or not new_name:
+        raise ValueError("function_addressとnew_nameは必須です")
     address = _get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
@@ -1114,7 +1117,9 @@ def set_global_data_type(params):
 
     def _apply():
         listing = ctx.listing
-        listing.clearCodeUnits(address, address)
+        clear_length = length if length > 0 else _component_length(data_type)
+        clear_end = address if clear_length <= 1 else address.add(clear_length - 1)
+        listing.clearCodeUnits(address, clear_end)
         if length > 0:
             listing.createData(address, data_type, length)
         else:

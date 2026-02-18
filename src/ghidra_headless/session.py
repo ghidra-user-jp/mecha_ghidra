@@ -307,8 +307,8 @@ class ProjectHandle:
             raise RuntimeError(f"削除対象のプログラムが見つかりません: {domain_path}")
         try:
             domain_file.delete()
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"プログラム削除に失敗しました: {domain_path}: {exc}")
 
     def _get_domain_file_locked(self, domain_path: str):
         if not domain_path:
