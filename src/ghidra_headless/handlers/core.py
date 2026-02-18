@@ -662,7 +662,21 @@ def disassemble_function(params):
     lines = []
     while instructions.hasNext():
         inst = instructions.next()
-        operands = inst.getDefaultOperandRepresentation()
+        operand_parts = []
+        try:
+            operand_count = inst.getNumOperands()
+        except Exception:
+            operand_count = 0
+
+        for operand_index in range(operand_count):
+            try:
+                operand_repr = inst.getDefaultOperandRepresentation(operand_index)
+            except Exception:
+                operand_repr = None
+            if operand_repr:
+                operand_parts.append(operand_repr)
+
+        operands = ", ".join(operand_parts)
         comment = inst.getComment(CodeUnit.EOL_COMMENT)
         line = {
             "address": str(inst.getAddress()),
