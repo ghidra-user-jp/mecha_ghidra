@@ -724,11 +724,37 @@ def test_registry_commit_project_program_discards_on_conflict(tmp_path, monkeypa
     assert result["status"] == "noop"
     assert result["reason"] == "conflict_discarded"
     assert result["discarded_local_changes"] is True
-    assert result["merged"] is True
+    assert result["merged"] is False
     assert result["checked_out"] is False
     assert not any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
     assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
-    assert any(call[0] == "merge_program" for call in dummy_handle.sync_calls)
+    assert not any(call[0] == "merge_program" for call in dummy_handle.sync_calls)
+    assert len(dummy_handle.releases) == 1
+
+
+def test_registry_commit_project_program_discards_checkout_on_conflict_without_local_changes(tmp_path, monkeypatch):
+    dummy_core(monkeypatch)
+    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
+    dummy_handle.sync_status["is_checked_out"] = True
+    dummy_handle.sync_status["can_checkin"] = False
+    dummy_handle.sync_status["modified_since_checkout"] = False
+    dummy_handle.sync_status["can_merge"] = True
+    dummy_handle.sync_status["version"] = 2
+    dummy_handle.sync_status["latest_version"] = 3
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
+
+    result = registry.commit_project_program("fw", "sync result")
+
+    assert result["status"] == "noop"
+    assert result["reason"] == "conflict_discarded"
+    assert result["discarded_local_changes"] is False
+    assert result["merged"] is False
+    assert result["checked_out"] is False
+    assert not any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
+    assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
+    assert not any(call[0] == "merge_program" for call in dummy_handle.sync_calls)
     assert len(dummy_handle.releases) == 1
 
 

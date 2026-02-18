@@ -316,10 +316,9 @@ class SessionRegistry:
                 if status.get("can_merge"):
                     action = self._run_with_reopened_program_locked(
                         name,
-                        operation=lambda active_handle, active_domain_path: self._pull_operation(
+                        operation=lambda active_handle, active_domain_path: self._discard_conflict_checkout_operation(
                             active_handle,
                             active_domain_path,
-                            on_local_changes="discard",
                         ),
                         save_before_close=False,
                     )
@@ -567,6 +566,17 @@ class SessionRegistry:
             raise operation_error
 
         return operation_result
+
+    @staticmethod
+    def _discard_conflict_checkout_operation(handle: ProjectHandle, domain_path: str) -> Dict[str, bool]:
+        status = handle.get_sync_status(domain_path)
+        discarded_local_changes = bool(status.get("modified_since_checkout"))
+        if status.get("is_checked_out"):
+            handle.undo_checkout_program(domain_path, keep=False)
+        return {
+            "discarded_local_changes": discarded_local_changes,
+            "merged": False,
+        }
 
     @staticmethod
     def _pull_operation(handle: ProjectHandle, domain_path: str, *, on_local_changes: str) -> Dict[str, bool]:
