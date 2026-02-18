@@ -39,6 +39,7 @@ class SessionRegistry:
     def __init__(self) -> None:
         self._sessions: Dict[str, ProgramSession] = {}
         self._locks: Dict[str, threading.RLock] = {}
+        self._target_projects: Dict[str, tuple[str, str]] = {}
         self._project_handles: Dict[tuple[str, str], ProjectHandle] = {}
         self._registry_lock = fasteners.ReaderWriterLock()
 
@@ -57,22 +58,68 @@ class SessionRegistry:
                 raise ValueError(f"セッション '{name}' は既に存在します")
 
             handle = self._get_or_create_project_handle(project_location, project_name)
+            had_target = name in self._target_projects
+            had_lock = name in self._locks
+            self._target_projects[name] = handle.get_key()
             session = handle.open_program(domain_path)
-            self._locks[name] = threading.RLock()
+            self._locks.setdefault(name, threading.RLock())
             self._sessions[name] = session
 
             try:
                 program = session.get_program()
                 _core().initialize(program, key=name)
                 return session
-            except Exception:
-                self._cleanup_session(name, session, handle, remove_registry_entry=True)
+            except Exception:  # noqa: BLE001
+                self._sessions.pop(name, None)
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                if not had_target:
+                    self._target_projects.pop(name, None)
+                if not had_lock:
+                    self._locks.pop(name, None)
+                try:
+                    _core().remove_context(name)
+                except Exception:
+                    pass
+                if handle is not None and handle.is_closed():
+                    self._project_handles.pop(handle.get_key(), None)
                 raise
+
+    def register_target(
+        self,
+        name: str,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+    ) -> Dict[str, Optional[str]]:
+        with self._registry_lock.write_lock():
+            key = ProjectHandle.make_key(project_location, project_name)
+            if name in self._sessions:
+                active_key = self._sessions[name].get_project_handle().get_key()
+                if active_key != key:
+                    raise ValueError(
+                        f"ターゲット '{name}' は既に別プロジェクトでセッションが開いています: {active_key}"
+                    )
+            self._target_projects[name] = key
+            self._locks.setdefault(name, threading.RLock())
+            return {
+                "target": name,
+                "project_location": key[0],
+                "project_name": key[1],
+                "domain_path": None,
+            }
 
     def _ensure(self, name: str) -> ProgramSession:
         try:
             return self._sessions[name]
         except KeyError:
+            if name in self._target_projects:
+                raise RuntimeError(
+                    f"セッション '{name}' は初期化されていません（プログラム未ロード）。"
+                    " load_project_program で program を開いてください"
+                )
             raise RuntimeError(f"セッション '{name}' は初期化されていません")
 
     def _lock(self, name: str) -> threading.RLock:
@@ -83,15 +130,27 @@ class SessionRegistry:
 
     def list_targets(self) -> List[Dict[str, Optional[str]]]:
         with self._registry_lock.read_lock():
-            return [
-                {"target": name, **session.to_dict()}
-                for name, session in sorted(self._sessions.items(), key=lambda item: item[0])
-            ]
+            names = sorted(set(self._target_projects.keys()) | set(self._sessions.keys()))
+            results: List[Dict[str, Optional[str]]] = []
+            for name in names:
+                session = self._sessions.get(name)
+                if session is not None:
+                    info = session.to_dict()
+                else:
+                    project_key = self._target_projects.get(name)
+                    if project_key is None:
+                        continue
+                    info = {
+                        "project_location": project_key[0],
+                        "project_name": project_key[1],
+                        "domain_path": None,
+                    }
+                results.append({"target": name, **info})
+            return results
 
     def list_programs(self, name: str):
-        with self._registry_lock.read_lock():
-            session = self._ensure(name)
-            handle = session.get_project_handle()
+        with self._registry_lock.write_lock():
+            handle = self._get_target_handle_locked(name)
             return handle.list_programs()
 
     def load_program(
@@ -102,11 +161,10 @@ class SessionRegistry:
         with self._registry_lock.write_lock():
             if not domain_path:
                 raise ValueError("domain_path を指定してください")
-
-            session = self._ensure(name)
-            handle = session.get_project_handle()
+            handle = self._get_target_handle_locked(name)
             new_session = handle.open_program(domain_path)
             loaded_domain_path = new_session.to_dict().get("domain_path") or ""
+            had_session = name in self._sessions
             try:
                 new_program = new_session.get_program()
                 _core().initialize(new_program, key=name)
@@ -116,12 +174,14 @@ class SessionRegistry:
                     new_session,
                     handle,
                     remove_registry_entry=False,
-                    remove_context=False,
+                    remove_context=not had_session,
                 )
                 raise
 
             old_session = self._sessions.get(name)
             self._sessions[name] = new_session
+            self._locks.setdefault(name, threading.RLock())
+            self._target_projects[name] = handle.get_key()
             try:
                 if old_session is not None:
                     old_session.close()
@@ -134,9 +194,9 @@ class SessionRegistry:
         with self._registry_lock.write_lock():
             if not binary_path:
                 raise ValueError("binary_path を指定してください")
-            session = self._ensure(name)
-            handle = session.get_project_handle()
+            handle = self._get_target_handle_locked(name)
             domain_file = handle.import_program(binary_path)
+            self._target_projects[name] = handle.get_key()
             return domain_file.getPathname()
 
     def get_project_sync_status(self, name: str) -> Dict[str, Any]:
@@ -253,6 +313,29 @@ class SessionRegistry:
                         raise RuntimeError("NOT_CHECKED_OUT: checkout済みではありません")
 
                 status = handle.get_sync_status(domain_path)
+                if status.get("can_merge"):
+                    action = self._run_with_reopened_program_locked(
+                        name,
+                        operation=lambda active_handle, active_domain_path: self._pull_operation(
+                            active_handle,
+                            active_domain_path,
+                            on_local_changes="discard",
+                        ),
+                        save_before_close=False,
+                    )
+                    updated = self._current_sync_status_locked(name)
+                    return {
+                        "status": "noop",
+                        "reason": "conflict_discarded",
+                        "target": name,
+                        "program": domain_path,
+                        "discarded_local_changes": bool(action["discarded_local_changes"]),
+                        "merged": bool(action["merged"]),
+                        "version": updated.get("version"),
+                        "latest_version": updated.get("latest_version"),
+                        "is_latest_version": bool(updated.get("is_latest_version")),
+                        "checked_out": bool(updated.get("is_checked_out")),
+                    }
                 if not status.get("can_checkin"):
                     if not status.get("modified_since_checkout"):
                         return {
@@ -514,6 +597,7 @@ class SessionRegistry:
         if session is None:
             raise RuntimeError(f"セッション '{name}' は存在しません")
         self._locks.pop(name, None)
+        self._target_projects.pop(name, None)
         handle = session.get_project_handle()
         self._cleanup_session(
             name,
@@ -533,6 +617,7 @@ class SessionRegistry:
                     pass
             self._sessions.clear()
             self._locks.clear()
+            self._target_projects.clear()
             for handle in list(self._project_handles.values()):
                 try:
                     handle.close()
@@ -571,6 +656,10 @@ class SessionRegistry:
         with self._registry_lock.read_lock():
             return bool(self._sessions)
 
+    def has_targets(self) -> bool:
+        with self._registry_lock.read_lock():
+            return bool(self._target_projects)
+
     def _get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
         key = ProjectHandle.make_key(project_location, project_name)
         handle = self._project_handles.get(key)
@@ -578,6 +667,26 @@ class SessionRegistry:
             handle = ProjectHandle(project_location, project_name)
             self._project_handles[key] = handle
         return handle
+
+    def _get_target_project_key_locked(self, name: str) -> tuple[str, str]:
+        session = self._sessions.get(name)
+        if session is not None:
+            key = session.get_project_handle().get_key()
+            self._target_projects[name] = key
+            return key
+        try:
+            return self._target_projects[name]
+        except KeyError:
+            raise RuntimeError(f"ターゲット '{name}' は初期化されていません")
+
+    def _get_target_handle_locked(self, name: str) -> ProjectHandle:
+        session = self._sessions.get(name)
+        if session is not None:
+            handle = session.get_project_handle()
+            self._target_projects[name] = handle.get_key()
+            return handle
+        key = self._get_target_project_key_locked(name)
+        return self._get_or_create_project_handle(key[0], key[1])
 
     @staticmethod
     def _session_domain_path(session: ProgramSession) -> str:
@@ -1314,13 +1423,22 @@ def main(argv: list[str] | None = None) -> int:
         for definition in args.session:
             try:
                 config = _parse_session_definition(definition)
-                _registry.create_session(
-                    config["name"],
-                    project_location=config.get("project_location"),
-                    project_name=config.get("project_name"),
-                    domain_path=config.get("domain_path"),
-                )
-                logger.info("セッション '%s' をロードしました", config["name"])
+                domain_path = config.get("domain_path")
+                if domain_path:
+                    _registry.create_session(
+                        config["name"],
+                        project_location=config.get("project_location"),
+                        project_name=config.get("project_name"),
+                        domain_path=domain_path,
+                    )
+                    logger.info("セッション '%s' をロードしました", config["name"])
+                else:
+                    _registry.register_target(
+                        config["name"],
+                        project_location=config.get("project_location"),
+                        project_name=config.get("project_name"),
+                    )
+                    logger.info("ターゲット '%s' をプロジェクトのみで登録しました", config["name"])
             except Exception as exc:  # noqa: BLE001
                 logger.error("セッション定義 '%s' の処理中にエラー: %s", definition, exc)
                 _registry.close_all()
@@ -1328,20 +1446,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.project_location:
         try:
-            _registry.create_session(
-                args.target_name,
-                project_location=args.project_location,
-                project_name=args.project_name,
-                domain_path=args.domain_path,
-            )
-            logger.info("デフォルトターゲット '%s' をロードしました", args.target_name)
+            if args.domain_path:
+                _registry.create_session(
+                    args.target_name,
+                    project_location=args.project_location,
+                    project_name=args.project_name,
+                    domain_path=args.domain_path,
+                )
+                logger.info("デフォルトターゲット '%s' をロードしました", args.target_name)
+            else:
+                _registry.register_target(
+                    args.target_name,
+                    project_location=args.project_location,
+                    project_name=args.project_name,
+                )
+                logger.info(
+                    "デフォルトターゲット '%s' をプロジェクトのみで登録しました（program未ロード）",
+                    args.target_name,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.error("デフォルトセッション初期化に失敗: %s", exc)
             _registry.close_all()
             return 1
 
-    if not _registry.has_sessions():
-        logger.error("少なくとも1つのセッションを --session または --project-location で指定してください")
+    if not _registry.has_targets():
+        logger.error("少なくとも1つのターゲットを --session または --project-location で指定してください")
         return 1
 
     _core_module = _core()

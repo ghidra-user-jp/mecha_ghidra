@@ -46,9 +46,12 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
 - `commit/pull/checkout` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
 - shared project の認証が必要な場合は `--ghidra-server-user` と `--ghidra-server-password-env` をセットで指定してください（パスワードの直接引数は未対応）。
+- `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
 - shared project 同期ツールの `commit/pull/undo_checkout` は、`DomainFile` の in-use 制約を回避するため内部で対象プログラムを一度閉じて再オープンします。
+- Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
 - `pull_project_program(on_local_changes="discard")` は `undoCheckout(keep=False)` のみを使用し、force 破棄は行いません。
+- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでローカル変更を破棄して最新状態へ追従し、`status=noop` / `reason=conflict_discarded` を返します（人間側の更新を優先）。
 
 ### shared project 認証つき起動例
 

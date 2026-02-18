@@ -5,10 +5,12 @@ from __future__ import absolute_import, print_function
 import threading
 from numbers import Integral
 
+import jpype
+
 from ghidra.app.decompiler import DecompInterface
 from ghidra.program.flatapi import FlatProgramAPI
 from ghidra.program.model.listing import CodeUnit
-from ghidra.program.model.symbol import SourceType, SymbolType
+from ghidra.program.model.symbol import SourceType
 from ghidra.program.model.data import (
     CategoryPath,
     StructureDataType,
@@ -32,6 +34,8 @@ from ghidra.util.task import ConsoleTaskMonitor, TaskMonitor
 
 _CONTEXTS = {}
 _THREAD_STATE = threading.local()
+_GHIDRA_PROGRAM_UTILITIES = None
+_GHIDRA_SCRIPT_UTIL = None
 
 
 class HeadlessContext(object):
@@ -110,12 +114,18 @@ def _txn(ctx, description, func):
 
 
 def _find_function_by_name(ctx, name):
-    symbol_iter = ctx.symbol_table.getSymbols(name)
-    while symbol_iter.hasNext():
-        symbol = symbol_iter.next()
-        if symbol.getSymbolType() == SymbolType.FUNCTION:
-            return symbol.getObject()
-    return None
+    iterator = ctx.function_manager.getFunctions(True)
+    first_match = None
+    while iterator.hasNext():
+        function = iterator.next()
+        if function.getName() != name:
+            continue
+        if first_match is None:
+            first_match = function
+        body = function.getBody()
+        if body is not None and not body.isEmpty():
+            return function
+    return first_match
 
 
 def _get_address(ctx, address_text):
@@ -213,18 +223,87 @@ def _parse_data_type(ctx, type_str):
     return dt
 
 
+def _new_java_byte_buffer(size):
+    try:
+        return jpype.JArray(jpype.JByte)(size)
+    except Exception:
+        return bytearray(size)
+
+
 def _hexdump(memory, start_address, size):
-    buffer = bytearray(size)
+    buffer = _new_java_byte_buffer(size)
     read = memory.getBytes(start_address, buffer)
     if read < 0:
         raise RuntimeError("メモリの読み取りに失敗しました")
     lines = []
     base = start_address
     for idx in range(0, read, 16):
-        chunk = buffer[idx: idx + 16]
-        hex_part = " ".join(["%02X" % (b & 0xFF) for b in chunk])
+        chunk = [int(buffer[i]) & 0xFF for i in range(idx, min(idx + 16, read))]
+        hex_part = " ".join(["%02X" % b for b in chunk])
         lines.append("%s  %s" % (base.add(idx), hex_part))
     return "\n".join(lines)
+
+
+def _ghidra_program_utilities():
+    global _GHIDRA_PROGRAM_UTILITIES
+    if _GHIDRA_PROGRAM_UTILITIES is None:
+        from ghidra.program.util import GhidraProgramUtilities
+        _GHIDRA_PROGRAM_UTILITIES = GhidraProgramUtilities
+    return _GHIDRA_PROGRAM_UTILITIES
+
+
+def _ghidra_script_util():
+    global _GHIDRA_SCRIPT_UTIL
+    if _GHIDRA_SCRIPT_UTIL is None:
+        from ghidra.app.script import GhidraScriptUtil
+        _GHIDRA_SCRIPT_UTIL = GhidraScriptUtil
+    return _GHIDRA_SCRIPT_UTIL
+
+
+def _analyze_program_if_needed(ctx):
+    utilities = _ghidra_program_utilities()
+    if not utilities.shouldAskToAnalyze(ctx.program):
+        return False
+    script_util = _ghidra_script_util()
+    script_util.acquireBundleHostReference()
+    try:
+        ctx.flat_api.analyzeAll(ctx.program)
+        utilities.markProgramAnalyzed(ctx.program)
+    finally:
+        script_util.releaseBundleHostReference()
+    return True
+
+
+def _decompile_function_object(ctx, function):
+    def _run_decompile():
+        interface = DecompInterface()
+        try:
+            if not interface.openProgram(ctx.program):
+                raise RuntimeError("デコンパイラの初期化に失敗しました")
+            results = interface.decompileFunction(function, 120, ctx.monitor())
+            if results is None:
+                raise RuntimeError("デコンパイルに失敗しました")
+            decompiled = results.getDecompiledFunction()
+            if decompiled is not None:
+                return decompiled.getC()
+            detail = (results.getErrorMessage() or "").strip()
+            if detail:
+                raise RuntimeError("デコンパイル結果が空です: %s" % detail)
+            raise RuntimeError("デコンパイル結果が空です")
+        finally:
+            interface.dispose()
+
+    try:
+        return _run_decompile()
+    except RuntimeError as first_error:
+        analyzed = False
+        try:
+            analyzed = _analyze_program_if_needed(ctx)
+        except Exception:
+            analyzed = False
+        if not analyzed:
+            raise
+        return _run_decompile()
 
 
 def _decode_hex_bytes(hex_string):
@@ -365,18 +444,7 @@ def decompile_function(params):
     if function is None:
         raise LookupError("関数が見つかりません: %s" % name)
 
-    interface = DecompInterface()
-    try:
-        interface.openProgram(ctx.program)
-        results = interface.decompileFunction(function, 60, ctx.monitor())
-        if results is None:
-            raise RuntimeError("デコンパイルに失敗しました")
-        decompiled = results.getDecompiledFunction()
-        if decompiled is None:
-            raise RuntimeError("デコンパイル結果が空です")
-        return decompiled.getC()
-    finally:
-        interface.dispose()
+    return _decompile_function_object(ctx, function)
 
 
 def decompile_function_by_address(params):
@@ -386,7 +454,7 @@ def decompile_function_by_address(params):
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
         raise LookupError("アドレスに対応する関数が見つかりません: %s" % address_text)
-    return decompile_function({"name": function.getName()})
+    return _decompile_function_object(ctx, function)
 
 
 def rename_function(params):
