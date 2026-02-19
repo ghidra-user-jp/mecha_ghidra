@@ -225,3 +225,31 @@ def test_collect_has_non_positive_limit_guard():
             break
 
     assert guard_found, "_collect に limit <= 0 の早期returnガードが必要です"
+
+
+def test_txn_requires_checkout_guard_for_versioned_program():
+    core_module = _load_ast(CORE_PATH)
+    txn = None
+    for node in core_module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_txn":
+            txn = node
+            break
+    assert txn is not None, "_txn が見つかりません"
+
+    guard_call_found = False
+    for statement in txn.body:
+        if not isinstance(statement, ast.Expr):
+            continue
+        call = statement.value
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_ensure_checkout_for_versioned_program"
+            and len(call.args) == 1
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "ctx"
+        ):
+            guard_call_found = True
+            break
+
+    assert guard_call_found, "_txn の先頭で checkout ガードを実行する必要があります"

@@ -34,6 +34,28 @@ _core_module = None
 _shared_project_sync_tools_registered = False
 _PASSWORD_CLIENT_AUTHENTICATOR_CLASS = None
 _CLIENT_UTIL_CLASS = None
+_CHECKOUT_REQUIRED_COMMANDS = {
+    "rename_function",
+    "rename_function_by_address",
+    "rename_data",
+    "rename_variable",
+    "set_decompiler_comment",
+    "set_disassembly_comment",
+    "set_function_prototype",
+    "set_local_variable_type",
+    "set_global_data_type",
+    "create_struct",
+    "add_struct_members",
+    "clear_struct",
+    "create_enum",
+    "add_enum_values",
+    "add_class_members",
+    "remove_class_members",
+    "remove_enum_values",
+    "remove_struct_members",
+    "set_bytes",
+    "add_bookmark",
+}
 
 
 class SessionRegistry:
@@ -231,6 +253,10 @@ class SessionRegistry:
                         "exclusive": bool(status.get("is_checked_out_exclusive")),
                     }
                 checked_out = handle.checkout_program(resolved_domain_path, exclusive=exclusive)
+                if checked_out:
+                    # checkout前に開いていたactive programはread-only状態のまま残るため、
+                    # ここで開き直してshared projectの最新checkout状態を反映させる。
+                    self._reload_active_program_after_checkout_locked(name, resolved_domain_path)
                 return {
                     "status": "ok",
                     "target": name,
@@ -311,6 +337,9 @@ class SessionRegistry:
                 if not status.get("is_checked_out"):
                     if auto_checkout and status.get("can_checkout"):
                         checked_out = handle.checkout_program(resolved_domain_path, exclusive=False)
+                        if checked_out:
+                            self._reload_active_program_after_checkout_locked(name, resolved_domain_path)
+                            handle = self._get_target_handle_locked(name)
                         status = handle.get_sync_status(resolved_domain_path)
                         if not status.get("is_checked_out"):
                             if not checked_out:
@@ -319,6 +348,11 @@ class SessionRegistry:
                     else:
                         raise RuntimeError("NOT_CHECKED_OUT: checkout済みではありません")
 
+                self._save_active_program_if_needed_locked(
+                    name,
+                    resolved_domain_path,
+                    handle=handle,
+                )
                 status = handle.get_sync_status(resolved_domain_path)
                 if status.get("can_merge"):
                     action = self._run_sync_operation_for_domain_locked(
@@ -511,9 +545,61 @@ class SessionRegistry:
                     "reloaded": True,
                 }
 
+    def get_version_history(
+        self,
+        name: str,
+        *,
+        domain_path: str | None = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        with self._registry_lock.write_lock():
+            lock = self._lock(name)
+            with lock:
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                history = handle.get_version_history(resolved_domain_path, limit=limit)
+                return {
+                    "target": name,
+                    "program": resolved_domain_path,
+                    **history,
+                }
+
+    def get_version_diff(
+        self,
+        name: str,
+        *,
+        from_version: int,
+        to_version: int,
+        domain_path: str | None = None,
+        range_limit: int = 200,
+    ) -> Dict[str, Any]:
+        with self._registry_lock.write_lock():
+            lock = self._lock(name)
+            with lock:
+                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                diff = handle.get_version_diff(
+                    resolved_domain_path,
+                    from_version=from_version,
+                    to_version=to_version,
+                    range_limit=range_limit,
+                )
+                return {
+                    "target": name,
+                    "program": resolved_domain_path,
+                    **diff,
+                }
+
     def _current_sync_status_locked(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
         return handle.get_sync_status(resolved_domain_path)
+
+    def _reload_active_program_after_checkout_locked(self, name: str, domain_path: str) -> None:
+        if not self._is_active_domain_path_locked(name, domain_path):
+            return
+        self._run_with_reopened_program_locked(
+            name,
+            operation=lambda _active_handle, _active_domain_path: None,
+            save_before_close=False,
+        )
 
     def _resolve_sync_target_locked(
         self,
@@ -534,6 +620,27 @@ class SessionRegistry:
         if session is None:
             return False
         return self._session_domain_path(session) == domain_path
+
+    def _save_active_program_if_needed_locked(
+        self,
+        name: str,
+        domain_path: str,
+        *,
+        handle: ProjectHandle | None = None,
+    ) -> bool:
+        if not self._is_active_domain_path_locked(name, domain_path):
+            return False
+        session = self._sessions.get(name)
+        if session is None:
+            return False
+        program = session.get_program()
+
+        active_handle = handle or session.get_project_handle()
+        try:
+            active_handle.project.save(program)
+        except Exception as exc:
+            raise RuntimeError(f"SAVE_FAILED: プログラム保存に失敗しました: {exc}") from exc
+        return True
 
     def _run_sync_operation_for_domain_locked(
         self,
@@ -771,6 +878,24 @@ class SessionRegistry:
         if not status.get("is_versioned"):
             raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
 
+    def _ensure_checkout_for_mutating_command_locked(self, command: str, target: str) -> None:
+        if command not in _CHECKOUT_REQUIRED_COMMANDS:
+            return
+        session = self._sessions.get(target)
+        if session is None:
+            return
+        handle = session.get_project_handle()
+        domain_path = self._session_domain_path(session)
+        status = handle.get_sync_status(domain_path)
+        if not status.get("is_versioned"):
+            return
+        if status.get("is_checked_out"):
+            return
+        raise RuntimeError(
+            "CHECKOUT_REQUIRED: 共有プロジェクトの更新系操作には checkout が必要です。"
+            "先に checkout_project_program を実行してください"
+        )
+
     def call(
         self,
         command: str,
@@ -781,6 +906,7 @@ class SessionRegistry:
             self._ensure(target)
             lock = self._lock(target)
             with lock:
+                self._ensure_checkout_for_mutating_command_locked(command, target)
                 return _core().execute(command, params or {}, key=target)
 
 _registry = SessionRegistry()
@@ -1404,6 +1530,30 @@ def reload_project_program(
     return _registry.reload_project_program(target, domain_path=domain_path)
 
 
+def get_version_history(
+    target: str,
+    limit: Annotated[int, Field(description="返却する履歴件数の上限")] = 50,
+    domain_path: Annotated[str | None, Field(description="履歴取得対象のdomain path。未指定時は現在ロード中のprogram")] = None,
+):
+    return _registry.get_version_history(target, domain_path=domain_path, limit=limit)
+
+
+def get_version_diff(
+    target: str,
+    from_version: Annotated[int, Field(description="比較元バージョン")],
+    to_version: Annotated[int, Field(description="比較先バージョン")],
+    range_limit: Annotated[int, Field(description="返却する差分アドレスレンジ件数の上限")] = 200,
+    domain_path: Annotated[str | None, Field(description="差分取得対象のdomain path。未指定時は現在ロード中のprogram")] = None,
+):
+    return _registry.get_version_diff(
+        target,
+        from_version=from_version,
+        to_version=to_version,
+        domain_path=domain_path,
+        range_limit=range_limit,
+    )
+
+
 def register_shared_project_sync_tools() -> None:
     global _shared_project_sync_tools_registered
     if _shared_project_sync_tools_registered:
@@ -1412,6 +1562,14 @@ def register_shared_project_sync_tools() -> None:
     mcp.add_tool(
         get_project_sync_status,
         description="Get shared-project version-control status for the target program",
+    )
+    mcp.add_tool(
+        get_version_history,
+        description="Get version history metadata for the target program in a shared project",
+    )
+    mcp.add_tool(
+        get_version_diff,
+        description="Get a summary of differences between two shared-project versions of the target program",
     )
     mcp.add_tool(
         checkout_project_program,

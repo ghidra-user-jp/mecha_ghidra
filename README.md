@@ -49,6 +49,7 @@ PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとし�
 - `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
 - shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
+- shared project で `rename_*` / `set_*` など更新系ツールを使う場合は、先に `checkout_project_program` が必要です（未checkout時は `CHECKOUT_REQUIRED` エラー）。
 - shared project 同期ツールの `commit/pull/undo_checkout` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
 - Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
 - `pull_project_program(on_local_changes="discard")` は `undoCheckout(keep=False)` のみを使用し、force 破棄は行いません。
@@ -234,9 +235,11 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 #### Shared Project Sync (`--enable-shared-project-sync` 指定時のみ)
 
-`get_project_sync_status` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` は `domain_path` を任意指定できます（未指定時は現在ロード中のprogram）。
+`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` は `domain_path` を任意指定できます（未指定時は現在ロード中のprogram）。
 
 - `get_project_sync_status` - shared project 上の同期状態を取得
+- `get_version_history` - バージョン履歴（version/user/comment/time）を取得
+- `get_version_diff` - 2バージョン間の差分要約（件数/タイプ別/アドレスレンジ）を取得
 - `checkout_project_program` - プログラムを checkout（排他指定可）
 - `add_project_program_to_version_control` - private プログラムを shared 管理へ追加
 - `commit_project_program` - checkout 中の変更を check-in

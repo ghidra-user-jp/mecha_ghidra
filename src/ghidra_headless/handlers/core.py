@@ -103,6 +103,7 @@ def _to_int_auto(value):
 
 
 def _txn(ctx, description, func):
+    _ensure_checkout_for_versioned_program(ctx)
     tx_id = ctx.program.startTransaction(description)
     success = False
     try:
@@ -111,6 +112,36 @@ def _txn(ctx, description, func):
         return result
     finally:
         ctx.program.endTransaction(tx_id, success)
+
+
+def _safe_call(obj, name, *args):
+    method = getattr(obj, name, None)
+    if method is None:
+        return None
+    try:
+        return method(*args)
+    except Exception:
+        return None
+
+
+def _ensure_checkout_for_versioned_program(ctx):
+    program = getattr(ctx, "program", None)
+    if program is None:
+        return
+    domain_file = _safe_call(program, "getDomainFile")
+    if domain_file is None:
+        return
+
+    is_versioned = _safe_call(domain_file, "isVersioned")
+    if not bool(is_versioned):
+        return
+    is_checked_out = _safe_call(domain_file, "isCheckedOut")
+    if bool(is_checked_out):
+        return
+    raise RuntimeError(
+        "CHECKOUT_REQUIRED: 共有プロジェクトの更新系操作には checkout が必要です。"
+        "先に checkout_project_program を実行してください"
+    )
 
 
 def _find_function_by_name(ctx, name):

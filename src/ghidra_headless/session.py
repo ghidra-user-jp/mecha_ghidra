@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import pathlib
 import threading
@@ -16,6 +17,9 @@ logger = logging.getLogger(__name__)
 _FLAT_API_CLASS = None
 _CONSOLE_MONITOR_CLASS = None
 _DEFAULT_CHECKIN_HANDLER_CLASS = None
+_PROGRAM_DIFF_CLASS = None
+_PROGRAM_DIFF_FILTER_CLASS = None
+_JAVA_OBJECT_CLASS = None
 
 
 def _flat_program_api_class():
@@ -37,6 +41,27 @@ def _default_checkin_handler_class():
     if _DEFAULT_CHECKIN_HANDLER_CLASS is None:
         _DEFAULT_CHECKIN_HANDLER_CLASS = pycore.JClass("ghidra.framework.data.DefaultCheckinHandler")
     return _DEFAULT_CHECKIN_HANDLER_CLASS
+
+
+def _program_diff_class():
+    global _PROGRAM_DIFF_CLASS
+    if _PROGRAM_DIFF_CLASS is None:
+        _PROGRAM_DIFF_CLASS = pycore.JClass("ghidra.program.util.ProgramDiff")
+    return _PROGRAM_DIFF_CLASS
+
+
+def _program_diff_filter_class():
+    global _PROGRAM_DIFF_FILTER_CLASS
+    if _PROGRAM_DIFF_FILTER_CLASS is None:
+        _PROGRAM_DIFF_FILTER_CLASS = pycore.JClass("ghidra.program.util.ProgramDiffFilter")
+    return _PROGRAM_DIFF_FILTER_CLASS
+
+
+def _java_object():
+    global _JAVA_OBJECT_CLASS
+    if _JAVA_OBJECT_CLASS is None:
+        _JAVA_OBJECT_CLASS = pycore.JClass("java.lang.Object")
+    return _JAVA_OBJECT_CLASS()
 
 
 class ProgramSession:
@@ -177,6 +202,109 @@ class ProjectHandle:
                 raise RuntimeError("プロジェクトはクローズ済みです")
             domain_file = self._get_domain_file_locked(domain_path)
             return _sync_status_from_domain_file(domain_file)
+
+    def get_version_history(self, domain_path: str, *, limit: int = 50) -> Dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            normalized_limit = int(limit)
+            if normalized_limit < 1:
+                raise ValueError("limit は1以上を指定してください")
+            domain_file = self._get_domain_file_locked(domain_path)
+            if not bool(_required_call(domain_file, "isVersioned")):
+                raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
+            versions = _get_version_history_entries(domain_file)
+            versions.sort(key=lambda item: item["version"], reverse=True)
+            current_version = int(_required_call(domain_file, "getVersion"))
+            latest_version = int(_required_call(domain_file, "getLatestVersion"))
+            return {
+                "program": domain_path,
+                "current_version": current_version,
+                "latest_version": latest_version,
+                "total_versions": len(versions),
+                "versions": versions[:normalized_limit],
+            }
+
+    def get_version_diff(
+        self,
+        domain_path: str,
+        *,
+        from_version: int,
+        to_version: int,
+        range_limit: int = 200,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("プロジェクトはクローズ済みです")
+            source_version = int(from_version)
+            target_version = int(to_version)
+            if source_version < 1 or target_version < 1:
+                raise ValueError("from_version と to_version は1以上を指定してください")
+            normalized_range_limit = int(range_limit)
+            if normalized_range_limit < 0:
+                raise ValueError("range_limit は0以上を指定してください")
+
+            domain_file = self._get_domain_file_locked(domain_path)
+            if not bool(_required_call(domain_file, "isVersioned")):
+                raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
+
+            versions = _get_version_history_entries(domain_file)
+            known_versions = {item["version"] for item in versions}
+            if source_version not in known_versions:
+                raise RuntimeError(
+                    f"VERSION_NOT_FOUND: from_version={source_version} が履歴にありません"
+                )
+            if target_version not in known_versions:
+                raise RuntimeError(
+                    f"VERSION_NOT_FOUND: to_version={target_version} が履歴にありません"
+                )
+
+            result = {
+                "program": domain_path,
+                "from_version": source_version,
+                "to_version": target_version,
+                "total_diff_addresses": 0,
+                "total_diff_ranges": 0,
+                "diff_types": [],
+                "ranges": [],
+                "ranges_truncated": False,
+                "warnings": None,
+            }
+            if source_version == target_version:
+                return result
+
+            monitor = _console_monitor()
+            from_consumer = _java_object()
+            to_consumer = _java_object()
+            from_program = None
+            to_program = None
+            try:
+                from_program = domain_file.getReadOnlyDomainObject(from_consumer, source_version, monitor)
+                to_program = domain_file.getReadOnlyDomainObject(to_consumer, target_version, monitor)
+                if from_program is None or to_program is None:
+                    raise RuntimeError(
+                        f"VERSION_LOAD_FAILED: version {source_version} または {target_version} を開けませんでした"
+                    )
+                program_diff = _program_diff_class()(from_program, to_program)
+                differences = program_diff.getDifferences(monitor)
+
+                type_counts = _collect_diff_type_counts(program_diff, differences, monitor)
+                ranges, truncated = _collect_diff_ranges(differences, limit=normalized_range_limit)
+                warnings = program_diff.getWarnings()
+                result.update(
+                    {
+                        "total_diff_addresses": int(differences.getNumAddresses()) if differences is not None else 0,
+                        "total_diff_ranges": int(differences.getNumAddressRanges()) if differences is not None else 0,
+                        "diff_types": type_counts,
+                        "ranges": ranges,
+                        "ranges_truncated": truncated,
+                        "warnings": None if warnings is None else str(warnings),
+                    }
+                )
+                return result
+            finally:
+                _release_domain_object(from_program, from_consumer)
+                _release_domain_object(to_program, to_consumer)
 
     def checkout_program(self, domain_path: str, *, exclusive: bool = False) -> bool:
         with self._lock:
@@ -434,3 +562,88 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
         "checkouts": checkouts_list,
         "shared_project_url": None if shared_url is None else str(shared_url),
     }
+
+
+def _get_version_history_entries(domain_file) -> list[Dict[str, Any]]:
+    history = _required_call(domain_file, "getVersionHistory")
+    if history is None:
+        return []
+    entries: list[Dict[str, Any]] = []
+    for item in list(history):
+        version_num = _safe_call(item, "getVersion")
+        if version_num is None:
+            continue
+        timestamp = _safe_call(item, "getCreateTime")
+        entries.append(
+            {
+                "version": int(version_num),
+                "user": _safe_call(item, "getUser"),
+                "comment": _safe_call(item, "getComment"),
+                "create_time": timestamp,
+                "create_time_iso": _to_iso8601_utc(timestamp),
+            }
+        )
+    return entries
+
+
+def _collect_diff_type_counts(program_diff, differences, monitor) -> list[Dict[str, Any]]:
+    if differences is None:
+        return []
+    diff_filter = _program_diff_filter_class()()
+    counts: list[Dict[str, Any]] = []
+    for diff_type in list(diff_filter.getPrimaryTypes()):
+        normalized_type = int(diff_type)
+        type_diffs = program_diff.getTypeDiffs(normalized_type, differences, monitor)
+        count = 0 if type_diffs is None else int(type_diffs.getNumAddresses())
+        if count <= 0:
+            continue
+        counts.append(
+            {
+                "type": str(diff_filter.typeToName(normalized_type)),
+                "count": count,
+            }
+        )
+    counts.sort(key=lambda item: item["count"], reverse=True)
+    return counts
+
+
+def _collect_diff_ranges(differences, *, limit: int) -> tuple[list[Dict[str, Any]], bool]:
+    if differences is None:
+        return [], False
+    total_ranges = int(differences.getNumAddressRanges())
+    if limit == 0:
+        return [], total_ranges > 0
+    ranges: list[Dict[str, Any]] = []
+    for idx, addr_range in enumerate(differences.getAddressRanges()):
+        if idx >= limit:
+            break
+        ranges.append(
+            {
+                "start": str(addr_range.getMinAddress()),
+                "end": str(addr_range.getMaxAddress()),
+                "length": int(addr_range.getLength()),
+            }
+        )
+    return ranges, total_ranges > len(ranges)
+
+
+def _release_domain_object(domain_object, consumer) -> None:
+    if domain_object is None:
+        return
+    try:
+        domain_object.release(consumer)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to release domain object: %s", exc)
+
+
+def _to_iso8601_utc(timestamp_millis) -> Optional[str]:
+    if timestamp_millis is None:
+        return None
+    try:
+        timestamp = int(timestamp_millis) / 1000.0
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return _dt.datetime.fromtimestamp(timestamp, tz=_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:  # noqa: BLE001
+        return None
