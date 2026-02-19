@@ -1,3 +1,5 @@
+<img width="4096" height="700" alt="mecha_ghidra_one_line" src="https://github.com/user-attachments/assets/def48147-f8cf-4a6a-b4e6-cb3a43798d56" />
+
 # Mecha Ghidra — Headless Ghidra MCP for Ghidra Server
 PyGhidra を利用して Ghidra のヘッドレス機能を MCP ツールとして公開する Python パッケージです。従来の Jython スクリプトによる HTTP サーバーを置き換え、純粋な Python 3.10 以降の環境で Ghidra プロジェクトを操作できます。
 
