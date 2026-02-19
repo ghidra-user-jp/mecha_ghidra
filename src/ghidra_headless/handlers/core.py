@@ -1527,7 +1527,7 @@ def add_class_members(params):
             class_name,
             parent_namespace,
             create_class_if_missing=False,
-            create_struct_if_missing=True,
+            create_struct_if_missing=False,
         )
         _apply_members_to_struct(ctx, struct, members)
         _dt_manager(ctx).replaceDataType(struct, struct, True)
@@ -1654,6 +1654,7 @@ def add_bookmark(params):
     category = params.get("category")
     comment = params.get("comment", "")
     bookmark_type = params.get("type")
+    _bookmark_format = params.get("format", "json")
     if not address_text or not category or bookmark_type is None:
         raise ValueError("address, category, type は必須です")
 

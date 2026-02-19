@@ -1341,11 +1341,18 @@ def add_bookmark(
     category: str,
     comment: str,
     type: str,
+    format: str = "json",
     target: str = "default",
 ):
     return _registry.call(
         "add_bookmark",
-        {"address": address, "category": category, "comment": comment, "type": type},
+        {
+            "address": address,
+            "category": category,
+            "comment": comment,
+            "type": type,
+            "format": format,
+        },
         target,
     )
 

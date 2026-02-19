@@ -358,3 +358,34 @@ def test_set_global_data_type_reads_clear_mode_param():
             break
 
     assert reads_clear_mode, "set_global_data_type は clear_mode パラメータを受け取る必要があります"
+
+
+def test_create_class_command_exists_in_supported_commands():
+    core_module = _load_ast(CORE_PATH)
+    supported = _supported_commands(core_module)
+    assert "create_class" in supported
+    assert supported["create_class"] == "create_class"
+
+
+def test_add_class_members_does_not_create_struct_implicitly():
+    core_module = _load_ast(CORE_PATH)
+    add_class_members = _find_function_def(core_module, "add_class_members")
+
+    has_strict_struct_binding = False
+    for node in ast.walk(add_class_members):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "_ensure_class_struct":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "create_struct_if_missing":
+                continue
+            if isinstance(keyword.value, ast.Constant) and keyword.value.value is False:
+                has_strict_struct_binding = True
+                break
+        if has_strict_struct_binding:
+            break
+
+    assert has_strict_struct_binding, "add_class_members はクラス構造体を暗黙作成せず既存紐付けを利用する必要があります"

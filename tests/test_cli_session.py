@@ -575,9 +575,36 @@ def test_add_bookmark_tool_invokes_core(monkeypatch):
             "category": "Analysis",
             "comment": "Check this later",
             "type": "Info",
+            "format": "json",
         },
         "target": "note",
     }
+
+
+def test_add_bookmark_tool_allows_format_override(monkeypatch):
+    recorded = {}
+
+    def fake_call(self, command, params, target):
+        recorded["command"] = command
+        recorded["params"] = params
+        recorded["target"] = target
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli.SessionRegistry, "call", fake_call)
+
+    result = cli.add_bookmark(
+        address="0x401000",
+        category="Analysis",
+        comment="Check this later",
+        type="Info",
+        format="legacy",
+        target="note",
+    )
+
+    assert result == {"status": "ok"}
+    assert recorded["command"] == "add_bookmark"
+    assert recorded["params"]["format"] == "legacy"
+    assert recorded["target"] == "note"
 
 
 def test_list_functions_tool_forwards_offset_and_limit(monkeypatch):
