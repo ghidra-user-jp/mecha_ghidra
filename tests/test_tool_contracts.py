@@ -253,3 +253,108 @@ def test_txn_requires_checkout_guard_for_versioned_program():
             break
 
     assert guard_call_found, "_txn の先頭で checkout ガードを実行する必要があります"
+
+
+def _find_function_def(module: ast.Module, function_name: str) -> ast.FunctionDef:
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return node
+    raise AssertionError(f"{function_name} が見つかりません")
+
+
+def test_rename_variable_reads_parameters_for_argument_rename():
+    core_module = _load_ast(CORE_PATH)
+    rename_variable = _find_function_def(core_module, "rename_variable")
+
+    has_get_parameters = False
+    for node in ast.walk(rename_variable):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "getParameters"
+        ):
+            has_get_parameters = True
+            break
+
+    assert has_get_parameters, "rename_variable は引数リネームのため getParameters を参照する必要があります"
+
+
+def test_set_function_prototype_uses_apply_function_signature_cmd():
+    core_module = _load_ast(CORE_PATH)
+    set_function_prototype = _find_function_def(core_module, "set_function_prototype")
+
+    uses_apply_cmd = False
+    uses_set_prototype_string = False
+
+    for node in ast.walk(set_function_prototype):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "ApplyFunctionSignatureCmd":
+            uses_apply_cmd = True
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "setPrototypeString":
+            uses_set_prototype_string = True
+
+    assert uses_apply_cmd, "set_function_prototype は ApplyFunctionSignatureCmd を使う必要があります"
+    assert not uses_set_prototype_string, "set_function_prototype で setPrototypeString は使わないでください"
+
+
+def test_parse_data_type_does_not_call_find_data_types_directly():
+    core_module = _load_ast(CORE_PATH)
+    parse_data_type = _find_function_def(core_module, "_parse_data_type")
+
+    has_direct_find_data_types = False
+    for node in ast.walk(parse_data_type):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "findDataTypes"
+        ):
+            has_direct_find_data_types = True
+            break
+
+    assert not has_direct_find_data_types, "_parse_data_type で dtm.findDataTypes を直接呼ばないでください"
+
+
+def test_set_local_variable_type_uses_high_symbol_update_path():
+    core_module = _load_ast(CORE_PATH)
+    set_local_variable_type = _find_function_def(core_module, "set_local_variable_type")
+
+    uses_high_function = False
+    uses_update_db_variable = False
+
+    for node in ast.walk(set_local_variable_type):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "_decompile_high_function":
+                uses_high_function = True
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "HighFunctionDBUtil"
+                and node.func.attr == "updateDBVariable"
+            ):
+                uses_update_db_variable = True
+
+    assert uses_high_function, "set_local_variable_type は高レベルデコンパイル結果を利用する必要があります"
+    assert uses_update_db_variable, "set_local_variable_type は HighFunctionDBUtil.updateDBVariable を使う必要があります"
+
+
+def test_set_global_data_type_reads_clear_mode_param():
+    core_module = _load_ast(CORE_PATH)
+    set_global_data_type = _find_function_def(core_module, "set_global_data_type")
+
+    reads_clear_mode = False
+    for node in ast.walk(set_global_data_type):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "params"
+            and node.func.attr == "get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "clear_mode"
+        ):
+            reads_clear_mode = True
+            break
+
+    assert reads_clear_mode, "set_global_data_type は clear_mode パラメータを受け取る必要があります"

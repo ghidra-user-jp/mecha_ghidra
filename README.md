@@ -87,11 +87,11 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 - `rename_function` - 関数名を変更（名前指定）
 - `rename_function_by_address` - 関数名を変更（アドレス指定）
-- `rename_variable` - ローカル変数名を変更
+- `rename_variable` - ローカル変数名/引数名を変更
 - `rename_data` - データラベル名を変更
 - `set_function_prototype` - 関数プロトタイプを設定
-- `set_local_variable_type` - ローカル変数の型を設定
-- `set_global_data_type` - グローバルデータの型を設定
+- `set_local_variable_type` - ローカル変数/引数の型を設定
+- `set_global_data_type` - グローバルデータの型を設定（`clear_mode` 指定可）
 - `set_bytes` - メモリ内容をバイト列で書き換え
 - `set_decompiler_comment` - デコンパイラコメントを設定
 - `set_disassembly_comment` - 逆アセンブリコメントを設定
@@ -108,6 +108,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `add_enum_values` - 列挙体の値を追加
 - `remove_enum_values` - 列挙体の値を削除
 - `get_enum` - 列挙体定義を取得
+- `create_class` - GhidraClass 名前空間と対応構造体を作成
 - `add_class_members` - クラス相当データ型へメンバーを追加
 - `remove_class_members` - クラス相当データ型からメンバーを削除
 

@@ -45,6 +45,7 @@ _CHECKOUT_REQUIRED_COMMANDS = {
     "set_local_variable_type",
     "set_global_data_type",
     "create_struct",
+    "create_class",
     "add_struct_members",
     "clear_struct",
     "create_enum",
@@ -1246,12 +1247,30 @@ def set_global_data_type(
     address: str,
     data_type: str,
     length: int | None = None,
+    clear_mode: str | None = None,
     target: str = "default",
 ):
     params: Dict[str, Any] = {"address": address, "data_type": data_type}
     if length is not None:
         params["length"] = length
+    if clear_mode:
+        params["clear_mode"] = clear_mode
     return _registry.call("set_global_data_type", params, target)
+
+
+@mcp.tool()
+def create_class(
+    name: str,
+    parent_namespace: str | None = None,
+    members: list[dict] | None = None,
+    target: str = "default",
+):
+    params: Dict[str, Any] = {"name": name}
+    if parent_namespace:
+        params["parent_namespace"] = parent_namespace
+    if members:
+        params["members"] = members
+    return _registry.call("create_class", params, target)
 
 
 @mcp.tool()
