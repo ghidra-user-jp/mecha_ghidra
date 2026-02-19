@@ -389,3 +389,84 @@ def test_add_class_members_does_not_create_struct_implicitly():
             break
 
     assert has_strict_struct_binding, "add_class_members はクラス構造体を暗黙作成せず既存紐付けを利用する必要があります"
+
+
+def _calls_function(fn: ast.FunctionDef, function_name: str) -> bool:
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == function_name:
+            return True
+    return False
+
+
+def test_list_classes_uses_namespace_iterator_helper():
+    core_module = _load_ast(CORE_PATH)
+    list_classes = _find_function_def(core_module, "list_classes")
+    assert _calls_function(list_classes, "_iter_namespaces")
+
+
+def test_list_namespaces_uses_namespace_iterator_helper():
+    core_module = _load_ast(CORE_PATH)
+    list_namespaces = _find_function_def(core_module, "list_namespaces")
+    assert _calls_function(list_namespaces, "_iter_namespaces")
+
+
+def test_list_exports_uses_export_compatibility_helper():
+    core_module = _load_ast(CORE_PATH)
+    list_exports = _find_function_def(core_module, "list_exports")
+    assert _calls_function(list_exports, "_is_exported_symbol")
+
+
+def test_get_xrefs_from_uses_iter_items_for_reference_arrays():
+    core_module = _load_ast(CORE_PATH)
+    get_xrefs_from = _find_function_def(core_module, "get_xrefs_from")
+    assert _calls_function(get_xrefs_from, "_iter_items")
+
+
+def test_find_ghidra_class_uses_iter_items_for_symbol_collections():
+    core_module = _load_ast(CORE_PATH)
+    find_ghidra_class = _find_function_def(core_module, "_find_ghidra_class")
+    assert _calls_function(find_ghidra_class, "_iter_items")
+
+
+def test_get_enum_does_not_require_concrete_enumdatatype_instance():
+    core_module = _load_ast(CORE_PATH)
+    get_enum = _find_function_def(core_module, "get_enum")
+
+    uses_concrete_isinstance_check = False
+    for node in ast.walk(get_enum):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "isinstance":
+            continue
+        if len(node.args) < 2:
+            continue
+        target = node.args[1]
+        if isinstance(target, ast.Name) and target.id == "EnumDataType":
+            uses_concrete_isinstance_check = True
+            break
+
+    assert not uses_concrete_isinstance_check, "get_enum は EnumDataType 具象型への厳格依存を避ける必要があります"
+
+
+def test_execute_wraps_handler_result_with_json_safe():
+    core_module = _load_ast(CORE_PATH)
+    execute = _find_function_def(core_module, "execute")
+
+    wraps_json_safe = False
+    for node in ast.walk(execute):
+        if not isinstance(node, ast.Return):
+            continue
+        call = node.value
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_json_safe"
+            and call.args
+            and isinstance(call.args[0], ast.Call)
+            and isinstance(call.args[0].func, ast.Name)
+            and call.args[0].func.id == "handler"
+        ):
+            wraps_json_safe = True
+            break
+
+    assert wraps_json_safe, "execute は返却値を _json_safe で正規化する必要があります"

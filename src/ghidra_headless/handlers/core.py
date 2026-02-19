@@ -128,6 +128,139 @@ def _safe_call(obj, name, *args):
         return None
 
 
+def _iter_items(items):
+    if items is None:
+        return
+
+    has_next = getattr(items, "hasNext", None)
+    next_item = getattr(items, "next", None)
+    if callable(has_next) and callable(next_item):
+        while bool(has_next()):
+            yield next_item()
+        return
+
+    iterator_fn = getattr(items, "iterator", None)
+    if callable(iterator_fn):
+        iterator = _safe_call(items, "iterator")
+        if iterator is not None:
+            for item in _iter_items(iterator):
+                yield item
+            return
+
+    try:
+        for item in items:
+            yield item
+        return
+    except Exception:
+        pass
+
+    if callable(next_item):
+        while True:
+            try:
+                yield next_item()
+            except Exception:
+                break
+
+
+def _json_safe(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+
+    has_next = getattr(value, "hasNext", None)
+    next_item = getattr(value, "next", None)
+    if callable(has_next) and callable(next_item):
+        return [_json_safe(v) for v in _iter_items(value)]
+
+    iterator_fn = getattr(value, "iterator", None)
+    if callable(iterator_fn):
+        return [_json_safe(v) for v in _iter_items(value)]
+
+    return str(value)
+
+
+def _namespace_key(namespace):
+    namespace_id = _safe_call(namespace, "getID")
+    if namespace_id is not None:
+        return "id:%s" % namespace_id
+    full_name = _safe_call(namespace, "getName", True)
+    if full_name:
+        return "name:%s" % full_name
+    return "repr:%s" % namespace
+
+
+def _iter_symbol_table_symbols(symbol_table):
+    probes = [
+        ("getAllSymbols", (True,)),
+        ("getAllSymbols", ()),
+        ("getSymbolIterator", (True,)),
+        ("getSymbolIterator", ()),
+    ]
+    for method_name, args in probes:
+        symbols = _safe_call(symbol_table, method_name, *args)
+        if symbols is None:
+            continue
+        for symbol in _iter_items(symbols):
+            yield symbol
+        return
+
+
+def _iter_namespaces(ctx):
+    manager = getattr(ctx, "namespace_manager", None)
+    if manager is not None:
+        for args in ((True,), ()):
+            namespaces = _safe_call(manager, "getNamespaces", *args)
+            if namespaces is None:
+                continue
+            for namespace in _iter_items(namespaces):
+                yield namespace
+            return
+
+    seen = set()
+    for symbol in _iter_symbol_table_symbols(ctx.symbol_table):
+        parent = _safe_call(symbol, "getParentNamespace")
+        if parent is not None and not bool(_safe_call(parent, "isGlobal")):
+            key = _namespace_key(parent)
+            if key not in seen:
+                seen.add(key)
+                yield parent
+
+        symbol_type = _safe_call(symbol, "getSymbolType")
+        if symbol_type is None or str(symbol_type).upper() != "CLASS":
+            continue
+        class_namespace = _safe_call(symbol, "getObject")
+        if class_namespace is None or bool(_safe_call(class_namespace, "isGlobal")):
+            continue
+        class_key = _namespace_key(class_namespace)
+        if class_key in seen:
+            continue
+        seen.add(class_key)
+        yield class_namespace
+
+
+def _is_exported_symbol(ctx, symbol):
+    if symbol is None:
+        return False
+
+    exported = _safe_call(symbol, "isExported")
+    if exported is not None:
+        return bool(exported)
+
+    exported = _safe_call(symbol, "isExternalEntryPoint")
+    if exported is not None:
+        return bool(exported)
+
+    address = _safe_call(symbol, "getAddress")
+    if address is not None:
+        exported = _safe_call(ctx.symbol_table, "isExternalEntryPoint", address)
+        if exported is not None:
+            return bool(exported)
+    return False
+
+
 def _ensure_checkout_for_versioned_program(ctx):
     program = getattr(ctx, "program", None)
     if program is None:
@@ -179,8 +312,7 @@ def _collect(iterator, offset, limit, to_value):
         offset = 0
     result = []
     idx = 0
-    while iterator.hasNext():
-        item = iterator.next()
+    for item in _iter_items(iterator):
         if idx >= offset:
             result.append(to_value(item))
             if len(result) >= limit:
@@ -514,8 +646,7 @@ def _resolve_namespace(ctx, namespace_path):
 
 def _find_ghidra_class(ctx, class_name, parent_namespace):
     symbols = ctx.symbol_table.getSymbols(class_name, parent_namespace)
-    while symbols.hasNext():
-        symbol = symbols.next()
+    for symbol in _iter_items(symbols):
         symbol_type = _safe_call(symbol, "getSymbolType")
         if symbol_type is None or str(symbol_type).upper() != "CLASS":
             continue
@@ -655,25 +786,17 @@ def list_classes(params):
     offset = _to_int(params.get("offset"), 0)
     limit = _to_int(params.get("limit"), 100)
 
-    namespace_iter = ctx.namespace_manager.getNamespaces(True)
-
     def _to_entry(namespace):
         return {
             "name": namespace.getName(True),
-            "isClass": namespace.isClass(),
+            "isClass": bool(_safe_call(namespace, "isClass")) or False,
         }
-
-    # skip グローバル名前空間
-    def _filtered(iterator):
-        while iterator.hasNext():
-            ns = iterator.next()
-            if ns.isGlobal():
-                continue
-            yield ns
 
     items = []
     idx = 0
-    for namespace in _filtered(namespace_iter):
+    for namespace in _iter_namespaces(ctx):
+        if bool(_safe_call(namespace, "isGlobal")):
+            continue
         if idx >= offset:
             items.append(_to_entry(namespace))
             if len(items) >= limit:
@@ -811,10 +934,9 @@ def list_exports(params):
     iterator = ctx.function_manager.getFunctions(True)
     exports = []
     idx = 0
-    while iterator.hasNext():
-        function = iterator.next()
+    for function in _iter_items(iterator):
         symbol = function.getSymbol()
-        if symbol is not None and symbol.isExported():
+        if _is_exported_symbol(ctx, symbol):
             if idx >= offset:
                 exports.append(symbol.getName(True))
                 if len(exports) >= limit:
@@ -827,12 +949,10 @@ def list_namespaces(params):
     ctx = ensure_context()
     offset = _to_int(params.get("offset"), 0)
     limit = _to_int(params.get("limit"), 100)
-    iterator = ctx.namespace_manager.getNamespaces(True)
     result = []
     idx = 0
-    while iterator.hasNext():
-        namespace = iterator.next()
-        if namespace.isGlobal():
+    for namespace in _iter_namespaces(ctx):
+        if bool(_safe_call(namespace, "isGlobal")):
             continue
         if idx >= offset:
             result.append(namespace.getName(True))
@@ -995,8 +1115,7 @@ def disassemble_function(params):
     body = function.getBody()
     instructions = ctx.listing.getInstructions(body, True)
     lines = []
-    while instructions.hasNext():
-        inst = instructions.next()
+    for inst in _iter_items(instructions):
         operand_parts = []
         try:
             operand_count = inst.getNumOperands()
@@ -1009,15 +1128,15 @@ def disassemble_function(params):
             except Exception:
                 operand_repr = None
             if operand_repr:
-                operand_parts.append(operand_repr)
+                operand_parts.append(str(operand_repr))
 
         operands = ", ".join(operand_parts)
         comment = inst.getComment(CodeUnit.EOL_COMMENT)
         line = {
             "address": str(inst.getAddress()),
-            "mnemonic": inst.getMnemonicString(),
-            "operands": operands,
-            "comment": comment or "",
+            "mnemonic": str(inst.getMnemonicString()),
+            "operands": str(operands),
+            "comment": str(comment) if comment else "",
         }
         lines.append(line)
     return lines
@@ -1153,8 +1272,7 @@ def get_xrefs_to(params):
     references = ctx.reference_manager.getReferencesTo(address)
     items = []
     idx = 0
-    while references.hasNext():
-        ref = references.next()
+    for ref in _iter_items(references):
         if idx >= offset:
             items.append({
                 "from": str(ref.getFromAddress()),
@@ -1175,8 +1293,7 @@ def get_xrefs_from(params):
     references = ctx.reference_manager.getReferencesFrom(address)
     items = []
     idx = 0
-    while references.hasNext():
-        ref = references.next()
+    for ref in _iter_items(references):
         if idx >= offset:
             items.append({
                 "to": str(ref.getToAddress()),
@@ -1202,8 +1319,7 @@ def get_function_xrefs(params):
     references = ctx.reference_manager.getReferencesTo(entry)
     results = []
     idx = 0
-    while references.hasNext():
-        ref = references.next()
+    for ref in _iter_items(references):
         if idx >= offset:
             results.append({
                 "from": str(ref.getFromAddress()),
@@ -1316,7 +1432,20 @@ def clear_struct(params):
         struct = _get_struct_datatype(ctx, struct_name, category)
         if struct is None:
             raise LookupError("構造体が見つかりません: %s" % struct_name)
-        struct.clearComponents()
+        cleared = False
+        clear_components = getattr(struct, "clearComponents", None)
+        if callable(clear_components):
+            clear_components()
+            cleared = True
+        else:
+            num_components = _safe_call(struct, "getNumComponents")
+            if num_components is None:
+                num_components = len(list(_iter_items(struct.getComponents())))
+            for ordinal in range(int(num_components) - 1, -1, -1):
+                struct.delete(ordinal)
+                cleared = True
+        if not cleared:
+            raise RuntimeError("構造体メンバーのクリアに失敗しました")
         _dt_manager(ctx).replaceDataType(struct, struct, True)
         return struct
 
@@ -1343,8 +1472,7 @@ def get_data_by_label(params):
         raise ValueError("labelが必要です")
     symbols = ctx.symbol_table.getSymbols(label)
     results = []
-    while symbols.hasNext():
-        symbol = symbols.next()
+    for symbol in _iter_items(symbols):
         address = symbol.getAddress()
         data = ctx.listing.getDefinedDataAt(address)
         representation = data.getDefaultValueRepresentation() if data else ""
@@ -1446,7 +1574,8 @@ def get_enum(params):
     enum_dt = _get_enum_datatype(ctx, name, category)
     if enum_dt is None:
         raise LookupError("列挙体が見つかりません: %s" % name)
-    if not isinstance(enum_dt, EnumDataType):
+    class_name = _safe_call(_safe_call(enum_dt, "getClass"), "getName")
+    if not class_name or "Enum" not in str(class_name):
         raise TypeError("指定されたデータ型は列挙型ではありません")
     return _describe_enum(enum_dt)
 
@@ -1641,11 +1770,12 @@ def get_callee(params):
     if function is None:
         raise LookupError("関数が見つかりません: %s" % address_text)
     callees = function.getCalledFunctions(TaskMonitor.DUMMY)
-    if function.isThunk() and not callees:
+    callees_list = list(_iter_items(callees))
+    if function.isThunk() and not callees_list:
         thunked = function.getThunkedFunction(False)
         if thunked is not None:
-            callees = thunked.getCalledFunctions(TaskMonitor.DUMMY)
-    return sorted(["%s @ %s" % (callee.getName(True), callee.getEntryPoint()) for callee in callees])
+            callees_list = list(_iter_items(thunked.getCalledFunctions(TaskMonitor.DUMMY)))
+    return sorted(["%s @ %s" % (callee.getName(True), callee.getEntryPoint()) for callee in callees_list])
 
 
 def add_bookmark(params):
@@ -1730,7 +1860,7 @@ def execute(command, params, key="default"):
     previous = getattr(_THREAD_STATE, "current_key", None)
     _THREAD_STATE.current_key = key
     try:
-        return handler(params or {})
+        return _json_safe(handler(params or {}))
     finally:
         if previous is None:
             if hasattr(_THREAD_STATE, "current_key"):

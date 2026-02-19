@@ -301,3 +301,57 @@ def test_get_version_diff(monkeypatch):
     assert result["warnings"] == "none"
     assert domain_file.programs[1].released == [consumers[0]]
     assert domain_file.programs[2].released == [consumers[1]]
+
+
+def test_list_programs_from_metadata_parses_program_entries(tmp_path):
+    idata = tmp_path / "sample.rep" / "idata" / "00"
+    idata.mkdir(parents=True)
+
+    (idata / "00000001.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="CONTENT_TYPE" TYPE="string" VALUE="Program" />
+    <STATE NAME="PARENT" TYPE="string" VALUE="/folder" />
+    <STATE NAME="NAME" TYPE="string" VALUE="a.bin" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+    (idata / "00000002.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="CONTENT_TYPE" TYPE="string" VALUE="Folder" />
+    <STATE NAME="PARENT" TYPE="string" VALUE="/" />
+    <STATE NAME="NAME" TYPE="string" VALUE="folder" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+    (idata / "00000003.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="CONTENT_TYPE" TYPE="string" VALUE="Program" />
+    <STATE NAME="PARENT" TYPE="string" VALUE="/" />
+    <STATE NAME="NAME" TYPE="string" VALUE="z.bin" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+
+    result = session.ProjectHandle.list_programs_from_metadata(str(tmp_path), "sample")
+
+    assert result == [
+        {"domain_path": "/folder/a.bin", "domain_name": "a.bin", "contentType": "Program"},
+        {"domain_path": "/z.bin", "domain_name": "z.bin", "contentType": "Program"},
+    ]
+
+
+def test_list_programs_from_metadata_returns_none_when_rep_missing(tmp_path):
+    result = session.ProjectHandle.list_programs_from_metadata(str(tmp_path), "sample")
+    assert result is None

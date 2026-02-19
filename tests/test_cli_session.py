@@ -542,6 +542,50 @@ def test_list_programs_for_target_returns_programs():
     assert result == handle_a.list_programs()
 
 
+def test_list_programs_for_project_only_target_uses_metadata(monkeypatch):
+    registry = cli.SessionRegistry()
+    key = (str(Path("/project").resolve()), "Sample")
+    with registry._registry_lock.write_lock():
+        registry._target_projects["a"] = key
+        registry._locks["a"] = threading.RLock()
+
+    expected = [{"domain_path": "/from/metadata", "domain_name": "metadata", "contentType": "Program"}]
+    monkeypatch.setattr(
+        cli.ProjectHandle,
+        "list_programs_from_metadata",
+        staticmethod(lambda project_location, project_name: expected),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_get_or_create_project_handle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not open project handle")),
+    )
+
+    result = registry.list_programs("a")
+
+    assert result == expected
+
+
+def test_list_programs_for_project_only_target_falls_back_to_handle(monkeypatch):
+    registry = cli.SessionRegistry()
+    key = (str(Path("/project").resolve()), "Sample")
+    with registry._registry_lock.write_lock():
+        registry._target_projects["a"] = key
+        registry._locks["a"] = threading.RLock()
+
+    handle = DummyHandle(key=key, name="Sample")
+    monkeypatch.setattr(
+        cli.ProjectHandle,
+        "list_programs_from_metadata",
+        staticmethod(lambda _project_location, _project_name: None),
+    )
+    monkeypatch.setattr(registry, "_get_or_create_project_handle", lambda *_args, **_kwargs: handle)
+
+    result = registry.list_programs("a")
+
+    assert result == handle.list_programs()
+
+
 def test_list_programs_requires_existing_target():
     registry = cli.SessionRegistry()
     with pytest.raises(RuntimeError, match="初期化されていません"):

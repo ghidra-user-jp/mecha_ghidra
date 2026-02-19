@@ -174,7 +174,18 @@ class SessionRegistry:
 
     def list_programs(self, name: str):
         with self._registry_lock.write_lock():
-            handle = self._get_target_handle_locked(name)
+            session = self._sessions.get(name)
+            if session is not None:
+                handle = session.get_project_handle()
+                self._target_projects[name] = handle.get_key()
+                return handle.list_programs()
+
+            key = self._get_target_project_key_locked(name)
+            metadata_programs = ProjectHandle.list_programs_from_metadata(key[0], key[1])
+            if metadata_programs is not None:
+                return metadata_programs
+
+            handle = self._get_or_create_project_handle(key[0], key[1])
             return handle.list_programs()
 
     def load_program(
