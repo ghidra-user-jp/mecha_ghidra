@@ -90,3 +90,214 @@ def test_open_program_allows_reopen_after_release(monkeypatch):
     new_handle = build_handle(monkeypatch)
     session_two = new_handle.open_program("/folder/app")
     assert session_two.get_program().getDomainFile().getPathname() == "/folder/app"
+
+
+def test_sync_status_raises_when_required_call_fails():
+    class BrokenDomainFile:
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _):
+            return None
+
+        def isVersioned(self):
+            raise RuntimeError("backend unavailable")
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
+        session._sync_status_from_domain_file(BrokenDomainFile())
+
+
+def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class FailingDomainFile:
+        def delete(self):
+            raise RuntimeError("delete failed")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return FailingDomainFile()
+
+    class DummyProjectWithFailingDelete(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+    handle.project = DummyProjectWithFailingDelete()
+
+    with pytest.raises(RuntimeError, match="プログラム削除に失敗しました"):
+        handle._delete_program_locked("/folder/app")
+
+
+def test_get_version_history(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class DummyVersion:
+        def __init__(self, version, user, comment, create_time):
+            self._version = version
+            self._user = user
+            self._comment = comment
+            self._create_time = create_time
+
+        def getVersion(self):
+            return self._version
+
+        def getUser(self):
+            return self._user
+
+        def getComment(self):
+            return self._comment
+
+        def getCreateTime(self):
+            return self._create_time
+
+    class DummyVersionedDomainFile:
+        def isVersioned(self):
+            return True
+
+        def getVersion(self):
+            return 2
+
+        def getLatestVersion(self):
+            return 2
+
+        def getVersionHistory(self):
+            return [
+                DummyVersion(1, "alice", "init", 1000),
+                DummyVersion(2, "bob", "update", 2000),
+            ]
+
+    monkeypatch.setattr(handle, "_get_domain_file_locked", lambda _path: DummyVersionedDomainFile())
+
+    result = handle.get_version_history("/folder/app", limit=1)
+
+    assert result["program"] == "/folder/app"
+    assert result["current_version"] == 2
+    assert result["latest_version"] == 2
+    assert result["total_versions"] == 2
+    assert result["versions"][0]["version"] == 2
+    assert result["versions"][0]["create_time_iso"] == "1970-01-01T00:00:02Z"
+
+
+def test_get_version_diff(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class DummyVersion:
+        def __init__(self, version):
+            self._version = version
+
+        def getVersion(self):
+            return self._version
+
+    class DummyProgram:
+        def __init__(self, version):
+            self.version = version
+            self.released = []
+
+        def release(self, consumer):
+            self.released.append(consumer)
+
+    class DummyRange:
+        def __init__(self, start, end, length):
+            self._start = start
+            self._end = end
+            self._length = length
+
+        def getMinAddress(self):
+            return self._start
+
+        def getMaxAddress(self):
+            return self._end
+
+        def getLength(self):
+            return self._length
+
+    class DummyAddressSet:
+        def __init__(self, addresses, ranges):
+            self._addresses = addresses
+            self._ranges = ranges
+
+        def getNumAddresses(self):
+            return self._addresses
+
+        def getNumAddressRanges(self):
+            return len(self._ranges)
+
+        def getAddressRanges(self):
+            return self._ranges
+
+    class DummyProgramDiffFilter:
+        def getPrimaryTypes(self):
+            return [1, 2]
+
+        def typeToName(self, diff_type):
+            return {1: "Bytes", 2: "Functions"}[int(diff_type)]
+
+    class DummyProgramDiff:
+        def __init__(self, _from_program, _to_program):
+            self._diffs = DummyAddressSet(
+                3,
+                [
+                    DummyRange("0x1000", "0x1001", 2),
+                    DummyRange("0x2000", "0x2000", 1),
+                ],
+            )
+
+        def getDifferences(self, _monitor):
+            return self._diffs
+
+        def getTypeDiffs(self, diff_type, _differences, _monitor):
+            mapping = {
+                1: DummyAddressSet(3, [DummyRange("0x1000", "0x1001", 2)]),
+                2: DummyAddressSet(1, [DummyRange("0x2000", "0x2000", 1)]),
+            }
+            return mapping[int(diff_type)]
+
+        def getWarnings(self):
+            return "none"
+
+    class DummyVersionedDomainFile:
+        def __init__(self):
+            self.programs = {}
+
+        def isVersioned(self):
+            return True
+
+        def getVersionHistory(self):
+            return [DummyVersion(1), DummyVersion(2)]
+
+        def getReadOnlyDomainObject(self, consumer, version, _monitor):
+            program = DummyProgram(version)
+            self.programs[int(version)] = program
+            return program
+
+    domain_file = DummyVersionedDomainFile()
+    monkeypatch.setattr(handle, "_get_domain_file_locked", lambda _path: domain_file)
+    monkeypatch.setattr(session, "_program_diff_class", lambda: DummyProgramDiff)
+    monkeypatch.setattr(session, "_program_diff_filter_class", lambda: DummyProgramDiffFilter)
+    monkeypatch.setattr(session, "_console_monitor", lambda: None)
+    consumers = []
+
+    def fake_consumer():
+        consumer = object()
+        consumers.append(consumer)
+        return consumer
+
+    monkeypatch.setattr(session, "_java_object", fake_consumer)
+
+    result = handle.get_version_diff("/folder/app", from_version=1, to_version=2, range_limit=1)
+
+    assert result["program"] == "/folder/app"
+    assert result["total_diff_addresses"] == 3
+    assert result["total_diff_ranges"] == 2
+    assert result["ranges_truncated"] is True
+    assert len(result["ranges"]) == 1
+    assert result["diff_types"] == [
+        {"type": "Bytes", "count": 3},
+        {"type": "Functions", "count": 1},
+    ]
+    assert result["warnings"] == "none"
+    assert domain_file.programs[1].released == [consumers[0]]
+    assert domain_file.programs[2].released == [consumers[1]]

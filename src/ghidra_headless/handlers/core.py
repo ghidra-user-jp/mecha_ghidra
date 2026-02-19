@@ -5,10 +5,12 @@ from __future__ import absolute_import, print_function
 import threading
 from numbers import Integral
 
+import jpype
+
 from ghidra.app.decompiler import DecompInterface
 from ghidra.program.flatapi import FlatProgramAPI
 from ghidra.program.model.listing import CodeUnit
-from ghidra.program.model.symbol import SourceType, SymbolType
+from ghidra.program.model.symbol import SourceType
 from ghidra.program.model.data import (
     CategoryPath,
     StructureDataType,
@@ -32,6 +34,8 @@ from ghidra.util.task import ConsoleTaskMonitor, TaskMonitor
 
 _CONTEXTS = {}
 _THREAD_STATE = threading.local()
+_GHIDRA_PROGRAM_UTILITIES = None
+_GHIDRA_SCRIPT_UTIL = None
 
 
 class HeadlessContext(object):
@@ -99,6 +103,7 @@ def _to_int_auto(value):
 
 
 def _txn(ctx, description, func):
+    _ensure_checkout_for_versioned_program(ctx)
     tx_id = ctx.program.startTransaction(description)
     success = False
     try:
@@ -109,13 +114,49 @@ def _txn(ctx, description, func):
         ctx.program.endTransaction(tx_id, success)
 
 
+def _safe_call(obj, name, *args):
+    method = getattr(obj, name, None)
+    if method is None:
+        return None
+    try:
+        return method(*args)
+    except Exception:
+        return None
+
+
+def _ensure_checkout_for_versioned_program(ctx):
+    program = getattr(ctx, "program", None)
+    if program is None:
+        return
+    domain_file = _safe_call(program, "getDomainFile")
+    if domain_file is None:
+        return
+
+    is_versioned = _safe_call(domain_file, "isVersioned")
+    if not bool(is_versioned):
+        return
+    is_checked_out = _safe_call(domain_file, "isCheckedOut")
+    if bool(is_checked_out):
+        return
+    raise RuntimeError(
+        "CHECKOUT_REQUIRED: 共有プロジェクトの更新系操作には checkout が必要です。"
+        "先に checkout_project_program を実行してください"
+    )
+
+
 def _find_function_by_name(ctx, name):
-    symbol_iter = ctx.symbol_table.getSymbols(name)
-    while symbol_iter.hasNext():
-        symbol = symbol_iter.next()
-        if symbol.getSymbolType() == SymbolType.FUNCTION:
-            return symbol.getObject()
-    return None
+    iterator = ctx.function_manager.getFunctions(True)
+    first_match = None
+    while iterator.hasNext():
+        function = iterator.next()
+        if function.getName() != name:
+            continue
+        if first_match is None:
+            first_match = function
+        body = function.getBody()
+        if body is not None and not body.isEmpty():
+            return function
+    return first_match
 
 
 def _get_address(ctx, address_text):
@@ -128,6 +169,10 @@ def _get_address(ctx, address_text):
 
 
 def _collect(iterator, offset, limit, to_value):
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     result = []
     idx = 0
     while iterator.hasNext():
@@ -150,9 +195,10 @@ def _parse_data_type(ctx, type_str):
 
     dtm = _dt_manager(ctx)
     text = type_str.strip()
-    for needle in (" const", " volatile", "\t", "\n", "\r"):
+    for needle in ("\t", "\n", "\r"):
         text = text.replace(needle, " ")
     text = " ".join(text.split())
+    text = " ".join([token for token in text.split(" ") if token.lower() not in {"const", "volatile"}])
 
     pointer_depth = 0
     while text.endswith("*"):
@@ -213,18 +259,87 @@ def _parse_data_type(ctx, type_str):
     return dt
 
 
+def _new_java_byte_buffer(size):
+    try:
+        return jpype.JArray(jpype.JByte)(size)
+    except Exception:
+        return bytearray(size)
+
+
 def _hexdump(memory, start_address, size):
-    buffer = bytearray(size)
+    buffer = _new_java_byte_buffer(size)
     read = memory.getBytes(start_address, buffer)
     if read < 0:
         raise RuntimeError("メモリの読み取りに失敗しました")
     lines = []
     base = start_address
     for idx in range(0, read, 16):
-        chunk = buffer[idx: idx + 16]
-        hex_part = " ".join(["%02X" % (b & 0xFF) for b in chunk])
+        chunk = [int(buffer[i]) & 0xFF for i in range(idx, min(idx + 16, read))]
+        hex_part = " ".join(["%02X" % b for b in chunk])
         lines.append("%s  %s" % (base.add(idx), hex_part))
     return "\n".join(lines)
+
+
+def _ghidra_program_utilities():
+    global _GHIDRA_PROGRAM_UTILITIES
+    if _GHIDRA_PROGRAM_UTILITIES is None:
+        from ghidra.program.util import GhidraProgramUtilities
+        _GHIDRA_PROGRAM_UTILITIES = GhidraProgramUtilities
+    return _GHIDRA_PROGRAM_UTILITIES
+
+
+def _ghidra_script_util():
+    global _GHIDRA_SCRIPT_UTIL
+    if _GHIDRA_SCRIPT_UTIL is None:
+        from ghidra.app.script import GhidraScriptUtil
+        _GHIDRA_SCRIPT_UTIL = GhidraScriptUtil
+    return _GHIDRA_SCRIPT_UTIL
+
+
+def _analyze_program_if_needed(ctx):
+    utilities = _ghidra_program_utilities()
+    if not utilities.shouldAskToAnalyze(ctx.program):
+        return False
+    script_util = _ghidra_script_util()
+    script_util.acquireBundleHostReference()
+    try:
+        ctx.flat_api.analyzeAll(ctx.program)
+        utilities.markProgramAnalyzed(ctx.program)
+    finally:
+        script_util.releaseBundleHostReference()
+    return True
+
+
+def _decompile_function_object(ctx, function):
+    def _run_decompile():
+        interface = DecompInterface()
+        try:
+            if not interface.openProgram(ctx.program):
+                raise RuntimeError("デコンパイラの初期化に失敗しました")
+            results = interface.decompileFunction(function, 120, ctx.monitor())
+            if results is None:
+                raise RuntimeError("デコンパイルに失敗しました")
+            decompiled = results.getDecompiledFunction()
+            if decompiled is not None:
+                return decompiled.getC()
+            detail = (results.getErrorMessage() or "").strip()
+            if detail:
+                raise RuntimeError("デコンパイル結果が空です: %s" % detail)
+            raise RuntimeError("デコンパイル結果が空です")
+        finally:
+            interface.dispose()
+
+    try:
+        return _run_decompile()
+    except RuntimeError as first_error:
+        analyzed = False
+        try:
+            analyzed = _analyze_program_if_needed(ctx)
+        except Exception:
+            analyzed = False
+        if not analyzed:
+            raise
+        return _run_decompile()
 
 
 def _decode_hex_bytes(hex_string):
@@ -365,18 +480,7 @@ def decompile_function(params):
     if function is None:
         raise LookupError("関数が見つかりません: %s" % name)
 
-    interface = DecompInterface()
-    try:
-        interface.openProgram(ctx.program)
-        results = interface.decompileFunction(function, 60, ctx.monitor())
-        if results is None:
-            raise RuntimeError("デコンパイルに失敗しました")
-        decompiled = results.getDecompiledFunction()
-        if decompiled is None:
-            raise RuntimeError("デコンパイル結果が空です")
-        return decompiled.getC()
-    finally:
-        interface.dispose()
+    return _decompile_function_object(ctx, function)
 
 
 def decompile_function_by_address(params):
@@ -386,7 +490,7 @@ def decompile_function_by_address(params):
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
         raise LookupError("アドレスに対応する関数が見つかりません: %s" % address_text)
-    return decompile_function({"name": function.getName()})
+    return _decompile_function_object(ctx, function)
 
 
 def rename_function(params):
@@ -411,6 +515,8 @@ def rename_function_by_address(params):
     ctx = ensure_context()
     address_text = params.get("function_address")
     new_name = params.get("new_name") or params.get("newName")
+    if not address_text or not new_name:
+        raise ValueError("function_addressとnew_nameは必須です")
     address = _get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
@@ -443,9 +549,15 @@ def rename_data(params):
 
 def list_segments(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     blocks = ctx.program.getMemory().getBlocks()
     result = []
+    idx = 0
     for block in blocks:
+        if idx < offset:
+            idx += 1
+            continue
         entry = {
             "name": block.getName(),
             "start": str(block.getStart()),
@@ -458,40 +570,64 @@ def list_segments(params):
             },
         }
         result.append(entry)
+        if len(result) >= limit:
+            break
+        idx += 1
     return result
 
 
 def list_imports(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     iterator = ctx.symbol_table.getExternalSymbols()
     items = []
+    idx = 0
     while iterator.hasNext():
         symbol = iterator.next()
-        items.append(symbol.getName(True))
+        if idx >= offset:
+            items.append(symbol.getName(True))
+            if len(items) >= limit:
+                break
+        idx += 1
     return items
 
 
 def list_exports(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     iterator = ctx.function_manager.getFunctions(True)
     exports = []
+    idx = 0
     while iterator.hasNext():
         function = iterator.next()
         symbol = function.getSymbol()
         if symbol is not None and symbol.isExported():
-            exports.append(symbol.getName(True))
+            if idx >= offset:
+                exports.append(symbol.getName(True))
+                if len(exports) >= limit:
+                    break
+            idx += 1
     return exports
 
 
 def list_namespaces(params):
     ctx = ensure_context()
+    offset = _to_int(params.get("offset"), 0)
+    limit = _to_int(params.get("limit"), 100)
     iterator = ctx.namespace_manager.getNamespaces(True)
     result = []
+    idx = 0
     while iterator.hasNext():
         namespace = iterator.next()
         if namespace.isGlobal():
             continue
-        result.append(namespace.getName(True))
+        if idx >= offset:
+            result.append(namespace.getName(True))
+            if len(result) >= limit:
+                break
+        idx += 1
     return result
 
 
@@ -594,7 +730,21 @@ def disassemble_function(params):
     lines = []
     while instructions.hasNext():
         inst = instructions.next()
-        operands = inst.getDefaultOperandRepresentation()
+        operand_parts = []
+        try:
+            operand_count = inst.getNumOperands()
+        except Exception:
+            operand_count = 0
+
+        for operand_index in range(operand_count):
+            try:
+                operand_repr = inst.getDefaultOperandRepresentation(operand_index)
+            except Exception:
+                operand_repr = None
+            if operand_repr:
+                operand_parts.append(operand_repr)
+
+        operands = ", ".join(operand_parts)
         comment = inst.getComment(CodeUnit.EOL_COMMENT)
         line = {
             "address": str(inst.getAddress()),
@@ -1002,7 +1152,9 @@ def set_global_data_type(params):
 
     def _apply():
         listing = ctx.listing
-        listing.clearCodeUnits(address, address)
+        clear_length = length if length > 0 else _component_length(data_type)
+        clear_end = address if clear_length <= 1 else address.add(clear_length - 1)
+        listing.clearCodeUnits(address, clear_end)
         if length > 0:
             listing.createData(address, data_type, length)
         else:
