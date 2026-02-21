@@ -6,6 +6,7 @@ import datetime as _dt
 import logging
 import pathlib
 import threading
+import xml.etree.ElementTree as _et
 from typing import Any, Dict, Optional
 
 import pyghidra.core as pycore
@@ -141,6 +142,15 @@ class ProjectHandle:
     @staticmethod
     def make_key(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
         return ProjectHandle.resolve_project_location_and_file(project_location, project_name)
+
+    @staticmethod
+    def list_programs_from_metadata(project_location: str, project_name: Optional[str]) -> Optional[list[Dict[str, str]]]:
+        resolved_location, resolved_name = ProjectHandle.resolve_project_location_and_file(project_location, project_name)
+        rep_dir = pathlib.Path(resolved_location) / f"{resolved_name}.rep"
+        idata_dir = rep_dir / "idata"
+        if not idata_dir.is_dir():
+            return None
+        return _collect_program_files_from_idata(idata_dir)
 
     def get_project_location(self) -> str:
         return self.project_location
@@ -383,6 +393,7 @@ class ProjectHandle:
             if domain_path is None:
                 raise RuntimeError("削除対象プログラムのパスを取得できません")
             domain_key = _parse_domain_path(self.project, domain_path)
+            remove_error = None
             try:
                 if program is not None:
                     self.project.save(program)
@@ -394,11 +405,16 @@ class ProjectHandle:
             except Exception as exc:
                 logger.warning("program close failed: %s", exc)
             if remove_program:
-                self._delete_program_locked(domain_path)
+                try:
+                    self._delete_program_locked(domain_path)
+                except Exception as exc:
+                    remove_error = exc
             self._open_programs.discard(domain_key)
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
                 self._close_project_locked()
+            if remove_error is not None:
+                raise remove_error
 
     def list_programs(self):
         with self._lock:
@@ -488,6 +504,63 @@ def _collect_program_files(folder, results):
             )
     for sub in list(folder.getFolders()):
         _collect_program_files(sub, results)
+
+
+def _collect_program_files_from_idata(idata_dir: pathlib.Path) -> list[Dict[str, str]]:
+    programs: list[Dict[str, str]] = []
+    seen_paths: set[str] = set()
+
+    for prp_path in sorted(idata_dir.rglob("*.prp")):
+        info = _read_prp_basic_info(prp_path)
+        if not info:
+            continue
+        if str(info.get("CONTENT_TYPE") or "") != "Program":
+            continue
+
+        name = info.get("NAME")
+        if not name:
+            continue
+
+        parent = str(info.get("PARENT") or "/")
+        parent_path = pathlib.PurePosixPath(parent)
+        if not parent_path.is_absolute():
+            parent_path = pathlib.PurePosixPath("/") / parent_path
+
+        domain_path = (parent_path / name).as_posix()
+        if not domain_path.startswith("/"):
+            domain_path = "/" + domain_path
+        if domain_path in seen_paths:
+            continue
+        seen_paths.add(domain_path)
+
+        programs.append(
+            {
+                "domain_path": domain_path,
+                "domain_name": str(name),
+                "contentType": "Program",
+            }
+        )
+
+    programs.sort(key=lambda item: item["domain_path"])
+    return programs
+
+
+def _read_prp_basic_info(prp_path: pathlib.Path) -> Optional[Dict[str, str]]:
+    try:
+        root = _et.parse(str(prp_path)).getroot()
+    except Exception:
+        return None
+
+    info: Dict[str, str] = {}
+    for state in root.findall(".//STATE"):
+        key = state.attrib.get("NAME")
+        if not key:
+            continue
+        value = state.attrib.get("VALUE")
+        if value is None:
+            continue
+        info[str(key)] = str(value)
+    return info or None
 
 
 def _domain_path(program, domain_file=None) -> Optional[str]:

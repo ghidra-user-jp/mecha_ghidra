@@ -7,14 +7,18 @@ from numbers import Integral
 
 import jpype
 
+from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
 from ghidra.app.decompiler import DecompInterface
+from ghidra.app.util.parser import FunctionSignatureParser
 from ghidra.program.flatapi import FlatProgramAPI
 from ghidra.program.model.listing import CodeUnit
+from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 from ghidra.program.model.data import (
     CategoryPath,
     StructureDataType,
     EnumDataType,
+    DataUtilities,
     VoidDataType,
     CharDataType,
     UnsignedCharDataType,
@@ -124,6 +128,139 @@ def _safe_call(obj, name, *args):
         return None
 
 
+def _iter_items(items):
+    if items is None:
+        return
+
+    has_next = getattr(items, "hasNext", None)
+    next_item = getattr(items, "next", None)
+    if callable(has_next) and callable(next_item):
+        while bool(has_next()):
+            yield next_item()
+        return
+
+    iterator_fn = getattr(items, "iterator", None)
+    if callable(iterator_fn):
+        iterator = _safe_call(items, "iterator")
+        if iterator is not None:
+            for item in _iter_items(iterator):
+                yield item
+            return
+
+    try:
+        for item in items:
+            yield item
+        return
+    except Exception:
+        pass
+
+    if callable(next_item):
+        while True:
+            try:
+                yield next_item()
+            except Exception:
+                break
+
+
+def _json_safe(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+
+    has_next = getattr(value, "hasNext", None)
+    next_item = getattr(value, "next", None)
+    if callable(has_next) and callable(next_item):
+        return [_json_safe(v) for v in _iter_items(value)]
+
+    iterator_fn = getattr(value, "iterator", None)
+    if callable(iterator_fn):
+        return [_json_safe(v) for v in _iter_items(value)]
+
+    return str(value)
+
+
+def _namespace_key(namespace):
+    namespace_id = _safe_call(namespace, "getID")
+    if namespace_id is not None:
+        return "id:%s" % namespace_id
+    full_name = _safe_call(namespace, "getName", True)
+    if full_name:
+        return "name:%s" % full_name
+    return "repr:%s" % namespace
+
+
+def _iter_symbol_table_symbols(symbol_table):
+    probes = [
+        ("getAllSymbols", (True,)),
+        ("getAllSymbols", ()),
+        ("getSymbolIterator", (True,)),
+        ("getSymbolIterator", ()),
+    ]
+    for method_name, args in probes:
+        symbols = _safe_call(symbol_table, method_name, *args)
+        if symbols is None:
+            continue
+        for symbol in _iter_items(symbols):
+            yield symbol
+        return
+
+
+def _iter_namespaces(ctx):
+    manager = getattr(ctx, "namespace_manager", None)
+    if manager is not None:
+        for args in ((True,), ()):
+            namespaces = _safe_call(manager, "getNamespaces", *args)
+            if namespaces is None:
+                continue
+            for namespace in _iter_items(namespaces):
+                yield namespace
+            return
+
+    seen = set()
+    for symbol in _iter_symbol_table_symbols(ctx.symbol_table):
+        parent = _safe_call(symbol, "getParentNamespace")
+        if parent is not None and not bool(_safe_call(parent, "isGlobal")):
+            key = _namespace_key(parent)
+            if key not in seen:
+                seen.add(key)
+                yield parent
+
+        symbol_type = _safe_call(symbol, "getSymbolType")
+        if symbol_type is None or str(symbol_type).upper() != "CLASS":
+            continue
+        class_namespace = _safe_call(symbol, "getObject")
+        if class_namespace is None or bool(_safe_call(class_namespace, "isGlobal")):
+            continue
+        class_key = _namespace_key(class_namespace)
+        if class_key in seen:
+            continue
+        seen.add(class_key)
+        yield class_namespace
+
+
+def _is_exported_symbol(ctx, symbol):
+    if symbol is None:
+        return False
+
+    exported = _safe_call(symbol, "isExported")
+    if exported is not None:
+        return bool(exported)
+
+    exported = _safe_call(symbol, "isExternalEntryPoint")
+    if exported is not None:
+        return bool(exported)
+
+    address = _safe_call(symbol, "getAddress")
+    if address is not None:
+        exported = _safe_call(ctx.symbol_table, "isExternalEntryPoint", address)
+        if exported is not None:
+            return bool(exported)
+    return False
+
+
 def _ensure_checkout_for_versioned_program(ctx):
     program = getattr(ctx, "program", None)
     if program is None:
@@ -175,8 +312,7 @@ def _collect(iterator, offset, limit, to_value):
         offset = 0
     result = []
     idx = 0
-    while iterator.hasNext():
-        item = iterator.next()
+    for item in _iter_items(iterator):
         if idx >= offset:
             result.append(to_value(item))
             if len(result) >= limit:
@@ -187,6 +323,73 @@ def _collect(iterator, offset, limit, to_value):
 
 def _dt_manager(ctx):
     return ctx.program.getDataTypeManager()
+
+
+def _find_data_type_by_name(dtm, type_name):
+    if not type_name:
+        return None
+
+    query = str(type_name).strip()
+    if not query:
+        return None
+    query_lower = query.lower()
+    query_compact = query_lower.replace(" ", "")
+    candidate = None
+
+    iterator = _safe_call(dtm, "getAllDataTypes")
+    if iterator is not None:
+        while iterator.hasNext():
+            data_type = iterator.next()
+            names = [
+                _safe_call(data_type, "getName"),
+                _safe_call(data_type, "getDisplayName"),
+                _safe_call(data_type, "getPathName"),
+                _safe_call(data_type, "getName", True),
+            ]
+            for name in names:
+                if not name:
+                    continue
+                text = str(name)
+                text_lower = text.lower()
+                if text == query:
+                    return data_type
+                if text_lower == query_lower and candidate is None:
+                    candidate = data_type
+                if text_lower.replace(" ", "") == query_compact and candidate is None:
+                    candidate = data_type
+                if text.endswith("/" + query) and candidate is None:
+                    candidate = data_type
+                if text_lower.endswith("/" + query_lower) and candidate is None:
+                    candidate = data_type
+
+    if candidate is not None:
+        return candidate
+
+    for probe in (query, "/" + query):
+        resolved = _safe_call(dtm, "getDataType", probe)
+        if resolved is not None:
+            return resolved
+
+    return None
+
+
+def _parse_clear_data_mode(clear_mode_text):
+    clear_data_mode = DataUtilities.ClearDataMode
+    mapping = {
+        "CHECK_FOR_SPACE": clear_data_mode.CHECK_FOR_SPACE,
+        "CLEAR_SINGLE_DATA": clear_data_mode.CLEAR_SINGLE_DATA,
+        "CLEAR_ALL_UNDEFINED_CONFLICT_DATA": clear_data_mode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA,
+        "CLEAR_ALL_DEFAULT_CONFLICT_DATA": clear_data_mode.CLEAR_ALL_DEFAULT_CONFLICT_DATA,
+        "CLEAR_ALL_CONFLICT_DATA": clear_data_mode.CLEAR_ALL_CONFLICT_DATA,
+    }
+    if not clear_mode_text:
+        return mapping["CHECK_FOR_SPACE"]
+    normalized = str(clear_mode_text).strip().upper()
+    mode = mapping.get(normalized)
+    if mode is None:
+        allowed = ", ".join(sorted(mapping.keys()))
+        raise ValueError("clear_modeが不正です: %s (利用可能: %s)" % (clear_mode_text, allowed))
+    return mode
 
 
 def _parse_data_type(ctx, type_str):
@@ -248,9 +451,7 @@ def _parse_data_type(ctx, type_str):
         dt = builtin[pointer_alias[lowered]]
         pointer_depth += 1
     else:
-        matches = list(dtm.findDataTypes(text))
-        if matches:
-            dt = matches[0]
+        dt = _find_data_type_by_name(dtm, text)
     if dt is None:
         raise ValueError("unknown data type: %s" % type_str)
 
@@ -342,6 +543,75 @@ def _decompile_function_object(ctx, function):
         return _run_decompile()
 
 
+def _decompile_high_function(ctx, function):
+    def _run_decompile():
+        interface = DecompInterface()
+        try:
+            if not interface.openProgram(ctx.program):
+                raise RuntimeError("デコンパイラの初期化に失敗しました")
+            results = interface.decompileFunction(function, 120, ctx.monitor())
+            if results is None:
+                raise RuntimeError("デコンパイルに失敗しました")
+            if not results.decompileCompleted():
+                detail = (results.getErrorMessage() or "").strip()
+                if detail:
+                    raise RuntimeError("デコンパイルに失敗しました: %s" % detail)
+                raise RuntimeError("デコンパイルに失敗しました")
+            high_function = results.getHighFunction()
+            if high_function is None:
+                raise RuntimeError("高レベル関数情報を取得できませんでした")
+            return high_function
+        finally:
+            interface.dispose()
+
+    try:
+        return _run_decompile()
+    except RuntimeError:
+        analyzed = False
+        try:
+            analyzed = _analyze_program_if_needed(ctx)
+        except Exception:
+            analyzed = False
+        if not analyzed:
+            raise
+        return _run_decompile()
+
+
+def _requires_full_param_commit(high_symbol, high_function):
+    try:
+        if high_symbol is not None and not bool(high_symbol.isParameter()):
+            return False
+        function = high_function.getFunction()
+        params = function.getParameters()
+        local_symbol_map = high_function.getLocalSymbolMap()
+        num_params = int(local_symbol_map.getNumParams())
+        if num_params != len(params):
+            return True
+        for index in range(num_params):
+            param_symbol = local_symbol_map.getParamSymbol(index)
+            if param_symbol is None:
+                return True
+            if int(param_symbol.getCategoryIndex()) != index:
+                return True
+            storage = param_symbol.getStorage()
+            if storage is None:
+                return True
+            if int(storage.compareTo(params[index].getVariableStorage())) != 0:
+                return True
+        return False
+    except Exception:
+        return True
+
+
+def _build_signature_parser(ctx):
+    data_type_manager = ctx.program.getDataTypeManager()
+    try:
+        return FunctionSignatureParser(data_type_manager, None)
+    except TypeError:
+        # 環境差分でシグネチャが1引数版のみの場合に対応
+        return FunctionSignatureParser(data_type_manager)
+
+
 def _decode_hex_bytes(hex_string):
     cleaned = "".join(hex_string.split())
     if len(cleaned) % 2 != 0:
@@ -358,13 +628,85 @@ def _get_struct_datatype(ctx, name, category):
     return dtm.getDataType(cp, name)
 
 
-def _ensure_class_struct(ctx, class_name, parent_namespace):
-    category = parent_namespace if parent_namespace else "/classes"
+def _resolve_namespace(ctx, namespace_path):
+    global_namespace = ctx.program.getGlobalNamespace()
+    if not namespace_path:
+        return global_namespace
+
+    normalized = str(namespace_path).replace("/", "::")
+    parts = [part for part in normalized.split("::") if part]
+    current = global_namespace
+    for part in parts:
+        found = ctx.symbol_table.getNamespace(part, current)
+        if found is None:
+            return None
+        current = found
+    return current
+
+
+def _find_ghidra_class(ctx, class_name, parent_namespace):
+    symbols = ctx.symbol_table.getSymbols(class_name, parent_namespace)
+    for symbol in _iter_items(symbols):
+        symbol_type = _safe_call(symbol, "getSymbolType")
+        if symbol_type is None or str(symbol_type).upper() != "CLASS":
+            continue
+        class_namespace = _safe_call(symbol, "getObject")
+        if class_namespace is not None:
+            return class_namespace
+    return None
+
+
+def _build_class_category_path(class_namespace):
+    parts = []
+    current = class_namespace
+    while current is not None and not bool(current.isGlobal()):
+        parts.insert(0, current.getName())
+        current = current.getParentNamespace()
+    if not parts:
+        return "/classes"
+    return "/classes/" + "/".join(parts)
+
+
+def _ensure_class_struct(
+    ctx,
+    class_name,
+    parent_namespace,
+    create_class_if_missing=False,
+    create_struct_if_missing=False,
+):
+    parent = _resolve_namespace(ctx, parent_namespace)
+    if parent is None:
+        raise LookupError("親名前空間が見つかりません: %s" % parent_namespace)
+
+    class_namespace = _find_ghidra_class(ctx, class_name, parent)
+    if class_namespace is None:
+        if not create_class_if_missing:
+            raise LookupError("クラスが見つかりません: %s" % class_name)
+        class_namespace = ctx.symbol_table.createClass(parent, class_name, SourceType.USER_DEFINED)
+
+    category = _build_class_category_path(class_namespace)
     struct = _get_struct_datatype(ctx, class_name, category)
     if struct is None:
+        if not create_struct_if_missing:
+            raise LookupError("クラス構造体が見つかりません: %s" % class_name)
         struct = StructureDataType(CategoryPath(category), class_name, 0)
         struct = _dt_manager(ctx).addDataType(struct, None)
-    return struct
+    return class_namespace, struct
+
+
+def _apply_members_to_struct(ctx, struct, members):
+    for member in members:
+        if not isinstance(member, dict):
+            raise ValueError("membersの要素はオブジェクトで指定してください")
+        data_type = _parse_data_type(ctx, member.get("type"))
+        field_name = member.get("name", "")
+        comment = member.get("comment", "")
+        offset = member.get("offset")
+        length = _component_length(data_type)
+        if offset is not None:
+            struct.replaceAtOffset(int(offset), data_type, length, field_name, comment)
+        else:
+            struct.add(data_type, length, field_name, comment)
 
 
 def _get_enum_datatype(ctx, name, category):
@@ -444,25 +786,17 @@ def list_classes(params):
     offset = _to_int(params.get("offset"), 0)
     limit = _to_int(params.get("limit"), 100)
 
-    namespace_iter = ctx.namespace_manager.getNamespaces(True)
-
     def _to_entry(namespace):
         return {
             "name": namespace.getName(True),
-            "isClass": namespace.isClass(),
+            "isClass": bool(_safe_call(namespace, "isClass")) or False,
         }
-
-    # skip グローバル名前空間
-    def _filtered(iterator):
-        while iterator.hasNext():
-            ns = iterator.next()
-            if ns.isGlobal():
-                continue
-            yield ns
 
     items = []
     idx = 0
-    for namespace in _filtered(namespace_iter):
+    for namespace in _iter_namespaces(ctx):
+        if bool(_safe_call(namespace, "isGlobal")):
+            continue
         if idx >= offset:
             items.append(_to_entry(namespace))
             if len(items) >= limit:
@@ -600,10 +934,9 @@ def list_exports(params):
     iterator = ctx.function_manager.getFunctions(True)
     exports = []
     idx = 0
-    while iterator.hasNext():
-        function = iterator.next()
+    for function in _iter_items(iterator):
         symbol = function.getSymbol()
-        if symbol is not None and symbol.isExported():
+        if _is_exported_symbol(ctx, symbol):
             if idx >= offset:
                 exports.append(symbol.getName(True))
                 if len(exports) >= limit:
@@ -616,12 +949,10 @@ def list_namespaces(params):
     ctx = ensure_context()
     offset = _to_int(params.get("offset"), 0)
     limit = _to_int(params.get("limit"), 100)
-    iterator = ctx.namespace_manager.getNamespaces(True)
     result = []
     idx = 0
-    while iterator.hasNext():
-        namespace = iterator.next()
-        if namespace.isGlobal():
+    for namespace in _iter_namespaces(ctx):
+        if bool(_safe_call(namespace, "isGlobal")):
             continue
         if idx >= offset:
             result.append(namespace.getName(True))
@@ -689,13 +1020,69 @@ def rename_variable(params):
     if function is None:
         raise LookupError("関数が見つかりません: %s" % function_name)
 
+    if old_name == new_name:
+        return {"name": new_name}
+
+    # まず高レベルシンボル（ローカル＋引数）を優先して更新する。
+    # これにより引数名やデコンパイル由来の変数名にも対応できる。
+    high_symbol = None
+    high_function = None
+    try:
+        high_function = _decompile_high_function(ctx, function)
+    except Exception:
+        high_function = None
+
+    if high_function is not None:
+        local_symbol_map = high_function.getLocalSymbolMap()
+        if local_symbol_map is not None:
+            symbols = local_symbol_map.getSymbols()
+            while symbols.hasNext():
+                symbol = symbols.next()
+                symbol_name = symbol.getName()
+                if symbol_name == new_name and symbol_name != old_name:
+                    raise ValueError("同名の変数が既に存在します: %s" % new_name)
+                if symbol_name == old_name:
+                    high_symbol = symbol
+            if high_symbol is not None:
+                def _rename_high():
+                    if _requires_full_param_commit(high_symbol, high_function):
+                        HighFunctionDBUtil.commitParamsToDatabase(
+                            high_function,
+                            False,
+                            HighFunctionDBUtil.ReturnCommitOption.NO_COMMIT,
+                            function.getSignatureSource(),
+                        )
+                    HighFunctionDBUtil.updateDBVariable(
+                        high_symbol,
+                        new_name,
+                        None,
+                        SourceType.USER_DEFINED,
+                    )
+                    return True
+
+                _txn(ctx, "Rename variable", _rename_high)
+                return {"name": new_name}
+
+    # フォールバック: DB上のローカル変数と引数を直接変更
     target = None
     for local in function.getLocalVariables():
-        if local.getName() == old_name:
+        local_name = local.getName()
+        if local_name == new_name and local_name != old_name:
+            raise ValueError("同名の変数が既に存在します: %s" % new_name)
+        if local_name == old_name:
             target = local
-            break
+
     if target is None:
-        raise LookupError("ローカル変数が見つかりません: %s" % old_name)
+        for param in function.getParameters():
+            param_name = param.getName()
+            if param_name == new_name and param_name != old_name:
+                raise ValueError("同名の変数が既に存在します: %s" % new_name)
+            if param_name == old_name:
+                target = param
+                break
+
+    if target is None:
+        raise LookupError("変数が見つかりません: %s" % old_name)
 
     def _rename():
         target.setName(new_name, SourceType.USER_DEFINED)
@@ -728,8 +1115,7 @@ def disassemble_function(params):
     body = function.getBody()
     instructions = ctx.listing.getInstructions(body, True)
     lines = []
-    while instructions.hasNext():
-        inst = instructions.next()
+    for inst in _iter_items(instructions):
         operand_parts = []
         try:
             operand_count = inst.getNumOperands()
@@ -742,15 +1128,15 @@ def disassemble_function(params):
             except Exception:
                 operand_repr = None
             if operand_repr:
-                operand_parts.append(operand_repr)
+                operand_parts.append(str(operand_repr))
 
         operands = ", ".join(operand_parts)
         comment = inst.getComment(CodeUnit.EOL_COMMENT)
         line = {
             "address": str(inst.getAddress()),
-            "mnemonic": inst.getMnemonicString(),
-            "operands": operands,
-            "comment": comment or "",
+            "mnemonic": str(inst.getMnemonicString()),
+            "operands": str(operands),
+            "comment": str(comment) if comment else "",
         }
         lines.append(line)
     return lines
@@ -796,7 +1182,21 @@ def set_function_prototype(params):
         raise LookupError("関数が見つかりません: %s" % address_text)
 
     def _apply():
-        function.setPrototypeString(prototype, SourceType.USER_DEFINED)
+        parser = _build_signature_parser(ctx)
+        base_signature = _safe_call(function, "getSignature")
+        try:
+            signature = parser.parse(base_signature, prototype)
+        except TypeError:
+            signature = parser.parse(None, prototype)
+        if signature is None:
+            raise ValueError("関数プロトタイプを解析できません: %s" % prototype)
+
+        command = ApplyFunctionSignatureCmd(function.getEntryPoint(), signature, SourceType.USER_DEFINED)
+        if not command.applyTo(ctx.program, ctx.monitor()):
+            status_msg = _safe_call(command, "getStatusMsg")
+            if status_msg:
+                raise RuntimeError("関数プロトタイプの適用に失敗しました: %s" % status_msg)
+            raise RuntimeError("関数プロトタイプの適用に失敗しました")
         return True
 
     _txn(ctx, "Set function prototype", _apply)
@@ -819,6 +1219,36 @@ def set_local_variable_type(params):
     data_type = _parse_data_type(ctx, type_text)
 
     def _apply():
+        high_function = None
+        try:
+            high_function = _decompile_high_function(ctx, function)
+        except Exception:
+            high_function = None
+        if high_function is not None:
+            local_symbol_map = high_function.getLocalSymbolMap()
+            if local_symbol_map is not None:
+                symbols = local_symbol_map.getSymbols()
+                target_symbol = None
+                while symbols.hasNext():
+                    symbol = symbols.next()
+                    if symbol.getName() == variable_name:
+                        target_symbol = symbol
+                        break
+                if target_symbol is not None:
+                    if _requires_full_param_commit(target_symbol, high_function):
+                        HighFunctionDBUtil.commitParamsToDatabase(
+                            high_function,
+                            False,
+                            HighFunctionDBUtil.ReturnCommitOption.NO_COMMIT,
+                            function.getSignatureSource(),
+                        )
+                    HighFunctionDBUtil.updateDBVariable(
+                        target_symbol,
+                        target_symbol.getName(),
+                        data_type,
+                        SourceType.USER_DEFINED,
+                    )
+                    return True
         for local in function.getLocalVariables():
             if local.getName() == variable_name:
                 local.setDataType(data_type, SourceType.USER_DEFINED)
@@ -842,8 +1272,7 @@ def get_xrefs_to(params):
     references = ctx.reference_manager.getReferencesTo(address)
     items = []
     idx = 0
-    while references.hasNext():
-        ref = references.next()
+    for ref in _iter_items(references):
         if idx >= offset:
             items.append({
                 "from": str(ref.getFromAddress()),
@@ -864,8 +1293,7 @@ def get_xrefs_from(params):
     references = ctx.reference_manager.getReferencesFrom(address)
     items = []
     idx = 0
-    while references.hasNext():
-        ref = references.next()
+    for ref in _iter_items(references):
         if idx >= offset:
             items.append({
                 "to": str(ref.getToAddress()),
@@ -891,8 +1319,7 @@ def get_function_xrefs(params):
     references = ctx.reference_manager.getReferencesTo(entry)
     results = []
     idx = 0
-    while references.hasNext():
-        ref = references.next()
+    for ref in _iter_items(references):
         if idx >= offset:
             results.append({
                 "from": str(ref.getFromAddress()),
@@ -1005,7 +1432,20 @@ def clear_struct(params):
         struct = _get_struct_datatype(ctx, struct_name, category)
         if struct is None:
             raise LookupError("構造体が見つかりません: %s" % struct_name)
-        struct.clearComponents()
+        cleared = False
+        clear_components = getattr(struct, "clearComponents", None)
+        if callable(clear_components):
+            clear_components()
+            cleared = True
+        else:
+            num_components = _safe_call(struct, "getNumComponents")
+            if num_components is None:
+                num_components = len(list(_iter_items(struct.getComponents())))
+            for ordinal in range(int(num_components) - 1, -1, -1):
+                struct.delete(ordinal)
+                cleared = True
+        if not cleared:
+            raise RuntimeError("構造体メンバーのクリアに失敗しました")
         _dt_manager(ctx).replaceDataType(struct, struct, True)
         return struct
 
@@ -1032,8 +1472,7 @@ def get_data_by_label(params):
         raise ValueError("labelが必要です")
     symbols = ctx.symbol_table.getSymbols(label)
     results = []
-    while symbols.hasNext():
-        symbol = symbols.next()
+    for symbol in _iter_items(symbols):
         address = symbol.getAddress()
         data = ctx.listing.getDefinedDataAt(address)
         representation = data.getDefaultValueRepresentation() if data else ""
@@ -1135,7 +1574,8 @@ def get_enum(params):
     enum_dt = _get_enum_datatype(ctx, name, category)
     if enum_dt is None:
         raise LookupError("列挙体が見つかりません: %s" % name)
-    if not isinstance(enum_dt, EnumDataType):
+    class_name = _safe_call(_safe_call(enum_dt, "getClass"), "getName")
+    if not class_name or "Enum" not in str(class_name):
         raise TypeError("指定されたデータ型は列挙型ではありません")
     return _describe_enum(enum_dt)
 
@@ -1145,24 +1585,59 @@ def set_global_data_type(params):
     address_text = params.get("address")
     data_type_text = params.get("data_type")
     length = _to_int(params.get("length"), -1)
+    clear_mode_text = params.get("clear_mode")
     if not address_text or not data_type_text:
         raise ValueError("addressとdata_typeは必須です")
     address = _get_address(ctx, address_text)
     data_type = _parse_data_type(ctx, data_type_text)
+    clear_mode = _parse_clear_data_mode(clear_mode_text)
 
     def _apply():
-        listing = ctx.listing
-        clear_length = length if length > 0 else _component_length(data_type)
-        clear_end = address if clear_length <= 1 else address.add(clear_length - 1)
-        listing.clearCodeUnits(address, clear_end)
-        if length > 0:
-            listing.createData(address, data_type, length)
-        else:
-            listing.createData(address, data_type)
+        created = DataUtilities.createData(ctx.program, address, data_type, length, clear_mode)
+        if created is None:
+            raise RuntimeError("データ型の設定に失敗しました")
         return True
 
     _txn(ctx, "Set global data type", _apply)
-    return {"address": address_text, "data_type": data_type_text}
+    return {"address": address_text, "data_type": data_type_text, "clear_mode": str(clear_mode)}
+
+
+def create_class(params):
+    ctx = ensure_context()
+    class_name = params.get("name")
+    if not class_name:
+        raise ValueError("nameが必要です")
+    parent_namespace = params.get("parent_namespace")
+    members = params.get("members") or []
+    if not isinstance(members, (list, tuple)):
+        raise ValueError("membersはリストで指定してください")
+
+    def _create():
+        parent = _resolve_namespace(ctx, parent_namespace)
+        if parent is None:
+            raise LookupError("親名前空間が見つかりません: %s" % parent_namespace)
+        existing_class = _find_ghidra_class(ctx, class_name, parent)
+        if existing_class is not None:
+            raise ValueError("クラスが既に存在します: %s" % class_name)
+
+        class_namespace = ctx.symbol_table.createClass(parent, class_name, SourceType.USER_DEFINED)
+        category = _build_class_category_path(class_namespace)
+        struct = _get_struct_datatype(ctx, class_name, category)
+        if struct is None:
+            struct = StructureDataType(CategoryPath(category), class_name, 0)
+            struct = _dt_manager(ctx).addDataType(struct, None)
+        _apply_members_to_struct(ctx, struct, members)
+        _dt_manager(ctx).replaceDataType(struct, struct, True)
+        return class_namespace, struct
+
+    class_namespace, struct_dt = _txn(ctx, "Create class", _create)
+    namespace_name = _safe_call(class_namespace, "getName", True)
+    if not namespace_name:
+        namespace_name = class_namespace.getName()
+    return {
+        "class": namespace_name,
+        "struct": _describe_struct(struct_dt),
+    }
 
 
 def add_class_members(params):
@@ -1176,17 +1651,14 @@ def add_class_members(params):
         raise ValueError("membersはリストで指定してください")
 
     def _update():
-        struct = _ensure_class_struct(ctx, class_name, parent_namespace)
-        for member in members:
-            data_type = _parse_data_type(ctx, member.get("type"))
-            field_name = member.get("name", "")
-            comment = member.get("comment", "")
-            offset = member.get("offset")
-            length = _component_length(data_type)
-            if offset is not None:
-                struct.replaceAtOffset(int(offset), data_type, length, field_name, comment)
-            else:
-                struct.add(data_type, length, field_name, comment)
+        _, struct = _ensure_class_struct(
+            ctx,
+            class_name,
+            parent_namespace,
+            create_class_if_missing=False,
+            create_struct_if_missing=False,
+        )
+        _apply_members_to_struct(ctx, struct, members)
         _dt_manager(ctx).replaceDataType(struct, struct, True)
         return struct
 
@@ -1205,7 +1677,13 @@ def remove_class_members(params):
         raise ValueError("membersはリストで指定してください")
 
     def _update():
-        struct = _ensure_class_struct(ctx, class_name, parent_namespace)
+        _, struct = _ensure_class_struct(
+            ctx,
+            class_name,
+            parent_namespace,
+            create_class_if_missing=False,
+            create_struct_if_missing=False,
+        )
         target_names = set(members)
         for component in list(struct.getComponents()):
             if component.getFieldName() in target_names:
@@ -1292,11 +1770,12 @@ def get_callee(params):
     if function is None:
         raise LookupError("関数が見つかりません: %s" % address_text)
     callees = function.getCalledFunctions(TaskMonitor.DUMMY)
-    if function.isThunk() and not callees:
+    callees_list = list(_iter_items(callees))
+    if function.isThunk() and not callees_list:
         thunked = function.getThunkedFunction(False)
         if thunked is not None:
-            callees = thunked.getCalledFunctions(TaskMonitor.DUMMY)
-    return sorted(["%s @ %s" % (callee.getName(True), callee.getEntryPoint()) for callee in callees])
+            callees_list = list(_iter_items(thunked.getCalledFunctions(TaskMonitor.DUMMY)))
+    return sorted(["%s @ %s" % (callee.getName(True), callee.getEntryPoint()) for callee in callees_list])
 
 
 def add_bookmark(params):
@@ -1305,6 +1784,7 @@ def add_bookmark(params):
     category = params.get("category")
     comment = params.get("comment", "")
     bookmark_type = params.get("type")
+    _bookmark_format = params.get("format", "json")
     if not address_text or not category or bookmark_type is None:
         raise ValueError("address, category, type は必須です")
 
@@ -1361,6 +1841,7 @@ SUPPORTED_COMMANDS = {
     "add_enum_values": add_enum_values,
     "get_enum": get_enum,
     "set_global_data_type": set_global_data_type,
+    "create_class": create_class,
     "add_class_members": add_class_members,
     "remove_class_members": remove_class_members,
     "remove_enum_values": remove_enum_values,
@@ -1379,7 +1860,7 @@ def execute(command, params, key="default"):
     previous = getattr(_THREAD_STATE, "current_key", None)
     _THREAD_STATE.current_key = key
     try:
-        return handler(params or {})
+        return _json_safe(handler(params or {}))
     finally:
         if previous is None:
             if hasattr(_THREAD_STATE, "current_key"):

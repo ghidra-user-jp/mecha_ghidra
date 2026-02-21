@@ -131,6 +131,24 @@ def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
         handle._delete_program_locked("/folder/app")
 
 
+def test_release_program_clears_tracking_when_delete_fails(monkeypatch):
+    handle = build_handle(monkeypatch)
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+
+    monkeypatch.setattr(
+        handle,
+        "_delete_program_locked",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("delete failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        handle.release_program(program, remove_program=True)
+
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
+
+
 def test_get_version_history(monkeypatch):
     handle = build_handle(monkeypatch)
 
@@ -301,3 +319,57 @@ def test_get_version_diff(monkeypatch):
     assert result["warnings"] == "none"
     assert domain_file.programs[1].released == [consumers[0]]
     assert domain_file.programs[2].released == [consumers[1]]
+
+
+def test_list_programs_from_metadata_parses_program_entries(tmp_path):
+    idata = tmp_path / "sample.rep" / "idata" / "00"
+    idata.mkdir(parents=True)
+
+    (idata / "00000001.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="CONTENT_TYPE" TYPE="string" VALUE="Program" />
+    <STATE NAME="PARENT" TYPE="string" VALUE="/folder" />
+    <STATE NAME="NAME" TYPE="string" VALUE="a.bin" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+    (idata / "00000002.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="CONTENT_TYPE" TYPE="string" VALUE="Folder" />
+    <STATE NAME="PARENT" TYPE="string" VALUE="/" />
+    <STATE NAME="NAME" TYPE="string" VALUE="folder" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+    (idata / "00000003.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="CONTENT_TYPE" TYPE="string" VALUE="Program" />
+    <STATE NAME="PARENT" TYPE="string" VALUE="/" />
+    <STATE NAME="NAME" TYPE="string" VALUE="z.bin" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+
+    result = session.ProjectHandle.list_programs_from_metadata(str(tmp_path), "sample")
+
+    assert result == [
+        {"domain_path": "/folder/a.bin", "domain_name": "a.bin", "contentType": "Program"},
+        {"domain_path": "/z.bin", "domain_name": "z.bin", "contentType": "Program"},
+    ]
+
+
+def test_list_programs_from_metadata_returns_none_when_rep_missing(tmp_path):
+    result = session.ProjectHandle.list_programs_from_metadata(str(tmp_path), "sample")
+    assert result is None

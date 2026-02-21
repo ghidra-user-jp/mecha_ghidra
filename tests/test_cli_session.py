@@ -3,6 +3,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from mcp.types import CallToolResult
 
 from ghidra_mcp import cli
 from ghidra_headless import session
@@ -356,6 +357,41 @@ def test_session_registry_close_and_remove_program(tmp_path, monkeypatch):
     assert dummy_handle.deleted_programs == ["/folder/fw.bin"]
 
 
+def test_session_registry_close_and_remove_program_failure_keeps_session_visible(tmp_path, monkeypatch):
+    project_file = tmp_path / "sample.gpr"
+    project_file.write_text("")
+    calls = dummy_core(monkeypatch)
+
+    class FailingRemoveHandle(DummyHandle):
+        def release_program(self, program, *, remove_program: bool = False):
+            super().release_program(program, remove_program=remove_program)
+            if remove_program:
+                raise RuntimeError("delete failed")
+
+    dummy_handle = FailingRemoveHandle(key=(str(project_file.parent), "sample"))
+    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
+
+    registry = cli.SessionRegistry()
+    registry.create_session("fw", project_location=str(project_file), domain_path="/folder/fw.bin")
+
+    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED"):
+        registry.close_session("fw", remove_program=True)
+
+    assert registry.list_targets() == [
+        {
+            "target": "fw",
+            "domain_path": "/folder/fw.bin",
+            "project_name": "Sample",
+            "project_location": str(tmp_path),
+        }
+    ]
+    assert calls["remove"] == []
+
+    registry.close_session("fw", remove_program=False)
+    assert registry.list_targets() == []
+    assert calls["remove"] == ["fw"]
+
+
 def test_registry_close_all(tmp_path, monkeypatch):
     calls = dummy_core(monkeypatch)
     dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
@@ -542,6 +578,50 @@ def test_list_programs_for_target_returns_programs():
     assert result == handle_a.list_programs()
 
 
+def test_list_programs_for_project_only_target_uses_metadata(monkeypatch):
+    registry = cli.SessionRegistry()
+    key = (str(Path("/project").resolve()), "Sample")
+    with registry._registry_lock.write_lock():
+        registry._target_projects["a"] = key
+        registry._locks["a"] = threading.RLock()
+
+    expected = [{"domain_path": "/from/metadata", "domain_name": "metadata", "contentType": "Program"}]
+    monkeypatch.setattr(
+        cli.ProjectHandle,
+        "list_programs_from_metadata",
+        staticmethod(lambda project_location, project_name: expected),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_get_or_create_project_handle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not open project handle")),
+    )
+
+    result = registry.list_programs("a")
+
+    assert result == expected
+
+
+def test_list_programs_for_project_only_target_falls_back_to_handle(monkeypatch):
+    registry = cli.SessionRegistry()
+    key = (str(Path("/project").resolve()), "Sample")
+    with registry._registry_lock.write_lock():
+        registry._target_projects["a"] = key
+        registry._locks["a"] = threading.RLock()
+
+    handle = DummyHandle(key=key, name="Sample")
+    monkeypatch.setattr(
+        cli.ProjectHandle,
+        "list_programs_from_metadata",
+        staticmethod(lambda _project_location, _project_name: None),
+    )
+    monkeypatch.setattr(registry, "_get_or_create_project_handle", lambda *_args, **_kwargs: handle)
+
+    result = registry.list_programs("a")
+
+    assert result == handle.list_programs()
+
+
 def test_list_programs_requires_existing_target():
     registry = cli.SessionRegistry()
     with pytest.raises(RuntimeError, match="初期化されていません"):
@@ -575,9 +655,36 @@ def test_add_bookmark_tool_invokes_core(monkeypatch):
             "category": "Analysis",
             "comment": "Check this later",
             "type": "Info",
+            "format": "json",
         },
         "target": "note",
     }
+
+
+def test_add_bookmark_tool_allows_format_override(monkeypatch):
+    recorded = {}
+
+    def fake_call(self, command, params, target):
+        recorded["command"] = command
+        recorded["params"] = params
+        recorded["target"] = target
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli.SessionRegistry, "call", fake_call)
+
+    result = cli.add_bookmark(
+        address="0x401000",
+        category="Analysis",
+        comment="Check this later",
+        type="Info",
+        format="legacy",
+        target="note",
+    )
+
+    assert result == {"status": "ok"}
+    assert recorded["command"] == "add_bookmark"
+    assert recorded["params"]["format"] == "legacy"
+    assert recorded["target"] == "note"
 
 
 def test_list_functions_tool_forwards_offset_and_limit(monkeypatch):
@@ -688,6 +795,26 @@ def test_registry_call_uses_instance_methods_instead_of_global_registry(monkeypa
 
     assert result == {"command": "list_methods", "params": {"offset": 0, "limit": 1}, "key": "fw"}
     assert used == {"ensure": "fw", "lock": "fw"}
+
+
+def test_registry_call_wraps_empty_list_result(monkeypatch):
+    registry = cli.SessionRegistry()
+    lock = threading.RLock()
+
+    monkeypatch.setattr(registry, "_ensure", lambda _name: None)
+    monkeypatch.setattr(registry, "_lock", lambda _name: lock)
+    monkeypatch.setattr(
+        cli,
+        "_core",
+        lambda: types.SimpleNamespace(execute=lambda _command, _params, key: []),
+    )
+
+    result = registry.call("search_functions_by_name", {"query": "__missing__"}, target="fw")
+
+    assert isinstance(result, CallToolResult)
+    assert len(result.content) == 1
+    assert result.content[0].type == "text"
+    assert result.content[0].text == "[]"
 
 
 def test_registry_call_rejects_mutating_command_when_versioned_not_checked_out(tmp_path, monkeypatch):
@@ -851,6 +978,16 @@ def test_list_project_programs_tool_passes_target(monkeypatch):
     assert called == {"target": "fw"}
 
 
+def test_list_project_programs_tool_wraps_empty_result(monkeypatch):
+    monkeypatch.setattr(cli._registry, "list_programs", lambda _target: [])
+
+    result = cli.list_project_programs("fw")
+
+    assert isinstance(result, CallToolResult)
+    assert len(result.content) == 1
+    assert result.content[0].text == "[]"
+
+
 def test_import_program_tool(monkeypatch):
     called = {}
 
@@ -887,6 +1024,16 @@ def test_load_project_program_tool_accepts_domain_path(monkeypatch):
         "target": "fw",
         "domain_path": "/folder/current.bin",
     }
+
+
+def test_list_targets_tool_wraps_empty_result(monkeypatch):
+    monkeypatch.setattr(cli._registry, "list_targets", lambda: [])
+
+    result = cli.list_targets()
+
+    assert isinstance(result, CallToolResult)
+    assert len(result.content) == 1
+    assert result.content[0].text == "[]"
 
 
 def test_registry_get_project_sync_status(tmp_path, monkeypatch):
