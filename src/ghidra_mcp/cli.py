@@ -23,7 +23,7 @@ from typing import Annotated, Any, Dict, List, Optional
 import pyghidra
 import pyghidra.core as pycore
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from ghidra_headless.session import ProgramSession, ProjectHandle
 
@@ -775,19 +775,22 @@ class SessionRegistry:
             self._close_session_locked(name, remove_program=remove_program)
 
     def _close_session_locked(self, name: str, *, remove_program: bool) -> None:
-        session = self._sessions.pop(name, None)
+        session = self._sessions.get(name)
         if session is None:
             raise RuntimeError(f"セッション '{name}' は存在しません")
-        self._locks.pop(name, None)
-        self._target_projects.pop(name, None)
         handle = session.get_project_handle()
         self._cleanup_session(
             name,
             session,
             handle,
             remove_registry_entry=False,
+            remove_context=False,
             remove_program=remove_program,
         )
+        self._sessions.pop(name, None)
+        self._locks.pop(name, None)
+        self._target_projects.pop(name, None)
+        _core().remove_context(name)
 
     def close_all(self) -> None:
         with self._registry_lock.write_lock():
@@ -919,9 +922,17 @@ class SessionRegistry:
             lock = self._lock(target)
             with lock:
                 self._ensure_checkout_for_mutating_command_locked(command, target)
-                return _core().execute(command, params or {}, key=target)
+                result = _core().execute(command, params or {}, key=target)
+                return _normalize_empty_list_result(result)
 
 _registry = SessionRegistry()
+
+
+def _normalize_empty_list_result(result: Any) -> Any:
+    """Return non-empty MCP content for empty-list results to keep clients compatible."""
+    if isinstance(result, list) and len(result) == 0:
+        return CallToolResult(content=[TextContent(type="text", text="[]")])
+    return result
 
 
 def _core():
@@ -1379,12 +1390,12 @@ def add_bookmark(
     ),
 )
 def list_targets() -> List[Dict[str, Optional[str]]]:
-    return _registry.list_targets()
+    return _normalize_empty_list_result(_registry.list_targets())
 
 
 @mcp.tool()
 def list_project_programs(target: str):
-    return _registry.list_programs(target)
+    return _normalize_empty_list_result(_registry.list_programs(target))
 
 
 @mcp.tool(

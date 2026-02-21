@@ -131,6 +131,24 @@ def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
         handle._delete_program_locked("/folder/app")
 
 
+def test_release_program_clears_tracking_when_delete_fails(monkeypatch):
+    handle = build_handle(monkeypatch)
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+
+    monkeypatch.setattr(
+        handle,
+        "_delete_program_locked",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("delete failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="delete failed"):
+        handle.release_program(program, remove_program=True)
+
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
+
+
 def test_get_version_history(monkeypatch):
     handle = build_handle(monkeypatch)
 

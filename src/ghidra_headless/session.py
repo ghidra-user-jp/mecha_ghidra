@@ -393,6 +393,7 @@ class ProjectHandle:
             if domain_path is None:
                 raise RuntimeError("削除対象プログラムのパスを取得できません")
             domain_key = _parse_domain_path(self.project, domain_path)
+            remove_error = None
             try:
                 if program is not None:
                     self.project.save(program)
@@ -404,11 +405,16 @@ class ProjectHandle:
             except Exception as exc:
                 logger.warning("program close failed: %s", exc)
             if remove_program:
-                self._delete_program_locked(domain_path)
+                try:
+                    self._delete_program_locked(domain_path)
+                except Exception as exc:
+                    remove_error = exc
             self._open_programs.discard(domain_key)
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
                 self._close_project_locked()
+            if remove_error is not None:
+                raise remove_error
 
     def list_programs(self):
         with self._lock:
