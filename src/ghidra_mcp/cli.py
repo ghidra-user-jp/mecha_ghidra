@@ -23,6 +23,7 @@ from typing import Annotated, Any, Dict, List, Optional
 import pyghidra
 import pyghidra.core as pycore
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from ghidra_headless.session import ProgramSession, ProjectHandle
@@ -1724,6 +1725,44 @@ def _normalize_streamable_http_path(path: str) -> str:
     return normalized
 
 
+def _normalize_host(host: str) -> str:
+    return (host or "").strip().lower()
+
+
+def _resolve_transport_security_for_host(host: str) -> TransportSecuritySettings:
+    normalized = _normalize_host(host)
+    if normalized in {"127.0.0.1", "localhost", "::1"}:
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+        )
+    if normalized in {"0.0.0.0", "::"}:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    if ":" in normalized and not normalized.startswith("["):
+        host_pattern = f"[{normalized}]:*"
+        origin_pattern = f"http://[{normalized}]:*"
+    else:
+        host_pattern = f"{normalized}:*"
+        origin_pattern = f"http://{normalized}:*"
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[host_pattern],
+        allowed_origins=[origin_pattern],
+    )
+
+
+def _configure_transport_security_for_host(host: str) -> None:
+    settings = _resolve_transport_security_for_host(host)
+    if not settings.enable_dns_rebinding_protection:
+        logger.warning(
+            "mcp-host=%s のため DNS rebinding protection を無効化します。"
+            " 本番運用では固定ホスト名/IPでの起動を推奨します。",
+            host,
+        )
+    mcp.settings.transport_security = settings
+
+
 def configure_ghidra_server_auth(args) -> None:
     username = (getattr(args, "ghidra_server_user", None) or "").strip()
     password_env_name = (getattr(args, "ghidra_server_password_env", None) or "").strip()
@@ -1854,6 +1893,7 @@ def configure_mcp_for_sse(args) -> None:
     mcp.settings.log_level = args.log_level.upper()
     mcp.settings.host = args.mcp_host
     mcp.settings.port = args.mcp_port or 8081
+    _configure_transport_security_for_host(mcp.settings.host)
     logger.info("MCPをSSEモードで起動: http://%s:%s/sse", mcp.settings.host, mcp.settings.port)
 
 
@@ -1863,6 +1903,7 @@ def configure_mcp_for_streamable_http(args) -> None:
     mcp.settings.host = args.mcp_host
     mcp.settings.port = args.mcp_port or 8081
     mcp.settings.streamable_http_path = _normalize_streamable_http_path(args.mcp_path)
+    _configure_transport_security_for_host(mcp.settings.host)
     logger.info(
         "MCPをStreamable HTTPモードで起動: http://%s:%s%s",
         mcp.settings.host,
