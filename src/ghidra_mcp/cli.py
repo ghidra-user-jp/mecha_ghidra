@@ -125,46 +125,82 @@ def list_classes(offset: int = 0, limit: int = 100, target: str = "default"):
 
 @mcp.tool()
 def decompile_function(name: str, target: str = "default") -> str:
-    return _registry.call("decompile_function", {"name": name}, target)
+    return dispatch_tool(
+        "decompile_function",
+        {"name": name},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def rename_function(old_name: str, new_name: str, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "rename_function",
         {"oldName": old_name, "newName": new_name},
         target,
+        registry=_registry,
     )
 
 
 @mcp.tool()
 def rename_data(address: str, new_name: str, target: str = "default"):
-    return _registry.call("rename_data", {"address": address, "newName": new_name}, target)
+    return dispatch_tool(
+        "rename_data",
+        {"address": address, "newName": new_name},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def list_segments(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call("list_segments", {"offset": offset, "limit": limit}, target)
+    return dispatch_tool(
+        "list_segments",
+        {"offset": offset, "limit": limit},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def list_imports(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call("list_imports", {"offset": offset, "limit": limit}, target)
+    return dispatch_tool(
+        "list_imports",
+        {"offset": offset, "limit": limit},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def list_exports(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call("list_exports", {"offset": offset, "limit": limit}, target)
+    return dispatch_tool(
+        "list_exports",
+        {"offset": offset, "limit": limit},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def list_namespaces(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call("list_namespaces", {"offset": offset, "limit": limit}, target)
+    return dispatch_tool(
+        "list_namespaces",
+        {"offset": offset, "limit": limit},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def list_data_items(offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call("list_data_items", {"offset": offset, "limit": limit}, target)
+    return dispatch_tool(
+        "list_data_items",
+        {"offset": offset, "limit": limit},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -191,10 +227,11 @@ def rename_variable(
     new_name: str,
     target: str = "default",
 ):
-    return _registry.call(
+    return dispatch_tool(
         "rename_variable",
         {"functionName": function_name, "oldName": old_name, "newName": new_name},
         target,
+        registry=_registry,
     )
 
 
@@ -230,47 +267,61 @@ def list_functions(offset: int = 0, limit: int = 100, target: str = "default"):
 
 @mcp.tool()
 def decompile_function_by_address(address: str, target: str = "default") -> str:
-    return _registry.call("decompile_function_by_address", {"address": address}, target)
+    return dispatch_tool(
+        "decompile_function_by_address",
+        {"address": address},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def disassemble_function(address: str, target: str = "default"):
-    return _registry.call("disassemble_function", {"address": address}, target)
+    return dispatch_tool(
+        "disassemble_function",
+        {"address": address},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def set_decompiler_comment(address: str, comment: str, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "set_decompiler_comment",
         {"address": address, "comment": comment},
         target,
+        registry=_registry,
     )
 
 
 @mcp.tool()
 def set_disassembly_comment(address: str, comment: str, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "set_disassembly_comment",
         {"address": address, "comment": comment},
         target,
+        registry=_registry,
     )
 
 
 @mcp.tool()
 def rename_function_by_address(function_address: str, new_name: str, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "rename_function_by_address",
         {"function_address": function_address, "new_name": new_name},
         target,
+        registry=_registry,
     )
 
 
 @mcp.tool()
 def set_function_prototype(function_address: str, prototype: str, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "set_function_prototype",
         {"function_address": function_address, "prototype": prototype},
         target,
+        registry=_registry,
     )
 
 
@@ -281,7 +332,7 @@ def set_local_variable_type(
     new_type: str,
     target: str = "default",
 ):
-    return _registry.call(
+    return dispatch_tool(
         "set_local_variable_type",
         {
             "function_address": function_address,
@@ -289,31 +340,37 @@ def set_local_variable_type(
             "new_type": new_type,
         },
         target,
+        registry=_registry,
     )
 
 
 @mcp.tool()
 def get_xrefs_to(address: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call(
-        "get_xrefs_to", {"address": address, "offset": offset, "limit": limit}, target
+    return dispatch_tool(
+        "get_xrefs_to",
+        {"address": address, "offset": offset, "limit": limit},
+        target,
+        registry=_registry,
     )
 
 
 @mcp.tool()
 def get_xrefs_from(address: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "get_xrefs_from",
         {"address": address, "offset": offset, "limit": limit},
         target,
+        registry=_registry,
     )
 
 
 @mcp.tool()
 def get_function_xrefs(name: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "get_function_xrefs",
         {"name": name, "offset": offset, "limit": limit},
         target,
+        registry=_registry,
     )
 
 
@@ -327,7 +384,12 @@ def list_strings(
     params = {"offset": offset, "limit": limit}
     if filter:
         params["filter"] = filter
-    return _registry.call("list_strings", params, target)
+    return dispatch_tool(
+        "list_strings",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -343,7 +405,12 @@ def create_struct(
         params["category"] = category
     if members:
         params["members"] = members
-    return _registry.call("create_struct", params, target)
+    return dispatch_tool(
+        "create_struct",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -356,7 +423,12 @@ def add_struct_members(
     params: Dict[str, Any] = {"struct_name": struct_name, "members": members}
     if category:
         params["category"] = category
-    return _registry.call("add_struct_members", params, target)
+    return dispatch_tool(
+        "add_struct_members",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -364,7 +436,12 @@ def clear_struct(struct_name: str, category: str | None = None, target: str = "d
     params: Dict[str, Any] = {"struct_name": struct_name}
     if category:
         params["category"] = category
-    return _registry.call("clear_struct", params, target)
+    return dispatch_tool(
+        "clear_struct",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -372,25 +449,41 @@ def get_struct(name: str, category: str | None = None, target: str = "default"):
     params: Dict[str, Any] = {"name": name}
     if category:
         params["category"] = category
-    return _registry.call("get_struct", params, target)
+    return dispatch_tool(
+        "get_struct",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def get_data_by_label(label: str, target: str = "default"):
-    return _registry.call("get_data_by_label", {"label": label}, target)
+    return dispatch_tool(
+        "get_data_by_label",
+        {"label": label},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def get_bytes(address: str, size: int = 16, target: str = "default"):
-    return _registry.call("get_bytes", {"address": address, "size": size}, target)
+    return dispatch_tool(
+        "get_bytes",
+        {"address": address, "size": size},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def search_bytes(pattern: str, offset: int = 0, limit: int = 100, target: str = "default"):
-    return _registry.call(
+    return dispatch_tool(
         "search_bytes",
         {"bytes": pattern, "offset": offset, "limit": limit},
         target,
+        registry=_registry,
     )
 
 
@@ -407,7 +500,12 @@ def create_enum(
         params["category"] = category
     if values:
         params["values"] = values
-    return _registry.call("create_enum", params, target)
+    return dispatch_tool(
+        "create_enum",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -420,7 +518,12 @@ def add_enum_values(
     params: Dict[str, Any] = {"enum_name": enum_name, "values": values}
     if category:
         params["category"] = category
-    return _registry.call("add_enum_values", params, target)
+    return dispatch_tool(
+        "add_enum_values",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -428,7 +531,12 @@ def get_enum(name: str, category: str | None = None, target: str = "default"):
     params: Dict[str, Any] = {"name": name}
     if category:
         params["category"] = category
-    return _registry.call("get_enum", params, target)
+    return dispatch_tool(
+        "get_enum",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -444,7 +552,12 @@ def set_global_data_type(
         params["length"] = length
     if clear_mode:
         params["clear_mode"] = clear_mode
-    return _registry.call("set_global_data_type", params, target)
+    return dispatch_tool(
+        "set_global_data_type",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -459,7 +572,12 @@ def create_class(
         params["parent_namespace"] = parent_namespace
     if members:
         params["members"] = members
-    return _registry.call("create_class", params, target)
+    return dispatch_tool(
+        "create_class",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -472,7 +590,12 @@ def add_class_members(
     params: Dict[str, Any] = {"class_name": class_name, "members": members}
     if parent_namespace:
         params["parent_namespace"] = parent_namespace
-    return _registry.call("add_class_members", params, target)
+    return dispatch_tool(
+        "add_class_members",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -485,7 +608,12 @@ def remove_class_members(
     params: Dict[str, Any] = {"class_name": class_name, "members": members}
     if parent_namespace:
         params["parent_namespace"] = parent_namespace
-    return _registry.call("remove_class_members", params, target)
+    return dispatch_tool(
+        "remove_class_members",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -498,7 +626,12 @@ def remove_enum_values(
     params: Dict[str, Any] = {"enum_name": enum_name, "values": values}
     if category:
         params["category"] = category
-    return _registry.call("remove_enum_values", params, target)
+    return dispatch_tool(
+        "remove_enum_values",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -511,17 +644,32 @@ def remove_struct_members(
     params: Dict[str, Any] = {"struct_name": struct_name, "members": members}
     if category:
         params["category"] = category
-    return _registry.call("remove_struct_members", params, target)
+    return dispatch_tool(
+        "remove_struct_members",
+        params,
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def set_bytes(address: str, bytes_hex: str, target: str = "default"):
-    return _registry.call("set_bytes", {"address": address, "bytes": bytes_hex}, target)
+    return dispatch_tool(
+        "set_bytes",
+        {"address": address, "bytes": bytes_hex},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def get_callee(address: str, target: str = "default"):
-    return _registry.call("get_callee", {"address": address}, target)
+    return dispatch_tool(
+        "get_callee",
+        {"address": address},
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
@@ -533,7 +681,7 @@ def add_bookmark(
     format: str = "json",
     target: str = "default",
 ):
-    return _registry.call(
+    return dispatch_tool(
         "add_bookmark",
         {
             "address": address,
@@ -543,6 +691,7 @@ def add_bookmark(
             "format": format,
         },
         target,
+        registry=_registry,
     )
 
 

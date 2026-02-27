@@ -187,7 +187,7 @@ def test_typed_input_models_for_function_listing_slice():
         fields = model.model_fields
         assert set(fields.keys()) == set(expected_fields.keys())
         for key, (expected_type, expected_default) in expected_fields.items():
-            assert fields[key].annotation is expected_type
+            assert fields[key].annotation == expected_type
             if expected_default is ...:
                 assert fields[key].is_required()
             else:
@@ -226,5 +226,296 @@ def test_typed_input_models_for_function_listing_slice():
         "get_function_by_address",
         {
             "address": (str, ...),
+        },
+    )
+    _assert_fields(
+        "decompile_function",
+        {
+            "name": (str, ...),
+        },
+    )
+    _assert_fields(
+        "decompile_function_by_address",
+        {
+            "address": (str, ...),
+        },
+    )
+    _assert_fields(
+        "disassemble_function",
+        {
+            "address": (str, ...),
+        },
+    )
+    _assert_fields(
+        "get_callee",
+        {
+            "address": (str, ...),
+        },
+    )
+    _assert_fields(
+        "get_xrefs_to",
+        {
+            "address": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "get_xrefs_from",
+        {
+            "address": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "get_function_xrefs",
+        {
+            "name": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "list_segments",
+        {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "list_imports",
+        {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "list_exports",
+        {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "list_namespaces",
+        {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "list_data_items",
+        {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "list_strings",
+        {
+            "offset": (int, 0),
+            "limit": (int, 2000),
+            "filter": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "get_data_by_label",
+        {
+            "label": (str, ...),
+        },
+    )
+    _assert_fields(
+        "get_bytes",
+        {
+            "address": (str, ...),
+            "size": (int, 16),
+        },
+    )
+    _assert_fields(
+        "search_bytes",
+        {
+            "bytes": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "get_struct",
+        {
+            "name": (str, ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "get_enum",
+        {
+            "name": (str, ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "rename_function",
+        {
+            "oldName": (str, ...),
+            "newName": (str, ...),
+        },
+    )
+    _assert_fields(
+        "rename_function_by_address",
+        {
+            "function_address": (str, ...),
+            "new_name": (str, ...),
+        },
+    )
+    _assert_fields(
+        "rename_data",
+        {
+            "address": (str, ...),
+            "newName": (str, ...),
+        },
+    )
+    _assert_fields(
+        "rename_variable",
+        {
+            "functionName": (str, ...),
+            "oldName": (str, ...),
+            "newName": (str, ...),
+        },
+    )
+    _assert_fields(
+        "set_decompiler_comment",
+        {
+            "address": (str, ...),
+            "comment": (str, ...),
+        },
+    )
+    _assert_fields(
+        "set_disassembly_comment",
+        {
+            "address": (str, ...),
+            "comment": (str, ...),
+        },
+    )
+    _assert_fields(
+        "set_function_prototype",
+        {
+            "function_address": (str, ...),
+            "prototype": (str, ...),
+        },
+    )
+    _assert_fields(
+        "set_local_variable_type",
+        {
+            "function_address": (str, ...),
+            "variable_name": (str, ...),
+            "new_type": (str, ...),
+        },
+    )
+    _assert_fields(
+        "create_struct",
+        {
+            "name": (str, ...),
+            "size": (int, 0),
+            "category": (str | None, None),
+            "members": (list[dict] | None, None),
+        },
+    )
+    _assert_fields(
+        "add_struct_members",
+        {
+            "struct_name": (str, ...),
+            "members": (list[dict], ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "clear_struct",
+        {
+            "struct_name": (str, ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "create_enum",
+        {
+            "name": (str, ...),
+            "size": (int, 4),
+            "category": (str | None, None),
+            "values": (list[dict] | None, None),
+        },
+    )
+    _assert_fields(
+        "add_enum_values",
+        {
+            "enum_name": (str, ...),
+            "values": (list[dict], ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "remove_enum_values",
+        {
+            "enum_name": (str, ...),
+            "values": (list[str], ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "create_class",
+        {
+            "name": (str, ...),
+            "parent_namespace": (str | None, None),
+            "members": (list[dict] | None, None),
+        },
+    )
+    _assert_fields(
+        "add_class_members",
+        {
+            "class_name": (str, ...),
+            "members": (list[dict], ...),
+            "parent_namespace": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "remove_class_members",
+        {
+            "class_name": (str, ...),
+            "members": (list[str], ...),
+            "parent_namespace": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "remove_struct_members",
+        {
+            "struct_name": (str, ...),
+            "members": (list[str], ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "set_global_data_type",
+        {
+            "address": (str, ...),
+            "data_type": (str, ...),
+            "length": (int | None, None),
+            "clear_mode": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "set_bytes",
+        {
+            "address": (str, ...),
+            "bytes": (str, ...),
+        },
+    )
+    _assert_fields(
+        "add_bookmark",
+        {
+            "address": (str, ...),
+            "category": (str, ...),
+            "comment": (str, ...),
+            "type": (str, ...),
+            "format": (str, "json"),
         },
     )

@@ -156,6 +156,180 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
         "get_function_by_address": {
             "address": (str, ...),
         },
+        "decompile_function": {
+            "name": (str, ...),
+        },
+        "decompile_function_by_address": {
+            "address": (str, ...),
+        },
+        "disassemble_function": {
+            "address": (str, ...),
+        },
+        "get_callee": {
+            "address": (str, ...),
+        },
+        "get_xrefs_to": {
+            "address": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "get_xrefs_from": {
+            "address": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "get_function_xrefs": {
+            "name": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "list_segments": {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "list_imports": {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "list_exports": {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "list_namespaces": {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "list_data_items": {
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "list_strings": {
+            "offset": (int, 0),
+            "limit": (int, 2000),
+            "filter": (str | None, None),
+        },
+        "get_data_by_label": {
+            "label": (str, ...),
+        },
+        "get_bytes": {
+            "address": (str, ...),
+            "size": (int, 16),
+        },
+        "search_bytes": {
+            "bytes": (str, ...),
+            "offset": (int, 0),
+            "limit": (int, 100),
+        },
+        "get_struct": {
+            "name": (str, ...),
+            "category": (str | None, None),
+        },
+        "get_enum": {
+            "name": (str, ...),
+            "category": (str | None, None),
+        },
+        "rename_function": {
+            "oldName": (str, ...),
+            "newName": (str, ...),
+        },
+        "rename_function_by_address": {
+            "function_address": (str, ...),
+            "new_name": (str, ...),
+        },
+        "rename_data": {
+            "address": (str, ...),
+            "newName": (str, ...),
+        },
+        "rename_variable": {
+            "functionName": (str, ...),
+            "oldName": (str, ...),
+            "newName": (str, ...),
+        },
+        "set_decompiler_comment": {
+            "address": (str, ...),
+            "comment": (str, ...),
+        },
+        "set_disassembly_comment": {
+            "address": (str, ...),
+            "comment": (str, ...),
+        },
+        "set_function_prototype": {
+            "function_address": (str, ...),
+            "prototype": (str, ...),
+        },
+        "set_local_variable_type": {
+            "function_address": (str, ...),
+            "variable_name": (str, ...),
+            "new_type": (str, ...),
+        },
+        "create_struct": {
+            "name": (str, ...),
+            "size": (int, 0),
+            "category": (str | None, None),
+            "members": (list[dict] | None, None),
+        },
+        "add_struct_members": {
+            "struct_name": (str, ...),
+            "members": (list[dict], ...),
+            "category": (str | None, None),
+        },
+        "clear_struct": {
+            "struct_name": (str, ...),
+            "category": (str | None, None),
+        },
+        "create_enum": {
+            "name": (str, ...),
+            "size": (int, 4),
+            "category": (str | None, None),
+            "values": (list[dict] | None, None),
+        },
+        "add_enum_values": {
+            "enum_name": (str, ...),
+            "values": (list[dict], ...),
+            "category": (str | None, None),
+        },
+        "remove_enum_values": {
+            "enum_name": (str, ...),
+            "values": (list[str], ...),
+            "category": (str | None, None),
+        },
+        "create_class": {
+            "name": (str, ...),
+            "parent_namespace": (str | None, None),
+            "members": (list[dict] | None, None),
+        },
+        "add_class_members": {
+            "class_name": (str, ...),
+            "members": (list[dict], ...),
+            "parent_namespace": (str | None, None),
+        },
+        "remove_class_members": {
+            "class_name": (str, ...),
+            "members": (list[str], ...),
+            "parent_namespace": (str | None, None),
+        },
+        "remove_struct_members": {
+            "struct_name": (str, ...),
+            "members": (list[str], ...),
+            "category": (str | None, None),
+        },
+        "set_global_data_type": {
+            "address": (str, ...),
+            "data_type": (str, ...),
+            "length": (int | None, None),
+            "clear_mode": (str | None, None),
+        },
+        "set_bytes": {
+            "address": (str, ...),
+            "bytes": (str, ...),
+        },
+        "add_bookmark": {
+            "address": (str, ...),
+            "category": (str, ...),
+            "comment": (str, ...),
+            "type": (str, ...),
+            "format": (str, "json"),
+        },
     }
     if tool_name in typed_fields_by_tool:
         return create_typed_input_model(model_name, typed_fields_by_tool[tool_name])
