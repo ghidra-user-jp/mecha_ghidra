@@ -18,7 +18,11 @@ PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開す�
    ```bash
    export GHIDRA_INSTALL_DIR=/path/to/ghidra
    ```
-3. サーバーを起動（Streamable HTTP）
+   or
+   ```bash
+   $env:GHIDRA_INSTALL_DIR="C:\path\to\ghidra"
+   ```
+4. サーバーを起動（Streamable HTTP）
    ```bash
    uv run ghidra-mcp \
        --project-location /Users/samsepi0l/ghidra_project.gpr \
