@@ -1815,6 +1815,7 @@ def test_configure_mcp_for_streamable_http(monkeypatch):
             host="127.0.0.1",
             port=8081,
             streamable_http_path="/mcp",
+            transport_security=None,
         )
     )
     monkeypatch.setattr(cli, "mcp", fake_mcp)
@@ -1831,6 +1832,56 @@ def test_configure_mcp_for_streamable_http(monkeypatch):
     assert fake_mcp.settings.host == "0.0.0.0"
     assert fake_mcp.settings.port == 9090
     assert fake_mcp.settings.streamable_http_path == "/custom"
+    assert fake_mcp.settings.transport_security.enable_dns_rebinding_protection is False
+
+
+def test_configure_mcp_for_streamable_http_with_specific_host_enables_rebinding_protection(monkeypatch):
+    fake_mcp = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            log_level="INFO",
+            host="127.0.0.1",
+            port=8081,
+            streamable_http_path="/mcp",
+            transport_security=None,
+        )
+    )
+    monkeypatch.setattr(cli, "mcp", fake_mcp)
+
+    args = types.SimpleNamespace(
+        log_level="INFO",
+        mcp_host="172.16.53.129",
+        mcp_port=8081,
+        mcp_path="/mcp",
+    )
+    cli.configure_mcp_for_streamable_http(args)
+
+    security = fake_mcp.settings.transport_security
+    assert security.enable_dns_rebinding_protection is True
+    assert security.allowed_hosts == ["172.16.53.129:*"]
+    assert security.allowed_origins == ["http://172.16.53.129:*"]
+
+
+def test_configure_mcp_for_sse_with_loopback_host_keeps_local_security(monkeypatch):
+    fake_mcp = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            log_level="INFO",
+            host="127.0.0.1",
+            port=8081,
+            transport_security=None,
+        )
+    )
+    monkeypatch.setattr(cli, "mcp", fake_mcp)
+
+    args = types.SimpleNamespace(
+        log_level="INFO",
+        mcp_host="127.0.0.1",
+        mcp_port=8081,
+    )
+    cli.configure_mcp_for_sse(args)
+
+    security = fake_mcp.settings.transport_security
+    assert security.enable_dns_rebinding_protection is True
+    assert "127.0.0.1:*" in security.allowed_hosts
 
 
 def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
