@@ -72,6 +72,8 @@ def _cli_wrappers(cli_module: ast.Module) -> dict[str, set[str] | None]:
             continue
 
         call_node = None
+        command_arg_index = 0
+        params_arg_index = 1
         for node in ast.walk(fn):
             if (
                 isinstance(node, ast.Call)
@@ -82,18 +84,27 @@ def _cli_wrappers(cli_module: ast.Module) -> dict[str, set[str] | None]:
             ):
                 call_node = node
                 break
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "dispatch_tool"
+            ):
+                call_node = node
+                command_arg_index = 0
+                params_arg_index = 1
+                break
 
         if call_node is None:
             continue
-        if not call_node.args or not isinstance(call_node.args[0], ast.Constant):
+        if len(call_node.args) <= command_arg_index or not isinstance(call_node.args[command_arg_index], ast.Constant):
             continue
-        if not isinstance(call_node.args[0].value, str):
+        if not isinstance(call_node.args[command_arg_index].value, str):
             continue
-        command = call_node.args[0].value
+        command = call_node.args[command_arg_index].value
 
         keys: set[str] | None = None
-        if len(call_node.args) >= 2:
-            params_expr = call_node.args[1]
+        if len(call_node.args) > params_arg_index:
+            params_expr = call_node.args[params_arg_index]
             if isinstance(params_expr, ast.Dict):
                 keys = {
                     key.value
