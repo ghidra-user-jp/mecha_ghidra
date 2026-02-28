@@ -519,3 +519,121 @@ def test_typed_input_models_for_function_listing_slice():
             "format": (str, "json"),
         },
     )
+    _assert_fields("list_targets", {})
+    _assert_fields("list_project_programs", {})
+    _assert_fields(
+        "register_target",
+        {
+            "project_location": (str, ...),
+            "project_name": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "load_project_program",
+        {
+            "domain_path": (str, ...),
+        },
+    )
+    _assert_fields(
+        "import_program",
+        {
+            "binary_path": (str, ...),
+        },
+    )
+    _assert_fields(
+        "create_session",
+        {
+            "project_location": (str, ...),
+            "domain_path": (str, ...),
+            "project_name": (str | None, None),
+        },
+    )
+    _assert_fields("close_session", {})
+    _assert_fields("close_session_and_remove_program", {})
+    _assert_fields(
+        "get_project_sync_status",
+        {
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "checkout_project_program",
+        {
+            "exclusive": (bool, False),
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "add_project_program_to_version_control",
+        {
+            "comment": (str, ...),
+            "keep_checked_out": (bool, False),
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "commit_project_program",
+        {
+            "message": (str, ...),
+            "keep_checked_out": (bool, False),
+            "auto_checkout": (bool, True),
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "pull_project_program",
+        {
+            "on_local_changes": (str, "abort"),
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "undo_checkout_project_program",
+        {
+            "discard_local_changes": (bool, True),
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "terminate_project_program_checkout",
+        {
+            "checkout_id": (int, ...),
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "reload_project_program",
+        {
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "get_version_history",
+        {
+            "limit": (int, 50),
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "get_version_diff",
+        {
+            "from_version": (int, ...),
+            "to_version": (int, ...),
+            "range_limit": (int, 200),
+            "domain_path": (str | None, None),
+        },
+    )
+
+
+def test_registry_and_shared_sync_adapters_are_configured():
+    specs = get_all_tool_specs(include_shared_sync=True)
+
+    assert specs["load_project_program"].result_adapter == "status_program_ok"
+    assert specs["import_program"].result_adapter == "status_program_ok"
+    assert specs["create_session"].result_adapter == "status_target_ok"
+    assert specs["create_session"].error_adapter == "create_session_error"
+    assert specs["close_session"].result_adapter == "status_target_ok"
+    assert specs["close_session"].error_adapter == "close_session_error"
+    assert specs["close_session_and_remove_program"].result_adapter == "status_target_ok"
+    assert specs["close_session_and_remove_program"].error_adapter == "close_remove_error"
+    assert specs["close_session_and_remove_program"].static_kwargs == {"remove_program": True}

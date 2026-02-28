@@ -33,6 +33,8 @@ class ToolSpec:
     empty_list_policy: str = "normalize"
     include_target: bool = True
     static_kwargs: dict[str, Any] = field(default_factory=dict)
+    result_adapter: str | None = None
+    error_adapter: str | None = None
 
 
 _CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
@@ -128,6 +130,20 @@ _SHARED_SYNC_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     "reload_project_program": ("reload_project_program", ("domain_path",)),
 }
 
+_RESULT_ADAPTERS_BY_SPEC: dict[str, str] = {
+    "load_project_program": "status_program_ok",
+    "import_program": "status_program_ok",
+    "create_session": "status_target_ok",
+    "close_session": "status_target_ok",
+    "close_session_and_remove_program": "status_target_ok",
+}
+
+_ERROR_ADAPTERS_BY_SPEC: dict[str, str] = {
+    "create_session": "create_session_error",
+    "close_session": "close_session_error",
+    "close_session_and_remove_program": "close_remove_error",
+}
+
 
 def _pascal_case(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
@@ -136,6 +152,68 @@ def _pascal_case(name: str) -> str:
 def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[BaseModel]:
     model_name = f"{_pascal_case(tool_name)}Input"
     typed_fields_by_tool: dict[str, dict[str, tuple[type[Any], Any]]] = {
+        "list_targets": {},
+        "list_project_programs": {},
+        "register_target": {
+            "project_location": (str, ...),
+            "project_name": (str | None, None),
+        },
+        "load_project_program": {
+            "domain_path": (str, ...),
+        },
+        "import_program": {
+            "binary_path": (str, ...),
+        },
+        "create_session": {
+            "project_location": (str, ...),
+            "domain_path": (str, ...),
+            "project_name": (str | None, None),
+        },
+        "close_session": {},
+        "close_session_and_remove_program": {},
+        "get_project_sync_status": {
+            "domain_path": (str | None, None),
+        },
+        "checkout_project_program": {
+            "exclusive": (bool, False),
+            "domain_path": (str | None, None),
+        },
+        "add_project_program_to_version_control": {
+            "comment": (str, ...),
+            "keep_checked_out": (bool, False),
+            "domain_path": (str | None, None),
+        },
+        "commit_project_program": {
+            "message": (str, ...),
+            "keep_checked_out": (bool, False),
+            "auto_checkout": (bool, True),
+            "domain_path": (str | None, None),
+        },
+        "pull_project_program": {
+            "on_local_changes": (str, "abort"),
+            "domain_path": (str | None, None),
+        },
+        "undo_checkout_project_program": {
+            "discard_local_changes": (bool, True),
+            "domain_path": (str | None, None),
+        },
+        "terminate_project_program_checkout": {
+            "checkout_id": (int, ...),
+            "domain_path": (str | None, None),
+        },
+        "reload_project_program": {
+            "domain_path": (str | None, None),
+        },
+        "get_version_history": {
+            "limit": (int, 50),
+            "domain_path": (str | None, None),
+        },
+        "get_version_diff": {
+            "from_version": (int, ...),
+            "to_version": (int, ...),
+            "range_limit": (int, 200),
+            "domain_path": (str | None, None),
+        },
         "list_methods": {
             "offset": (int, 0),
             "limit": (int, 100),
@@ -345,6 +423,8 @@ for command_name, field_names in _CORE_COMMAND_PARAM_KEYS.items():
         executor_kind=ExecutorKind.CORE_COMMAND,
         command_or_method=command_name,
         input_model=_build_input_model(command_name, field_names),
+        result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(command_name),
+        error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(command_name),
     )
 
 for spec_name, (method_name, field_names, include_target, static_kwargs) in _REGISTRY_METHOD_SPECS.items():
@@ -356,6 +436,8 @@ for spec_name, (method_name, field_names, include_target, static_kwargs) in _REG
         input_model=_build_input_model(spec_name, field_names),
         include_target=include_target,
         static_kwargs=dict(static_kwargs),
+        result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(spec_name),
+        error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(spec_name),
     )
 
 for spec_name, (method_name, field_names) in _SHARED_SYNC_METHOD_SPECS.items():
@@ -365,6 +447,8 @@ for spec_name, (method_name, field_names) in _SHARED_SYNC_METHOD_SPECS.items():
         executor_kind=ExecutorKind.SHARED_SYNC_METHOD,
         command_or_method=method_name,
         input_model=_build_input_model(spec_name, field_names),
+        result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(spec_name),
+        error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(spec_name),
     )
 
 

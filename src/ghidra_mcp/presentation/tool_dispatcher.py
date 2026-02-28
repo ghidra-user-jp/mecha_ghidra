@@ -15,6 +15,39 @@ class CoreExecutorProtocol(Protocol):
         """Execute a legacy core command under a target context."""
 
 
+def _status_target_ok(_result: Any, target: str) -> dict[str, Any]:
+    return {"status": "ok", "target": target}
+
+
+def _status_program_ok(result: Any, target: str) -> dict[str, Any]:
+    return {"status": "ok", "target": target, "program": result}
+
+
+_RESULT_ADAPTERS = {
+    "status_target_ok": _status_target_ok,
+    "status_program_ok": _status_program_ok,
+}
+
+
+def _create_session_error(exc: Exception, target: str) -> RuntimeError:
+    return RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
+
+
+def _close_session_error(exc: Exception, target: str) -> RuntimeError:
+    return RuntimeError(f"セッション '{target}' のクローズに失敗しました: {exc}")
+
+
+def _close_remove_error(exc: Exception, target: str) -> RuntimeError:
+    return RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました: {exc}")
+
+
+_ERROR_ADAPTERS = {
+    "create_session_error": _create_session_error,
+    "close_session_error": _close_session_error,
+    "close_remove_error": _close_remove_error,
+}
+
+
 def normalize_empty_list_result(result: Any) -> Any:
     if isinstance(result, list) and len(result) == 0:
         return CallToolResult(content=[TextContent(type="text", text="[]")])
@@ -39,22 +72,40 @@ def dispatch_tool(
 ) -> Any:
     spec = get_tool_spec(spec_name)
     params = _validate_raw_args(spec_name, spec.input_model, raw_args)
+    result_adapter = None
+    if spec.result_adapter:
+        result_adapter = _RESULT_ADAPTERS.get(spec.result_adapter)
+        if result_adapter is None:
+            raise RuntimeError(f"UNKNOWN_RESULT_ADAPTER: {spec.result_adapter}")
+    error_adapter = None
+    if spec.error_adapter:
+        error_adapter = _ERROR_ADAPTERS.get(spec.error_adapter)
+        if error_adapter is None:
+            raise RuntimeError(f"UNKNOWN_ERROR_ADAPTER: {spec.error_adapter}")
 
-    if spec.executor_kind == ExecutorKind.CORE_COMMAND:
-        if hasattr(registry, "call"):
-            result = registry.call(spec.command_or_method, params, target)
-        elif core_executor is not None:
-            result = core_executor.execute(spec.command_or_method, params, key=target)
+    try:
+        if spec.executor_kind == ExecutorKind.CORE_COMMAND:
+            if hasattr(registry, "call"):
+                result = registry.call(spec.command_or_method, params, target)
+            elif core_executor is not None:
+                result = core_executor.execute(spec.command_or_method, params, key=target)
+            else:
+                raise RuntimeError("CORE_EXECUTOR_UNAVAILABLE: core command dispatcherが利用できません")
+
         else:
-            raise RuntimeError("CORE_EXECUTOR_UNAVAILABLE: core command dispatcherが利用できません")
-        return normalize_empty_list_result(result) if spec.empty_list_policy == "normalize" else result
+            method = getattr(registry, spec.command_or_method)
+            kwargs = {**params, **spec.static_kwargs}
+            if spec.include_target:
+                result = method(target, **kwargs)
+            else:
+                result = method(**kwargs)
 
-    method = getattr(registry, spec.command_or_method)
-    kwargs = {**params, **spec.static_kwargs}
-    if spec.include_target:
-        result = method(target, **kwargs)
-    else:
-        result = method(**kwargs)
+        if result_adapter is not None:
+            result = result_adapter(result, target)
+    except Exception as exc:
+        if error_adapter is not None:
+            raise error_adapter(exc, target) from exc
+        raise
 
     return normalize_empty_list_result(result) if spec.empty_list_policy == "normalize" else result
 

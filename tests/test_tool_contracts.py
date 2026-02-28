@@ -159,8 +159,13 @@ def test_cli_and_core_commands_are_in_sync():
 
     supported = _supported_commands(core_module)
     wrappers = _cli_wrappers(cli_module)
+    core_wrappers = {
+        command: keys
+        for command, keys in wrappers.items()
+        if command in supported
+    }
 
-    assert set(wrappers) == set(supported)
+    assert set(core_wrappers) == set(supported)
 
 
 def test_cli_wrapper_params_are_read_by_core_handlers():
@@ -172,10 +177,10 @@ def test_cli_wrapper_params_are_read_by_core_handlers():
     wrappers = _cli_wrappers(cli_module)
 
     mismatches: list[str] = []
-    for command, cli_keys in sorted(wrappers.items()):
+    for command, handler in sorted(supported.items()):
+        cli_keys = wrappers.get(command)
         if cli_keys is None:
             continue
-        handler = supported[command]
         unknown_keys = sorted(key for key in cli_keys if key not in handler_keys.get(handler, set()))
         if unknown_keys:
             mismatches.append(

@@ -21,8 +21,68 @@ class DummyRegistry:
         self.registry_calls.append(("list_targets", {}))
         return []
 
+    def list_programs(self, target):
+        self.registry_calls.append(("list_programs", {"target": target}))
+        return []
+
     def register_target(self, target, **kwargs):
         self.registry_calls.append(("register_target", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def load_program(self, target, **kwargs):
+        self.registry_calls.append(("load_program", {"target": target, **kwargs}))
+        return kwargs["domain_path"]
+
+    def import_program(self, target, **kwargs):
+        self.registry_calls.append(("import_program", {"target": target, **kwargs}))
+        return "/imported.bin"
+
+    def create_session(self, target, **kwargs):
+        self.registry_calls.append(("create_session", {"target": target, **kwargs}))
+        return object()
+
+    def close_session(self, target, **kwargs):
+        self.registry_calls.append(("close_session", {"target": target, **kwargs}))
+        return None
+
+    def get_project_sync_status(self, target, **kwargs):
+        self.registry_calls.append(("get_project_sync_status", {"target": target, **kwargs}))
+        return {"target": target, "program": kwargs.get("domain_path")}
+
+    def checkout_project_program(self, target, **kwargs):
+        self.registry_calls.append(("checkout_project_program", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def add_project_program_to_version_control(self, target, **kwargs):
+        self.registry_calls.append(("add_project_program_to_version_control", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def commit_project_program(self, target, **kwargs):
+        self.registry_calls.append(("commit_project_program", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def pull_project_program(self, target, **kwargs):
+        self.registry_calls.append(("pull_project_program", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def undo_checkout_project_program(self, target, **kwargs):
+        self.registry_calls.append(("undo_checkout_project_program", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def terminate_project_program_checkout(self, target, **kwargs):
+        self.registry_calls.append(("terminate_project_program_checkout", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def reload_project_program(self, target, **kwargs):
+        self.registry_calls.append(("reload_project_program", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def get_version_history(self, target, **kwargs):
+        self.registry_calls.append(("get_version_history", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target}
+
+    def get_version_diff(self, target, **kwargs):
+        self.registry_calls.append(("get_version_diff", {"target": target, **kwargs}))
         return {"status": "ok", "target": target}
 
 
@@ -83,6 +143,14 @@ def test_dispatch_tool_validation_error():
         ("set_global_data_type", {"address": "0x1"}),
         ("set_bytes", {"address": "0x1"}),
         ("add_bookmark", {"address": "0x1", "category": "cat", "comment": "memo"}),
+        ("register_target", {"project_name": "sample"}),
+        ("load_project_program", {}),
+        ("import_program", {}),
+        ("create_session", {"project_location": "/tmp/sample.gpr"}),
+        ("add_project_program_to_version_control", {"keep_checked_out": False}),
+        ("commit_project_program", {"keep_checked_out": False, "auto_checkout": True}),
+        ("terminate_project_program_checkout", {"domain_path": "/sample"}),
+        ("get_version_diff", {"to_version": 2}),
     ],
 )
 def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, raw_args):
@@ -136,6 +204,20 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("set_global_data_type", {"address": "0x1", "data_type": "int", "length": "x"}),
         ("set_bytes", {"address": "0x1", "bytes": 1}),
         ("add_bookmark", {"address": "0x1", "category": "cat", "comment": "memo", "type": 1}),
+        ("register_target", {"project_location": 1, "project_name": None}),
+        ("load_project_program", {"domain_path": 1}),
+        ("import_program", {"binary_path": 1}),
+        ("create_session", {"project_location": "/tmp/sample.gpr", "domain_path": 1}),
+        ("get_project_sync_status", {"domain_path": 1}),
+        ("checkout_project_program", {"exclusive": "yes", "domain_path": None}),
+        ("add_project_program_to_version_control", {"comment": 1, "keep_checked_out": False}),
+        ("commit_project_program", {"message": 1, "keep_checked_out": False, "auto_checkout": True}),
+        ("pull_project_program", {"on_local_changes": 1, "domain_path": None}),
+        ("undo_checkout_project_program", {"discard_local_changes": "x", "domain_path": None}),
+        ("terminate_project_program_checkout", {"checkout_id": "x", "domain_path": None}),
+        ("reload_project_program", {"domain_path": 1}),
+        ("get_version_history", {"limit": "x", "domain_path": None}),
+        ("get_version_diff", {"from_version": "x", "to_version": 2, "range_limit": 1}),
     ],
 )
 def test_dispatch_tool_validation_error_for_type_mismatch(spec_name, raw_args):
@@ -189,6 +271,75 @@ def test_dispatch_tool_routes_target_to_registry_method():
             },
         )
     ]
+
+
+def test_dispatch_tool_applies_status_program_result_adapter():
+    registry = DummyRegistry()
+
+    result = dispatch_tool(
+        "load_project_program",
+        {"domain_path": "/folder/app"},
+        "fw",
+        registry=registry,
+    )
+
+    assert result == {"status": "ok", "target": "fw", "program": "/folder/app"}
+
+
+def test_dispatch_tool_applies_status_target_result_adapter():
+    registry = DummyRegistry()
+
+    result = dispatch_tool(
+        "create_session",
+        {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
+        "fw",
+        registry=registry,
+    )
+
+    assert result == {"status": "ok", "target": "fw"}
+
+
+def test_dispatch_tool_applies_error_adapter_for_create_session():
+    class FailingRegistry(DummyRegistry):
+        def create_session(self, target, **kwargs):  # noqa: ARG002
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="セッション 'fw' の作成に失敗しました: boom"):
+        dispatch_tool(
+            "create_session",
+            {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
+            "fw",
+            registry=FailingRegistry(),
+        )
+
+
+def test_dispatch_tool_applies_error_adapter_for_close_session():
+    class FailingRegistry(DummyRegistry):
+        def close_session(self, target, **kwargs):  # noqa: ARG002
+            raise RuntimeError("close boom")
+
+    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズに失敗しました: close boom"):
+        dispatch_tool(
+            "close_session",
+            {},
+            "fw",
+            registry=FailingRegistry(),
+        )
+
+
+def test_dispatch_tool_applies_error_adapter_for_close_remove():
+    class FailingRegistry(DummyRegistry):
+        def close_session(self, target, **kwargs):  # noqa: ARG002
+            assert kwargs == {"remove_program": True}
+            raise RuntimeError("remove boom")
+
+    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズ/削除に失敗しました: remove boom"):
+        dispatch_tool(
+            "close_session_and_remove_program",
+            {},
+            "fw",
+            registry=FailingRegistry(),
+        )
 
 
 def test_dispatch_tool_can_fallback_to_core_executor_without_registry_call():

@@ -706,12 +706,12 @@ def add_bookmark(
     ),
 )
 def list_targets() -> List[Dict[str, Optional[str]]]:
-    return _normalize_empty_list_result(_registry.list_targets())
+    return dispatch_tool("list_targets", {}, "default", registry=_registry)
 
 
 @mcp.tool()
 def list_project_programs(target: str):
-    return _normalize_empty_list_result(_registry.list_programs(target))
+    return dispatch_tool("list_project_programs", {}, target, registry=_registry)
 
 
 @mcp.tool(
@@ -729,10 +729,14 @@ def register_target(
     project_location: Annotated[str, Field(description="Path to the Ghidra project (.gpr) file or project directory")],
     project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
 ):
-    return _registry.register_target(
+    return dispatch_tool(
+        "register_target",
+        {
+            "project_location": project_location,
+            "project_name": project_name,
+        },
         target,
-        project_location=project_location,
-        project_name=project_name,
+        registry=_registry,
     )
 
 
@@ -751,8 +755,14 @@ def load_project_program(
     target: str,
     domain_path: Annotated[str, Field(description="Domain path of the program to open (e.g. /folder/program)")],
 ):
-    loaded_domain_path = _registry.load_program(target, domain_path=domain_path)
-    return {"status": "ok", "target": target, "program": loaded_domain_path}
+    return dispatch_tool(
+        "load_project_program",
+        {
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool(description="Import a binary or Ghidra archive (.gzf) into the current target's project")
@@ -760,8 +770,14 @@ def import_program(
     target: str,
     binary_path: Annotated[str, Field(description="Path to the binary or Ghidra archive (.gzf) to import")],
 ):
-    imported_domain_path = _registry.import_program(target, binary_path=binary_path)
-    return {"status": "ok", "target": target, "program": imported_domain_path}
+    return dispatch_tool(
+        "import_program",
+        {
+            "binary_path": binary_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool(
@@ -781,41 +797,40 @@ def create_session(
     domain_path: Annotated[str, Field(description="Domain path of the program to open (e.g. /folder/program)")],
     project_name: Annotated[str | None, Field(description="Project name; required when project_location is a directory")] = None,
 ):
-    try:
-        _registry.create_session(
-            target,
-            project_location=project_location,
-            project_name=project_name,
-            domain_path=domain_path,
-        )
-        return {"status": "ok", "target": target}
-    except Exception as exc:
-        raise RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
+    return dispatch_tool(
+        "create_session",
+        {
+            "project_location": project_location,
+            "project_name": project_name,
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 @mcp.tool()
 def close_session(target: str):
-    try:
-        _registry.close_session(target)
-        return {"status": "ok", "target": target}
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"セッション '{target}' のクローズに失敗しました: {exc}")
+    return dispatch_tool("close_session", {}, target, registry=_registry)
 
 
 @mcp.tool()
 def close_session_and_remove_program(target: str):
-    try:
-        _registry.close_session(target, remove_program=True)
-        return {"status": "ok", "target": target}
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました: {exc}")
+    return dispatch_tool("close_session_and_remove_program", {}, target, registry=_registry)
 
 
 def get_project_sync_status(
     target: str,
     domain_path: Annotated[str | None, Field(description="同期対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.get_project_sync_status(target, domain_path=domain_path)
+    return dispatch_tool(
+        "get_project_sync_status",
+        {
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 def checkout_project_program(
@@ -823,7 +838,15 @@ def checkout_project_program(
     exclusive: Annotated[bool, Field(description="Trueの場合は排他的checkoutを試行")] = False,
     domain_path: Annotated[str | None, Field(description="checkout対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.checkout_project_program(target, exclusive=exclusive, domain_path=domain_path)
+    return dispatch_tool(
+        "checkout_project_program",
+        {
+            "exclusive": exclusive,
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 def add_project_program_to_version_control(
@@ -832,11 +855,15 @@ def add_project_program_to_version_control(
     keep_checked_out: Annotated[bool, Field(description="追加後もcheckout状態を維持する")] = False,
     domain_path: Annotated[str | None, Field(description="対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.add_project_program_to_version_control(
+    return dispatch_tool(
+        "add_project_program_to_version_control",
+        {
+            "comment": comment,
+            "keep_checked_out": keep_checked_out,
+            "domain_path": domain_path,
+        },
         target,
-        comment=comment,
-        keep_checked_out=keep_checked_out,
-        domain_path=domain_path,
+        registry=_registry,
     )
 
 
@@ -847,12 +874,16 @@ def commit_project_program(
     auto_checkout: Annotated[bool, Field(description="未checkout時に自動checkoutを試行する")] = True,
     domain_path: Annotated[str | None, Field(description="check-in対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.commit_project_program(
+    return dispatch_tool(
+        "commit_project_program",
+        {
+            "message": message,
+            "keep_checked_out": keep_checked_out,
+            "auto_checkout": auto_checkout,
+            "domain_path": domain_path,
+        },
         target,
-        message=message,
-        keep_checked_out=keep_checked_out,
-        auto_checkout=auto_checkout,
-        domain_path=domain_path,
+        registry=_registry,
     )
 
 
@@ -864,7 +895,15 @@ def pull_project_program(
     ] = "abort",
     domain_path: Annotated[str | None, Field(description="pull対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.pull_project_program(target, on_local_changes=on_local_changes, domain_path=domain_path)
+    return dispatch_tool(
+        "pull_project_program",
+        {
+            "on_local_changes": on_local_changes,
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 def undo_checkout_project_program(
@@ -872,10 +911,14 @@ def undo_checkout_project_program(
     discard_local_changes: Annotated[bool, Field(description="Trueならローカル変更を破棄")] = True,
     domain_path: Annotated[str | None, Field(description="undo対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.undo_checkout_project_program(
+    return dispatch_tool(
+        "undo_checkout_project_program",
+        {
+            "discard_local_changes": discard_local_changes,
+            "domain_path": domain_path,
+        },
         target,
-        discard_local_changes=discard_local_changes,
-        domain_path=domain_path,
+        registry=_registry,
     )
 
 
@@ -884,14 +927,29 @@ def terminate_project_program_checkout(
     checkout_id: Annotated[int, Field(description="終了したいcheckout id")],
     domain_path: Annotated[str | None, Field(description="終了対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.terminate_project_program_checkout(target, checkout_id=checkout_id, domain_path=domain_path)
+    return dispatch_tool(
+        "terminate_project_program_checkout",
+        {
+            "checkout_id": checkout_id,
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 def reload_project_program(
     target: str,
     domain_path: Annotated[str | None, Field(description="再読み込み対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.reload_project_program(target, domain_path=domain_path)
+    return dispatch_tool(
+        "reload_project_program",
+        {
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 def get_version_history(
@@ -899,7 +957,15 @@ def get_version_history(
     limit: Annotated[int, Field(description="返却する履歴件数の上限")] = 50,
     domain_path: Annotated[str | None, Field(description="履歴取得対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.get_version_history(target, domain_path=domain_path, limit=limit)
+    return dispatch_tool(
+        "get_version_history",
+        {
+            "limit": limit,
+            "domain_path": domain_path,
+        },
+        target,
+        registry=_registry,
+    )
 
 
 def get_version_diff(
@@ -909,12 +975,16 @@ def get_version_diff(
     range_limit: Annotated[int, Field(description="返却する差分アドレスレンジ件数の上限")] = 200,
     domain_path: Annotated[str | None, Field(description="差分取得対象のdomain path。未指定時は現在ロード中のprogram")] = None,
 ):
-    return _registry.get_version_diff(
+    return dispatch_tool(
+        "get_version_diff",
+        {
+            "from_version": from_version,
+            "to_version": to_version,
+            "range_limit": range_limit,
+            "domain_path": domain_path,
+        },
         target,
-        from_version=from_version,
-        to_version=to_version,
-        domain_path=domain_path,
-        range_limit=range_limit,
+        registry=_registry,
     )
 
 
