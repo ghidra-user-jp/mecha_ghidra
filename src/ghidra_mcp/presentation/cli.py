@@ -23,8 +23,6 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 
 from ghidra_headless.session import ProgramSession, ProjectHandle
-from ghidra_mcp.application.usecases import SyncService, TargetService
-from ghidra_mcp.infrastructure import LockManager, ProjectGateway, SyncGateway, TargetRepository
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 from ghidra_mcp.services.session_registry import SessionRegistry as _SessionRegistry
@@ -100,27 +98,10 @@ class SessionRegistry(_SessionRegistry):
 
 
 class ServiceRegistryAdapter:
-    """Facade bridging dispatcher calls to TargetService/SyncService."""
+    """Facade that preserves legacy monkeypatch points via SessionRegistry."""
 
-    def __init__(self, session_registry: SessionRegistry) -> None:
+    def __init__(self, *, session_registry: SessionRegistry) -> None:
         self._session_registry = session_registry
-        lock_manager = LockManager()
-        target_repository = TargetRepository(session_registry)
-        project_gateway = ProjectGateway(session_registry)
-        sync_gateway = SyncGateway(session_registry)
-        self._target_service = TargetService(
-            project_gateway=project_gateway,
-            target_repository=target_repository,
-            lock_manager=lock_manager,
-        )
-        self._sync_service = SyncService(
-            sync_gateway=sync_gateway,
-            target_repository=target_repository,
-            lock_manager=lock_manager,
-        )
-
-    def __getattr__(self, name: str):
-        return getattr(self._session_registry, name)
 
     # core command path
     def call(self, command: str, params: dict[str, Any], target: str):
@@ -128,23 +109,23 @@ class ServiceRegistryAdapter:
 
     # target/project path
     def list_targets(self):
-        return self._target_service.list_targets()
+        return self._session_registry.list_targets()
 
     def list_programs(self, target: str):
-        return self._target_service.list_project_programs(target)
+        return self._session_registry.list_programs(target)
 
     def register_target(self, target: str, *, project_location: str, project_name: str | None = None):
-        return self._target_service.register_target(
+        return self._session_registry.register_target(
             target,
-            project_location=project_location,
+            project_location,
             project_name=project_name,
         )
 
     def load_program(self, target: str, domain_path: str):
-        return self._target_service.load_project_program(target, domain_path=domain_path)
+        return self._session_registry.load_program(target, domain_path)
 
     def import_program(self, target: str, binary_path: str):
-        return self._target_service.import_program(target, binary_path=binary_path)
+        return self._session_registry.import_program(target, binary_path)
 
     def create_session(
         self,
@@ -156,22 +137,22 @@ class ServiceRegistryAdapter:
     ):
         if domain_path is None:
             raise ValueError("domain_path を指定してください")
-        return self._target_service.create_session(
+        return self._session_registry.create_session(
             target,
-            project_location=project_location,
-            domain_path=domain_path,
+            project_location,
             project_name=project_name,
+            domain_path=domain_path,
         )
 
     def close_session(self, target: str, *, remove_program: bool = False):
-        return self._target_service.close_session(target, remove_program=remove_program)
+        return self._session_registry.close_session(target, remove_program=remove_program)
 
     # shared-sync path
     def get_project_sync_status(self, target: str, *, domain_path: str | None = None):
-        return self._sync_service.get_project_sync_status(target, domain_path=domain_path)
+        return self._session_registry.get_project_sync_status(target, domain_path=domain_path)
 
     def checkout_project_program(self, target: str, *, exclusive: bool = False, domain_path: str | None = None):
-        return self._sync_service.checkout_project_program(target, exclusive=exclusive, domain_path=domain_path)
+        return self._session_registry.checkout_project_program(target, exclusive=exclusive, domain_path=domain_path)
 
     def add_project_program_to_version_control(
         self,
@@ -181,9 +162,9 @@ class ServiceRegistryAdapter:
         keep_checked_out: bool = False,
         domain_path: str | None = None,
     ):
-        return self._sync_service.add_project_program_to_version_control(
+        return self._session_registry.add_project_program_to_version_control(
             target,
-            comment=comment,
+            comment,
             keep_checked_out=keep_checked_out,
             domain_path=domain_path,
         )
@@ -197,9 +178,9 @@ class ServiceRegistryAdapter:
         auto_checkout: bool = True,
         domain_path: str | None = None,
     ):
-        return self._sync_service.commit_project_program(
+        return self._session_registry.commit_project_program(
             target,
-            message=message,
+            message,
             keep_checked_out=keep_checked_out,
             auto_checkout=auto_checkout,
             domain_path=domain_path,
@@ -212,7 +193,7 @@ class ServiceRegistryAdapter:
         on_local_changes: str = "abort",
         domain_path: str | None = None,
     ):
-        return self._sync_service.pull_project_program(
+        return self._session_registry.pull_project_program(
             target,
             on_local_changes=on_local_changes,
             domain_path=domain_path,
@@ -225,7 +206,7 @@ class ServiceRegistryAdapter:
         discard_local_changes: bool = True,
         domain_path: str | None = None,
     ):
-        return self._sync_service.undo_checkout_project_program(
+        return self._session_registry.undo_checkout_project_program(
             target,
             discard_local_changes=discard_local_changes,
             domain_path=domain_path,
@@ -238,17 +219,17 @@ class ServiceRegistryAdapter:
         checkout_id: int,
         domain_path: str | None = None,
     ):
-        return self._sync_service.terminate_project_program_checkout(
+        return self._session_registry.terminate_project_program_checkout(
             target,
             checkout_id=checkout_id,
             domain_path=domain_path,
         )
 
     def reload_project_program(self, target: str, *, domain_path: str | None = None):
-        return self._sync_service.reload_project_program(target, domain_path=domain_path)
+        return self._session_registry.reload_project_program(target, domain_path=domain_path)
 
     def get_version_history(self, target: str, *, limit: int = 50, domain_path: str | None = None):
-        return self._sync_service.get_version_history(target, limit=limit, domain_path=domain_path)
+        return self._session_registry.get_version_history(target, limit=limit, domain_path=domain_path)
 
     def get_version_diff(
         self,
@@ -259,7 +240,7 @@ class ServiceRegistryAdapter:
         range_limit: int = 200,
         domain_path: str | None = None,
     ):
-        return self._sync_service.get_version_diff(
+        return self._session_registry.get_version_diff(
             target,
             from_version=from_version,
             to_version=to_version,
@@ -267,9 +248,15 @@ class ServiceRegistryAdapter:
             domain_path=domain_path,
         )
 
+    def has_targets(self) -> bool:
+        return self._session_registry.has_targets()
+
+    def close_all(self) -> None:
+        self._session_registry.close_all()
+
 
 _session_registry = SessionRegistry()
-_registry = ServiceRegistryAdapter(_session_registry)
+_registry = _session_registry
 _runtime = create_mcp_server(
     registry_provider=lambda: _registry,
     dispatcher_provider=lambda: dispatch_tool,
