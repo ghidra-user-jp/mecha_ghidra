@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 from mcp.types import CallToolResult
+from pydantic import BaseModel, ConfigDict
 
+import ghidra_mcp.presentation.tool_dispatcher as tool_dispatcher_module
+from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, ToolSpec
+from ghidra_mcp.contracts.tool_models import create_typed_input_model
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
 
@@ -361,3 +365,34 @@ def test_dispatch_tool_can_fallback_to_core_executor_without_registry_call():
             "params": {"offset": 1, "limit": 2},
         }
     ]
+
+
+def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
+    class OutputMustBeDict(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        payload: dict[str, str]
+
+    class Registry:
+        def load_program(self, target, **kwargs):  # noqa: ARG002
+            return "/folder/app"
+
+    spec = ToolSpec(
+        name="dummy_load",
+        exposure=ToolExposure.ALWAYS,
+        executor_kind=ExecutorKind.REGISTRY_METHOD,
+        command_or_method="load_program",
+        input_model=create_typed_input_model("DummyInput", {"domain_path": (str, ...)}),
+        output_model=OutputMustBeDict,
+        include_target=True,
+        result_adapter="status_program_ok",
+    )
+
+    monkeypatch.setattr(tool_dispatcher_module, "get_tool_spec", lambda _name: spec)
+
+    with pytest.raises(ValueError, match="dummy_load の出力検証に失敗"):
+        tool_dispatcher_module.dispatch_tool(
+            "dummy_load",
+            {"domain_path": "/folder/app"},
+            "fw",
+            registry=Registry(),
+        )

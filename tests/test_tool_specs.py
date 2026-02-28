@@ -597,3 +597,21 @@ def test_specs_include_contract_driven_metadata():
     assert specs["list_targets"].public_signature == ()
     assert specs["create_session"].error_policy == "legacy_compatible"
     assert hasattr(specs["create_session"], "output_model")
+
+
+def test_all_specs_have_required_contract_fields():
+    specs = get_all_tool_specs(include_shared_sync=True)
+
+    for spec in specs.values():
+        assert spec.output_model is not None
+        assert spec.error_policy == "legacy_compatible"
+        assert isinstance(spec.public_signature, tuple)
+
+        fields = tuple(spec.input_model.model_fields.keys())
+        if spec.executor_kind == ExecutorKind.CORE_COMMAND and spec.include_target:
+            expected_signature = (*fields, "target")
+        elif spec.include_target:
+            expected_signature = ("target", *fields)
+        else:
+            expected_signature = fields
+        assert spec.public_signature == expected_signature
