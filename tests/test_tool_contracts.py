@@ -71,11 +71,36 @@ def _handler_param_keys(core_module: ast.Module) -> dict[str, set[str]]:
     return keys_by_handler
 
 
-def _registry_command_names(module: ast.Module) -> list[str]:
+def _registry_command_dep_keys(module: ast.Module) -> dict[str, set[str]]:
     for node in module.body:
         if not isinstance(node, ast.Assign):
             continue
-        if not any(isinstance(t, ast.Name) and t.id == "COMMAND_NAMES" for t in node.targets):
+        if not any(isinstance(t, ast.Name) and t.id == "COMMAND_DEP_KEYS" for t in node.targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        mapping: dict[str, set[str]] = {}
+        for key, value in zip(node.value.keys, node.value.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                continue
+            if isinstance(value, (ast.Tuple, ast.List)):
+                fields = {
+                    item.value
+                    for item in value.elts
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                }
+            else:
+                fields = set()
+            mapping[key.value] = fields
+        return mapping
+    raise AssertionError("COMMAND_DEP_KEYS が見つかりません")
+
+
+def _registry_string_tuple(module: ast.Module, target_name: str) -> list[str]:
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == target_name for t in node.targets):
             continue
         if not isinstance(node.value, (ast.Tuple, ast.List)):
             continue
@@ -84,7 +109,11 @@ def _registry_command_names(module: ast.Module) -> list[str]:
             if isinstance(item, ast.Constant) and isinstance(item.value, str):
                 names.append(item.value)
         return names
-    raise AssertionError("COMMAND_NAMES が見つかりません")
+    raise AssertionError(f"{target_name} が見つかりません")
+
+
+def _registry_command_names(module: ast.Module) -> list[str]:
+    return _registry_string_tuple(module, "COMMAND_NAMES")
 
 
 def _cli_wrappers(cli_module: ast.Module) -> dict[str, set[str] | None]:
@@ -192,21 +221,22 @@ def test_cli_and_core_commands_are_in_sync():
 
 def test_cli_wrapper_params_are_read_by_core_handlers():
     core_module = _load_ast(CORE_COMPAT_PATH)
+    registry_module = _load_ast(CORE_REGISTRY_PATH)
     cli_module = _load_ast(CLI_PATH)
 
     supported = _supported_commands(core_module)
-    handler_keys = _handler_param_keys(core_module)
+    dep_keys_by_command = _registry_command_dep_keys(registry_module)
     wrappers = _cli_wrappers(cli_module)
 
     mismatches: list[str] = []
-    for command, handler in sorted(supported.items()):
+    for command in sorted(supported):
         cli_keys = wrappers.get(command)
         if cli_keys is None:
             continue
-        unknown_keys = sorted(key for key in cli_keys if key not in handler_keys.get(handler, set()))
+        unknown_keys = sorted(key for key in cli_keys if key not in dep_keys_by_command.get(command, set()))
         if unknown_keys:
             mismatches.append(
-                f"{command} -> {handler} が未使用のキー: {', '.join(unknown_keys)}"
+                f"{command} が未使用のキー: {', '.join(unknown_keys)}"
             )
 
     assert not mismatches, "\n".join(mismatches)
@@ -534,3 +564,18 @@ def test_command_registry_names_match_supported_commands():
     command_names = _registry_command_names(registry_module)
 
     assert list(supported.keys()) == command_names
+
+
+def test_ast_sensitive_commands_are_explicit_function_defs():
+    compat_module = _load_ast(CORE_COMPAT_PATH)
+    registry_module = _load_ast(CORE_REGISTRY_PATH)
+
+    sensitive_commands = set(_registry_string_tuple(registry_module, "AST_SENSITIVE_COMMANDS"))
+    compat_functions = {
+        node.name
+        for node in compat_module.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    missing = sorted(name for name in sensitive_commands if name not in compat_functions)
+    assert not missing, "明示シムが不足しています: %s" % ", ".join(missing)

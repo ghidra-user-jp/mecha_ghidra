@@ -8,6 +8,7 @@ from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_t
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_COMPAT_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_compat.py"
+CORE_REGISTRY_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_command_registry.py"
 CLI_PATH = ROOT / "src" / "ghidra_mcp" / "cli.py"
 
 
@@ -74,40 +75,29 @@ def _supported_commands(core_module: ast.Module) -> dict[str, str]:
     raise AssertionError("SUPPORTED_COMMANDS が見つかりません")
 
 
-def _handler_param_keys(core_module: ast.Module) -> dict[str, set[str]]:
-    keys_by_handler: dict[str, set[str]] = {}
-    for node in core_module.body:
-        if not isinstance(node, ast.FunctionDef):
+def _command_dep_keys(registry_module: ast.Module) -> dict[str, set[str]]:
+    for node in registry_module.body:
+        if not isinstance(node, ast.Assign):
             continue
-        if not node.args.args or node.args.args[0].arg != "params":
+        if not any(isinstance(t, ast.Name) and t.id == "COMMAND_DEP_KEYS" for t in node.targets):
             continue
-
-        keys: set[str] = set()
-
-        class Visitor(ast.NodeVisitor):
-            def visit_Call(self, call: ast.Call) -> None:
-                if (
-                    isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "get"
-                    and isinstance(call.func.value, ast.Name)
-                    and call.func.value.id == "params"
-                    and call.args
-                    and isinstance(call.args[0], ast.Constant)
-                    and isinstance(call.args[0].value, str)
-                ):
-                    keys.add(call.args[0].value)
-                self.generic_visit(call)
-
-            def visit_Subscript(self, subscript: ast.Subscript) -> None:
-                if isinstance(subscript.value, ast.Name) and subscript.value.id == "params":
-                    key = subscript.slice
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                        keys.add(key.value)
-                self.generic_visit(subscript)
-
-        Visitor().visit(node)
-        keys_by_handler[node.name] = keys
-    return keys_by_handler
+        if not isinstance(node.value, ast.Dict):
+            continue
+        mapping: dict[str, set[str]] = {}
+        for key, value in zip(node.value.keys, node.value.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                continue
+            if isinstance(value, (ast.Tuple, ast.List)):
+                fields = {
+                    item.value
+                    for item in value.elts
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                }
+            else:
+                fields = set()
+            mapping[key.value] = fields
+        return mapping
+    raise AssertionError("COMMAND_DEP_KEYS が見つかりません")
 
 
 def test_tool_specs_cover_all_public_tools():
@@ -123,8 +113,9 @@ def test_tool_specs_cover_all_public_tools():
 
 def test_core_command_spec_keys_are_consumed_by_handlers():
     core_module = _load_ast(CORE_COMPAT_PATH)
+    registry_module = _load_ast(CORE_REGISTRY_PATH)
     supported = _supported_commands(core_module)
-    handler_keys = _handler_param_keys(core_module)
+    dep_keys_by_command = _command_dep_keys(registry_module)
 
     specs = get_all_tool_specs(include_shared_sync=True)
     mismatches: list[str] = []
@@ -133,12 +124,13 @@ def test_core_command_spec_keys_are_consumed_by_handlers():
         if spec.executor_kind != ExecutorKind.CORE_COMMAND:
             continue
         command = spec.command_or_method
-        handler_name = supported[command]
+        assert command in supported
+        expected_keys = dep_keys_by_command.get(command, set())
         unknown_keys = sorted(
-            key for key in spec.input_model.model_fields.keys() if key not in handler_keys.get(handler_name, set())
+            key for key in spec.input_model.model_fields.keys() if key not in expected_keys
         )
         if unknown_keys:
-            mismatches.append(f"{command} -> {handler_name} が未使用のキー: {', '.join(unknown_keys)}")
+            mismatches.append(f"{command} が未使用のキー: {', '.join(unknown_keys)}")
 
     assert not mismatches, "\n".join(mismatches)
 
