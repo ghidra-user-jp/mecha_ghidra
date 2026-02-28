@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_tool_spec
+from ghidra_mcp.presentation.error_mapper import map_exception
 
 
 class CoreExecutorProtocol(Protocol):
@@ -105,6 +106,9 @@ def dispatch_tool(
     except Exception as exc:
         if error_adapter is not None:
             raise error_adapter(exc, target) from exc
+        mapped = map_exception(exc)
+        if mapped is not exc:
+            raise mapped from exc
         raise
 
     return normalize_empty_list_result(result) if spec.empty_list_policy == "normalize" else result

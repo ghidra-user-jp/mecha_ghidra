@@ -4,59 +4,17 @@ import ast
 from pathlib import Path
 
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_tool_specs
+from ghidra_mcp.presentation import cli as presentation_cli
+from ghidra_mcp.presentation.tool_registry import build_tool_functions, register_shared_sync_tools
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_COMPAT_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_compat.py"
 CORE_REGISTRY_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_command_registry.py"
-CLI_PATH = ROOT / "src" / "ghidra_mcp" / "cli.py"
 
 
 def _load_ast(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"))
-
-
-def _decorated_tool_names(cli_module: ast.Module) -> set[str]:
-    names: set[str] = set()
-    for fn in cli_module.body:
-        if not isinstance(fn, ast.FunctionDef):
-            continue
-        for decorator in fn.decorator_list:
-            if isinstance(decorator, ast.Call):
-                target = decorator.func
-            else:
-                target = decorator
-            if (
-                isinstance(target, ast.Attribute)
-                and isinstance(target.value, ast.Name)
-                and target.value.id == "mcp"
-                and target.attr == "tool"
-            ):
-                names.add(fn.name)
-                break
-    return names
-
-
-def _shared_sync_registered_tool_names(cli_module: ast.Module) -> set[str]:
-    for node in cli_module.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "register_shared_project_sync_tools":
-            names: set[str] = set()
-            for call in ast.walk(node):
-                if not isinstance(call, ast.Call):
-                    continue
-                if not isinstance(call.func, ast.Attribute):
-                    continue
-                if call.func.attr != "add_tool":
-                    continue
-                if not isinstance(call.func.value, ast.Name) or call.func.value.id != "mcp":
-                    continue
-                if not call.args:
-                    continue
-                target = call.args[0]
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-            return names
-    raise AssertionError("register_shared_project_sync_tools が見つかりません")
 
 
 def _supported_commands(core_module: ast.Module) -> dict[str, str]:
@@ -101,14 +59,8 @@ def _command_dep_keys(registry_module: ast.Module) -> dict[str, set[str]]:
 
 
 def test_tool_specs_cover_all_public_tools():
-    cli_module = _load_ast(CLI_PATH)
-
-    decorated_names = _decorated_tool_names(cli_module)
-    shared_sync_registered = _shared_sync_registered_tool_names(cli_module)
-    expected_public = decorated_names | shared_sync_registered
-
     specs = get_all_tool_specs(include_shared_sync=True)
-    assert set(specs) == expected_public
+    assert set(specs) == set(presentation_cli.PUBLIC_TOOL_FUNCTIONS)
 
 
 def test_core_command_spec_keys_are_consumed_by_handlers():
@@ -158,17 +110,23 @@ def test_shared_sync_specs_are_gated_by_exposure():
 
 
 def test_shared_sync_specs_match_registration_function():
-    cli_module = _load_ast(CLI_PATH)
-    shared_sync_registered = _shared_sync_registered_tool_names(cli_module)
-
     specs = get_all_tool_specs(include_shared_sync=True)
-    shared_sync_names = {
-        name
-        for name, spec in specs.items()
-        if spec.exposure == ToolExposure.SHARED_SYNC
-    }
+    tools = build_tool_functions(
+        specs=specs,
+        dispatcher_provider=lambda: presentation_cli.dispatch_tool,
+        registry_provider=lambda: presentation_cli._registry,
+    )
 
-    assert shared_sync_registered == shared_sync_names
+    registered: list[str] = []
+
+    class DummyMCP:
+        def add_tool(self, fn, description=None):  # noqa: ARG002
+            registered.append(fn.__name__)
+
+    register_shared_sync_tools(DummyMCP(), tools=tools)
+
+    shared_sync_names = [name for name, spec in specs.items() if spec.exposure == ToolExposure.SHARED_SYNC]
+    assert registered == shared_sync_names
 
 
 def test_typed_input_models_for_function_listing_slice():
@@ -629,3 +587,13 @@ def test_registry_and_shared_sync_adapters_are_configured():
     assert specs["close_session_and_remove_program"].result_adapter == "status_target_ok"
     assert specs["close_session_and_remove_program"].error_adapter == "close_remove_error"
     assert specs["close_session_and_remove_program"].static_kwargs == {"remove_program": True}
+
+
+def test_specs_include_contract_driven_metadata():
+    specs = get_all_tool_specs(include_shared_sync=True)
+
+    assert specs["list_functions"].public_signature[-1] == "target"
+    assert specs["register_target"].public_signature[0] == "target"
+    assert specs["list_targets"].public_signature == ()
+    assert specs["create_session"].error_policy == "legacy_compatible"
+    assert hasattr(specs["create_session"], "output_model")

@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .tool_models import create_optional_any_input_model, create_typed_input_model
+from .tool_models import create_any_output_model, create_optional_any_input_model, create_typed_input_model
 
 
 class ToolExposure(str, Enum):
@@ -29,6 +29,9 @@ class ToolSpec:
     executor_kind: ExecutorKind
     command_or_method: str
     input_model: type[BaseModel]
+    output_model: type[BaseModel] = field(default_factory=create_any_output_model)
+    public_signature: tuple[str, ...] = field(default_factory=tuple)
+    error_policy: str = "legacy_compatible"
     annotations: dict[str, Any] = field(default_factory=dict)
     empty_list_policy: str = "normalize"
     include_target: bool = True
@@ -423,17 +426,20 @@ for command_name, field_names in _CORE_COMMAND_PARAM_KEYS.items():
         executor_kind=ExecutorKind.CORE_COMMAND,
         command_or_method=command_name,
         input_model=_build_input_model(command_name, field_names),
+        public_signature=(*field_names, "target"),
         result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(command_name),
         error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(command_name),
     )
 
 for spec_name, (method_name, field_names, include_target, static_kwargs) in _REGISTRY_METHOD_SPECS.items():
+    signature_fields = ("target", *field_names) if include_target else field_names
     _TOOL_SPECS[spec_name] = ToolSpec(
         name=spec_name,
         exposure=ToolExposure.ALWAYS,
         executor_kind=ExecutorKind.REGISTRY_METHOD,
         command_or_method=method_name,
         input_model=_build_input_model(spec_name, field_names),
+        public_signature=signature_fields,
         include_target=include_target,
         static_kwargs=dict(static_kwargs),
         result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(spec_name),
@@ -447,6 +453,7 @@ for spec_name, (method_name, field_names) in _SHARED_SYNC_METHOD_SPECS.items():
         executor_kind=ExecutorKind.SHARED_SYNC_METHOD,
         command_or_method=method_name,
         input_model=_build_input_model(spec_name, field_names),
+        public_signature=("target", *field_names),
         result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(spec_name),
         error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(spec_name),
     )

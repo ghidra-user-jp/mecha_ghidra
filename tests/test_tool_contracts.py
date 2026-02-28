@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_all_tool_specs
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core.py"
@@ -12,7 +14,6 @@ CORE_REGISTRY_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_comma
 READ_ONLY_DECOMPILE_PATH = (
     ROOT / "src" / "ghidra_headless" / "handlers" / "commands" / "read_only_decompile.py"
 )
-CLI_PATH = ROOT / "src" / "ghidra_mcp" / "cli.py"
 
 
 def _load_ast(path: Path) -> ast.Module:
@@ -116,123 +117,27 @@ def _registry_command_names(module: ast.Module) -> list[str]:
     return _registry_string_tuple(module, "COMMAND_NAMES")
 
 
-def _cli_wrappers(cli_module: ast.Module) -> dict[str, set[str] | None]:
-    wrappers: dict[str, set[str] | None] = {}
-    for fn in cli_module.body:
-        if not isinstance(fn, ast.FunctionDef):
-            continue
-
-        call_node = None
-        command_arg_index = 0
-        params_arg_index = 1
-        for node in ast.walk(fn):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "call"
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "_registry"
-            ):
-                call_node = node
-                break
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "dispatch_tool"
-            ):
-                call_node = node
-                command_arg_index = 0
-                params_arg_index = 1
-                break
-
-        if call_node is None:
-            continue
-        if len(call_node.args) <= command_arg_index or not isinstance(call_node.args[command_arg_index], ast.Constant):
-            continue
-        if not isinstance(call_node.args[command_arg_index].value, str):
-            continue
-        command = call_node.args[command_arg_index].value
-
-        keys: set[str] | None = None
-        if len(call_node.args) > params_arg_index:
-            params_expr = call_node.args[params_arg_index]
-            if isinstance(params_expr, ast.Dict):
-                keys = {
-                    key.value
-                    for key in params_expr.keys
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
-                }
-            elif isinstance(params_expr, ast.Name):
-                param_var = params_expr.id
-                keys = set()
-                for stmt in fn.body:
-                    if isinstance(stmt, ast.Assign):
-                        for target in stmt.targets:
-                            if (
-                                isinstance(target, ast.Name)
-                                and target.id == param_var
-                                and isinstance(stmt.value, ast.Dict)
-                            ):
-                                keys.update(
-                                    key.value
-                                    for key in stmt.value.keys
-                                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
-                                )
-                    elif isinstance(stmt, ast.AnnAssign):
-                        if (
-                            isinstance(stmt.target, ast.Name)
-                            and stmt.target.id == param_var
-                            and isinstance(stmt.value, ast.Dict)
-                        ):
-                            keys.update(
-                                key.value
-                                for key in stmt.value.keys
-                                if isinstance(key, ast.Constant) and isinstance(key.value, str)
-                            )
-
-                    for node in ast.walk(stmt):
-                        if (
-                            isinstance(node, ast.Subscript)
-                            and isinstance(node.value, ast.Name)
-                            and node.value.id == param_var
-                        ):
-                            key = node.slice
-                            if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                                keys.add(key.value)
-
-        wrappers[command] = keys
-    return wrappers
-
-
 def test_cli_and_core_commands_are_in_sync():
     core_module = _load_ast(CORE_COMPAT_PATH)
-    cli_module = _load_ast(CLI_PATH)
-
     supported = _supported_commands(core_module)
-    wrappers = _cli_wrappers(cli_module)
-    core_wrappers = {
-        command: keys
-        for command, keys in wrappers.items()
-        if command in supported
+    core_specs = {
+        spec.command_or_method
+        for spec in get_all_tool_specs(include_shared_sync=True).values()
+        if spec.executor_kind == ExecutorKind.CORE_COMMAND
     }
-
-    assert set(core_wrappers) == set(supported)
+    assert core_specs == set(supported)
 
 
 def test_cli_wrapper_params_are_read_by_core_handlers():
     core_module = _load_ast(CORE_COMPAT_PATH)
     registry_module = _load_ast(CORE_REGISTRY_PATH)
-    cli_module = _load_ast(CLI_PATH)
-
     supported = _supported_commands(core_module)
     dep_keys_by_command = _registry_command_dep_keys(registry_module)
-    wrappers = _cli_wrappers(cli_module)
 
     mismatches: list[str] = []
     for command in sorted(supported):
-        cli_keys = wrappers.get(command)
-        if cli_keys is None:
-            continue
+        spec = get_all_tool_specs(include_shared_sync=True)[command]
+        cli_keys = set(spec.input_model.model_fields.keys())
         unknown_keys = sorted(key for key in cli_keys if key not in dep_keys_by_command.get(command, set()))
         if unknown_keys:
             mismatches.append(
