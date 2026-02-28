@@ -6,6 +6,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core.py"
+CORE_COMPAT_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_compat.py"
+CORE_HELPERS_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_helpers.py"
+CORE_REGISTRY_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_command_registry.py"
+READ_ONLY_DECOMPILE_PATH = (
+    ROOT / "src" / "ghidra_headless" / "handlers" / "commands" / "read_only_decompile.py"
+)
 CLI_PATH = ROOT / "src" / "ghidra_mcp" / "cli.py"
 
 
@@ -63,6 +69,22 @@ def _handler_param_keys(core_module: ast.Module) -> dict[str, set[str]]:
         Visitor().visit(node)
         keys_by_handler[node.name] = keys
     return keys_by_handler
+
+
+def _registry_command_names(module: ast.Module) -> list[str]:
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "COMMAND_NAMES" for t in node.targets):
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            continue
+        names: list[str] = []
+        for item in node.value.elts:
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                names.append(item.value)
+        return names
+    raise AssertionError("COMMAND_NAMES が見つかりません")
 
 
 def _cli_wrappers(cli_module: ast.Module) -> dict[str, set[str] | None]:
@@ -154,7 +176,7 @@ def _cli_wrappers(cli_module: ast.Module) -> dict[str, set[str] | None]:
 
 
 def test_cli_and_core_commands_are_in_sync():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     cli_module = _load_ast(CLI_PATH)
 
     supported = _supported_commands(core_module)
@@ -169,7 +191,7 @@ def test_cli_and_core_commands_are_in_sync():
 
 
 def test_cli_wrapper_params_are_read_by_core_handlers():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     cli_module = _load_ast(CLI_PATH)
 
     supported = _supported_commands(core_module)
@@ -191,7 +213,7 @@ def test_cli_wrapper_params_are_read_by_core_handlers():
 
 
 def test_default_operand_representation_is_called_with_operand_index():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(READ_ONLY_DECOMPILE_PATH)
     invalid_calls: list[str] = []
 
     for node in ast.walk(core_module):
@@ -210,7 +232,7 @@ def test_default_operand_representation_is_called_with_operand_index():
 
 
 def test_collect_has_non_positive_limit_guard():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_HELPERS_PATH)
     collect = None
     for node in core_module.body:
         if isinstance(node, ast.FunctionDef) and node.name == "_collect":
@@ -244,7 +266,7 @@ def test_collect_has_non_positive_limit_guard():
 
 
 def test_txn_requires_checkout_guard_for_versioned_program():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_HELPERS_PATH)
     txn = None
     for node in core_module.body:
         if isinstance(node, ast.FunctionDef) and node.name == "_txn":
@@ -279,7 +301,7 @@ def _find_function_def(module: ast.Module, function_name: str) -> ast.FunctionDe
 
 
 def test_rename_variable_reads_parameters_for_argument_rename():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     rename_variable = _find_function_def(core_module, "rename_variable")
 
     has_get_parameters = False
@@ -296,7 +318,7 @@ def test_rename_variable_reads_parameters_for_argument_rename():
 
 
 def test_set_function_prototype_uses_apply_function_signature_cmd():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     set_function_prototype = _find_function_def(core_module, "set_function_prototype")
 
     uses_apply_cmd = False
@@ -315,7 +337,7 @@ def test_set_function_prototype_uses_apply_function_signature_cmd():
 
 
 def test_parse_data_type_does_not_call_find_data_types_directly():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_HELPERS_PATH)
     parse_data_type = _find_function_def(core_module, "_parse_data_type")
 
     has_direct_find_data_types = False
@@ -332,7 +354,7 @@ def test_parse_data_type_does_not_call_find_data_types_directly():
 
 
 def test_set_local_variable_type_uses_high_symbol_update_path():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     set_local_variable_type = _find_function_def(core_module, "set_local_variable_type")
 
     uses_high_function = False
@@ -355,7 +377,7 @@ def test_set_local_variable_type_uses_high_symbol_update_path():
 
 
 def test_set_global_data_type_reads_clear_mode_param():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     set_global_data_type = _find_function_def(core_module, "set_global_data_type")
 
     reads_clear_mode = False
@@ -377,14 +399,14 @@ def test_set_global_data_type_reads_clear_mode_param():
 
 
 def test_create_class_command_exists_in_supported_commands():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     supported = _supported_commands(core_module)
     assert "create_class" in supported
     assert supported["create_class"] == "create_class"
 
 
 def test_add_class_members_does_not_create_struct_implicitly():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     add_class_members = _find_function_def(core_module, "add_class_members")
 
     has_strict_struct_binding = False
@@ -415,37 +437,37 @@ def _calls_function(fn: ast.FunctionDef, function_name: str) -> bool:
 
 
 def test_list_classes_uses_namespace_iterator_helper():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     list_classes = _find_function_def(core_module, "list_classes")
     assert _calls_function(list_classes, "_iter_namespaces")
 
 
 def test_list_namespaces_uses_namespace_iterator_helper():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     list_namespaces = _find_function_def(core_module, "list_namespaces")
     assert _calls_function(list_namespaces, "_iter_namespaces")
 
 
 def test_list_exports_uses_export_compatibility_helper():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     list_exports = _find_function_def(core_module, "list_exports")
     assert _calls_function(list_exports, "_is_exported_symbol")
 
 
 def test_get_xrefs_from_uses_iter_items_for_reference_arrays():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     get_xrefs_from = _find_function_def(core_module, "get_xrefs_from")
     assert _calls_function(get_xrefs_from, "_iter_items")
 
 
 def test_find_ghidra_class_uses_iter_items_for_symbol_collections():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_HELPERS_PATH)
     find_ghidra_class = _find_function_def(core_module, "_find_ghidra_class")
     assert _calls_function(find_ghidra_class, "_iter_items")
 
 
 def test_get_enum_does_not_require_concrete_enumdatatype_instance():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     get_enum = _find_function_def(core_module, "get_enum")
 
     uses_concrete_isinstance_check = False
@@ -486,3 +508,29 @@ def test_execute_wraps_handler_result_with_json_safe():
             break
 
     assert wraps_json_safe, "execute は返却値を _json_safe で正規化する必要があります"
+
+
+def test_core_reexports_supported_commands_from_core_compat():
+    core_module = _load_ast(CORE_PATH)
+
+    has_reexport = False
+    for node in core_module.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module != "ghidra_headless.handlers.core_compat":
+            continue
+        if any(alias.name == "SUPPORTED_COMMANDS" for alias in node.names):
+            has_reexport = True
+            break
+
+    assert has_reexport, "core.py は core_compat.SUPPORTED_COMMANDS を再公開する必要があります"
+
+
+def test_command_registry_names_match_supported_commands():
+    compat_module = _load_ast(CORE_COMPAT_PATH)
+    registry_module = _load_ast(CORE_REGISTRY_PATH)
+
+    supported = _supported_commands(compat_module)
+    command_names = _registry_command_names(registry_module)
+
+    assert list(supported.keys()) == command_names

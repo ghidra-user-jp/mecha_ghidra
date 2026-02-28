@@ -7,7 +7,7 @@ from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_t
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core.py"
+CORE_COMPAT_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_compat.py"
 CLI_PATH = ROOT / "src" / "ghidra_mcp" / "cli.py"
 
 
@@ -122,7 +122,7 @@ def test_tool_specs_cover_all_public_tools():
 
 
 def test_core_command_spec_keys_are_consumed_by_handlers():
-    core_module = _load_ast(CORE_PATH)
+    core_module = _load_ast(CORE_COMPAT_PATH)
     supported = _supported_commands(core_module)
     handler_keys = _handler_param_keys(core_module)
 
