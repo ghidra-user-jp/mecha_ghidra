@@ -30,18 +30,30 @@ class ProgramLease:
             ) from exc
 
         self.before_close()
-        result = self.do_operation()
+
+        operation_error: Exception | None = None
+        result: Any = None
+        try:
+            result = self.do_operation()
+        except Exception as exc:  # noqa: BLE001
+            operation_error = exc
 
         try:
             self.reopen()
         except Exception as exc:  # noqa: BLE001
+            details: dict[str, Any] | None = None
+            if operation_error is not None:
+                details = {"operation_error": str(operation_error)}
             raise DomainError(
                 code=ErrorCode.REOPEN_FAILED,
                 message=f"プログラム再オープンに失敗しました: {exc}",
                 hint="セッションを再作成して再実行してください",
                 retryable=True,
+                details=details,
             ) from exc
 
+        if operation_error is not None:
+            raise operation_error
         return result
 
 

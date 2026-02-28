@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import fasteners
 
+from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.infrastructure import ProgramLease
 from ghidra_headless.session import ProgramSession, ProjectHandle
 
 
@@ -644,27 +646,25 @@ class RuntimeState:
         project_name = handle.get_project_name()
         domain_path = self._session_domain_path(session)
         program = session.get_program()
+        active_handle: ProjectHandle | None = None
 
-        if save_before_close:
-            try:
-                handle.project.save(program)
-            except Exception as exc:
-                raise RuntimeError(f"SAVE_FAILED: プログラム保存に失敗しました: {exc}") from exc
+        def _save_hook() -> None:
+            handle.project.save(program)
 
-        session.close()
-        if handle.is_closed():
-            self._project_handles.pop(handle.get_key(), None)
+        def _before_close() -> None:
+            session.close()
+            if handle.is_closed():
+                self._project_handles.pop(handle.get_key(), None)
 
-        active_handle = self._get_or_create_project_handle(project_location, project_name)
-        operation_error = None
-        operation_result = None
-        try:
-            operation_result = operation(active_handle, domain_path)
-        except Exception as exc:  # noqa: BLE001
-            operation_error = exc
+        def _do_operation():
+            nonlocal active_handle
+            active_handle = self._get_or_create_project_handle(project_location, project_name)
+            return operation(active_handle, domain_path)
 
-        reopen_error = None
-        try:
+        def _reopen() -> None:
+            nonlocal active_handle
+            if active_handle is None:
+                active_handle = self._get_or_create_project_handle(project_location, project_name)
             reopened = active_handle.open_program(domain_path)
             try:
                 self._core_accessor().initialize(reopened.get_program(), key=name)
@@ -675,29 +675,36 @@ class RuntimeState:
                 except Exception:
                     pass
                 raise
-        except Exception as exc:  # noqa: BLE001
-            reopen_error = exc
+            finally:
+                if active_handle is not None and active_handle.is_closed():
+                    self._project_handles.pop(active_handle.get_key(), None)
 
-        if active_handle.is_closed():
-            self._project_handles.pop(active_handle.get_key(), None)
+        lease = ProgramLease(
+            before_close=_before_close,
+            do_operation=_do_operation,
+            reopen=_reopen,
+        )
+        try:
+            return lease.run(save=save_before_close, save_hook=_save_hook)
+        except DomainError as exc:
+            if exc.code == ErrorCode.SAVE_FAILED:
+                raise RuntimeError(f"SAVE_FAILED: {exc.message}") from exc
 
-        if reopen_error is not None:
-            self._sessions.pop(name, None)
-            self._locks.pop(name, None)
-            try:
-                self._core_accessor().remove_context(name)
-            except Exception:
-                pass
-            if operation_error is not None:
-                raise RuntimeError(
-                    f"SYNC_OPERATION_FAILED: {operation_error}; REOPEN_FAILED: {reopen_error}"
-                ) from operation_error
-            raise RuntimeError(f"REOPEN_FAILED: {reopen_error}") from reopen_error
+            if exc.code == ErrorCode.REOPEN_FAILED:
+                self._sessions.pop(name, None)
+                self._locks.pop(name, None)
+                try:
+                    self._core_accessor().remove_context(name)
+                except Exception:
+                    pass
+                operation_error = (exc.details or {}).get("operation_error")
+                if operation_error:
+                    raise RuntimeError(
+                        f"SYNC_OPERATION_FAILED: {operation_error}; REOPEN_FAILED: {exc.message}"
+                    ) from exc
+                raise RuntimeError(f"REOPEN_FAILED: {exc.message}") from exc
 
-        if operation_error is not None:
-            raise operation_error
-
-        return operation_result
+            raise RuntimeError(str(exc)) from exc
 
     @staticmethod
     def _discard_conflict_checkout_operation(handle: ProjectHandle, domain_path: str) -> Dict[str, bool]:
@@ -808,6 +815,17 @@ class RuntimeState:
     def has_targets(self) -> bool:
         with self._registry_lock.read_lock():
             return bool(self._target_projects)
+
+    def project_lock_key(self, name: str) -> str | None:
+        with self._registry_lock.read_lock():
+            key = self._target_projects.get(name)
+            if key is None:
+                session = self._sessions.get(name)
+                if session is not None:
+                    key = session.get_project_handle().get_key()
+            if key is None:
+                return None
+            return f"{key[0]}::{key[1]}"
 
     def _get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
         key = ProjectHandle.make_key(project_location, project_name)

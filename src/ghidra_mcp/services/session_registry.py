@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ghidra_mcp.application.services import RuntimeState, SyncService, TargetService
-from ghidra_mcp.domain import DomainError
+from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.infrastructure import LockManager
 
 
 class SessionRegistry:
@@ -28,8 +29,9 @@ class SessionRegistry:
         self._runtime._ensure = self._forward_ensure
         self._runtime_lock = self._runtime._lock
         self._runtime._lock = self._forward_lock
-        self._target_service = TargetService(self._runtime)
-        self._sync_service = SyncService(self._runtime)
+        self._lock_manager = LockManager()
+        self._target_service = TargetService(self._runtime, lock_manager=self._lock_manager)
+        self._sync_service = SyncService(self._runtime, lock_manager=self._lock_manager)
         self._bind_runtime_attrs()
 
     def _bind_runtime_attrs(self) -> None:
@@ -45,6 +47,8 @@ class SessionRegistry:
 
     @staticmethod
     def _rethrow_domain_error(exc: DomainError) -> None:
+        if exc.code == ErrorCode.VALIDATION_ERROR:
+            raise ValueError(str(exc)) from exc
         raise RuntimeError(str(exc)) from exc
 
     def _forward_get_or_create_project_handle(self, project_location: str, project_name: str | None):

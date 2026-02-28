@@ -63,6 +63,19 @@ def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | Non
     return parsed.model_dump(exclude_none=True)
 
 
+def _validate_output(spec_name: str, model_cls, result: Any) -> Any:
+    if model_cls is None:
+        return result
+    try:
+        model_cls.model_validate(result)
+    except ValidationError:
+        try:
+            model_cls.model_validate({"payload": result})
+        except ValidationError as exc:
+            raise ValueError(f"{spec_name} の出力検証に失敗しました: {exc}") from exc
+    return result
+
+
 def dispatch_tool(
     spec_name: str,
     raw_args: dict[str, Any] | None,
@@ -101,6 +114,7 @@ def dispatch_tool(
             else:
                 result = method(**kwargs)
 
+        result = _validate_output(spec_name, spec.output_model, result)
         if result_adapter is not None:
             result = result_adapter(result, target)
     except Exception as exc:
