@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import ghidra_mcp.contracts.tool_models as tool_models
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_tool_specs
 from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
 from ghidra_mcp.presentation import cli as presentation_cli
@@ -630,9 +631,10 @@ def test_all_output_models_are_strict_and_typed():
             assert model_fields["payload"].annotation == (dict[str, object] | list[object])
 
 
-def test_tool_spec_does_not_depend_on_create_any_output_model():
+def test_any_output_model_helper_is_removed():
     source = TOOL_SPEC_PATH.read_text(encoding="utf-8")
     assert "create_any_output_model" not in source
+    assert not hasattr(tool_models, "create_any_output_model")
 
 
 def test_all_specs_have_required_contract_fields():

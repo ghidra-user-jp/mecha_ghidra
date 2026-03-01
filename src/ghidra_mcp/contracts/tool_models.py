@@ -62,10 +62,6 @@ def create_scalar_output_model(
     return create_typed_output_model(model_name, {"payload": (payload_type, ...)})
 
 
-def create_any_output_model(model_name: str = "AnyToolOutput") -> type[ToolOutputModel]:
-    return create_model(model_name, __base__=ToolOutputModel, payload=(Any, None))
-
-
 __all__ = [
     "ToolInputModel",
     "ToolOutputModel",
@@ -73,7 +69,6 @@ __all__ = [
     "create_list_output_model",
     "create_map_output_model",
     "create_scalar_output_model",
-    "create_any_output_model",
     "create_optional_any_input_model",
     "create_typed_input_model",
 ]
