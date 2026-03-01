@@ -96,19 +96,6 @@ COMMAND_NAMES = (
     "add_bookmark",
 )
 
-AST_SENSITIVE_COMMANDS = (
-    "list_classes",
-    "list_namespaces",
-    "list_exports",
-    "get_xrefs_from",
-    "get_enum",
-    "rename_variable",
-    "set_function_prototype",
-    "set_local_variable_type",
-    "set_global_data_type",
-    "add_class_members",
-)
-
 COMMAND_TO_IMPL = {
     "list_methods": list_methods,
     "list_functions": list_functions,
@@ -350,7 +337,6 @@ COMMAND_PROFILE = {
 
 __all__ = [
     "COMMAND_NAMES",
-    "AST_SENSITIVE_COMMANDS",
     "COMMAND_TO_IMPL",
     "COMMAND_DEP_KEYS",
     "COMMAND_PROFILE",

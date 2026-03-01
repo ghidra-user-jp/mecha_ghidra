@@ -1,61 +1,9 @@
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_tool_specs
+from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
 from ghidra_mcp.presentation import cli as presentation_cli
 from ghidra_mcp.presentation.tool_registry import build_tool_functions, register_shared_sync_tools
-
-
-ROOT = Path(__file__).resolve().parents[1]
-CORE_COMPAT_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_compat.py"
-CORE_REGISTRY_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_command_registry.py"
-
-
-def _load_ast(path: Path) -> ast.Module:
-    return ast.parse(path.read_text(encoding="utf-8"))
-
-
-def _supported_commands(core_module: ast.Module) -> dict[str, str]:
-    for node in core_module.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(t, ast.Name) and t.id == "SUPPORTED_COMMANDS" for t in node.targets):
-            continue
-        if not isinstance(node.value, ast.Dict):
-            continue
-        commands: dict[str, str] = {}
-        for key, value in zip(node.value.keys, node.value.values):
-            if isinstance(key, ast.Constant) and isinstance(key.value, str) and isinstance(value, ast.Name):
-                commands[key.value] = value.id
-        return commands
-    raise AssertionError("SUPPORTED_COMMANDS が見つかりません")
-
-
-def _command_dep_keys(registry_module: ast.Module) -> dict[str, set[str]]:
-    for node in registry_module.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(t, ast.Name) and t.id == "COMMAND_DEP_KEYS" for t in node.targets):
-            continue
-        if not isinstance(node.value, ast.Dict):
-            continue
-        mapping: dict[str, set[str]] = {}
-        for key, value in zip(node.value.keys, node.value.values):
-            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
-                continue
-            if isinstance(value, (ast.Tuple, ast.List)):
-                fields = {
-                    item.value
-                    for item in value.elts
-                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
-                }
-            else:
-                fields = set()
-            mapping[key.value] = fields
-        return mapping
-    raise AssertionError("COMMAND_DEP_KEYS が見つかりません")
 
 
 def test_tool_specs_cover_all_public_tools():
@@ -64,10 +12,8 @@ def test_tool_specs_cover_all_public_tools():
 
 
 def test_core_command_spec_keys_are_consumed_by_handlers():
-    core_module = _load_ast(CORE_COMPAT_PATH)
-    registry_module = _load_ast(CORE_REGISTRY_PATH)
-    supported = _supported_commands(core_module)
-    dep_keys_by_command = _command_dep_keys(registry_module)
+    supported = set(COMMAND_NAMES)
+    dep_keys_by_command = {name: set(keys) for name, keys in COMMAND_DEP_KEYS.items()}
 
     specs = get_all_tool_specs(include_shared_sync=True)
     mismatches: list[str] = []

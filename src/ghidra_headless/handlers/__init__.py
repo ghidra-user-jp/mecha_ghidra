@@ -2,6 +2,12 @@
 
 from __future__ import absolute_import, print_function
 
-from .core import HANDLERS
+
+def __getattr__(name):
+    if name == "HANDLERS":
+        from .core import HANDLERS
+
+        return HANDLERS
+    raise AttributeError(name)
 
 __all__ = ["HANDLERS"]
