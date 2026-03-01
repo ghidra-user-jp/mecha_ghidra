@@ -11,6 +11,7 @@ CORE_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core.py"
 CORE_COMPAT_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_compat.py"
 CORE_HELPERS_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_helpers.py"
 CORE_REGISTRY_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core_command_registry.py"
+PRESENTATION_CLI_PATH = ROOT / "src" / "ghidra_mcp" / "presentation" / "cli.py"
 READ_ONLY_DECOMPILE_PATH = (
     ROOT / "src" / "ghidra_headless" / "handlers" / "commands" / "read_only_decompile.py"
 )
@@ -484,3 +485,21 @@ def test_ast_sensitive_commands_are_explicit_function_defs():
 
     missing = sorted(name for name in sensitive_commands if name not in compat_functions)
     assert not missing, "明示シムが不足しています: %s" % ", ".join(missing)
+
+
+def test_presentation_cli_does_not_import_legacy_services_module():
+    cli_module = _load_ast(PRESENTATION_CLI_PATH)
+
+    forbidden_imports: list[str] = []
+    for node in ast.walk(cli_module):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("ghidra_mcp.services"):
+                    forbidden_imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.startswith("ghidra_mcp.services"):
+                forbidden_imports.append(node.module)
+
+    assert not forbidden_imports, "presentation/cli.py が旧 services 層を import しています: %s" % ", ".join(
+        sorted(set(forbidden_imports))
+    )

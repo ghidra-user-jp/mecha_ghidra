@@ -45,16 +45,16 @@ def _resolve_ghidra_install_dir() -> str:
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
-    pytest.skip("GHIDRA_INSTALL_DIR が見つからないため runtime test をスキップします")
+    pytest.fail("GHIDRA_INSTALL_DIR が見つからないため runtime test を継続できません")
 
 
 def _resolve_runtime_binary_path() -> str:
     value = os.environ.get("GHIDRA_RUNTIME_BINARY_PATH")
     if not value:
-        pytest.skip("GHIDRA_RUNTIME_BINARY_PATH が未設定のため runtime test をスキップします")
+        pytest.fail("GHIDRA_RUNTIME_BINARY_PATH が未設定です（runtime test では必須）")
     path = Path(value).expanduser().resolve()
     if not path.exists():
-        pytest.skip(f"GHIDRA_RUNTIME_BINARY_PATH が存在しません: {path}")
+        pytest.fail(f"GHIDRA_RUNTIME_BINARY_PATH が存在しません: {path}")
     return str(path)
 
 
@@ -62,11 +62,11 @@ def _start_pyghidra_if_needed() -> None:
     if pyghidra.started():
         return
     if shutil.which("java") is None:
-        pytest.skip("java コマンドが見つからないため runtime test をスキップします")
+        pytest.fail("java コマンドが見つかりません（runtime test では必須）")
     try:
         pyghidra.start(install_dir=_resolve_ghidra_install_dir())
     except Exception as exc:
-        pytest.skip(f"pyghidra 起動に失敗したため runtime test をスキップします: {exc}")
+        pytest.fail(f"pyghidra 起動に失敗しました: {exc}")
 
 
 def _ensure_project_created(project_dir: Path, project_name: str) -> None:
@@ -197,6 +197,9 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         _log_runtime_result("get_bytes(seed)", bytes_dump)
 
         runtime_results = {
+            "list_methods": _unwrap_runtime_result(
+                cli.list_methods(offset=0, limit=5, target=target)
+            ),
             "decompile_function": _unwrap_runtime_result(
                 cli.decompile_function(name=function_name, target=target)
             ),
@@ -226,6 +229,9 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             ),
             "list_exports": _unwrap_runtime_result(
                 cli.list_exports(offset=0, limit=5, target=target)
+            ),
+            "list_classes": _unwrap_runtime_result(
+                cli.list_classes(offset=0, limit=5, target=target)
             ),
             "list_namespaces": _unwrap_runtime_result(
                 cli.list_namespaces(offset=0, limit=5, target=target)
@@ -258,12 +264,14 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["decompile_function_by_address"], str)
         assert isinstance(runtime_results["disassemble_function"], list)
         assert isinstance(runtime_results["get_callee"], list)
+        assert isinstance(runtime_results["list_methods"], list)
         assert isinstance(runtime_results["get_xrefs_to"], list)
         assert isinstance(runtime_results["get_xrefs_from"], list)
         assert isinstance(runtime_results["get_function_xrefs"], list)
         assert isinstance(runtime_results["list_segments"], list)
         assert isinstance(runtime_results["list_imports"], list)
         assert isinstance(runtime_results["list_exports"], list)
+        assert isinstance(runtime_results["list_classes"], list)
         assert isinstance(runtime_results["list_namespaces"], list)
         assert isinstance(runtime_results["list_data_items"], list)
         assert isinstance(runtime_results["list_strings"], list)

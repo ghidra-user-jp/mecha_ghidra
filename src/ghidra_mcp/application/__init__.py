@@ -8,9 +8,7 @@ from .usecases import (
     DatatypesUseCases,
     FunctionsUseCases,
     MemoryUseCases,
-    SyncService,
     SymbolsUseCases,
-    TargetService,
 )
 
 __all__ = [
@@ -21,7 +19,5 @@ __all__ = [
     "DatatypesUseCases",
     "FunctionsUseCases",
     "MemoryUseCases",
-    "SyncService",
     "SymbolsUseCases",
-    "TargetService",
 ]

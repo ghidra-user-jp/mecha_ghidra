@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ghidra_mcp.infrastructure import CoreGateway
+from ghidra_mcp.infrastructure.ghidra_adapter.core_gateway import CoreGateway
 
 
 DATATYPE_COMMANDS: tuple[str, ...] = (

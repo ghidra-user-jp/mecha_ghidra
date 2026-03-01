@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ghidra_mcp.application.services.runtime_state import RuntimeState
+from ghidra_mcp.application.services.ports import TargetRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.infrastructure import LockManager
+from ghidra_mcp.infrastructure.locks import LockManager
 
 
 class TargetService:
-    def __init__(self, runtime_state: RuntimeState, *, lock_manager: LockManager | None = None) -> None:
+    def __init__(self, runtime_state: TargetRuntimePort, *, lock_manager: LockManager | None = None) -> None:
         self._runtime = runtime_state
         self._lock_manager = lock_manager or LockManager()
 

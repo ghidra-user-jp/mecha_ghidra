@@ -46,16 +46,16 @@ def _resolve_ghidra_install_dir() -> str:
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
-    pytest.skip("GHIDRA_INSTALL_DIR が見つからないため runtime test をスキップします")
+    pytest.fail("GHIDRA_INSTALL_DIR が見つからないため runtime test を継続できません")
 
 
 def _resolve_runtime_binary_path() -> str:
     value = os.environ.get("GHIDRA_RUNTIME_BINARY_PATH")
     if not value:
-        pytest.skip("GHIDRA_RUNTIME_BINARY_PATH が未設定のため runtime test をスキップします")
+        pytest.fail("GHIDRA_RUNTIME_BINARY_PATH が未設定です（runtime test では必須）")
     path = Path(value).expanduser().resolve()
     if not path.exists():
-        pytest.skip(f"GHIDRA_RUNTIME_BINARY_PATH が存在しません: {path}")
+        pytest.fail(f"GHIDRA_RUNTIME_BINARY_PATH が存在しません: {path}")
     return str(path)
 
 
@@ -63,11 +63,11 @@ def _start_pyghidra_if_needed() -> None:
     if pyghidra.started():
         return
     if shutil.which("java") is None:
-        pytest.skip("java コマンドが見つからないため runtime test をスキップします")
+        pytest.fail("java コマンドが見つかりません（runtime test では必須）")
     try:
         pyghidra.start(install_dir=_resolve_ghidra_install_dir())
     except Exception as exc:
-        pytest.skip(f"pyghidra 起動に失敗したため runtime test をスキップします: {exc}")
+        pytest.fail(f"pyghidra 起動に失敗しました: {exc}")
 
 
 def _ensure_project_created(project_dir: Path, project_name: str) -> None:

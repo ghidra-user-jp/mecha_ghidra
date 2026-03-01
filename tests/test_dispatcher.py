@@ -90,11 +90,6 @@ class DummyRegistry:
         return {"status": "ok", "target": target}
 
 
-class DummyCoreExecutor:
-    def execute(self, command, params, key):
-        return [{"name": command, "entry": key, "params": dict(params)}]
-
-
 def test_dispatch_tool_raises_for_unknown_spec():
     registry = DummyRegistry()
 
@@ -346,25 +341,17 @@ def test_dispatch_tool_applies_error_adapter_for_close_remove():
         )
 
 
-def test_dispatch_tool_can_fallback_to_core_executor_without_registry_call():
+def test_dispatch_tool_raises_when_registry_has_no_core_call():
     class RegistryWithoutCoreCall:
         pass
 
-    result = dispatch_tool(
-        "list_functions",
-        {"offset": 1, "limit": 2},
-        "fw",
-        registry=RegistryWithoutCoreCall(),
-        core_executor=DummyCoreExecutor(),
-    )
-
-    assert result == [
-        {
-            "name": "list_functions",
-            "entry": "fw",
-            "params": {"offset": 1, "limit": 2},
-        }
-    ]
+    with pytest.raises(RuntimeError, match="CORE_EXECUTOR_UNAVAILABLE"):
+        dispatch_tool(
+            "list_functions",
+            {"offset": 1, "limit": 2},
+            "fw",
+            registry=RegistryWithoutCoreCall(),
+        )
 
 
 def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):

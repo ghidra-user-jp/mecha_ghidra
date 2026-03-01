@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from ghidra_mcp.application.services.runtime_state import RuntimeState
+from ghidra_mcp.application.services.ports import SyncRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.infrastructure import LockManager
+from ghidra_mcp.infrastructure.locks import LockManager
 
 
 class SyncService:
-    def __init__(self, runtime_state: RuntimeState, *, lock_manager: LockManager | None = None) -> None:
+    def __init__(self, runtime_state: SyncRuntimePort, *, lock_manager: LockManager | None = None) -> None:
         self._runtime = runtime_state
         self._lock_manager = lock_manager or LockManager()
 

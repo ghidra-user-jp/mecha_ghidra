@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any
 
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_tool_spec
 from ghidra_mcp.presentation.error_mapper import map_exception
-
-
-class CoreExecutorProtocol(Protocol):
-    def execute(self, command: str, params: dict[str, Any], key: str) -> Any:
-        """Execute a legacy core command under a target context."""
 
 
 def _status_target_ok(_result: Any, target: str) -> dict[str, Any]:
@@ -82,7 +77,6 @@ def dispatch_tool(
     target: str,
     *,
     registry,
-    core_executor: CoreExecutorProtocol | None = None,
 ) -> Any:
     spec = get_tool_spec(spec_name)
     params = _validate_raw_args(spec_name, spec.input_model, raw_args)
@@ -99,12 +93,9 @@ def dispatch_tool(
 
     try:
         if spec.executor_kind == ExecutorKind.CORE_COMMAND:
-            if hasattr(registry, "call"):
-                result = registry.call(spec.command_or_method, params, target)
-            elif core_executor is not None:
-                result = core_executor.execute(spec.command_or_method, params, key=target)
-            else:
+            if not hasattr(registry, "call"):
                 raise RuntimeError("CORE_EXECUTOR_UNAVAILABLE: core command dispatcherが利用できません")
+            result = registry.call(spec.command_or_method, params, target)
 
         else:
             method = getattr(registry, spec.command_or_method)
@@ -129,7 +120,6 @@ def dispatch_tool(
 
 
 __all__ = [
-    "CoreExecutorProtocol",
     "dispatch_tool",
     "normalize_empty_list_result",
 ]
