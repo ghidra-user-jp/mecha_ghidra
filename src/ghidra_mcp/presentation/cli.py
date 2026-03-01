@@ -26,7 +26,7 @@ from ghidra_mcp.application.services.core_command_service import CoreCommandServ
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.application.services.sync_service import SyncService
 from ghidra_mcp.application.services.target_service import TargetService
-from ghidra_mcp.infrastructure import LockManager, RuntimeBackend
+from ghidra_mcp.infrastructure import CoreGateway, LockManager, RuntimeBackend
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
@@ -75,6 +75,13 @@ def _core():
 
         _core_module = core_module
     return _core_module
+
+
+class _LazyCoreExecutor:
+    """Resolve ghidra core module lazily to avoid import-time dependency on started JVM."""
+
+    def execute(self, command: str, params: dict[str, Any], key: str) -> Any:
+        return _core().execute(command, params, key=key)
 
 
 def _password_client_authenticator_class():
@@ -266,7 +273,8 @@ _runtime_backend = RuntimeBackend(state=_runtime_state)
 _lock_manager = LockManager()
 _target_service = TargetService(_runtime_backend, lock_manager=_lock_manager)
 _sync_service = SyncService(_runtime_backend, lock_manager=_lock_manager)
-_core_command_service = CoreCommandService(_runtime_backend)
+_core_gateway = CoreGateway(_LazyCoreExecutor())
+_core_command_service = CoreCommandService(_core_gateway)
 _registry = ServiceRegistryAdapter(
     core_command_service=_core_command_service,
     target_service=_target_service,

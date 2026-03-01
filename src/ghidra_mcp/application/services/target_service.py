@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from ghidra_mcp.application.services.ports import TargetRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.infrastructure.locks import LockManager
@@ -125,13 +123,6 @@ class TargetService:
 
     def has_targets(self) -> bool:
         return self._runtime.has_targets()
-
-    def call(self, command: str, params: dict[str, Any] | None = None, target: str = "default") -> Any:
-        try:
-            with self._lock_manager.acquire(target=target, project_key=self._project_key(target)):
-                return self._runtime.call(command, params, target)
-        except Exception as exc:
-            self._raise_domain_error(exc, operation=f"call:{command}", target=target)
 
 
 __all__ = ["TargetService"]

@@ -63,10 +63,6 @@ class DummyRuntime:
     def has_targets(self) -> bool:
         return True
 
-    def call(self, command: str, params: dict | None, target: str):
-        self.calls.append(("call", (command, target), {"params": params}))
-        return {"ok": True}
-
 
 class RaisingRuntime(DummyRuntime):
     def load_program(self, name: str, domain_path: str):  # noqa: ARG002
@@ -88,11 +84,10 @@ def test_target_service_lifecycle_and_lock_routing():
     assert service.list_programs("fw") == []
     assert service.load_program("fw", "/next") == "/next"
     assert service.import_program("fw", "/tmp/a.exe") == "/imported.bin"
-    assert service.call("list_functions", {"offset": 0, "limit": 1}, "fw") == {"ok": True}
     service.close_session("fw", remove_program=True)
 
     lock_targets = [target for target, _project in lock_manager.calls]
-    assert lock_targets == ["fw", "fw", "fw", "fw", "fw", "fw", "fw"]
+    assert lock_targets == ["fw", "fw", "fw", "fw", "fw", "fw"]
 
 
 def test_target_service_maps_validation_error_to_domain_error():
@@ -108,16 +103,16 @@ def test_target_service_maps_validation_error_to_domain_error():
 
 def test_target_service_maps_session_not_found_error_code():
     class Runtime(DummyRuntime):
-        def call(self, command: str, params: dict | None, target: str):  # noqa: ARG002
+        def list_programs(self, name: str):  # noqa: ARG002
             raise RuntimeError("セッション 'fw' は初期化されていません")
 
     service = TargetService(Runtime(), lock_manager=DummyLockManager())
 
     with pytest.raises(DomainError) as exc_info:
-        service.call("list_functions", {"offset": 0, "limit": 1}, "fw")
+        service.list_programs("fw")
 
     assert exc_info.value.code == ErrorCode.SESSION_NOT_FOUND
-    assert exc_info.value.details == {"operation": "call:list_functions", "target": "fw"}
+    assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
 
 
 def test_target_service_preserves_domain_error_and_merges_details():

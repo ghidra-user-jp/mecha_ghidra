@@ -5,11 +5,6 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 
-class CoreCommandRuntimePort(Protocol):
-    def call(self, command: str, params: dict[str, Any] | None = None, target: str = "default") -> Any:
-        ...
-
-
 class TargetRuntimePort(Protocol):
     def create_session(
         self,
@@ -134,4 +129,4 @@ class SyncRuntimePort(Protocol):
         ...
 
 
-__all__ = ["CoreCommandRuntimePort", "SyncRuntimePort", "TargetRuntimePort"]
+__all__ = ["SyncRuntimePort", "TargetRuntimePort"]
