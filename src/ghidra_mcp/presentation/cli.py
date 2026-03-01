@@ -15,19 +15,22 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Dict
+from typing import Dict
 
 import pyghidra
 import pyghidra.core as pycore
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent
 
-from ghidra_mcp.application.services.core_command_service import CoreCommandService
-from ghidra_mcp.application.services.runtime_state import RuntimeState
-from ghidra_mcp.application.services.sync_service import SyncService
-from ghidra_mcp.application.services.target_service import TargetService
-from ghidra_mcp.infrastructure import CoreGateway, LockManager, RuntimeBackend
-from ghidra_mcp.presentation.mcp_server import create_mcp_server
+from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter, create_cli_runtime
+from ghidra_mcp.presentation.transport import (
+    configure_mcp_for_sse as _configure_mcp_for_sse,
+    configure_mcp_for_streamable_http as _configure_mcp_for_streamable_http,
+    configure_transport_security_for_host as _configure_transport_security_for_host_impl,
+    normalize_host as _normalize_host_impl,
+    normalize_streamable_http_path as _normalize_streamable_http_path_impl,
+    normalize_transport as _normalize_transport_impl,
+    resolve_transport_security_for_host as _resolve_transport_security_for_host_impl,
+)
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
 logger = logging.getLogger(__name__)
@@ -61,13 +64,6 @@ _CHECKOUT_REQUIRED_COMMANDS = {
     "add_bookmark",
 }
 
-
-def _normalize_empty_list_result(result: Any) -> Any:
-    if isinstance(result, list) and len(result) == 0:
-        return CallToolResult(content=[TextContent(type="text", text="[]")])
-    return result
-
-
 def _core():
     global _core_module
     if _core_module is None:
@@ -75,13 +71,6 @@ def _core():
 
         _core_module = core_module
     return _core_module
-
-
-class _LazyCoreExecutor:
-    """Resolve ghidra core module lazily to avoid import-time dependency on started JVM."""
-
-    def execute(self, command: str, params: dict[str, Any], key: str) -> Any:
-        return _core().execute(command, params, key=key)
 
 
 def _password_client_authenticator_class():
@@ -98,193 +87,14 @@ def _client_util_class():
     return _CLIENT_UTIL_CLASS
 
 
-class ServiceRegistryAdapter:
-    """Facade bridging dispatcher calls to core/target/sync services."""
-
-    def __init__(
-        self,
-        *,
-        core_command_service: CoreCommandService,
-        target_service: TargetService,
-        sync_service: SyncService,
-    ) -> None:
-        self._core_command_service = core_command_service
-        self._target_service = target_service
-        self._sync_service = sync_service
-
-    # core command path
-    def call(self, command: str, params: dict[str, Any], target: str):
-        return self._core_command_service.call(command, params, target)
-
-    # target/project path
-    def list_targets(self):
-        return self._target_service.list_targets()
-
-    def list_programs(self, target: str):
-        return self._target_service.list_programs(target)
-
-    def register_target(self, target: str, *, project_location: str, project_name: str | None = None):
-        return self._target_service.register_target(
-            target,
-            project_location,
-            project_name=project_name,
-        )
-
-    def load_program(self, target: str, domain_path: str):
-        return self._target_service.load_program(target, domain_path)
-
-    def import_program(self, target: str, binary_path: str):
-        return self._target_service.import_program(target, binary_path)
-
-    def create_session(
-        self,
-        target: str,
-        project_location: str,
-        *,
-        project_name: str | None = None,
-        domain_path: str | None = None,
-    ):
-        if domain_path is None:
-            raise ValueError("domain_path を指定してください")
-        return self._target_service.create_session(
-            target,
-            project_location,
-            project_name=project_name,
-            domain_path=domain_path,
-        )
-
-    def close_session(self, target: str, *, remove_program: bool = False):
-        return self._target_service.close_session(target, remove_program=remove_program)
-
-    # shared-sync path
-    def get_project_sync_status(self, target: str, *, domain_path: str | None = None):
-        return self._sync_service.get_project_sync_status(target, domain_path=domain_path)
-
-    def checkout_project_program(self, target: str, *, exclusive: bool = False, domain_path: str | None = None):
-        return self._sync_service.checkout_project_program(target, exclusive=exclusive, domain_path=domain_path)
-
-    def add_project_program_to_version_control(
-        self,
-        target: str,
-        *,
-        comment: str,
-        keep_checked_out: bool = False,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.add_project_program_to_version_control(
-            target,
-            comment,
-            keep_checked_out=keep_checked_out,
-            domain_path=domain_path,
-        )
-
-    def commit_project_program(
-        self,
-        target: str,
-        *,
-        message: str,
-        keep_checked_out: bool = False,
-        auto_checkout: bool = True,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.commit_project_program(
-            target,
-            message,
-            keep_checked_out=keep_checked_out,
-            auto_checkout=auto_checkout,
-            domain_path=domain_path,
-        )
-
-    def pull_project_program(
-        self,
-        target: str,
-        *,
-        on_local_changes: str = "abort",
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.pull_project_program(
-            target,
-            on_local_changes=on_local_changes,
-            domain_path=domain_path,
-        )
-
-    def undo_checkout_project_program(
-        self,
-        target: str,
-        *,
-        discard_local_changes: bool = True,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.undo_checkout_project_program(
-            target,
-            discard_local_changes=discard_local_changes,
-            domain_path=domain_path,
-        )
-
-    def terminate_project_program_checkout(
-        self,
-        target: str,
-        *,
-        checkout_id: int,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.terminate_project_program_checkout(
-            target,
-            checkout_id=checkout_id,
-            domain_path=domain_path,
-        )
-
-    def reload_project_program(self, target: str, *, domain_path: str | None = None):
-        return self._sync_service.reload_project_program(target, domain_path=domain_path)
-
-    def get_version_history(self, target: str, *, limit: int = 50, domain_path: str | None = None):
-        return self._sync_service.get_version_history(target, limit=limit, domain_path=domain_path)
-
-    def get_version_diff(
-        self,
-        target: str,
-        *,
-        from_version: int,
-        to_version: int,
-        range_limit: int = 200,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.get_version_diff(
-            target,
-            from_version=from_version,
-            to_version=to_version,
-            range_limit=range_limit,
-            domain_path=domain_path,
-        )
-
-    def has_targets(self) -> bool:
-        return self._target_service.has_targets()
-
-    def close_all(self) -> None:
-        self._target_service.close_all()
-
-
-_runtime_state = RuntimeState(
+_runtime_bundle = create_cli_runtime(
     core_accessor=lambda: _core(),
     checkout_required_commands=set(_CHECKOUT_REQUIRED_COMMANDS),
-    normalize_result=_normalize_empty_list_result,
-)
-_runtime_backend = RuntimeBackend(state=_runtime_state)
-_lock_manager = LockManager()
-_target_service = TargetService(_runtime_backend, lock_manager=_lock_manager)
-_sync_service = SyncService(_runtime_backend, lock_manager=_lock_manager)
-_core_gateway = CoreGateway(_LazyCoreExecutor())
-_core_command_service = CoreCommandService(_core_gateway)
-_registry = ServiceRegistryAdapter(
-    core_command_service=_core_command_service,
-    target_service=_target_service,
-    sync_service=_sync_service,
-)
-_runtime = create_mcp_server(
-    registry_provider=lambda: _registry,
     dispatcher_provider=lambda: dispatch_tool,
-    include_shared_sync=False,
+    registry_provider=lambda: _registry,
 )
+_registry = _runtime_bundle.registry
+_runtime = _runtime_bundle.runtime
 mcp = _runtime.mcp
 
 for _tool_name, _tool_fn in _runtime.tools.items():
@@ -361,54 +171,23 @@ def parse_args(argv: list[str]):
 
 
 def _normalize_transport(transport: str) -> str:
-    return "streamable-http" if transport == "http" else transport
+    return _normalize_transport_impl(transport)
 
 
 def _normalize_streamable_http_path(path: str) -> str:
-    normalized = (path or "").strip()
-    if not normalized:
-        return "/mcp"
-    if not normalized.startswith("/"):
-        return "/" + normalized
-    return normalized
+    return _normalize_streamable_http_path_impl(path)
 
 
 def _normalize_host(host: str) -> str:
-    return (host or "").strip().lower()
+    return _normalize_host_impl(host)
 
 
 def _resolve_transport_security_for_host(host: str) -> TransportSecuritySettings:
-    normalized = _normalize_host(host)
-    if normalized in {"127.0.0.1", "localhost", "::1"}:
-        return TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
-        )
-    if normalized in {"0.0.0.0", "::"}:
-        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    if ":" in normalized and not normalized.startswith("["):
-        host_pattern = f"[{normalized}]:*"
-        origin_pattern = f"http://[{normalized}]:*"
-    else:
-        host_pattern = f"{normalized}:*"
-        origin_pattern = f"http://{normalized}:*"
-    return TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[host_pattern],
-        allowed_origins=[origin_pattern],
-    )
+    return _resolve_transport_security_for_host_impl(host)
 
 
 def _configure_transport_security_for_host(host: str) -> None:
-    settings = _resolve_transport_security_for_host(host)
-    if not settings.enable_dns_rebinding_protection:
-        logger.warning(
-            "mcp-host=%s のため DNS rebinding protection を無効化します。"
-            " 本番運用では固定ホスト名/IPでの起動を推奨します。",
-            host,
-        )
-    mcp.settings.transport_security = settings
+    _configure_transport_security_for_host_impl(mcp=mcp, host=host, logger=logger)
 
 
 def configure_ghidra_server_auth(args) -> None:
@@ -537,27 +316,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def configure_mcp_for_sse(args) -> None:
-    logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
-    mcp.settings.log_level = args.log_level.upper()
-    mcp.settings.host = args.mcp_host
-    mcp.settings.port = args.mcp_port or 8081
-    _configure_transport_security_for_host(mcp.settings.host)
-    logger.info("MCPをSSEモードで起動: http://%s:%s/sse", mcp.settings.host, mcp.settings.port)
+    _configure_mcp_for_sse(mcp=mcp, args=args, logger=logger)
 
 
 def configure_mcp_for_streamable_http(args) -> None:
-    logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
-    mcp.settings.log_level = args.log_level.upper()
-    mcp.settings.host = args.mcp_host
-    mcp.settings.port = args.mcp_port or 8081
-    mcp.settings.streamable_http_path = _normalize_streamable_http_path(args.mcp_path)
-    _configure_transport_security_for_host(mcp.settings.host)
-    logger.info(
-        "MCPをStreamable HTTPモードで起動: http://%s:%s%s",
-        mcp.settings.host,
-        mcp.settings.port,
-        mcp.settings.streamable_http_path,
-    )
+    _configure_mcp_for_streamable_http(mcp=mcp, args=args, logger=logger)
 
 
 # expose generated tool callables to static analysis/tests

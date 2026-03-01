@@ -9,6 +9,7 @@ from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_all_tool_specs
 ROOT = Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core.py"
 PRESENTATION_CLI_PATH = ROOT / "src" / "ghidra_mcp" / "presentation" / "cli.py"
+LEGACY_SERVICES_DIR = ROOT / "src" / "ghidra_mcp" / "services"
 
 
 def _core_command_specs() -> dict[str, tuple[str, ...]]:
@@ -47,3 +48,7 @@ def test_command_dep_keys_cover_all_supported_commands():
 def test_presentation_cli_does_not_import_legacy_services_module():
     source = PRESENTATION_CLI_PATH.read_text(encoding="utf-8")
     assert "ghidra_mcp.services" not in source
+
+
+def test_legacy_services_directory_is_removed():
+    assert not LEGACY_SERVICES_DIR.exists()
