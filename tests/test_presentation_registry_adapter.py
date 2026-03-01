@@ -6,8 +6,34 @@ from typing import Any, get_args, get_origin
 import pytest
 
 from ghidra_mcp import cli
+from ghidra_mcp.application.usecases.datatypes import DATATYPE_COMMANDS
+from ghidra_mcp.application.usecases.functions import FUNCTION_COMMANDS
+from ghidra_mcp.application.usecases.memory import MEMORY_COMMANDS
+from ghidra_mcp.application.usecases.symbols import SYMBOL_COMMANDS
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_all_tool_specs, get_tool_spec
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
+
+
+_LIST_CORE_COMMANDS = {
+    "list_methods",
+    "list_functions",
+    "list_classes",
+    "search_functions_by_name",
+    "disassemble_function",
+    "get_callee",
+    "get_xrefs_to",
+    "get_xrefs_from",
+    "get_function_xrefs",
+    "list_segments",
+    "list_imports",
+    "list_exports",
+    "list_namespaces",
+    "list_data_items",
+    "list_strings",
+    "get_data_by_label",
+    "search_bytes",
+}
+_CORE_COMMANDS = set(FUNCTION_COMMANDS) | set(MEMORY_COMMANDS) | set(SYMBOL_COMMANDS) | set(DATATYPE_COMMANDS)
 
 
 class RecordingCoreService:
@@ -16,6 +42,14 @@ class RecordingCoreService:
 
     def call(self, command: str, params: dict[str, Any], target: str):
         self.calls.append((command, dict(params), target))
+        if command in _LIST_CORE_COMMANDS:
+            return []
+        if command in {"decompile_function", "decompile_function_by_address"}:
+            return "void main(void) {}"
+        if command == "get_bytes":
+            return "90"
+        if command in _CORE_COMMANDS:
+            return {"command": command, "target": target}
         return {"command": command, "target": target}
 
 
@@ -27,8 +61,26 @@ class RecordingService:
     def __getattr__(self, name: str):
         def _method(*args: Any, **kwargs: Any):
             self.calls.append((name, args, dict(kwargs)))
+            if name in {"list_targets", "list_programs"}:
+                return []
             if name in {"load_program", "import_program"}:
                 return "/program"
+            if name == "create_session":
+                target = args[0]
+                project_location = args[1]
+                return {
+                    "target": target,
+                    "project_location": project_location,
+                    "project_name": kwargs.get("project_name"),
+                    "domain_path": kwargs.get("domain_path"),
+                }
+            if name == "close_session":
+                target = args[0]
+                return {
+                    "closed": True,
+                    "target": target,
+                    "remove_program": bool(kwargs.get("remove_program", False)),
+                }
             return {"service": self.label, "method": name}
 
         return _method

@@ -78,13 +78,19 @@ def test_target_service_lifecycle_and_lock_routing():
     assert service.register_target("fw", "/tmp/prj", project_name="sample") == {"target": "fw"}
     assert service.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main") == {
         "target": "fw",
+        "project_location": "/tmp/prj",
+        "project_name": "sample",
         "domain_path": "/main",
     }
     assert service.list_targets() == [{"target": "fw"}]
     assert service.list_programs("fw") == []
     assert service.load_program("fw", "/next") == "/next"
     assert service.import_program("fw", "/tmp/a.exe") == "/imported.bin"
-    service.close_session("fw", remove_program=True)
+    assert service.close_session("fw", remove_program=True) == {
+        "closed": True,
+        "target": "fw",
+        "remove_program": True,
+    }
 
     lock_targets = [target for target, _project in lock_manager.calls]
     assert lock_targets == ["fw", "fw", "fw", "fw", "fw", "fw"]

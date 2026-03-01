@@ -8,7 +8,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .tool_models import create_any_output_model, create_optional_any_input_model, create_typed_input_model
+from .tool_models import (
+    create_list_output_model,
+    create_map_output_model,
+    create_optional_any_input_model,
+    create_scalar_output_model,
+    create_typed_input_model,
+    create_typed_output_model,
+)
 
 
 class ToolExposure(str, Enum):
@@ -29,7 +36,7 @@ class ToolSpec:
     executor_kind: ExecutorKind
     command_or_method: str
     input_model: type[BaseModel]
-    output_model: type[BaseModel] = field(default_factory=create_any_output_model)
+    output_model: type[BaseModel]
     public_signature: tuple[str, ...] = field(default_factory=tuple)
     error_policy: str = "legacy_compatible"
     annotations: dict[str, Any] = field(default_factory=dict)
@@ -146,6 +153,67 @@ _ERROR_ADAPTERS_BY_SPEC: dict[str, str] = {
     "close_session": "close_session_error",
     "close_session_and_remove_program": "close_remove_error",
 }
+
+
+_LIST_OUTPUT_TOOLS: set[str] = {
+    "list_methods",
+    "list_functions",
+    "list_classes",
+    "search_functions_by_name",
+    "disassemble_function",
+    "get_callee",
+    "get_xrefs_to",
+    "get_xrefs_from",
+    "get_function_xrefs",
+    "list_segments",
+    "list_imports",
+    "list_exports",
+    "list_namespaces",
+    "list_data_items",
+    "list_strings",
+    "get_data_by_label",
+    "search_bytes",
+    "list_targets",
+    "list_project_programs",
+}
+
+_SCALAR_OUTPUT_TYPES: dict[str, type[Any]] = {
+    "decompile_function": str,
+    "decompile_function_by_address": str,
+    "get_bytes": str,
+    "load_project_program": str,
+    "import_program": str,
+}
+
+_DIRECT_OUTPUT_FIELDS: dict[str, dict[str, tuple[type[Any], Any]]] = {
+    "create_session": {
+        "target": (str, ...),
+        "project_location": (str, ...),
+        "project_name": (str | None, None),
+        "domain_path": (str | None, None),
+    },
+    "close_session": {
+        "closed": (bool, ...),
+        "target": (str, ...),
+        "remove_program": (bool, ...),
+    },
+    "close_session_and_remove_program": {
+        "closed": (bool, ...),
+        "target": (str, ...),
+        "remove_program": (bool, ...),
+    },
+}
+
+
+def _build_output_model(tool_name: str) -> type[BaseModel]:
+    model_name = f"{_pascal_case(tool_name)}Output"
+    if tool_name in _DIRECT_OUTPUT_FIELDS:
+        return create_typed_output_model(model_name, _DIRECT_OUTPUT_FIELDS[tool_name])
+    if tool_name in _SCALAR_OUTPUT_TYPES:
+        return create_scalar_output_model(model_name, _SCALAR_OUTPUT_TYPES[tool_name], allow_empty_list=True)
+    if tool_name in _LIST_OUTPUT_TOOLS:
+        return create_list_output_model(model_name, object)
+    return create_map_output_model(model_name, object, allow_empty_list=True)
 
 
 def _pascal_case(name: str) -> str:
@@ -417,6 +485,15 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
     return create_optional_any_input_model(model_name, field_names)
 
 
+_ALL_TOOL_NAMES = set(_CORE_COMMAND_PARAM_KEYS) | set(_REGISTRY_METHOD_SPECS) | set(_SHARED_SYNC_METHOD_SPECS)
+_KNOWN_OUTPUT_OVERRIDE_NAMES = set(_LIST_OUTPUT_TOOLS) | set(_SCALAR_OUTPUT_TYPES) | set(_DIRECT_OUTPUT_FIELDS)
+_UNKNOWN_OUTPUT_OVERRIDE_NAMES = _KNOWN_OUTPUT_OVERRIDE_NAMES - _ALL_TOOL_NAMES
+if _UNKNOWN_OUTPUT_OVERRIDE_NAMES:
+    raise RuntimeError(
+        "output model override に未定義ツールがあります: %s" % ", ".join(sorted(_UNKNOWN_OUTPUT_OVERRIDE_NAMES))
+    )
+
+
 _TOOL_SPECS: dict[str, ToolSpec] = {}
 
 for command_name, field_names in _CORE_COMMAND_PARAM_KEYS.items():
@@ -426,6 +503,7 @@ for command_name, field_names in _CORE_COMMAND_PARAM_KEYS.items():
         executor_kind=ExecutorKind.CORE_COMMAND,
         command_or_method=command_name,
         input_model=_build_input_model(command_name, field_names),
+        output_model=_build_output_model(command_name),
         public_signature=(*field_names, "target"),
         result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(command_name),
         error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(command_name),
@@ -439,6 +517,7 @@ for spec_name, (method_name, field_names, include_target, static_kwargs) in _REG
         executor_kind=ExecutorKind.REGISTRY_METHOD,
         command_or_method=method_name,
         input_model=_build_input_model(spec_name, field_names),
+        output_model=_build_output_model(spec_name),
         public_signature=signature_fields,
         include_target=include_target,
         static_kwargs=dict(static_kwargs),
@@ -453,6 +532,7 @@ for spec_name, (method_name, field_names) in _SHARED_SYNC_METHOD_SPECS.items():
         executor_kind=ExecutorKind.SHARED_SYNC_METHOD,
         command_or_method=method_name,
         input_model=_build_input_model(spec_name, field_names),
+        output_model=_build_output_model(spec_name),
         public_signature=("target", *field_names),
         result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(spec_name),
         error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(spec_name),

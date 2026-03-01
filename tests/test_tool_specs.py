@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_tool_specs
 from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
 from ghidra_mcp.presentation import cli as presentation_cli
 from ghidra_mcp.presentation.tool_registry import build_tool_functions, register_shared_sync_tools
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOL_SPEC_PATH = ROOT / "src" / "ghidra_mcp" / "contracts" / "tool_spec.py"
 
 
 def test_tool_specs_cover_all_public_tools():
@@ -543,6 +549,90 @@ def test_specs_include_contract_driven_metadata():
     assert specs["list_targets"].public_signature == ()
     assert specs["create_session"].error_policy == "legacy_compatible"
     assert hasattr(specs["create_session"], "output_model")
+
+
+def test_all_output_models_are_strict_and_typed():
+    specs = get_all_tool_specs(include_shared_sync=True)
+
+    list_output_tools = {
+        "list_methods",
+        "list_functions",
+        "list_classes",
+        "search_functions_by_name",
+        "disassemble_function",
+        "get_callee",
+        "get_xrefs_to",
+        "get_xrefs_from",
+        "get_function_xrefs",
+        "list_segments",
+        "list_imports",
+        "list_exports",
+        "list_namespaces",
+        "list_data_items",
+        "list_strings",
+        "get_data_by_label",
+        "search_bytes",
+        "list_targets",
+        "list_project_programs",
+    }
+    scalar_output_tools = {
+        "decompile_function": str,
+        "decompile_function_by_address": str,
+        "get_bytes": str,
+        "load_project_program": str,
+        "import_program": str,
+    }
+    direct_output_fields = {
+        "create_session": {
+            "target": (str, ...),
+            "project_location": (str, ...),
+            "project_name": (str | None, None),
+            "domain_path": (str | None, None),
+        },
+        "close_session": {
+            "closed": (bool, ...),
+            "target": (str, ...),
+            "remove_program": (bool, ...),
+        },
+        "close_session_and_remove_program": {
+            "closed": (bool, ...),
+            "target": (str, ...),
+            "remove_program": (bool, ...),
+        },
+    }
+
+    categorized = set(list_output_tools) | set(scalar_output_tools) | set(direct_output_fields)
+    assert categorized <= set(specs)
+
+    for name, spec in specs.items():
+        model_fields = spec.output_model.model_fields
+        assert model_fields
+        for field in model_fields.values():
+            assert field.annotation is not Any
+
+        if name in direct_output_fields:
+            expected = direct_output_fields[name]
+            assert set(model_fields.keys()) == set(expected.keys())
+            for key, (expected_type, expected_default) in expected.items():
+                assert model_fields[key].annotation == expected_type
+                if expected_default is ...:
+                    assert model_fields[key].is_required()
+                else:
+                    assert model_fields[key].default == expected_default
+            continue
+
+        assert set(model_fields.keys()) == {"payload"}
+        if name in list_output_tools:
+            assert model_fields["payload"].annotation == list[object]
+        elif name in scalar_output_tools:
+            assert model_fields["payload"].annotation == (scalar_output_tools[name] | list[object])
+        else:
+            assert model_fields["payload"].annotation == (dict[str, object] | list[object])
+
+
+def test_tool_spec_does_not_depend_on_create_any_output_model():
+    source = TOOL_SPEC_PATH.read_text(encoding="utf-8")
+    assert "create_any_output_model" not in source
 
 
 def test_all_specs_have_required_contract_fields():

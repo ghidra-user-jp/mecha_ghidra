@@ -43,11 +43,20 @@ class DummyRegistry:
 
     def create_session(self, target, **kwargs):
         self.registry_calls.append(("create_session", {"target": target, **kwargs}))
-        return object()
+        return {
+            "target": target,
+            "project_location": kwargs["project_location"],
+            "project_name": kwargs.get("project_name"),
+            "domain_path": kwargs["domain_path"],
+        }
 
     def close_session(self, target, **kwargs):
         self.registry_calls.append(("close_session", {"target": target, **kwargs}))
-        return None
+        return {
+            "closed": True,
+            "target": target,
+            "remove_program": bool(kwargs.get("remove_program", False)),
+        }
 
     def get_project_sync_status(self, target, **kwargs):
         self.registry_calls.append(("get_project_sync_status", {"target": target, **kwargs}))
@@ -383,3 +392,89 @@ def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
             "fw",
             registry=Registry(),
         )
+
+
+@pytest.mark.parametrize(
+    ("spec_name", "raw_args", "override", "expected_exc", "expected_message"),
+    [
+        (
+            "list_methods",
+            {"offset": 0, "limit": 3},
+            {"call_result": {"bad": "shape"}},
+            ValueError,
+            "list_methods の出力検証に失敗",
+        ),
+        (
+            "get_bytes",
+            {"address": "0x401000", "size": 8},
+            {"call_result": {"bad": "shape"}},
+            ValueError,
+            "get_bytes の出力検証に失敗",
+        ),
+        (
+            "create_session",
+            {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
+            {"create_session_result": {"target": "fw"}},
+            RuntimeError,
+            "セッション 'fw' の作成に失敗しました",
+        ),
+        (
+            "close_session",
+            {},
+            {"close_session_result": None},
+            RuntimeError,
+            "セッション 'fw' のクローズに失敗しました",
+        ),
+        (
+            "load_project_program",
+            {"domain_path": "/folder/app"},
+            {"load_program_result": {"program": "/folder/app"}},
+            ValueError,
+            "load_project_program の出力検証に失敗",
+        ),
+        (
+            "get_project_sync_status",
+            {"domain_path": "/folder/app"},
+            {"sync_status_result": "invalid"},
+            ValueError,
+            "get_project_sync_status の出力検証に失敗",
+        ),
+    ],
+)
+def test_dispatch_tool_raises_output_validation_error_for_incompatible_result(
+    spec_name,
+    raw_args,
+    override,
+    expected_exc,
+    expected_message,
+):
+    class BadOutputRegistry(DummyRegistry):
+        def call(self, command, params, target):
+            if command == "list_methods" and "call_result" in override:
+                return override["call_result"]
+            if command == "get_bytes" and "call_result" in override:
+                return override["call_result"]
+            return super().call(command, params, target)
+
+        def create_session(self, target, **kwargs):
+            if "create_session_result" in override:
+                return override["create_session_result"]
+            return super().create_session(target, **kwargs)
+
+        def close_session(self, target, **kwargs):
+            if "close_session_result" in override:
+                return override["close_session_result"]
+            return super().close_session(target, **kwargs)
+
+        def load_program(self, target, **kwargs):
+            if "load_program_result" in override:
+                return override["load_program_result"]
+            return super().load_program(target, **kwargs)
+
+        def get_project_sync_status(self, target, **kwargs):
+            if "sync_status_result" in override:
+                return override["sync_status_result"]
+            return super().get_project_sync_status(target, **kwargs)
+
+    with pytest.raises(expected_exc, match=expected_message):
+        dispatch_tool(spec_name, raw_args, "fw", registry=BadOutputRegistry())

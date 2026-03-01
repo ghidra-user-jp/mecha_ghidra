@@ -68,12 +68,23 @@ class TargetService:
     ):
         try:
             with self._lock_manager.acquire(target=name):
-                return self._runtime.create_session(
+                session = self._runtime.create_session(
                     name,
                     project_location,
                     project_name=project_name,
                     domain_path=domain_path,
                 )
+                info = {}
+                if hasattr(session, "to_dict"):
+                    info = session.to_dict()
+                elif isinstance(session, dict):
+                    info = dict(session)
+                return {
+                    "target": name,
+                    "project_location": info.get("project_location", project_location),
+                    "project_name": info.get("project_name", project_name),
+                    "domain_path": info.get("domain_path", domain_path),
+                }
         except Exception as exc:
             self._raise_domain_error(exc, operation="create_session", target=name)
 
@@ -111,7 +122,8 @@ class TargetService:
     def close_session(self, name: str, *, remove_program: bool = False):
         try:
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
-                return self._runtime.close_session(name, remove_program=remove_program)
+                self._runtime.close_session(name, remove_program=remove_program)
+                return {"closed": True, "target": name, "remove_program": bool(remove_program)}
         except Exception as exc:
             self._raise_domain_error(exc, operation="close_session", target=name)
 
