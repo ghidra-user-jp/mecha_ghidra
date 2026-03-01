@@ -64,11 +64,6 @@ class DummyRuntime:
         return True
 
 
-class RaisingRuntime(DummyRuntime):
-    def load_program(self, name: str, domain_path: str):  # noqa: ARG002
-        raise ValueError("domain_path を指定してください")
-
-
 def test_target_service_lifecycle_and_lock_routing():
     runtime = DummyRuntime()
     runtime.project_keys["fw"] = "/tmp/prj::sample"
@@ -96,21 +91,37 @@ def test_target_service_lifecycle_and_lock_routing():
     assert lock_targets == ["fw", "fw", "fw", "fw", "fw", "fw"]
 
 
-def test_target_service_maps_validation_error_to_domain_error():
-    service = TargetService(RaisingRuntime(), lock_manager=DummyLockManager())
+def test_target_service_preserves_runtime_domain_error_code():
+    class Runtime(DummyRuntime):
+        def load_program(self, name: str, domain_path: str):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="domain_path を指定してください",
+                hint="check input",
+                retryable=False,
+                details={"domain_path": domain_path},
+            )
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
 
     with pytest.raises(DomainError) as exc_info:
         service.load_program("fw", "")
 
     err = exc_info.value
     assert err.code == ErrorCode.VALIDATION_ERROR
-    assert err.details == {"operation": "load_program", "target": "fw"}
+    assert err.details == {"domain_path": "", "operation": "load_program", "target": "fw"}
 
 
-def test_target_service_maps_session_not_found_error_code():
+def test_target_service_preserves_session_not_found_domain_error():
     class Runtime(DummyRuntime):
         def list_programs(self, name: str):  # noqa: ARG002
-            raise RuntimeError("セッション 'fw' は初期化されていません")
+            raise DomainError(
+                code=ErrorCode.SESSION_NOT_FOUND,
+                message="セッション 'fw' は初期化されていません",
+                hint="load first",
+                retryable=False,
+                details={},
+            )
 
     service = TargetService(Runtime(), lock_manager=DummyLockManager())
 
@@ -118,6 +129,20 @@ def test_target_service_maps_session_not_found_error_code():
         service.list_programs("fw")
 
     assert exc_info.value.code == ErrorCode.SESSION_NOT_FOUND
+    assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
+
+
+def test_target_service_fallback_non_domain_error_is_sync_operation_failed():
+    class Runtime(DummyRuntime):
+        def list_programs(self, name: str):  # noqa: ARG002
+            raise RuntimeError("unexpected failure")
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.list_programs("fw")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
     assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
 
 

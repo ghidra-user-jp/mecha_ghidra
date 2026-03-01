@@ -33,29 +33,11 @@ class SyncService:
                 details=details,
             )
 
-        message = str(exc)
-        code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else ErrorCode.SYNC_OPERATION_FAILED
-        retryable = False
-
-        if message.startswith("CHECKOUT_REQUIRED"):
-            code = ErrorCode.CHECKOUT_REQUIRED
-        elif message.startswith("NOT_SHARED_PROJECT"):
-            code = ErrorCode.NOT_SHARED_PROJECT
-        elif message.startswith("NOT_CHECKED_OUT"):
-            code = ErrorCode.NOT_CHECKED_OUT
-        elif message.startswith("LOCAL_CHANGES_EXIST"):
-            code = ErrorCode.LOCAL_CHANGES_EXIST
-        elif message.startswith("REOPEN_FAILED"):
-            code = ErrorCode.REOPEN_FAILED
-            retryable = True
-        elif message.startswith("SAVE_FAILED"):
-            code = ErrorCode.SAVE_FAILED
-
         return DomainError(
-            code=code,
-            message=message,
+            code=ErrorCode.SYNC_OPERATION_FAILED,
+            message=str(exc),
             hint="shared project の状態と checkout 状態を確認してください",
-            retryable=retryable,
+            retryable=False,
             details={"operation": operation, "target": target, "domain_path": domain_path},
         )
 

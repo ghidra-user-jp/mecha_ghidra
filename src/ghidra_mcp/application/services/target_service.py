@@ -26,29 +26,11 @@ class TargetService:
                 details=details,
             )
 
-        message = str(exc)
-        code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else ErrorCode.SYNC_OPERATION_FAILED
-        retryable = False
-
-        if "セッション '" in message and ("存在しません" in message or "初期化されていません" in message):
-            code = ErrorCode.SESSION_NOT_FOUND
-        elif "ターゲット '" in message and "初期化されていません" in message:
-            code = ErrorCode.TARGET_NOT_REGISTERED
-        elif message.startswith("REOPEN_FAILED"):
-            code = ErrorCode.REOPEN_FAILED
-            retryable = True
-        elif message.startswith("SAVE_FAILED"):
-            code = ErrorCode.SAVE_FAILED
-        elif message.startswith("CHECKOUT_REQUIRED"):
-            code = ErrorCode.CHECKOUT_REQUIRED
-        elif "CORE_EXECUTOR_UNAVAILABLE" in message:
-            code = ErrorCode.CORE_EXECUTOR_UNAVAILABLE
-
         return DomainError(
-            code=code,
-            message=message,
+            code=ErrorCode.SYNC_OPERATION_FAILED,
+            message=str(exc),
             hint="操作対象の target/session 状態を確認してください",
-            retryable=retryable,
+            retryable=False,
             details={"operation": operation, "target": target},
         )
 

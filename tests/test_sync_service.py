@@ -129,11 +129,6 @@ class DummyRuntime:
         return {"diffs": []}
 
 
-class PullValidationRuntime(DummyRuntime):
-    def pull_project_program(self, name: str, *, on_local_changes: str = "abort", domain_path: str | None = None):  # noqa: ARG002
-        raise ValueError("on_local_changes は 'abort' または 'discard' を指定してください")
-
-
 def test_sync_service_lifecycle_and_lock_routing():
     runtime = DummyRuntime()
     lock_manager = DummyLockManager()
@@ -153,8 +148,18 @@ def test_sync_service_lifecycle_and_lock_routing():
     assert lock_manager.calls == [("fw", "/tmp/prj::sample")] * 10
 
 
-def test_sync_service_maps_validation_error_to_domain_error():
-    service = SyncService(PullValidationRuntime(), lock_manager=DummyLockManager())
+def test_sync_service_preserves_runtime_domain_error_code():
+    class Runtime(DummyRuntime):
+        def pull_project_program(self, name: str, *, on_local_changes: str = "abort", domain_path: str | None = None):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="on_local_changes は 'abort' または 'discard' を指定してください",
+                hint="check input",
+                retryable=False,
+                details={"on_local_changes": on_local_changes},
+            )
+
+    service = SyncService(Runtime(), lock_manager=DummyLockManager())
 
     with pytest.raises(DomainError) as exc_info:
         service.pull_project_program("fw", on_local_changes="invalid")
@@ -162,6 +167,7 @@ def test_sync_service_maps_validation_error_to_domain_error():
     err = exc_info.value
     assert err.code == ErrorCode.VALIDATION_ERROR
     assert err.details == {
+        "on_local_changes": "invalid",
         "operation": "pull_project_program",
         "target": "fw",
         "domain_path": None,
@@ -169,28 +175,34 @@ def test_sync_service_maps_validation_error_to_domain_error():
 
 
 @pytest.mark.parametrize(
-    ("runtime_message", "expected"),
+    "expected",
     [
-        ("CHECKOUT_REQUIRED: checkout が必要です", ErrorCode.CHECKOUT_REQUIRED),
-        ("NOT_SHARED_PROJECT: shared project ではありません", ErrorCode.NOT_SHARED_PROJECT),
-        ("NOT_CHECKED_OUT: checkout されていません", ErrorCode.NOT_CHECKED_OUT),
-        ("LOCAL_CHANGES_EXIST: ローカル変更があります", ErrorCode.LOCAL_CHANGES_EXIST),
-        ("REOPEN_FAILED: reopen 失敗", ErrorCode.REOPEN_FAILED),
-        ("SAVE_FAILED: save 失敗", ErrorCode.SAVE_FAILED),
+        ErrorCode.CHECKOUT_REQUIRED,
+        ErrorCode.NOT_SHARED_PROJECT,
+        ErrorCode.NOT_CHECKED_OUT,
+        ErrorCode.LOCAL_CHANGES_EXIST,
+        ErrorCode.REOPEN_FAILED,
+        ErrorCode.SAVE_FAILED,
     ],
 )
-def test_sync_service_maps_runtime_error_codes(runtime_message: str, expected: ErrorCode):
+def test_sync_service_preserves_runtime_domain_error_codes(expected: ErrorCode):
     class Runtime(DummyRuntime):
         def commit_project_program(
             self,
-            name: str,
-            commit_message: str,
+            name: str,  # noqa: ARG002
+            message: str,  # noqa: ARG002
             *,
-            keep_checked_out: bool = False,
-            auto_checkout: bool = True,
-            domain_path: str | None = None,
-        ):  # noqa: ARG002
-            raise RuntimeError(runtime_message)
+            keep_checked_out: bool = False,  # noqa: ARG002
+            auto_checkout: bool = True,  # noqa: ARG002
+            domain_path: str | None = None,  # noqa: ARG002
+        ):
+            raise DomainError(
+                code=expected,
+                message=f"{expected.value}: failure",
+                hint="check runtime",
+                retryable=expected in {ErrorCode.REOPEN_FAILED},
+                details={"origin": "runtime"},
+            )
 
     service = SyncService(Runtime(), lock_manager=DummyLockManager())
 
@@ -198,6 +210,33 @@ def test_sync_service_maps_runtime_error_codes(runtime_message: str, expected: E
         service.commit_project_program("fw", "msg")
 
     assert exc_info.value.code == expected
+    assert exc_info.value.details == {
+        "origin": "runtime",
+        "operation": "commit_project_program",
+        "target": "fw",
+        "domain_path": None,
+    }
+
+
+def test_sync_service_fallback_non_domain_error_is_sync_operation_failed():
+    class Runtime(DummyRuntime):
+        def commit_project_program(
+            self,
+            name: str,  # noqa: ARG002
+            message: str,  # noqa: ARG002
+            *,
+            keep_checked_out: bool = False,  # noqa: ARG002
+            auto_checkout: bool = True,  # noqa: ARG002
+            domain_path: str | None = None,  # noqa: ARG002
+        ):
+            raise RuntimeError("unexpected failure")
+
+    service = SyncService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.commit_project_program("fw", "msg")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
     assert exc_info.value.details == {
         "operation": "commit_project_program",
         "target": "fw",
