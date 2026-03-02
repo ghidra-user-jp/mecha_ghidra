@@ -10,15 +10,9 @@ from typing import Any, Dict, Optional
 import pyghidra.core as pycore
 
 from .models import ProgramSession
+from . import java_bindings, path_utils, sync_utils
 
 logger = logging.getLogger(__name__)
-
-
-def _session_module():
-    # Runtime import keeps package-level monkeypatching compatibility for tests.
-    from ghidra_headless import session as session_module
-
-    return session_module
 
 
 class ProjectHandle:
@@ -59,7 +53,7 @@ class ProjectHandle:
         idata_dir = rep_dir / "idata"
         if not idata_dir.is_dir():
             return None
-        return _session_module()._collect_program_files_from_idata(idata_dir)
+        return path_utils._collect_program_files_from_idata(idata_dir)
 
     def get_project_location(self) -> str:
         return self.project_location
@@ -74,15 +68,15 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("プロジェクトは既にクローズされています")
-            monitor = _session_module()._console_monitor()
-            domain_dir, domain_name = _session_module()._parse_domain_path(self.project, domain_path)
+            monitor = java_bindings._console_monitor()
+            domain_dir, domain_name = path_utils._parse_domain_path(self.project, domain_path)
             domain_path_key = (domain_dir, domain_name)
             if domain_path_key in self._open_programs:
                 raise RuntimeError(f"プログラムには既にセッションがあります: {domain_path_key}")
             program = self.project.openProgram(domain_dir, domain_name, False)
             if program is None:
                 raise RuntimeError(f"プログラムを取得できませんでした: {domain_path}")
-            flat_api = _session_module()._flat_program_api_class()(program, monitor)
+            flat_api = java_bindings._flat_program_api_class()(program, monitor)
             self._refcount += 1
             self._open_programs.add(domain_path_key)
             return ProgramSession(flat_api, program, project_handle=self)
@@ -120,7 +114,7 @@ class ProjectHandle:
             if self._closed:
                 raise RuntimeError("プロジェクトはクローズ済みです")
             domain_file = self._get_domain_file_locked(domain_path)
-            return _session_module()._sync_status_from_domain_file(domain_file)
+            return sync_utils._sync_status_from_domain_file(domain_file)
 
     def get_version_history(self, domain_path: str, *, limit: int = 50) -> Dict[str, Any]:
         with self._lock:
@@ -130,12 +124,12 @@ class ProjectHandle:
             if normalized_limit < 1:
                 raise ValueError("limit は1以上を指定してください")
             domain_file = self._get_domain_file_locked(domain_path)
-            if not bool(_session_module()._required_call(domain_file, "isVersioned")):
+            if not bool(sync_utils._required_call(domain_file, "isVersioned")):
                 raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
-            versions = _session_module()._get_version_history_entries(domain_file)
+            versions = sync_utils._get_version_history_entries(domain_file)
             versions.sort(key=lambda item: item["version"], reverse=True)
-            current_version = int(_session_module()._required_call(domain_file, "getVersion"))
-            latest_version = int(_session_module()._required_call(domain_file, "getLatestVersion"))
+            current_version = int(sync_utils._required_call(domain_file, "getVersion"))
+            latest_version = int(sync_utils._required_call(domain_file, "getLatestVersion"))
             return {
                 "program": domain_path,
                 "current_version": current_version,
@@ -164,10 +158,10 @@ class ProjectHandle:
                 raise ValueError("range_limit は0以上を指定してください")
 
             domain_file = self._get_domain_file_locked(domain_path)
-            if not bool(_session_module()._required_call(domain_file, "isVersioned")):
+            if not bool(sync_utils._required_call(domain_file, "isVersioned")):
                 raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
 
-            versions = _session_module()._get_version_history_entries(domain_file)
+            versions = sync_utils._get_version_history_entries(domain_file)
             known_versions = {item["version"] for item in versions}
             if source_version not in known_versions:
                 raise RuntimeError(
@@ -192,9 +186,9 @@ class ProjectHandle:
             if source_version == target_version:
                 return result
 
-            monitor = _session_module()._console_monitor()
-            from_consumer = _session_module()._java_object()
-            to_consumer = _session_module()._java_object()
+            monitor = java_bindings._console_monitor()
+            from_consumer = java_bindings._java_object()
+            to_consumer = java_bindings._java_object()
             from_program = None
             to_program = None
             try:
@@ -204,11 +198,11 @@ class ProjectHandle:
                     raise RuntimeError(
                         f"VERSION_LOAD_FAILED: version {source_version} または {target_version} を開けませんでした"
                     )
-                program_diff = _session_module()._program_diff_class()(from_program, to_program)
+                program_diff = java_bindings._program_diff_class()(from_program, to_program)
                 differences = program_diff.getDifferences(monitor)
 
-                type_counts = _session_module()._collect_diff_type_counts(program_diff, differences, monitor)
-                ranges, truncated = _session_module()._collect_diff_ranges(differences, limit=normalized_range_limit)
+                type_counts = sync_utils._collect_diff_type_counts(program_diff, differences, monitor)
+                ranges, truncated = sync_utils._collect_diff_ranges(differences, limit=normalized_range_limit)
                 warnings = program_diff.getWarnings()
                 result.update(
                     {
@@ -222,15 +216,15 @@ class ProjectHandle:
                 )
                 return result
             finally:
-                _session_module()._release_domain_object(from_program, from_consumer)
-                _session_module()._release_domain_object(to_program, to_consumer)
+                sync_utils._release_domain_object(from_program, from_consumer)
+                sync_utils._release_domain_object(to_program, to_consumer)
 
     def checkout_program(self, domain_path: str, *, exclusive: bool = False) -> bool:
         with self._lock:
             if self._closed:
                 raise RuntimeError("プロジェクトはクローズ済みです")
             domain_file = self._get_domain_file_locked(domain_path)
-            monitor = _session_module()._console_monitor()
+            monitor = java_bindings._console_monitor()
             return bool(domain_file.checkout(bool(exclusive), monitor))
 
     def add_program_to_version_control(
@@ -247,10 +241,10 @@ class ProjectHandle:
             if not text:
                 raise ValueError("comment を指定してください")
             domain_file = self._get_domain_file_locked(domain_path)
-            can_add = _session_module()._safe_call(domain_file, "canAddToRepository")
+            can_add = sync_utils._safe_call(domain_file, "canAddToRepository")
             if can_add is False:
                 raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControlできない状態です")
-            monitor = _session_module()._console_monitor()
+            monitor = java_bindings._console_monitor()
             domain_file.addToVersionControl(text, bool(keep_checked_out), monitor)
 
     def commit_program(
@@ -268,8 +262,8 @@ class ProjectHandle:
             if not text:
                 raise ValueError("message を指定してください")
             domain_file = self._get_domain_file_locked(domain_path)
-            monitor = _session_module()._console_monitor()
-            handler = _session_module()._default_checkin_handler_class()(text, bool(keep_checked_out), bool(create_keep_file))
+            monitor = java_bindings._console_monitor()
+            handler = java_bindings._default_checkin_handler_class()(text, bool(keep_checked_out), bool(create_keep_file))
             domain_file.checkin(handler, monitor)
 
     def merge_program(self, domain_path: str, *, ok_to_upgrade: bool = True) -> None:
@@ -277,7 +271,7 @@ class ProjectHandle:
             if self._closed:
                 raise RuntimeError("プロジェクトはクローズ済みです")
             domain_file = self._get_domain_file_locked(domain_path)
-            monitor = _session_module()._console_monitor()
+            monitor = java_bindings._console_monitor()
             domain_file.merge(bool(ok_to_upgrade), monitor)
 
     def undo_checkout_program(self, domain_path: str, *, keep: bool = False) -> None:
@@ -298,10 +292,10 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 return
-            domain_path = _session_module()._domain_path(program)
+            domain_path = path_utils._domain_path(program)
             if domain_path is None:
                 raise RuntimeError("削除対象プログラムのパスを取得できません")
-            domain_key = _session_module()._parse_domain_path(self.project, domain_path)
+            domain_key = path_utils._parse_domain_path(self.project, domain_path)
             remove_error = None
             try:
                 if program is not None:
@@ -331,7 +325,7 @@ class ProjectHandle:
                 raise RuntimeError("プロジェクトはクローズ済みです")
             results = []
             root = self.project.getProjectData().getRootFolder()
-            _session_module()._collect_program_files(root, results)
+            path_utils._collect_program_files(root, results)
             return results
 
     def is_closed(self) -> bool:

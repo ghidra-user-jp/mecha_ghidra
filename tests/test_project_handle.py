@@ -51,8 +51,8 @@ class DummyProject:
 
 
 def build_handle(monkeypatch):
-    monkeypatch.setattr(session, "_flat_program_api_class", lambda: DummyFlatAPI)
-    monkeypatch.setattr(session, "_console_monitor", lambda: None)
+    monkeypatch.setattr(session.java_bindings, "_flat_program_api_class", lambda: DummyFlatAPI)
+    monkeypatch.setattr(session.java_bindings, "_console_monitor", lambda: None)
 
     handle = session.ProjectHandle.__new__(session.ProjectHandle)
     handle._lock = threading.RLock()
@@ -107,7 +107,7 @@ def test_sync_status_raises_when_required_call_fails():
             raise RuntimeError("backend unavailable")
 
     with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
-        session._sync_status_from_domain_file(BrokenDomainFile())
+        session.sync_utils._sync_status_from_domain_file(BrokenDomainFile())
 
 
 def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
@@ -293,9 +293,9 @@ def test_get_version_diff(monkeypatch):
 
     domain_file = DummyVersionedDomainFile()
     monkeypatch.setattr(handle, "_get_domain_file_locked", lambda _path: domain_file)
-    monkeypatch.setattr(session, "_program_diff_class", lambda: DummyProgramDiff)
-    monkeypatch.setattr(session, "_program_diff_filter_class", lambda: DummyProgramDiffFilter)
-    monkeypatch.setattr(session, "_console_monitor", lambda: None)
+    monkeypatch.setattr(session.java_bindings, "_program_diff_class", lambda: DummyProgramDiff)
+    monkeypatch.setattr(session.java_bindings, "_program_diff_filter_class", lambda: DummyProgramDiffFilter)
+    monkeypatch.setattr(session.java_bindings, "_console_monitor", lambda: None)
     consumers = []
 
     def fake_consumer():
@@ -303,7 +303,7 @@ def test_get_version_diff(monkeypatch):
         consumers.append(consumer)
         return consumer
 
-    monkeypatch.setattr(session, "_java_object", fake_consumer)
+    monkeypatch.setattr(session.java_bindings, "_java_object", fake_consumer)
 
     result = handle.get_version_diff("/folder/app", from_version=1, to_version=2, range_limit=1)
 

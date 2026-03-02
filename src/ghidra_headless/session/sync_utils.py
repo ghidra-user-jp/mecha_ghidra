@@ -5,16 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from . import java_bindings
 from .path_utils import _to_iso8601_utc
 
 logger = logging.getLogger(__name__)
-
-
-def _session_module():
-    # Runtime import keeps package-level monkeypatching compatibility for tests.
-    from ghidra_headless import session as session_module
-
-    return session_module
 
 
 def _safe_call(obj, name: str, *args):
@@ -105,7 +99,7 @@ def _get_version_history_entries(domain_file) -> list[Dict[str, Any]]:
 def _collect_diff_type_counts(program_diff, differences, monitor) -> list[Dict[str, Any]]:
     if differences is None:
         return []
-    diff_filter = _session_module()._program_diff_filter_class()()
+    diff_filter = java_bindings._program_diff_filter_class()()
     counts: list[Dict[str, Any]] = []
     for diff_type in list(diff_filter.getPrimaryTypes()):
         normalized_type = int(diff_type)
