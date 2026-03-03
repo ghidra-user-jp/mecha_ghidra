@@ -312,7 +312,7 @@ def test_dispatch_tool_applies_error_adapter_for_create_session():
         def create_session(self, target, **kwargs):  # noqa: ARG002
             raise RuntimeError("boom")
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' の作成に失敗しました: boom"):
+    with pytest.raises(RuntimeError, match="セッション 'fw' の作成に失敗しました"):
         dispatch_tool(
             "create_session",
             {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
@@ -326,7 +326,7 @@ def test_dispatch_tool_applies_error_adapter_for_close_session():
         def close_session(self, target, **kwargs):  # noqa: ARG002
             raise RuntimeError("close boom")
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズに失敗しました: close boom"):
+    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズに失敗しました"):
         dispatch_tool(
             "close_session",
             {},
@@ -341,7 +341,7 @@ def test_dispatch_tool_applies_error_adapter_for_close_remove():
             assert kwargs == {"remove_program": True}
             raise RuntimeError("remove boom")
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズ/削除に失敗しました: remove boom"):
+    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズ/削除に失敗しました"):
         dispatch_tool(
             "close_session_and_remove_program",
             {},

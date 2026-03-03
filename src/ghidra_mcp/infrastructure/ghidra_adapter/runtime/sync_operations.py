@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
 
 from ghidra_mcp.domain import DomainError, ErrorCode
@@ -9,6 +10,8 @@ from ghidra_mcp.infrastructure.ghidra_adapter.program_lease import ProgramLease
 from ghidra_headless.session import ProjectHandle
 
 from .session_store import RuntimeSessionStore
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeSyncOperations:
@@ -489,8 +492,8 @@ class RuntimeSyncOperations:
             except Exception:
                 try:
                     reopened.close()
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    logger.warning("failed to close reopened session during rollback for target '%s': %s", name, close_exc)
                 raise
             finally:
                 if active_handle is not None and active_handle.is_closed():
@@ -512,8 +515,8 @@ class RuntimeSyncOperations:
                 self._store.locks.pop(name, None)
                 try:
                     self._store.core_accessor().remove_context(name)
-                except Exception:
-                    pass
+                except Exception as remove_exc:
+                    logger.warning("failed to remove context after reopen failure for target '%s': %s", name, remove_exc)
                 operation_error = (exc.details or {}).get("operation_error")
                 if operation_error:
                     raise RuntimeError(

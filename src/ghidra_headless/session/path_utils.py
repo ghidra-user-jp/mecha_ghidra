@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import datetime as _dt
 import pathlib
-import xml.etree.ElementTree as _et
+import re
 from typing import Dict, Optional
+
+_MAX_PRP_METADATA_BYTES = 1024 * 1024
+_STATE_TAG_RE = re.compile(r"<STATE\b[^>]*>", re.IGNORECASE)
+
+
+def _extract_xml_attr(tag_text: str, attr_name: str) -> Optional[str]:
+    pattern = rf"""\b{re.escape(attr_name)}\s*=\s*(['"])(.*?)\1"""
+    match = re.search(pattern, tag_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return match.group(2)
 
 
 def _parse_domain_path(project, domain_path: Optional[str]):
@@ -84,16 +95,25 @@ def _collect_program_files_from_idata(idata_dir: pathlib.Path) -> list[Dict[str,
 
 def _read_prp_basic_info(prp_path: pathlib.Path) -> Optional[Dict[str, str]]:
     try:
-        root = _et.parse(str(prp_path)).getroot()
+        raw = prp_path.read_bytes()
     except Exception:
         return None
 
+    if not raw or len(raw) > _MAX_PRP_METADATA_BYTES:
+        return None
+
+    lowered = raw.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
+        return None
+
+    text = raw.decode("utf-8", errors="replace")
     info: Dict[str, str] = {}
-    for state in root.findall(".//STATE"):
-        key = state.attrib.get("NAME")
+    for match in _STATE_TAG_RE.finditer(text):
+        tag_text = match.group(0)
+        key = _extract_xml_attr(tag_text, "NAME")
         if not key:
             continue
-        value = state.attrib.get("VALUE")
+        value = _extract_xml_attr(tag_text, "VALUE")
         if value is None:
             continue
         info[str(key)] = str(value)
@@ -122,4 +142,3 @@ def _to_iso8601_utc(timestamp_millis) -> Optional[str]:
         return _dt.datetime.fromtimestamp(timestamp, tz=_dt.timezone.utc).isoformat().replace("+00:00", "Z")
     except Exception:  # noqa: BLE001
         return None
-

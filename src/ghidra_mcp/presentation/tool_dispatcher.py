@@ -25,16 +25,16 @@ _RESULT_ADAPTERS = {
 }
 
 
-def _create_session_error(exc: Exception, target: str) -> RuntimeError:
-    return RuntimeError(f"セッション '{target}' の作成に失敗しました: {exc}")
+def _create_session_error(_exc: Exception, target: str) -> RuntimeError:
+    return RuntimeError(f"セッション '{target}' の作成に失敗しました")
 
 
-def _close_session_error(exc: Exception, target: str) -> RuntimeError:
-    return RuntimeError(f"セッション '{target}' のクローズに失敗しました: {exc}")
+def _close_session_error(_exc: Exception, target: str) -> RuntimeError:
+    return RuntimeError(f"セッション '{target}' のクローズに失敗しました")
 
 
-def _close_remove_error(exc: Exception, target: str) -> RuntimeError:
-    return RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました: {exc}")
+def _close_remove_error(_exc: Exception, target: str) -> RuntimeError:
+    return RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました")
 
 
 _ERROR_ADAPTERS = {

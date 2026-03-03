@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Dict, List, Optional
 
 from ghidra_headless.session import ProgramSession, ProjectHandle
 
 from .session_store import RuntimeSessionStore
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeTargetLifecycle:
@@ -44,16 +47,16 @@ class RuntimeTargetLifecycle:
                 self._store.sessions.pop(name, None)
                 try:
                     session.close()
-                except Exception:
-                    pass
+                except Exception as close_exc:
+                    logger.warning("failed to rollback session close during create_session for target '%s': %s", name, close_exc)
                 if not had_target:
                     self._store.target_projects.pop(name, None)
                 if not had_lock:
                     self._store.locks.pop(name, None)
                 try:
                     self._store.core_accessor().remove_context(name)
-                except Exception:
-                    pass
+                except Exception as remove_exc:
+                    logger.warning("failed to rollback context removal during create_session for target '%s': %s", name, remove_exc)
                 if handle is not None and handle.is_closed():
                     self._store.project_handles.pop(handle.get_key(), None)
                 raise
@@ -174,16 +177,16 @@ class RuntimeTargetLifecycle:
             for name in names:
                 try:
                     self._close_session_locked(name, remove_program=False)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as close_exc:  # noqa: BLE001
+                    logger.warning("failed to close session during close_all for target '%s': %s", name, close_exc)
             self._store.sessions.clear()
             self._store.locks.clear()
             self._store.target_projects.clear()
             for handle in list(self._store.project_handles.values()):
                 try:
                     handle.close()
-                except Exception:
-                    pass
+                except Exception as handle_exc:
+                    logger.warning("failed to close project handle during close_all: %s", handle_exc)
             self._store.project_handles.clear()
             self._store.core_accessor().clear_contexts()
 
