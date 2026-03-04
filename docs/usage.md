@@ -131,6 +131,44 @@ localhostに接続
 
 <img width="531" height="389" alt="image" src="https://github.com/user-attachments/assets/80a8aa7e-659b-4d8e-bf5f-65eea292dc7f" />
 
+## Codex での MCP 設定
+
+Codexアプリ/CLI では `~/.codex/config.toml` の `mcp_servers` セクションに設定します。推奨の `streamable-http` 接続例:
+
+```toml
+[mcp_servers.ghidra_headless]
+enabled = true
+url = "http://127.0.0.1:8081/mcp"
+```
+
+`stdio` で直接起動したい場合の例:
+
+```toml
+[mcp_servers.ghidra_headless]
+enabled = true
+command = "/Users/samsepi0l/.local/bin/uv"
+args = [
+  "--directory",
+  "/Users/samsepi0l/ghidra/GhidraMCP_headless",
+  "run",
+  "ghidra-mcp",
+  "--project-location",
+  "/Users/samsepi0l/ghidra_project.gpr",
+  "--transport",
+  "stdio"
+]
+```
+
+## Claude Code での MCP 設定
+
+Claude Code では CLI から MCP サーバーを登録できます。推奨の `streamable-http` 接続例:
+
+```bash
+claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
+```
+
+サーバー側で shared project 認証が必要な場合は、`ghidra-mcp` 起動時に `--ghidra-server-user` と `--ghidra-server-password-env` を指定してください（MCPクライアント側で平文パスワードを渡す方式ではありません）。
+
 ## Kilocode/Roocode での MCP 設定
 
 Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` でサーバーを起動する場合の例:
