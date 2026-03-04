@@ -75,8 +75,8 @@ class LockManager:
             if time.monotonic() >= deadline:
                 raise DomainError(
                     code=ErrorCode.LOCK_TIMEOUT,
-                    message=f"{lock_name} lock の取得に失敗しました",
-                    hint=f"ロック順序は {' -> '.join(order)} です",
+                    message=f"Failed to acquire {lock_name} lock",
+                    hint=f"Lock acquisition order: {' -> '.join(order)}",
                     retryable=True,
                     details={"lock": lock_name, "timeout": timeout},
                 )

@@ -44,11 +44,11 @@ def to_domain_error(
     elif message.startswith("LOCK_TIMEOUT"):
         code = ErrorCode.LOCK_TIMEOUT
         retryable = True
-    elif "セッション '" in message and ("存在しません" in message or "初期化されていません" in message):
+    elif "Session '" in message and ("does not exist" in message or "is not initialized" in message):
         code = ErrorCode.SESSION_NOT_FOUND
-    elif "ターゲット '" in message and "初期化されていません" in message:
+    elif "Target '" in message and "is not initialized" in message:
         code = ErrorCode.TARGET_NOT_REGISTERED
-    elif "DomainFile" in message or "domain pathを取得できません" in message:
+    elif "DomainFile" in message or "failed to resolve domain path" in message:
         code = ErrorCode.PROGRAM_NOT_FOUND
     elif message.startswith("REOPEN_FAILED"):
         code = ErrorCode.REOPEN_FAILED
@@ -67,7 +67,7 @@ def to_domain_error(
     return DomainError(
         code=code,
         message=message,
-        hint="runtime state を確認してください",
+        hint="Check runtime state",
         retryable=retryable,
         details=details,
     )

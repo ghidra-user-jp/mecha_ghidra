@@ -153,7 +153,7 @@ def test_sync_service_preserves_runtime_domain_error_code():
         def pull_project_program(self, name: str, *, on_local_changes: str = "abort", domain_path: str | None = None):  # noqa: ARG002
             raise DomainError(
                 code=ErrorCode.VALIDATION_ERROR,
-                message="on_local_changes は 'abort' または 'discard' を指定してください",
+                message="on_local_changes must be either 'abort' or 'discard'",
                 hint="check input",
                 retryable=False,
                 details={"on_local_changes": on_local_changes},

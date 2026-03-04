@@ -226,7 +226,7 @@ def test_service_registry_adapter_create_session_requires_domain_path():
         sync_service=sync,
     )
 
-    with pytest.raises(ValueError, match="domain_path を指定してください"):
+    with pytest.raises(ValueError, match="domain_path is required"):
         adapter.create_session("fw", "/tmp/sample.gpr", project_name="sample")
 
 

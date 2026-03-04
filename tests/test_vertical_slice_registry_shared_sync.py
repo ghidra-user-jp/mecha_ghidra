@@ -177,7 +177,7 @@ def test_registry_shared_sync_slice_create_session_error_message_is_unchanged(mo
 
     monkeypatch.setattr(cli, "_registry", DummyRegistry())
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' の作成に失敗しました"):
+    with pytest.raises(RuntimeError, match="Failed to create session 'fw'"):
         cli.create_session(
             target="fw",
             project_location="/tmp/sample.gpr",
@@ -192,7 +192,7 @@ def test_registry_shared_sync_slice_close_session_error_message_is_unchanged(mon
 
     monkeypatch.setattr(cli, "_registry", DummyRegistry())
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズに失敗しました"):
+    with pytest.raises(RuntimeError, match="Failed to close session 'fw'"):
         cli.close_session("fw")
 
 
@@ -204,5 +204,5 @@ def test_registry_shared_sync_slice_close_remove_error_message_is_unchanged(monk
 
     monkeypatch.setattr(cli, "_registry", DummyRegistry())
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズ/削除に失敗しました"):
+    with pytest.raises(RuntimeError, match="Failed to close/remove session 'fw'"):
         cli.close_session_and_remove_program("fw")

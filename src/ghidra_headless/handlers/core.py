@@ -114,7 +114,7 @@ def _build_profile_kwargs(profile):
         try:
             kwargs[keyword] = _PROFILE_DEPENDENCIES[keyword]
         except KeyError:
-            raise RuntimeError("未知の依存プロファイルキーです: %s" % keyword)
+            raise RuntimeError("Unknown dependency profile key: %s" % keyword)
     return kwargs
 
 
@@ -135,13 +135,13 @@ def _make_handler(command):
 SUPPORTED_COMMANDS = {command: _make_handler(command) for command in COMMAND_NAMES}
 
 if tuple(SUPPORTED_COMMANDS.keys()) != COMMAND_NAMES:
-    raise RuntimeError("SUPPORTED_COMMANDS と COMMAND_NAMES の順序/集合が一致しません")
+    raise RuntimeError("SUPPORTED_COMMANDS and COMMAND_NAMES order/membership mismatch")
 
 
 def execute(command, params, key="default"):
     handler = SUPPORTED_COMMANDS.get(command)
     if handler is None:
-        raise KeyError("未対応のコマンド: %s" % command)
+        raise KeyError("Unsupported command: %s" % command)
     _ensure_context_for_key(key)
     previous = getattr(_THREAD_STATE, "current_key", None)
     _THREAD_STATE.current_key = key

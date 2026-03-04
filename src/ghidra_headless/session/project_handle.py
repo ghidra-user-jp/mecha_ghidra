@@ -34,11 +34,11 @@ class ProjectHandle:
     def resolve_project_location_and_file(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
         path = pathlib.Path(project_location).expanduser().resolve()
         if project_name is None and path.suffix.lower() != ".gpr":
-            raise ValueError("project_location には .gpr のGhidraプロジェクトファイルを指定してください")
+            raise ValueError("project_location must point to a .gpr Ghidra project file")
         if project_name is None and not path.is_file():
-            raise ValueError(f"指定した .gpr ファイルが見つかりません: {path}")
+            raise ValueError(f"Specified .gpr file not found: {path}")
         if project_name is None and path.is_dir():
-            raise ValueError("project_name を指定してください")
+            raise ValueError("project_name is required")
         effective = project_name or path.stem
         return (str(path.parent if path.is_file() else path), effective)
 
@@ -67,15 +67,15 @@ class ProjectHandle:
     def open_program(self, domain_path: Optional[str] = None) -> ProgramSession:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトは既にクローズされています")
+                raise RuntimeError("Project is already closed")
             monitor = java_bindings._console_monitor()
             domain_dir, domain_name = path_utils._parse_domain_path(self.project, domain_path)
             domain_path_key = (domain_dir, domain_name)
             if domain_path_key in self._open_programs:
-                raise RuntimeError(f"プログラムには既にセッションがあります: {domain_path_key}")
+                raise RuntimeError(f"Program already has an active session: {domain_path_key}")
             program = self.project.openProgram(domain_dir, domain_name, False)
             if program is None:
-                raise RuntimeError(f"プログラムを取得できませんでした: {domain_path}")
+                raise RuntimeError(f"Failed to open program: {domain_path}")
             flat_api = java_bindings._flat_program_api_class()(program, monitor)
             self._refcount += 1
             self._open_programs.add(domain_path_key)
@@ -84,16 +84,16 @@ class ProjectHandle:
     def import_program(self, binary_path: str):
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトは既にクローズされています")
+                raise RuntimeError("Project is already closed")
             path = pathlib.Path(binary_path)
             if not path.exists():
-                raise ValueError(f"バイナリが存在しません: {binary_path}")
+                raise ValueError(f"Binary does not exist: {binary_path}")
             program_dir = "/"
             program_name = path.name
             data = self.project.getProjectData()
             domain_file = data.getFile(program_dir + program_name)
             if domain_file is not None:
-                raise RuntimeError(f"プログラムはすでに存在します: {domain_file.getPathname()}")
+                raise RuntimeError(f"Program already exists: {domain_file.getPathname()}")
             program = None
 
             try:
@@ -105,27 +105,27 @@ class ProjectHandle:
                 if program is not None:
                     self.project.close(program)
             if domain_file is None:
-                raise RuntimeError(f"プログラムの追加に失敗しました: {binary_path}")
+                raise RuntimeError(f"Failed to add program: {binary_path}")
 
             return domain_file
 
     def get_sync_status(self, domain_path: str) -> Dict[str, Any]:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             domain_file = self._get_domain_file_locked(domain_path)
             return sync_utils._sync_status_from_domain_file(domain_file)
 
     def get_version_history(self, domain_path: str, *, limit: int = 50) -> Dict[str, Any]:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             normalized_limit = int(limit)
             if normalized_limit < 1:
-                raise ValueError("limit は1以上を指定してください")
+                raise ValueError("limit must be >= 1")
             domain_file = self._get_domain_file_locked(domain_path)
             if not bool(sync_utils._required_call(domain_file, "isVersioned")):
-                raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
+                raise RuntimeError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
             versions = sync_utils._get_version_history_entries(domain_file)
             versions.sort(key=lambda item: item["version"], reverse=True)
             current_version = int(sync_utils._required_call(domain_file, "getVersion"))
@@ -148,28 +148,28 @@ class ProjectHandle:
     ) -> Dict[str, Any]:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             source_version = int(from_version)
             target_version = int(to_version)
             if source_version < 1 or target_version < 1:
-                raise ValueError("from_version と to_version は1以上を指定してください")
+                raise ValueError("from_version and to_version must be >= 1")
             normalized_range_limit = int(range_limit)
             if normalized_range_limit < 0:
-                raise ValueError("range_limit は0以上を指定してください")
+                raise ValueError("range_limit must be >= 0")
 
             domain_file = self._get_domain_file_locked(domain_path)
             if not bool(sync_utils._required_call(domain_file, "isVersioned")):
-                raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
+                raise RuntimeError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
 
             versions = sync_utils._get_version_history_entries(domain_file)
             known_versions = {item["version"] for item in versions}
             if source_version not in known_versions:
                 raise RuntimeError(
-                    f"VERSION_NOT_FOUND: from_version={source_version} が履歴にありません"
+                    f"VERSION_NOT_FOUND: from_version={source_version} not found in history"
                 )
             if target_version not in known_versions:
                 raise RuntimeError(
-                    f"VERSION_NOT_FOUND: to_version={target_version} が履歴にありません"
+                    f"VERSION_NOT_FOUND: to_version={target_version} not found in history"
                 )
 
             result = {
@@ -196,7 +196,7 @@ class ProjectHandle:
                 to_program = domain_file.getReadOnlyDomainObject(to_consumer, target_version, monitor)
                 if from_program is None or to_program is None:
                     raise RuntimeError(
-                        f"VERSION_LOAD_FAILED: version {source_version} または {target_version} を開けませんでした"
+                        f"VERSION_LOAD_FAILED: failed to open version {source_version} or {target_version}"
                     )
                 program_diff = java_bindings._program_diff_class()(from_program, to_program)
                 differences = program_diff.getDifferences(monitor)
@@ -222,7 +222,7 @@ class ProjectHandle:
     def checkout_program(self, domain_path: str, *, exclusive: bool = False) -> bool:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             domain_file = self._get_domain_file_locked(domain_path)
             monitor = java_bindings._console_monitor()
             return bool(domain_file.checkout(bool(exclusive), monitor))
@@ -236,14 +236,14 @@ class ProjectHandle:
     ) -> None:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             text = (comment or "").strip()
             if not text:
-                raise ValueError("comment を指定してください")
+                raise ValueError("comment is required")
             domain_file = self._get_domain_file_locked(domain_path)
             can_add = sync_utils._safe_call(domain_file, "canAddToRepository")
             if can_add is False:
-                raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControlできない状態です")
+                raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControl is not allowed")
             monitor = java_bindings._console_monitor()
             domain_file.addToVersionControl(text, bool(keep_checked_out), monitor)
 
@@ -257,10 +257,10 @@ class ProjectHandle:
     ) -> None:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             text = (message or "").strip()
             if not text:
-                raise ValueError("message を指定してください")
+                raise ValueError("message is required")
             domain_file = self._get_domain_file_locked(domain_path)
             monitor = java_bindings._console_monitor()
             handler = java_bindings._default_checkin_handler_class()(text, bool(keep_checked_out), bool(create_keep_file))
@@ -269,7 +269,7 @@ class ProjectHandle:
     def merge_program(self, domain_path: str, *, ok_to_upgrade: bool = True) -> None:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             domain_file = self._get_domain_file_locked(domain_path)
             monitor = java_bindings._console_monitor()
             domain_file.merge(bool(ok_to_upgrade), monitor)
@@ -277,14 +277,14 @@ class ProjectHandle:
     def undo_checkout_program(self, domain_path: str, *, keep: bool = False) -> None:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             domain_file = self._get_domain_file_locked(domain_path)
             domain_file.undoCheckout(bool(keep))
 
     def terminate_checkout_program(self, domain_path: str, checkout_id: int) -> None:
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             domain_file = self._get_domain_file_locked(domain_path)
             domain_file.terminateCheckout(int(checkout_id))
 
@@ -294,7 +294,7 @@ class ProjectHandle:
                 return
             domain_path = path_utils._domain_path(program)
             if domain_path is None:
-                raise RuntimeError("削除対象プログラムのパスを取得できません")
+                raise RuntimeError("Failed to resolve path of program to remove")
             domain_key = path_utils._parse_domain_path(self.project, domain_path)
             remove_error = None
             try:
@@ -322,7 +322,7 @@ class ProjectHandle:
     def list_programs(self):
         with self._lock:
             if self._closed:
-                raise RuntimeError("プロジェクトはクローズ済みです")
+                raise RuntimeError("Project is closed")
             results = []
             root = self.project.getProjectData().getRootFolder()
             path_utils._collect_program_files(root, results)
@@ -354,19 +354,19 @@ class ProjectHandle:
         data = self.project.getProjectData()
         domain_file = data.getFile(domain_path)
         if domain_file is None:
-            raise RuntimeError(f"削除対象のプログラムが見つかりません: {domain_path}")
+            raise RuntimeError(f"Program to remove not found: {domain_path}")
         try:
             domain_file.delete()
         except Exception as exc:
-            raise RuntimeError(f"プログラム削除に失敗しました: {domain_path}: {exc}")
+            raise RuntimeError(f"Failed to remove program: {domain_path}: {exc}")
 
     def _get_domain_file_locked(self, domain_path: str):
         if not domain_path:
-            raise ValueError("domain_path を指定してください")
+            raise ValueError("domain_path is required")
         data = self.project.getProjectData()
         domain_file = data.getFile(domain_path)
         if domain_file is None:
-            raise RuntimeError(f"プログラムが見つかりません: {domain_path}")
+            raise RuntimeError(f"Program not found: {domain_path}")
         return domain_file
 
 

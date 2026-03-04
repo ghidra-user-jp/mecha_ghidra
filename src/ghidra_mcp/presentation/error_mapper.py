@@ -7,19 +7,19 @@ from typing import Any
 from ghidra_mcp.domain import DomainError, ErrorCode
 
 _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
-    ErrorCode.CHECKOUT_REQUIRED: "CHECKOUT_REQUIRED: 共有プロジェクトの更新系操作には checkout が必要です",
-    ErrorCode.NOT_SHARED_PROJECT: "NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません",
-    ErrorCode.NOT_CHECKED_OUT: "NOT_CHECKED_OUT: checkout済みではありません",
-    ErrorCode.LOCAL_CHANGES_EXIST: "LOCAL_CHANGES_EXIST: ローカル変更があるため操作を中止しました",
-    ErrorCode.LOCK_TIMEOUT: "LOCK_TIMEOUT: ロック取得に失敗しました",
-    ErrorCode.SESSION_NOT_FOUND: "SESSION_NOT_FOUND: セッションが見つかりません",
-    ErrorCode.TARGET_NOT_REGISTERED: "TARGET_NOT_REGISTERED: ターゲットが未登録です",
-    ErrorCode.PROGRAM_NOT_FOUND: "PROGRAM_NOT_FOUND: プログラムが見つかりません",
-    ErrorCode.VALIDATION_ERROR: "VALIDATION_ERROR: 入力検証に失敗しました",
-    ErrorCode.REOPEN_FAILED: "REOPEN_FAILED: プログラム再オープンに失敗しました",
-    ErrorCode.SAVE_FAILED: "SAVE_FAILED: 保存処理に失敗しました",
-    ErrorCode.SYNC_OPERATION_FAILED: "SYNC_OPERATION_FAILED: 操作に失敗しました",
-    ErrorCode.CORE_EXECUTOR_UNAVAILABLE: "CORE_EXECUTOR_UNAVAILABLE: core command dispatcherが利用できません",
+    ErrorCode.CHECKOUT_REQUIRED: "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects",
+    ErrorCode.NOT_SHARED_PROJECT: "NOT_SHARED_PROJECT: target program is not under shared-project version control",
+    ErrorCode.NOT_CHECKED_OUT: "NOT_CHECKED_OUT: program is not checked out",
+    ErrorCode.LOCAL_CHANGES_EXIST: "LOCAL_CHANGES_EXIST: operation aborted due to local changes",
+    ErrorCode.LOCK_TIMEOUT: "LOCK_TIMEOUT: failed to acquire lock",
+    ErrorCode.SESSION_NOT_FOUND: "SESSION_NOT_FOUND: session not found",
+    ErrorCode.TARGET_NOT_REGISTERED: "TARGET_NOT_REGISTERED: target is not registered",
+    ErrorCode.PROGRAM_NOT_FOUND: "PROGRAM_NOT_FOUND: program not found",
+    ErrorCode.VALIDATION_ERROR: "VALIDATION_ERROR: input validation failed",
+    ErrorCode.REOPEN_FAILED: "REOPEN_FAILED: failed to reopen program",
+    ErrorCode.SAVE_FAILED: "SAVE_FAILED: save operation failed",
+    ErrorCode.SYNC_OPERATION_FAILED: "SYNC_OPERATION_FAILED: operation failed",
+    ErrorCode.CORE_EXECUTOR_UNAVAILABLE: "CORE_EXECUTOR_UNAVAILABLE: core command dispatcher is unavailable",
 }
 
 

@@ -1,0 +1,136 @@
+<img width="4096" height="700" alt="mecha_ghidra_one_line" src="https://github.com/user-attachments/assets/def48147-f8cf-4a6a-b4e6-cb3a43798d56" />
+
+[English](README.md) | [日本語](README.ja.md)
+
+# Mecha Ghidra — Headless Ghidra MCP for Ghidra Server
+PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開する Python パッケージです。Ghidra プロジェクトの解析・編集に加え、複数ターゲット管理やプログラムの import/load 切り替え、オプションの shared project 同期機能を使った AI クライアントとの共同解析まで行えます。
+
+## ドキュメント
+
+- [利用ガイド](docs/usage.ja.md) | [English](docs/usage.md): セットアップ、shared project 運用、複数ターゲット運用、Kilocode/Roocode 連携
+- [開発ガイド](docs/development.ja.md) | [English](docs/development.md): 開発フロー、テスト実行
+
+## クイックスタート
+
+1. 依存関係を同期
+   ```bash
+   uv sync
+   ```
+2. Ghidra パスを設定
+   ```bash
+   export GHIDRA_INSTALL_DIR=/path/to/ghidra
+   ```
+3. サーバーを起動（Streamable HTTP）
+   ```bash
+   uv run ghidra-mcp \
+       --project-location /Users/samsepi0l/ghidra_project.gpr \
+       --domain-path /main \
+       --transport http \
+       --mcp-host 127.0.0.1 \
+       --mcp-port 8081 \
+       --mcp-path /mcp
+   ```
+
+運用パターンや shared project 認証を含む詳細は [利用ガイド](docs/usage.ja.md) を参照してください。
+
+## 主要機能
+
+- **関数・シンボル操作**: 関数一覧、デコンパイル、リネーム、Xref 取得など。
+- **データ型編集**: 構造体・列挙体・クラス相当のデータ型作成／更新／削除に対応。
+- **メモリアクセス**: メモリのバイト列取得・検索・書き込み、グローバルデータ型の適用。
+- **コメント付与**: 逆アセンブリ／デコンパイラコメントの設定が可能。
+- **PyGhidra ベース**: Jython ではなく CPython 上で Ghidra API を直接呼び出します。
+- **複数ターゲット管理**: 同一プロセスで複数セッションを保持し、ターゲット名で切り替えながら解析できます。
+- **プロジェクト操作**: `list_project_programs` でプロジェクト内のプログラム一覧を取得し、`import_program` で新規バイナリを追加、`load_project_program` で既存プログラムへ切り替えできます。
+
+FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、MCP クライアントからは `ghidra_mcp.cli` を通じて利用できます。詳しいオプションは `uv run ghidra-mcp --help` を参照してください。
+
+### 提供ツール一覧
+
+#### Core Operations
+
+- `list_targets` - 登録済みターゲットと紐づくプロジェクト情報を一覧表示
+- `create_session` - 既存プロジェクトのプログラムを開いてターゲットを追加
+- `register_target` - プログラムを開かずにターゲットへプロジェクト情報のみ登録
+- `close_session` - ターゲットのセッションをクローズ
+- `close_session_and_remove_program` - セッションを閉じたうえでプログラムをプロジェクトから削除
+- `list_project_programs` - ターゲットが開いているプロジェクト内プログラム一覧を取得
+- `import_program` - バイナリまたは `.gzf` をプロジェクトへインポート
+- `load_project_program` - 既存プログラムを指定 `domain_path` でロード
+
+#### Function Analysis
+
+- `list_methods` - メソッド一覧を取得（ページング対応）
+- `list_functions` - 関数一覧を取得
+- `list_classes` - クラス一覧を取得
+- `list_namespaces` - 名前空間一覧を取得（ページング対応）
+- `search_functions_by_name` - 関数名の部分一致検索
+- `decompile_function` - 関数名指定で C 擬似コードを取得
+- `decompile_function_by_address` - アドレス指定で C 擬似コードを取得
+- `disassemble_function` - 関数の逆アセンブル結果を取得
+- `get_function_by_address` - アドレスに対応する関数情報を取得
+- `get_function_xrefs` - 関数名を起点に参照元/参照先を取得
+- `get_callee` - 指定アドレスの呼び出し先関数を取得
+
+#### Memory & Data
+
+- `list_segments` - メモリセグメント/レイアウト情報を取得
+- `list_imports` - インポートシンボル一覧を取得
+- `list_exports` - エクスポートシンボル一覧を取得
+- `list_data_items` - データアイテム一覧を取得
+- `list_strings` - 文字列一覧を取得（フィルタ対応）
+- `get_xrefs_to` - 指定アドレスへのクロスリファレンスを取得
+- `get_xrefs_from` - 指定アドレスからのクロスリファレンスを取得
+- `get_data_by_label` - ラベル名からデータを取得
+- `get_bytes` - 指定アドレスのバイト列を取得
+- `search_bytes` - バイトパターン検索
+
+#### Symbol & Comment Editing
+
+- `rename_function` - 関数名を変更（名前指定）
+- `rename_function_by_address` - 関数名を変更（アドレス指定）
+- `rename_variable` - ローカル変数名/引数名を変更
+- `rename_data` - データラベル名を変更
+- `set_function_prototype` - 関数プロトタイプを設定
+- `set_local_variable_type` - ローカル変数/引数の型を設定
+- `set_global_data_type` - グローバルデータの型を設定（`clear_mode` 指定可）
+- `set_bytes` - メモリ内容をバイト列で書き換え
+- `set_decompiler_comment` - デコンパイラコメントを設定
+- `set_disassembly_comment` - 逆アセンブリコメントを設定
+- `add_bookmark` - ブックマークを追加
+
+#### Data Type Operations
+
+- `create_struct` - 構造体を作成
+- `add_struct_members` - 構造体メンバーを追加
+- `clear_struct` - 構造体メンバーを全削除
+- `remove_struct_members` - 構造体メンバーを選択削除
+- `get_struct` - 構造体定義を取得
+- `create_enum` - 列挙体を作成
+- `add_enum_values` - 列挙体の値を追加
+- `remove_enum_values` - 列挙体の値を削除
+- `get_enum` - 列挙体定義を取得
+- `create_class` - GhidraClass 名前空間と対応構造体を作成
+- `add_class_members` - クラス相当データ型へメンバーを追加
+- `remove_class_members` - クラス相当データ型からメンバーを削除
+
+#### Shared Project Sync (`--enable-shared-project-sync` 指定時のみ)
+
+`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` は `domain_path` を任意指定できます（未指定時は現在ロード中のprogram）。
+
+- `get_project_sync_status` - shared project 上の同期状態を取得
+- `get_version_history` - バージョン履歴（version/user/comment/time）を取得
+- `get_version_diff` - 2バージョン間の差分要約（件数/タイプ別/アドレスレンジ）を取得
+- `checkout_project_program` - プログラムを checkout（排他指定可）
+- `add_project_program_to_version_control` - private プログラムを shared 管理へ追加
+- `commit_project_program` - checkout 中の変更を check-in
+- `pull_project_program` - 最新状態を取得（必要に応じて破棄/追従）
+- `undo_checkout_project_program` - checkout を取り消し（ローカル変更破棄可）
+- `terminate_project_program_checkout` - 既存 checkout を checkout ID で強制終了
+- `reload_project_program` - 現在プログラムを再ロード
+
+詳細な運用フローや制約事項は [利用ガイド](docs/usage.ja.md) を参照してください。
+
+## ライセンス
+
+このプロジェクトのライセンスは同梱の LICENSE ファイルを参照してください。

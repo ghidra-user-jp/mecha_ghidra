@@ -96,7 +96,7 @@ def test_target_service_preserves_runtime_domain_error_code():
         def load_program(self, name: str, domain_path: str):  # noqa: ARG002
             raise DomainError(
                 code=ErrorCode.VALIDATION_ERROR,
-                message="domain_path を指定してください",
+                message="domain_path is required",
                 hint="check input",
                 retryable=False,
                 details={"domain_path": domain_path},
@@ -117,7 +117,7 @@ def test_target_service_preserves_session_not_found_domain_error():
         def list_programs(self, name: str):  # noqa: ARG002
             raise DomainError(
                 code=ErrorCode.SESSION_NOT_FOUND,
-                message="セッション 'fw' は初期化されていません",
+                message="Session 'fw' is not initialized",
                 hint="load first",
                 retryable=False,
                 details={},

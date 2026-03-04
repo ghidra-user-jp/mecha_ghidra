@@ -8,10 +8,10 @@ def rename_function(params, *, ensure_context, find_function_by_name, txn, sourc
     old_name = params.get("oldName")
     new_name = params.get("newName")
     if not old_name or not new_name:
-        raise ValueError("oldNameとnewNameが必要です")
+        raise ValueError("oldName and newName are required")
     function = find_function_by_name(ctx, old_name)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % old_name)
+        raise LookupError("Function not found: %s" % old_name)
 
     def _rename():
         function.setName(new_name, source_type.USER_DEFINED)
@@ -26,11 +26,11 @@ def rename_function_by_address(params, *, ensure_context, get_address, txn, sour
     address_text = params.get("function_address")
     new_name = params.get("new_name") or params.get("newName")
     if not address_text or not new_name:
-        raise ValueError("function_addressとnew_nameは必須です")
+        raise ValueError("function_address and new_name are required")
     address = get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
-        raise LookupError("アドレスに対応する関数が見つかりません: %s" % address_text)
+        raise LookupError("No function found for address: %s" % address_text)
 
     def _rename():
         function.setName(new_name, source_type.USER_DEFINED)
@@ -45,11 +45,11 @@ def rename_data(params, *, ensure_context, get_address, txn, source_type):
     address_text = params.get("address")
     new_name = params.get("newName")
     if not new_name:
-        raise ValueError("newNameが必要です")
+        raise ValueError("newName is required")
     address = get_address(ctx, address_text)
     symbol = ctx.symbol_table.getPrimarySymbol(address)
     if symbol is None:
-        raise LookupError("アドレスにデータシンボルが存在しません: %s" % address_text)
+        raise LookupError("No data symbol at address: %s" % address_text)
 
     def _rename():
         symbol.setName(new_name, source_type.USER_DEFINED)
@@ -75,16 +75,16 @@ def rename_variable(
     old_name = params.get("oldName")
     new_name = params.get("newName")
     if not function_name or not old_name or not new_name:
-        raise ValueError("functionName, oldName, newNameが必要です")
+        raise ValueError("functionName, oldName, and newName are required")
 
     function = find_function_by_name(ctx, function_name)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % function_name)
+        raise LookupError("Function not found: %s" % function_name)
 
     if old_name == new_name:
         return {"name": new_name}
 
-    # 高レベルシンボル（ローカル＋引数）を優先して更新する。
+    # Prefer updating high-level symbols (locals and parameters) first.
     high_symbol = None
     high_function = None
     try:
@@ -100,7 +100,7 @@ def rename_variable(
                 symbol = symbols.next()
                 symbol_name = symbol.getName()
                 if symbol_name == new_name and symbol_name != old_name:
-                    raise ValueError("同名の変数が既に存在します: %s" % new_name)
+                    raise ValueError("Variable with the same name already exists: %s" % new_name)
                 if symbol_name == old_name:
                     high_symbol = symbol
             if high_symbol is not None:
@@ -123,12 +123,12 @@ def rename_variable(
                 txn(ctx, "Rename variable", _rename_high)
                 return {"name": new_name}
 
-    # フォールバック: DB上のローカル変数と引数を直接変更
+    # Fallback: update locals and parameters directly in the DB.
     target = None
     for local in function.getLocalVariables():
         local_name = local.getName()
         if local_name == new_name and local_name != old_name:
-            raise ValueError("同名の変数が既に存在します: %s" % new_name)
+            raise ValueError("Variable with the same name already exists: %s" % new_name)
         if local_name == old_name:
             target = local
 
@@ -136,13 +136,13 @@ def rename_variable(
         for param in function.getParameters():
             param_name = param.getName()
             if param_name == new_name and param_name != old_name:
-                raise ValueError("同名の変数が既に存在します: %s" % new_name)
+                raise ValueError("Variable with the same name already exists: %s" % new_name)
             if param_name == old_name:
                 target = param
                 break
 
     if target is None:
-        raise LookupError("変数が見つかりません: %s" % old_name)
+        raise LookupError("Variable not found: %s" % old_name)
 
     def _rename():
         target.setName(new_name, source_type.USER_DEFINED)
@@ -195,11 +195,11 @@ def set_function_prototype(
     address_text = params.get("function_address")
     prototype = params.get("prototype")
     if not address_text or not prototype:
-        raise ValueError("function_addressとprototypeは必須です")
+        raise ValueError("function_address and prototype are required")
     address = get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % address_text)
+        raise LookupError("Function not found: %s" % address_text)
 
     def _apply():
         parser = build_signature_parser(ctx)
@@ -209,14 +209,14 @@ def set_function_prototype(
         except TypeError:
             signature = parser.parse(None, prototype)
         if signature is None:
-            raise ValueError("関数プロトタイプを解析できません: %s" % prototype)
+            raise ValueError("Failed to parse function prototype: %s" % prototype)
 
         command = apply_function_signature_cmd(function.getEntryPoint(), signature, source_type.USER_DEFINED)
         if not command.applyTo(ctx.program, ctx.monitor()):
             status_msg = safe_call(command, "getStatusMsg")
             if status_msg:
-                raise RuntimeError("関数プロトタイプの適用に失敗しました: %s" % status_msg)
-            raise RuntimeError("関数プロトタイプの適用に失敗しました")
+                raise RuntimeError("Failed to apply function prototype: %s" % status_msg)
+            raise RuntimeError("Failed to apply function prototype")
         return True
 
     txn(ctx, "Set function prototype", _apply)
@@ -240,12 +240,12 @@ def set_local_variable_type(
     variable_name = params.get("variable_name")
     type_text = params.get("new_type")
     if not address_text or not variable_name or not type_text:
-        raise ValueError("function_address, variable_name, new_typeは必須です")
+        raise ValueError("function_address, variable_name, and new_type are required")
 
     address = get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % address_text)
+        raise LookupError("Function not found: %s" % address_text)
 
     data_type = parse_data_type(ctx, type_text)
 
@@ -288,7 +288,7 @@ def set_local_variable_type(
             if param.getName() == variable_name:
                 param.setDataType(data_type, source_type.USER_DEFINED)
                 return True
-        raise LookupError("変数が見つかりません: %s" % variable_name)
+        raise LookupError("Variable not found: %s" % variable_name)
 
     txn(ctx, "Set local variable type", _apply)
     return {"function": function.getName(), "variable": variable_name, "type": type_text}
@@ -299,7 +299,7 @@ def set_bytes(params, *, ensure_context, get_address, decode_hex_bytes, txn):
     address_text = params.get("address")
     bytes_text = params.get("bytes")
     if not address_text or not bytes_text:
-        raise ValueError("addressとbytesは必須です")
+        raise ValueError("address and bytes are required")
     address = get_address(ctx, address_text)
     data = decode_hex_bytes(bytes_text)
 
@@ -319,7 +319,7 @@ def add_bookmark(params, *, ensure_context, get_address, txn):
     bookmark_type = params.get("type")
     _bookmark_format = params.get("format", "json")
     if not address_text or not category or bookmark_type is None:
-        raise ValueError("address, category, type は必須です")
+        raise ValueError("address, category, and type are required")
 
     address = get_address(ctx, address_text)
     manager = ctx.program.getBookmarkManager()

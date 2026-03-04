@@ -45,14 +45,14 @@ def clear_contexts():
 
 def _ensure_context_for_key(key):
     if key not in _CONTEXTS:
-        raise RuntimeError("コンテキストが初期化されていません: %s" % key)
+        raise RuntimeError("Context is not initialized: %s" % key)
     return _CONTEXTS[key]
 
 
 def ensure_context():
     key = getattr(_THREAD_STATE, "current_key", None)
     if key is None:
-        raise RuntimeError("コンテキストキーが設定されていません")
+        raise RuntimeError("Context key is not set")
     return _ensure_context_for_key(key)
 
 

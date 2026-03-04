@@ -43,7 +43,7 @@ def _to_int(value, default):
 
 def _to_int_auto(value):
     if value is None:
-        raise ValueError("数値が未指定です")
+        raise ValueError("Numeric value is required")
     if isinstance(value, Integral):
         return int(value)
     if isinstance(value, str):
@@ -221,8 +221,8 @@ def _ensure_checkout_for_versioned_program(ctx):
     if bool(is_checked_out):
         return
     raise RuntimeError(
-        "CHECKOUT_REQUIRED: 共有プロジェクトの更新系操作には checkout が必要です。"
-        "先に checkout_project_program を実行してください"
+        "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects. "
+        "Run checkout_project_program first"
     )
 
 
@@ -243,10 +243,10 @@ def _find_function_by_name(ctx, name):
 
 def _get_address(ctx, address_text):
     if not address_text:
-        raise ValueError("addressが空です")
+        raise ValueError("address is empty")
     address = ctx.address_factory.getAddress(address_text)
     if address is None:
-        raise ValueError("不正なアドレス: %s" % address_text)
+        raise ValueError("Invalid address: %s" % address_text)
     return address
 
 
@@ -333,13 +333,13 @@ def _parse_clear_data_mode(clear_mode_text):
     mode = mapping.get(normalized)
     if mode is None:
         allowed = ", ".join(sorted(mapping.keys()))
-        raise ValueError("clear_modeが不正です: %s (利用可能: %s)" % (clear_mode_text, allowed))
+        raise ValueError("Invalid clear_mode: %s (allowed: %s)" % (clear_mode_text, allowed))
     return mode
 
 
 def _parse_data_type(ctx, type_str):
     if not type_str:
-        raise ValueError("data_typeが指定されていません")
+        raise ValueError("data_type is required")
 
     dtm = _dt_manager(ctx)
     text = type_str.strip()
@@ -416,7 +416,7 @@ def _hexdump(memory, start_address, size):
     buffer = _new_java_byte_buffer(size)
     read = memory.getBytes(start_address, buffer)
     if read < 0:
-        raise RuntimeError("メモリの読み取りに失敗しました")
+        raise RuntimeError("Failed to read memory")
     lines = []
     base = start_address
     for idx in range(0, read, 16):
@@ -461,17 +461,17 @@ def _decompile_function_object(ctx, function):
         interface = DecompInterface()
         try:
             if not interface.openProgram(ctx.program):
-                raise RuntimeError("デコンパイラの初期化に失敗しました")
+                raise RuntimeError("Failed to initialize decompiler")
             results = interface.decompileFunction(function, 120, ctx.monitor())
             if results is None:
-                raise RuntimeError("デコンパイルに失敗しました")
+                raise RuntimeError("Decompilation failed")
             decompiled = results.getDecompiledFunction()
             if decompiled is not None:
                 return decompiled.getC()
             detail = (results.getErrorMessage() or "").strip()
             if detail:
-                raise RuntimeError("デコンパイル結果が空です: %s" % detail)
-            raise RuntimeError("デコンパイル結果が空です")
+                raise RuntimeError("Decompilation result is empty: %s" % detail)
+            raise RuntimeError("Decompilation result is empty")
         finally:
             interface.dispose()
 
@@ -493,18 +493,18 @@ def _decompile_high_function(ctx, function):
         interface = DecompInterface()
         try:
             if not interface.openProgram(ctx.program):
-                raise RuntimeError("デコンパイラの初期化に失敗しました")
+                raise RuntimeError("Failed to initialize decompiler")
             results = interface.decompileFunction(function, 120, ctx.monitor())
             if results is None:
-                raise RuntimeError("デコンパイルに失敗しました")
+                raise RuntimeError("Decompilation failed")
             if not results.decompileCompleted():
                 detail = (results.getErrorMessage() or "").strip()
                 if detail:
-                    raise RuntimeError("デコンパイルに失敗しました: %s" % detail)
-                raise RuntimeError("デコンパイルに失敗しました")
+                    raise RuntimeError("Decompilation failed: %s" % detail)
+                raise RuntimeError("Decompilation failed")
             high_function = results.getHighFunction()
             if high_function is None:
-                raise RuntimeError("高レベル関数情報を取得できませんでした")
+                raise RuntimeError("Failed to obtain high-level function info")
             return high_function
         finally:
             interface.dispose()
@@ -553,18 +553,18 @@ def _build_signature_parser(ctx):
     try:
         return FunctionSignatureParser(data_type_manager, None)
     except TypeError:
-        # 環境差分でシグネチャが1引数版のみの場合に対応
+        # Some environments only provide the single-argument signature.
         return FunctionSignatureParser(data_type_manager)
 
 
 def _decode_hex_bytes(hex_string):
     cleaned = "".join(hex_string.split())
     if len(cleaned) % 2 != 0:
-        raise ValueError("bytesの長さが不正です")
+        raise ValueError("Invalid bytes length")
     try:
         return bytearray.fromhex(cleaned)
     except Exception:
-        raise ValueError("bytesは16進数で指定してください")
+        raise ValueError("bytes must be hexadecimal")
 
 
 def _get_struct_datatype(ctx, name, category):
@@ -621,19 +621,19 @@ def _ensure_class_struct(
 ):
     parent = _resolve_namespace(ctx, parent_namespace)
     if parent is None:
-        raise LookupError("親名前空間が見つかりません: %s" % parent_namespace)
+        raise LookupError("Parent namespace not found: %s" % parent_namespace)
 
     class_namespace = _find_ghidra_class(ctx, class_name, parent)
     if class_namespace is None:
         if not create_class_if_missing:
-            raise LookupError("クラスが見つかりません: %s" % class_name)
+            raise LookupError("Class not found: %s" % class_name)
         class_namespace = ctx.symbol_table.createClass(parent, class_name, SourceType.USER_DEFINED)
 
     category = _build_class_category_path(class_namespace)
     struct = _get_struct_datatype(ctx, class_name, category)
     if struct is None:
         if not create_struct_if_missing:
-            raise LookupError("クラス構造体が見つかりません: %s" % class_name)
+            raise LookupError("Class struct not found: %s" % class_name)
         struct = StructureDataType(CategoryPath(category), class_name, 0)
         struct = _dt_manager(ctx).addDataType(struct, None)
     return class_namespace, struct
@@ -642,7 +642,7 @@ def _ensure_class_struct(
 def _apply_members_to_struct(ctx, struct, members):
     for member in members:
         if not isinstance(member, dict):
-            raise ValueError("membersの要素はオブジェクトで指定してください")
+            raise ValueError("Each members entry must be an object")
         data_type = _parse_data_type(ctx, member.get("type"))
         field_name = member.get("name", "")
         comment = member.get("comment", "")

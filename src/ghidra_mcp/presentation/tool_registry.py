@@ -202,7 +202,7 @@ def _build_callable(
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
         if spec.name == "search_functions_by_name" and not bound.arguments.get("query"):
-            raise ValueError("queryが必要です")
+            raise ValueError("query is required")
         raw_args, target = _build_raw_args(spec, bound)
         dispatcher = dispatcher_provider()
         return dispatcher(spec.name, raw_args, target, registry=registry_provider())

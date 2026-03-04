@@ -1,70 +1,72 @@
-# 利用ガイド
+[English](usage.md) | [日本語](usage.ja.md)
 
-このドキュメントは、`ghidra-mcp` の導入と運用手順をまとめたものです。提供ツールの一覧は [README](../README.md) を参照してください。
+# Usage Guide
 
-## 動作要件
+This document explains installation and operations for `ghidra-mcp`. For the full tool list, see the [README](../README.md).
 
-- Python 3.10 以上
-- [uv](https://github.com/astral-sh/uv)（Python パッケージと仮想環境の管理ツール）
-- Ghidra 本体（PyGhidra が参照できるよう `GHIDRA_INSTALL_DIR` を設定してください）
-- PyGhidra が要求する Java/Ghidra のバージョン（Ghidra 11.3 以降を推奨）
+## Requirements
 
-## セットアップ手順
+- Python 3.10+
+- [uv](https://github.com/astral-sh/uv) (Python package and virtual environment manager)
+- Ghidra installation (`GHIDRA_INSTALL_DIR` must be set so PyGhidra can locate it)
+- Java/Ghidra versions required by PyGhidra (Ghidra 11.3+ recommended)
 
-1. **uv のインストール**
+## Setup
+
+1. **Install uv**
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
-   または各プラットフォーム向けパッケージを利用してください。
+   Or use a platform-specific package.
 
-2. **リポジトリの取得**
+2. **Clone the repository**
    ```bash
-   git clone <このリポジトリのURL>
+   git clone <repository-url>
    cd GhidraMCP_headless
    ```
 
-3. **依存関係の同期**
+3. **Sync dependencies**
    ```bash
    uv sync
    ```
-   `uv` が自動的に仮想環境を作成し、`pyproject.toml` に定義された依存パッケージ（`requests`, `mcp`, `pyghidra` など）をインストールします。
+   `uv` automatically creates a virtual environment and installs dependencies from `pyproject.toml` (`requests`, `mcp`, `pyghidra`, etc.).
 
-4. **環境変数の設定**
+4. **Set environment variables**
    ```bash
    export GHIDRA_INSTALL_DIR=/path/to/ghidra
    ```
-   PyGhidra が Ghidra 本体を見つけられるようにしてください。
+   This is required for PyGhidra to locate Ghidra.
 
-   Ghidra Serverを利用する場合は、ユーザ作成時に変更したパスワードを環境変数に設定する。
+   If you use Ghidra Server, set the password you configured when creating users:
    ```bash
    export GHIDRA_SERVER_PASSWORD='your-password'
    ```
 
-5. **MCP サーバーの起動**
+5. **Start the MCP server**
    ```bash
    uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport http --mcp-host 127.0.0.1 --mcp-port 8081 --mcp-path /mcp
    ```
 
 ## Notes
 
-- http接続時の推奨は `--transport http` です。FastMCP の Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
-- 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
-- `--mcp-host 0.0.0.0`（または `::`）で起動する場合、ローカル限定時とは保護設定が異なります。外部公開時は必ずリバースプロキシ/TLS/アクセス制御を併用してください。
-- `commit/pull/checkout` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
-- shared project の認証が必要な場合は `--ghidra-server-user` と `--ghidra-server-password-env` をセットで指定してください。片方のみ指定した場合は起動エラーになります（パスワードの直接引数は未対応）。
-- `--ghidra-server-password-env` で指定した環境変数が未設定または空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。
-- `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
-- 既存ターゲットへ program をロード/切り替える操作は `load_project_program` を使い、新規ターゲット作成は `create_session` を使います。program 未指定で先にターゲットだけ作る場合は `register_target` を使ってください。
-- `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。
-- private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
-- shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
-- shared project で `rename_*` / `set_*` など更新系ツールを使う場合は、先に `checkout_project_program` が必要です（未checkout時は `CHECKOUT_REQUIRED` エラー）。
-- shared project 同期ツールの `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
-- Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
-- `pull_project_program(on_local_changes="discard")` は `undoCheckout(keep=False)` のみを使用し、force 破棄は行いません。
-- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでローカル変更を破棄して最新状態へ追従し、`status=noop` / `reason=conflict_discarded` を返します（人間側の更新を優先）。
+- `--transport http` is recommended for HTTP connectivity. This starts FastMCP in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
+- `--transport sse` is still available for compatibility (`/sse`).
+- If you bind to `--mcp-host 0.0.0.0` (or `::`), protection assumptions differ from local-only mode. Use reverse proxy, TLS, and access controls for external exposure.
+- Enable shared-project sync tools with `--enable-shared-project-sync` only when you need to expose `commit/pull/checkout` operations.
+- If shared-project authentication is required, specify both `--ghidra-server-user` and `--ghidra-server-password-env`. Supplying only one causes startup failure (direct plaintext password arg is not supported).
+- Startup also fails when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged.
+- If `--domain-path` is omitted, startup registers only the project target (works with empty projects). In this mode, import with `import_program` and open with `load_project_program`.
+- Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
+- In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis.
+- Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
+- Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
+- In shared projects, mutating tools like `rename_*` and `set_*` require `checkout_project_program` beforehand (`CHECKOUT_REQUIRED` error if not checked out).
+- `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints.
+- Due to Ghidra limitations, merge conflict resolution is not supported in headless mode (`checkin/merge` return `requires merge ... not supported in headless mode`).
+- `pull_project_program(on_local_changes="discard")` only uses `undoCheckout(keep=False)` and does not force-discard.
+- `commit_project_program` detects merge conflicts (`can_merge=true`) and, by default, discards local changes to follow the latest state, returning `status=noop` / `reason=conflict_discarded` (human-side updates are prioritized).
 
-### shared project 認証つき起動例
+### Startup Example with Shared-Project Authentication
 
 ```bash
 export GHIDRA_SERVER_PASSWORD='your-password'
@@ -79,51 +81,51 @@ uv run ghidra-mcp \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
 ```
 
-## Ghidra Serverの設定
+## Ghidra Server Setup
 
-### インストール・ユーザ設定
+### Installation and User Setup
 
-サーバーのインストール
+Install the server:
 ```bash
 sudo GHIDRA_INSTALL_DIR/server/svrInstall
 ```
 
-自分自身のユーザとmecha ghidra用のユーザを登録
+Register your own user and a dedicated user for Mecha Ghidra:
 ```bash
 sudo GHIDRA_INSTALL_DIR/server/svrAdmin -add your_username
 sudo GHIDRA_INSTALL_DIR/server/svrAdmin -add mecha-ghidra
 ```
 
-GHIDRA_INSTALL_DIR/server/server.confを編集して、ユーザ名を指定して接続できるようにする。
-`${ghidra.repositories.dir}` は必ず最後に指定する
+Edit `GHIDRA_INSTALL_DIR/server/server.conf` to allow user-based connections.
+Make sure `${ghidra.repositories.dir}` is the last argument:
 ```text
 wrapper.app.parameter.1=-a0
 wrapper.app.parameter.2=-u
 wrapper.app.parameter.3=${ghidra.repositories.dir}
 ```
 
-ghidraを起動する
+Restart Ghidra Server:
 ```bash
 sudo server/ghidraSvr restart
 ```
 
-New ProjectからShared Projectを作成
+Create a Shared Project from "New Project".
 
 <img width="508" height="388" alt="Image" src="https://github.com/user-attachments/assets/1091c615-1590-4a49-aa2c-7628d6efed70" />
 
-localhostに接続
+Connect to localhost.
 
 <img width="508" height="388" alt="image" src="https://github.com/user-attachments/assets/0d1a0cef-fbee-4513-af18-3193a3529c2f" />
 
-作成したユーザでログインする。初回パスワードは `changeme`
+Log in with the created user. The initial password is `changeme`.
 
 <img width="350" height="179" alt="image" src="https://github.com/user-attachments/assets/e03718b4-89df-4a2b-8609-521a42dd1878" />
 
-初回ログイン時にパスワードを変更するように言われるので、作成した2つのユーザのパスワードを変更する
+At first login, you are prompted to change the password. Update passwords for both users.
 
 <img width="353" height="181" alt="image" src="https://github.com/user-attachments/assets/24da9ede-db7b-4ba2-8107-2fb7fe895968" />
 
-プロジェクトを作成する。LLMのアカウントはRead/Writeに設定。
+Create the project and set the LLM account permission to Read/Write.
 
 <img width="652" height="383" alt="image" src="https://github.com/user-attachments/assets/3da1693c-3dd7-4ba8-a6e6-95b4767cf95c" />
 
@@ -131,9 +133,10 @@ localhostに接続
 
 <img width="531" height="389" alt="image" src="https://github.com/user-attachments/assets/80a8aa7e-659b-4d8e-bf5f-65eea292dc7f" />
 
-## Codex での MCP 設定
+## MCP Configuration for Codex
 
-Codexアプリ/CLI では `~/.codex/config.toml` の `mcp_servers` セクションに設定します。推奨の `streamable-http` 接続例:
+In the Codex app/CLI, configure `mcp_servers` in `~/.codex/config.toml`.
+Recommended `streamable-http` example:
 
 ```toml
 [mcp_servers.ghidra_headless]
@@ -141,7 +144,7 @@ enabled = true
 url = "http://127.0.0.1:8081/mcp"
 ```
 
-`stdio` で直接起動したい場合の例:
+If you want to launch directly with `stdio`:
 
 ```toml
 [mcp_servers.ghidra_headless]
@@ -159,19 +162,20 @@ args = [
 ]
 ```
 
-## Claude Code での MCP 設定
+## MCP Configuration for Claude Code
 
-Claude Code では CLI から MCP サーバーを登録できます。推奨の `streamable-http` 接続例:
+In Claude Code, you can register the MCP server from CLI.
+Recommended `streamable-http` example:
 
 ```bash
 claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
 ```
 
-サーバー側で shared project 認証が必要な場合は、`ghidra-mcp` 起動時に `--ghidra-server-user` と `--ghidra-server-password-env` を指定してください（MCPクライアント側で平文パスワードを渡す方式ではありません）。
+If shared-project authentication is required on the server side, start `ghidra-mcp` with `--ghidra-server-user` and `--ghidra-server-password-env` (plaintext password passing from MCP client side is not used).
 
-## Kilocode/Roocode での MCP 設定
+## MCP Configuration for Kilocode/Roocode
 
-Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` でサーバーを起動する場合の例:
+Kilocode/Roocode MCP settings can be written as JSON. Example for launching via `stdio`:
 
 ```json
 {
@@ -195,7 +199,7 @@ Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` 
 }
 ```
 
-Streamable HTTP モードであれば、以下のようにエンドポイントを指定します。
+For Streamable HTTP mode, specify the endpoint like this:
 
 ```json
 "ghidra_headless": {
@@ -206,4 +210,4 @@ Streamable HTTP モードであれば、以下のようにエンドポイント�
 }
 ```
 
-streamable-http を使う必要があるクライアントでは `--transport http` で起動し、`http://127.0.0.1:8081/mcp` を指定してください。
+For clients that require streamable-http, start with `--transport http` and use `http://127.0.0.1:8081/mcp`.

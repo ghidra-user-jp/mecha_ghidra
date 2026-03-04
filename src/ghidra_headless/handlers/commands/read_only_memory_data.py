@@ -106,7 +106,7 @@ def list_data_items(params, *, ensure_context, to_int):
 
 
 def list_strings(params, *, ensure_context, to_int):
-    # シンプルなダンプリスト。Jython環境ではdataIterから抽出。
+    # Simple dump list; in Jython environments this is extracted from dataIter.
     ctx = ensure_context()
     filter_text = params.get("filter")
     offset = to_int(params.get("offset"), 0)
@@ -138,7 +138,7 @@ def get_data_by_label(params, *, ensure_context, iter_items):
     ctx = ensure_context()
     label = params.get("label")
     if not label:
-        raise ValueError("labelが必要です")
+        raise ValueError("label is required")
     symbols = ctx.symbol_table.getSymbols(label)
     results = []
     for symbol in iter_items(symbols):
@@ -160,7 +160,7 @@ def get_bytes(params, *, ensure_context, to_int, get_address, hexdump):
     address_text = params.get("address")
     size = to_int(params.get("size"), 1)
     if size <= 0:
-        raise ValueError("sizeは正の整数で指定してください")
+        raise ValueError("size must be a positive integer")
     address = get_address(ctx, address_text)
     memory = ctx.program.getMemory()
     return hexdump(memory, address, size)
@@ -170,7 +170,7 @@ def search_bytes(params, *, ensure_context, to_int, decode_hex_bytes):
     ctx = ensure_context()
     pattern_text = params.get("bytes")
     if not pattern_text:
-        raise ValueError("bytesが必要です")
+        raise ValueError("bytes is required")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
     pattern = decode_hex_bytes(pattern_text)
@@ -195,11 +195,11 @@ def get_struct(params, *, ensure_context, get_struct_datatype, describe_struct):
     ctx = ensure_context()
     name = params.get("name")
     if not name:
-        raise ValueError("nameが必要です")
+        raise ValueError("name is required")
     category = params.get("category")
     struct = get_struct_datatype(ctx, name, category)
     if struct is None:
-        raise LookupError("構造体が見つかりません: %s" % name)
+        raise LookupError("Struct not found: %s" % name)
     return describe_struct(struct)
 
 
@@ -207,12 +207,12 @@ def get_enum(params, *, ensure_context, get_enum_datatype, describe_enum, safe_c
     ctx = ensure_context()
     name = params.get("name")
     if not name:
-        raise ValueError("nameが必要です")
+        raise ValueError("name is required")
     category = params.get("category")
     enum_dt = get_enum_datatype(ctx, name, category)
     if enum_dt is None:
-        raise LookupError("列挙体が見つかりません: %s" % name)
+        raise LookupError("Enum not found: %s" % name)
     class_name = safe_call(safe_call(enum_dt, "getClass"), "getName")
     if not class_name or "Enum" not in str(class_name):
-        raise TypeError("指定されたデータ型は列挙型ではありません")
+        raise TypeError("Specified data type is not an enum")
     return describe_enum(enum_dt)

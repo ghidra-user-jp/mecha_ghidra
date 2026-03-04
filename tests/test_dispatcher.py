@@ -102,14 +102,14 @@ class DummyRegistry:
 def test_dispatch_tool_raises_for_unknown_spec():
     registry = DummyRegistry()
 
-    with pytest.raises(KeyError, match="未対応のツール仕様"):
+    with pytest.raises(KeyError, match="Unsupported tool spec"):
         dispatch_tool("unknown_tool", {}, "default", registry=registry)
 
 
 def test_dispatch_tool_validation_error():
     registry = DummyRegistry()
 
-    with pytest.raises(ValueError, match="入力検証に失敗"):
+    with pytest.raises(ValueError, match="input validation failed"):
         dispatch_tool("list_functions", {"offset": "bad"}, "default", registry=registry)
 
 
@@ -164,7 +164,7 @@ def test_dispatch_tool_validation_error():
 def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, raw_args):
     registry = DummyRegistry()
 
-    with pytest.raises(ValueError, match="入力検証に失敗"):
+    with pytest.raises(ValueError, match="input validation failed"):
         dispatch_tool(spec_name, raw_args, "default", registry=registry)
 
 
@@ -231,7 +231,7 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
 def test_dispatch_tool_validation_error_for_type_mismatch(spec_name, raw_args):
     registry = DummyRegistry()
 
-    with pytest.raises(ValueError, match="入力検証に失敗"):
+    with pytest.raises(ValueError, match="input validation failed"):
         dispatch_tool(spec_name, raw_args, "default", registry=registry)
 
 
@@ -312,7 +312,7 @@ def test_dispatch_tool_applies_error_adapter_for_create_session():
         def create_session(self, target, **kwargs):  # noqa: ARG002
             raise RuntimeError("boom")
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' の作成に失敗しました"):
+    with pytest.raises(RuntimeError, match="Failed to create session 'fw'"):
         dispatch_tool(
             "create_session",
             {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
@@ -326,7 +326,7 @@ def test_dispatch_tool_applies_error_adapter_for_close_session():
         def close_session(self, target, **kwargs):  # noqa: ARG002
             raise RuntimeError("close boom")
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズに失敗しました"):
+    with pytest.raises(RuntimeError, match="Failed to close session 'fw'"):
         dispatch_tool(
             "close_session",
             {},
@@ -341,7 +341,7 @@ def test_dispatch_tool_applies_error_adapter_for_close_remove():
             assert kwargs == {"remove_program": True}
             raise RuntimeError("remove boom")
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' のクローズ/削除に失敗しました"):
+    with pytest.raises(RuntimeError, match="Failed to close/remove session 'fw'"):
         dispatch_tool(
             "close_session_and_remove_program",
             {},
@@ -385,7 +385,7 @@ def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
 
     monkeypatch.setattr(tool_dispatcher_module, "get_tool_spec", lambda _name: spec)
 
-    with pytest.raises(ValueError, match="dummy_load の出力検証に失敗"):
+    with pytest.raises(ValueError, match="dummy_load output validation failed"):
         tool_dispatcher_module.dispatch_tool(
             "dummy_load",
             {"domain_path": "/folder/app"},
@@ -402,42 +402,42 @@ def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
             {"offset": 0, "limit": 3},
             {"call_result": {"bad": "shape"}},
             ValueError,
-            "list_methods の出力検証に失敗",
+            "list_methods output validation failed",
         ),
         (
             "get_bytes",
             {"address": "0x401000", "size": 8},
             {"call_result": {"bad": "shape"}},
             ValueError,
-            "get_bytes の出力検証に失敗",
+            "get_bytes output validation failed",
         ),
         (
             "create_session",
             {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
             {"create_session_result": {"target": "fw"}},
             RuntimeError,
-            "セッション 'fw' の作成に失敗しました",
+            "Failed to create session 'fw'",
         ),
         (
             "close_session",
             {},
             {"close_session_result": None},
             RuntimeError,
-            "セッション 'fw' のクローズに失敗しました",
+            "Failed to close session 'fw'",
         ),
         (
             "load_project_program",
             {"domain_path": "/folder/app"},
             {"load_program_result": {"program": "/folder/app"}},
             ValueError,
-            "load_project_program の出力検証に失敗",
+            "load_project_program output validation failed",
         ),
         (
             "get_project_sync_status",
             {"domain_path": "/folder/app"},
             {"sync_status_result": "invalid"},
             ValueError,
-            "get_project_sync_status の出力検証に失敗",
+            "get_project_sync_status output validation failed",
         ),
     ],
 )

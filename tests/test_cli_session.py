@@ -354,7 +354,7 @@ def test_service_registry_adapter_routes_calls(adapter, call, expected):
 
 def test_service_registry_adapter_requires_domain_path_for_create_session(adapter):
     registry, _core, _target, _sync = adapter
-    with pytest.raises(ValueError, match="domain_path を指定してください"):
+    with pytest.raises(ValueError, match="domain_path is required"):
         registry.create_session("fw", "/tmp/p.gpr", project_name="p")
 
 
@@ -406,18 +406,18 @@ def test_list_methods_and_list_classes_use_dispatcher(monkeypatch, call, expecte
     [
         (
             lambda: cli.list_methods(offset=0, limit=10, target="fw"),
-            "セッション 'fw' は初期化されていません",
+            "Session 'fw' is not initialized",
         ),
         (
             lambda: cli.list_classes(offset=0, limit=10, target="fw"),
-            "セッション 'fw' は初期化されていません",
+            "Session 'fw' is not initialized",
         ),
     ],
 )
 def test_list_methods_and_list_classes_error_message_compat(monkeypatch, call, message):
     class DummyRegistry:
         def call(self, command, params, target):  # noqa: ARG002
-            raise RuntimeError(f"セッション '{target}' は初期化されていません")
+            raise RuntimeError(f"Session '{target}' is not initialized")
 
     monkeypatch.setattr(cli, "_registry", DummyRegistry())
 
@@ -638,7 +638,7 @@ def test_configure_ghidra_server_auth_requires_user_and_env(monkeypatch, usernam
         ghidra_server_user=username,
         ghidra_server_password_env=password_env_name,
     )
-    with pytest.raises(ValueError, match="セットで指定してください"):
+    with pytest.raises(ValueError, match="must be set together"):
         cli.configure_ghidra_server_auth(args)
 
 
@@ -648,7 +648,7 @@ def test_configure_ghidra_server_auth_requires_non_empty_env_value(monkeypatch):
         ghidra_server_user="alice",
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
-    with pytest.raises(ValueError, match="空です"):
+    with pytest.raises(ValueError, match="is empty"):
         cli.configure_ghidra_server_auth(args)
 
 
@@ -658,7 +658,7 @@ def test_configure_ghidra_server_auth_requires_existing_env(monkeypatch):
         ghidra_server_user="alice",
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
-    with pytest.raises(ValueError, match="未設定です"):
+    with pytest.raises(ValueError, match="is not set"):
         cli.configure_ghidra_server_auth(args)
 
 

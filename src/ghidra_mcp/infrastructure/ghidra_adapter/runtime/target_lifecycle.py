@@ -29,7 +29,7 @@ class RuntimeTargetLifecycle:
         session: ProgramSession | None = None
         with self._store.registry_lock.write_lock():
             if name in self._store.sessions:
-                raise ValueError(f"セッション '{name}' は既に存在します")
+                raise ValueError(f"Session '{name}' already exists")
 
             handle = self._store.get_or_create_project_handle(project_location, project_name)
             had_target = name in self._store.target_projects
@@ -77,7 +77,7 @@ class RuntimeTargetLifecycle:
                 active_key = self._store.sessions[name].get_project_handle().get_key()
                 if active_key != key:
                     raise ValueError(
-                        f"ターゲット '{name}' は既に別プロジェクトでセッションが開いています: {active_key}"
+                        f"Target '{name}' already has an open session in another project: {active_key}"
                     )
             self._store.target_projects[name] = key
             self._store.locks.setdefault(name, threading.RLock())
@@ -131,7 +131,7 @@ class RuntimeTargetLifecycle:
     ) -> str:
         with self._store.registry_lock.write_lock():
             if not domain_path:
-                raise ValueError("domain_path を指定してください")
+                raise ValueError("domain_path is required")
             handle = self._store.get_target_handle_locked(name)
             new_session = handle.open_program(domain_path)
             had_session = name in self._store.sessions
@@ -165,7 +165,7 @@ class RuntimeTargetLifecycle:
     def import_program(self, name: str, binary_path: str) -> str:
         with self._store.registry_lock.write_lock():
             if not binary_path:
-                raise ValueError("binary_path を指定してください")
+                raise ValueError("binary_path is required")
             handle = self._store.get_target_handle_locked(name)
             domain_file = handle.import_program(binary_path)
             self._store.target_projects[name] = handle.get_key()
@@ -198,7 +198,7 @@ class RuntimeTargetLifecycle:
     def _close_session_locked(self, name: str, *, remove_program: bool) -> None:
         session = self._store.sessions.get(name)
         if session is None:
-            raise RuntimeError(f"セッション '{name}' は存在しません")
+            raise RuntimeError(f"Session '{name}' does not exist")
         handle = session.get_project_handle()
         self._store.cleanup_session(
             name,

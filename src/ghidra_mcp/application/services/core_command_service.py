@@ -38,7 +38,7 @@ class CoreCommandService:
             raise DomainError(
                 code=ErrorCode.CORE_EXECUTOR_UNAVAILABLE,
                 message=f"CORE_EXECUTOR_UNAVAILABLE: unsupported command '{command}'",
-                hint="command名を確認してください",
+                hint="Check the command name",
                 retryable=False,
                 details={"command": command, "target": target},
             )

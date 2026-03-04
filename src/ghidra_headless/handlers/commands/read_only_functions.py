@@ -53,7 +53,7 @@ def search_functions_by_name(params, *, ensure_context, to_int):
     ctx = ensure_context()
     query = params.get("query")
     if not query:
-        raise ValueError("queryが必要です")
+        raise ValueError("query is required")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
     iterator = ctx.function_manager.getFunctions(True)
@@ -82,7 +82,7 @@ def get_function_by_address(params, *, ensure_context, get_address):
     address = get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % address_text)
+        raise LookupError("Function not found: %s" % address_text)
     return {
         "name": function.getName(),
         "entry": str(function.getEntryPoint()),

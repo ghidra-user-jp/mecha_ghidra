@@ -14,7 +14,7 @@ def test_map_exception_masks_internal_domain_message_for_sync_operation_failed()
     mapped = map_exception(exc)
 
     assert isinstance(mapped, RuntimeError)
-    assert str(mapped) == "SYNC_OPERATION_FAILED: 操作に失敗しました"
+    assert str(mapped) == "SYNC_OPERATION_FAILED: operation failed"
     assert getattr(mapped, "domain_error")["code"] == ErrorCode.SYNC_OPERATION_FAILED.value
     assert getattr(mapped, "domain_error")["details"]["target"] == "fw"
 

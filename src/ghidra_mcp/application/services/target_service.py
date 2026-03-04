@@ -29,7 +29,7 @@ class TargetService:
         return DomainError(
             code=ErrorCode.SYNC_OPERATION_FAILED,
             message=str(exc),
-            hint="操作対象の target/session 状態を確認してください",
+            hint="Check target/session state for this operation",
             retryable=False,
             details={"operation": operation, "target": target},
         )

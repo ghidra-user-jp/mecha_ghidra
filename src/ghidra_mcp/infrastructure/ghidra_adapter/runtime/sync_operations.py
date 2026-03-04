@@ -70,7 +70,7 @@ class RuntimeSyncOperations:
     ) -> Dict[str, Any]:
         text = (comment or "").strip()
         if not text:
-            raise ValueError("comment を指定してください")
+            raise ValueError("comment is required")
         with self._store.registry_lock.write_lock():
             lock = self._store.ensure_lock(name)
             with lock:
@@ -85,7 +85,7 @@ class RuntimeSyncOperations:
                         "version": status.get("version"),
                     }
                 if not status.get("can_add_to_repository"):
-                    raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControlできない状態です")
+                    raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControl is not allowed")
 
                 self._run_sync_operation_for_domain_locked(
                     name,
@@ -120,7 +120,7 @@ class RuntimeSyncOperations:
     ) -> Dict[str, Any]:
         text = (message or "").strip()
         if not text:
-            raise ValueError("message を指定してください")
+            raise ValueError("message is required")
         with self._store.registry_lock.write_lock():
             lock = self._store.ensure_lock(name)
             with lock:
@@ -137,10 +137,10 @@ class RuntimeSyncOperations:
                         status = handle.get_sync_status(resolved_domain_path)
                         if not status.get("is_checked_out"):
                             if not checked_out:
-                                raise RuntimeError("AUTO_CHECKOUT_FAILED: checkoutに失敗しました")
-                            raise RuntimeError("AUTO_CHECKOUT_FAILED: checkout後の状態確認に失敗しました")
+                                raise RuntimeError("AUTO_CHECKOUT_FAILED: checkout failed")
+                            raise RuntimeError("AUTO_CHECKOUT_FAILED: post-checkout state verification failed")
                     else:
-                        raise RuntimeError("NOT_CHECKED_OUT: checkout済みではありません")
+                        raise RuntimeError("NOT_CHECKED_OUT: program is not checked out")
 
                 self._save_active_program_if_needed_locked(
                     name,
@@ -181,7 +181,7 @@ class RuntimeSyncOperations:
                             "checked_out": bool(status.get("is_checked_out")),
                             "version": status.get("version"),
                         }
-                    raise RuntimeError("CHECKIN_NOT_ALLOWED: checkinできない状態です")
+                    raise RuntimeError("CHECKIN_NOT_ALLOWED: checkin is not allowed")
 
                 self._run_sync_operation_for_domain_locked(
                     name,
@@ -213,7 +213,7 @@ class RuntimeSyncOperations:
     ) -> Dict[str, Any]:
         normalized = (on_local_changes or "abort").strip().lower()
         if normalized not in {"abort", "discard"}:
-            raise ValueError("on_local_changes は 'abort' または 'discard' を指定してください")
+            raise ValueError("on_local_changes must be either 'abort' or 'discard'")
         with self._store.registry_lock.write_lock():
             lock = self._store.ensure_lock(name)
             with lock:
@@ -222,7 +222,7 @@ class RuntimeSyncOperations:
                 self._ensure_versioned_project(status)
 
                 if status.get("modified_since_checkout") and normalized == "abort":
-                    raise RuntimeError("LOCAL_CHANGES_EXIST: ローカル変更があるためpullを中止しました")
+                    raise RuntimeError("LOCAL_CHANGES_EXIST: pull aborted due to local changes")
 
                 needs_operation = bool(status.get("modified_since_checkout")) or bool(status.get("can_merge"))
                 action = {
@@ -433,7 +433,7 @@ class RuntimeSyncOperations:
         try:
             active_handle.project.save(program)
         except Exception as exc:
-            raise RuntimeError(f"SAVE_FAILED: プログラム保存に失敗しました: {exc}") from exc
+            raise RuntimeError(f"SAVE_FAILED: failed to save program: {exc}") from exc
         return True
 
     def _run_sync_operation_for_domain_locked(
@@ -543,7 +543,7 @@ class RuntimeSyncOperations:
         discarded_local_changes = False
         if status.get("modified_since_checkout"):
             if on_local_changes == "abort":
-                raise RuntimeError("LOCAL_CHANGES_EXIST: ローカル変更があるためpullを中止しました")
+                raise RuntimeError("LOCAL_CHANGES_EXIST: pull aborted due to local changes")
             handle.undo_checkout_program(domain_path, keep=False)
             discarded_local_changes = True
             status = handle.get_sync_status(domain_path)
@@ -560,7 +560,7 @@ class RuntimeSyncOperations:
     @staticmethod
     def _ensure_versioned_project(status: Dict[str, Any]) -> None:
         if not status.get("is_versioned"):
-            raise RuntimeError("NOT_SHARED_PROJECT: 共有プロジェクトのバージョン管理対象ではありません")
+            raise RuntimeError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
 
 
 __all__ = ["RuntimeSyncOperations"]

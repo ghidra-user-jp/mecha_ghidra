@@ -25,17 +25,17 @@ class ProgramSession:
 
     def get_program(self):
         if self.program is None:
-            raise RuntimeError("セッションはすでにクローズしています")
+            raise RuntimeError("Session is already closed")
         return self.program
 
     def get_project_handle(self) -> "ProjectHandle":
         if self.project_handle is None:
-            raise RuntimeError("セッションはすでにクローズしています")
+            raise RuntimeError("Session is already closed")
         return self.project_handle
 
     def close(self, *, remove_program: bool = False) -> None:
         if self.project_handle is None:
-            raise RuntimeError("セッションはすでにクローズしています")
+            raise RuntimeError("Session is already closed")
         self.project_handle.release_program(self.program, remove_program=remove_program)
 
         self.project_handle = None

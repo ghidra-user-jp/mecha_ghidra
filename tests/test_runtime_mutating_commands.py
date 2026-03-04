@@ -18,7 +18,7 @@ RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
 pytestmark = pytest.mark.skipif(
     not RUNTIME_VALIDATION_ENABLED,
-    reason="GHIDRA_RUNTIME_VALIDATION=1 のときのみ実行します",
+    reason="Run only when GHIDRA_RUNTIME_VALIDATION=1",
 )
 
 
@@ -46,16 +46,16 @@ def _resolve_ghidra_install_dir() -> str:
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
-    pytest.fail("GHIDRA_INSTALL_DIR が見つからないため runtime test を継続できません")
+    pytest.fail("Cannot continue runtime tests because GHIDRA_INSTALL_DIR was not found")
 
 
 def _resolve_runtime_binary_path() -> str:
     value = os.environ.get("GHIDRA_RUNTIME_BINARY_PATH")
     if not value:
-        pytest.fail("GHIDRA_RUNTIME_BINARY_PATH が未設定です（runtime test では必須）")
+        pytest.fail("GHIDRA_RUNTIME_BINARY_PATH is not set (required for runtime tests)")
     path = Path(value).expanduser().resolve()
     if not path.exists():
-        pytest.fail(f"GHIDRA_RUNTIME_BINARY_PATH が存在しません: {path}")
+        pytest.fail(f"GHIDRA_RUNTIME_BINARY_PATH does not exist: {path}")
     return str(path)
 
 
@@ -63,11 +63,11 @@ def _start_pyghidra_if_needed() -> None:
     if pyghidra.started():
         return
     if shutil.which("java") is None:
-        pytest.fail("java コマンドが見つかりません（runtime test では必須）")
+        pytest.fail("java command not found (required for runtime tests)")
     try:
         pyghidra.start(install_dir=_resolve_ghidra_install_dir())
     except Exception as exc:
-        pytest.fail(f"pyghidra 起動に失敗しました: {exc}")
+        pytest.fail(f"Failed to start pyghidra: {exc}")
 
 
 def _ensure_project_created(project_dir: Path, project_name: str) -> None:
@@ -200,7 +200,9 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 continue
-    raise RuntimeError(f"rename_variable / set_local_variable_type に成功する候補がありません: {last_error}")
+    raise RuntimeError(
+        f"No candidate succeeded for rename_variable / set_local_variable_type: {last_error}"
+    )
 
 
 def test_runtime_mutating_commands_all_success(tmp_path):
@@ -223,7 +225,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         cli.load_project_program(target=target, domain_path=domain_path)
 
         functions = _unwrap_runtime_result(cli.list_functions(offset=0, limit=10, target=target))
-        assert isinstance(functions, list) and functions, "list_functions が空です"
+        assert isinstance(functions, list) and functions, "list_functions is empty"
         primary_address, primary_name, primary_decompiled = _pick_primary_function(target)
         aux = next((f for f in functions if f["entry"] != primary_address), functions[0])
         aux_address = aux["entry"]
@@ -287,7 +289,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             except Exception as exc:  # noqa: BLE001
                 prototype_error = exc
         if function_prototype_result is None:
-            raise RuntimeError(f"set_function_prototype に失敗しました: {prototype_error}")
+            raise RuntimeError(f"set_function_prototype failed: {prototype_error}")
         _log_runtime_result("set_function_prototype", function_prototype_result)
 
         rename_variable_result, set_local_type_result = _run_variable_mutations(target, functions)
@@ -309,7 +311,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             except Exception as exc:  # noqa: BLE001
                 set_bytes_error = exc
         if set_bytes_result is None:
-            raise RuntimeError(f"set_bytes に失敗しました: {set_bytes_error}")
+            raise RuntimeError(f"set_bytes failed: {set_bytes_error}")
         _log_runtime_result("set_bytes", set_bytes_result)
 
         renamed_aux_1 = f"{aux_name}_r1"
@@ -438,7 +440,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             if set_global_data_type_result is not None:
                 break
         if set_global_data_type_result is None:
-            raise RuntimeError(f"set_global_data_type に失敗しました: {set_global_error}")
+            raise RuntimeError(f"set_global_data_type failed: {set_global_error}")
         _log_runtime_result("set_global_data_type", set_global_data_type_result)
 
         runtime_results = {
@@ -466,7 +468,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         }
 
         for command_name, value in runtime_results.items():
-            assert isinstance(value, dict), f"{command_name} の戻り値がdictではありません: {type(value)}"
+            assert isinstance(value, dict), f"{command_name} returned non-dict value: {type(value)}"
     finally:
         try:
             cli.close_session(target)

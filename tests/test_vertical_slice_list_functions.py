@@ -221,14 +221,14 @@ def test_function_listing_slice_empty_result_keeps_compatibility(monkeypatch, ca
 def test_function_listing_slice_error_message_is_unchanged(monkeypatch, call):
     class DummyRegistry:
         def call(self, command, params, target):
-            raise RuntimeError(f"セッション '{target}' は初期化されていません")
+            raise RuntimeError(f"Session '{target}' is not initialized")
 
     monkeypatch.setattr(cli, "_registry", DummyRegistry())
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' は初期化されていません"):
+    with pytest.raises(RuntimeError, match="Session 'fw' is not initialized"):
         call()
 
 
 def test_search_functions_by_name_query_guard_message_is_unchanged():
-    with pytest.raises(ValueError, match="queryが必要です"):
+    with pytest.raises(ValueError, match="query is required"):
         cli.search_functions_by_name(query="", offset=0, limit=10, target="fw")

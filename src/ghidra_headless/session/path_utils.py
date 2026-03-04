@@ -23,7 +23,7 @@ def _parse_domain_path(project, domain_path: Optional[str]):
     if not domain_path:
         domain_path = _find_first_program_path(project)
     if not domain_path:
-        raise ValueError("プロジェクト内にプログラムが見つかりません")
+        raise ValueError("No program found in the project")
     domain_file = pathlib.PurePosixPath(domain_path)
     return domain_file.parent.as_posix(), domain_file.name
 

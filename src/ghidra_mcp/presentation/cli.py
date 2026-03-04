@@ -120,53 +120,56 @@ def _parse_session_definition(text: str) -> Dict[str, str]:
         if not part:
             continue
         if "=" not in part:
-            raise ValueError(f"セッション定義に'='が含まれていません: {part}")
+            raise ValueError(f"Session definition is missing '=': {part}")
         key, value = part.split("=", 1)
         result[key.strip()] = value.strip()
     if "name" not in result:
-        raise ValueError("session定義にはname=...が必須です")
+        raise ValueError("Session definition requires name=...")
     if "project_location" not in result:
-        raise ValueError("session定義にはproject_locationが必要です")
+        raise ValueError("Session definition requires project_location")
     return result
 
 
 def parse_args(argv: list[str]):
-    parser = argparse.ArgumentParser(description="PyGhidraベースのGhidra MCPサーバー")
-    parser.add_argument("--project-location", help="デフォルトセッション用のGhidraプロジェクトディレクトリ")
-    parser.add_argument("--project-name", help="デフォルトセッションのプロジェクト名")
-    parser.add_argument("--domain-path", help="デフォルトセッションのドメインパス (例: /folder/program)")
-    parser.add_argument("--target-name", default="default", help="デフォルトセッションのターゲット名")
+    parser = argparse.ArgumentParser(description="PyGhidra-based Ghidra MCP server")
+    parser.add_argument("--project-location", help="Ghidra project directory for the default session")
+    parser.add_argument("--project-name", help="Project name for the default session")
+    parser.add_argument("--domain-path", help="Domain path for the default session (e.g. /folder/program)")
+    parser.add_argument("--target-name", default="default", help="Target name for the default session")
     parser.add_argument(
         "--session",
         action="append",
         metavar="name=...,project_location=...,domain_path=...",
-        help="追加セッション定義をカンマ区切りで指定 (繰り返し可)",
+        help="Additional session definitions as comma-separated key/value pairs (repeatable)",
     )
-    parser.add_argument("--ghidra-path", help="Ghidraインストールパス。未指定時は環境変数GHIDRA_INSTALL_DIRを利用")
+    parser.add_argument(
+        "--ghidra-path",
+        help="Ghidra installation path. If omitted, use GHIDRA_INSTALL_DIR.",
+    )
     parser.add_argument(
         "--ghidra-server-user",
-        help="shared project接続時に利用するGhidra serverユーザー名",
+        help="Ghidra server username for shared-project connections",
     )
     parser.add_argument(
         "--ghidra-server-password-env",
-        help="Ghidra serverパスワードを保持した環境変数名",
+        help="Environment variable name holding the Ghidra server password",
     )
     parser.add_argument(
         "--transport",
         type=str,
         default="stdio",
         choices=["stdio", "sse", "http", "streamable-http"],
-        help="MCPのトランスポート",
+        help="MCP transport",
     )
-    parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="SSE/Streamable HTTPホスト (stdioでは未使用)")
-    parser.add_argument("--mcp-port", type=int, help="SSE/Streamable HTTPポート (stdioでは未使用)")
-    parser.add_argument("--mcp-path", type=str, default="/mcp", help="Streamable HTTPパス (例: /mcp)")
+    parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="SSE/Streamable HTTP host (unused for stdio)")
+    parser.add_argument("--mcp-port", type=int, help="SSE/Streamable HTTP port (unused for stdio)")
+    parser.add_argument("--mcp-path", type=str, default="/mcp", help="Streamable HTTP path (e.g. /mcp)")
     parser.add_argument(
         "--enable-shared-project-sync",
         action="store_true",
-        help="shared project向けのcommit/pull/checkout系ツールを公開する",
+        help="Expose shared-project commit/pull/checkout tools",
     )
-    parser.add_argument("--log-level", default="INFO", help="ログレベル")
+    parser.add_argument("--log-level", default="INFO", help="Log level")
     return parser.parse_args(argv)
 
 
@@ -196,18 +199,18 @@ def configure_ghidra_server_auth(args) -> None:
     if not username and not password_env_name:
         return
     if not username or not password_env_name:
-        raise ValueError("--ghidra-server-user と --ghidra-server-password-env はセットで指定してください")
+        raise ValueError("--ghidra-server-user and --ghidra-server-password-env must be set together")
 
     password = os.environ.get(password_env_name)
     if password is None:
-        raise ValueError(f"環境変数 '{password_env_name}' が未設定です")
+        raise ValueError(f"Environment variable '{password_env_name}' is not set")
     if password == "":
-        raise ValueError(f"環境変数 '{password_env_name}' が空です")
+        raise ValueError(f"Environment variable '{password_env_name}' is empty")
 
     authenticator = _password_client_authenticator_class()(username, password)
     _client_util_class().setClientAuthenticator(authenticator)
     logger.info(
-        "Ghidra server認証を設定しました (user=%s, password_env=%s)",
+        "Configured Ghidra server authentication (user=%s, password_env=%s)",
         username,
         password_env_name,
     )
@@ -219,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
     args = parse_args(argv)
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
-    logger.info("PyGhidra MCPサーバーを起動します")
+    logger.info("Starting PyGhidra MCP server")
 
     ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
     if ghidra_path:
@@ -231,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         configure_ghidra_server_auth(args)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Ghidra server認証設定に失敗: %s", exc)
+        logger.error("Failed to configure Ghidra server authentication: %s", exc)
         return 1
 
     if args.session:
@@ -246,16 +249,16 @@ def main(argv: list[str] | None = None) -> int:
                         project_name=config.get("project_name"),
                         domain_path=domain_path,
                     )
-                    logger.info("セッション '%s' をロードしました", config["name"])
+                    logger.info("Loaded session '%s'", config["name"])
                 else:
                     _registry.register_target(
                         config["name"],
                         project_location=config.get("project_location"),
                         project_name=config.get("project_name"),
                     )
-                    logger.info("ターゲット '%s' をプロジェクトのみで登録しました", config["name"])
+                    logger.info("Registered target '%s' with project metadata only", config["name"])
             except Exception as exc:  # noqa: BLE001
-                logger.error("セッション定義 '%s' の処理中にエラー: %s", definition, exc)
+                logger.error("Error while processing session definition '%s': %s", definition, exc)
                 _registry.close_all()
                 return 1
 
@@ -268,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
                     project_name=args.project_name,
                     domain_path=args.domain_path,
                 )
-                logger.info("デフォルトターゲット '%s' をロードしました", args.target_name)
+                logger.info("Loaded default target '%s'", args.target_name)
             else:
                 _registry.register_target(
                     args.target_name,
@@ -276,22 +279,22 @@ def main(argv: list[str] | None = None) -> int:
                     project_name=args.project_name,
                 )
                 logger.info(
-                    "デフォルトターゲット '%s' をプロジェクトのみで登録しました（program未ロード）",
+                    "Registered default target '%s' with project metadata only (program not loaded)",
                     args.target_name,
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.error("デフォルトセッション初期化に失敗: %s", exc)
+            logger.error("Failed to initialize default session: %s", exc)
             _registry.close_all()
             return 1
 
     if not _registry.has_targets():
-        logger.error("少なくとも1つのターゲットを --session または --project-location で指定してください")
+        logger.error("Specify at least one target via --session or --project-location")
         return 1
 
     _core_module = _core()
 
     def _shutdown_handler(signum, frame):
-        logger.info("シグナル %s を受信したため終了処理を開始します", signum)
+        logger.info("Received signal %s; starting shutdown", signum)
         _registry.close_all()
         sys.exit(0)
 
@@ -300,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.enable_shared_project_sync:
         register_shared_project_sync_tools()
-        logger.info("shared project同期ツールを有効化しました")
+        logger.info("Enabled shared-project sync tools")
 
     transport = _normalize_transport(args.transport)
     if transport == "sse":

@@ -53,8 +53,8 @@ def configure_transport_security_for_host(*, mcp: FastMCP, host: str, logger: lo
     settings = resolve_transport_security_for_host(host)
     if not settings.enable_dns_rebinding_protection:
         logger.warning(
-            "mcp-host=%s のため DNS rebinding protection を無効化します。"
-            " 本番運用では固定ホスト名/IPでの起動を推奨します。",
+            "Disabling DNS rebinding protection because mcp-host=%s."
+            " For production, use a fixed host/IP and proper network controls.",
             host,
         )
     mcp.settings.transport_security = settings
@@ -66,7 +66,7 @@ def configure_mcp_for_sse(*, mcp: FastMCP, args: Any, logger: logging.Logger) ->
     mcp.settings.host = args.mcp_host
     mcp.settings.port = args.mcp_port or 8081
     configure_transport_security_for_host(mcp=mcp, host=mcp.settings.host, logger=logger)
-    logger.info("MCPをSSEモードで起動: http://%s:%s/sse", mcp.settings.host, mcp.settings.port)
+    logger.info("Starting MCP in SSE mode: http://%s:%s/sse", mcp.settings.host, mcp.settings.port)
 
 
 def configure_mcp_for_streamable_http(*, mcp: FastMCP, args: Any, logger: logging.Logger) -> None:
@@ -77,7 +77,7 @@ def configure_mcp_for_streamable_http(*, mcp: FastMCP, args: Any, logger: loggin
     mcp.settings.streamable_http_path = normalize_streamable_http_path(args.mcp_path)
     configure_transport_security_for_host(mcp=mcp, host=mcp.settings.host, logger=logger)
     logger.info(
-        "MCPをStreamable HTTPモードで起動: http://%s:%s%s",
+        "Starting MCP in Streamable HTTP mode: http://%s:%s%s",
         mcp.settings.host,
         mcp.settings.port,
         mcp.settings.streamable_http_path,

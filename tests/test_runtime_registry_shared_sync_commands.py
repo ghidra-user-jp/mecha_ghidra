@@ -16,21 +16,21 @@ RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
 pytestmark = pytest.mark.skipif(
     not RUNTIME_VALIDATION_ENABLED,
-    reason="GHIDRA_RUNTIME_VALIDATION=1 のときのみ実行します",
+    reason="Run only when GHIDRA_RUNTIME_VALIDATION=1",
 )
 
 
 def _require_env(name: str) -> str:
     value = (os.environ.get(name) or "").strip()
     if not value:
-        pytest.fail(f"{name} が未設定です（runtime registry/shared-sync 検証では必須）")
+        pytest.fail(f"{name} is not set (required for runtime registry/shared-sync validation)")
     return value
 
 
 def _require_existing_path(value: str, env_name: str) -> Path:
     path = Path(value).expanduser().resolve()
     if not path.exists():
-        pytest.fail(f"{env_name} が存在しません: {path}")
+        pytest.fail(f"{env_name} does not exist: {path}")
     return path
 
 
@@ -38,7 +38,7 @@ def _start_pyghidra() -> None:
     if pyghidra.started():
         return
     if shutil.which("java") is None:
-        pytest.fail("java コマンドが見つかりません（runtime registry/shared-sync 検証では必須）")
+        pytest.fail("java command not found (required for runtime registry/shared-sync validation)")
     install_dir = _require_existing_path(_require_env("GHIDRA_INSTALL_DIR"), "GHIDRA_INSTALL_DIR")
     pyghidra.start(install_dir=str(install_dir))
 
@@ -194,7 +194,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
             if maybe_id is not None:
                 stale_checkout_id = int(maybe_id)
         if stale_checkout_id is None:
-            pytest.fail("terminate_project_program_checkout 用の stale checkout_id を取得できませんでした")
+            pytest.fail("Failed to obtain stale checkout_id for terminate_project_program_checkout")
         _unwrap_runtime_result(cli.close_session(stale_target))
 
         runtime_results["load_project_program"] = _unwrap_runtime_result(
@@ -298,7 +298,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
             "reload_project_program",
         ]:
             assert isinstance(runtime_results[command_name], dict), (
-                f"{command_name} の戻り値がdictではありません: {type(runtime_results[command_name])}"
+                f"{command_name} returned non-dict value: {type(runtime_results[command_name])}"
             )
     finally:
         for cleanup_target in [stale_target, remove_target, create_target, target]:

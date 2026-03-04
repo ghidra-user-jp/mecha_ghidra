@@ -16,7 +16,7 @@ from ghidra_mcp.infrastructure.ghidra_adapter.core_gateway import CoreGateway
 
 class _NeverCalledExecutor:
     def execute(self, command: str, params: dict[str, Any], key: str) -> Any:  # noqa: ARG002
-        raise AssertionError("injected usecases 経由のため CoreGateway executor は呼ばれない想定です")
+        raise AssertionError("CoreGateway executor should not be called when injected usecases are provided")
 
 
 @dataclass

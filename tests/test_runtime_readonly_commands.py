@@ -17,7 +17,7 @@ RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
 pytestmark = pytest.mark.skipif(
     not RUNTIME_VALIDATION_ENABLED,
-    reason="GHIDRA_RUNTIME_VALIDATION=1 のときのみ実行します",
+    reason="Run only when GHIDRA_RUNTIME_VALIDATION=1",
 )
 
 
@@ -45,16 +45,16 @@ def _resolve_ghidra_install_dir() -> str:
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
-    pytest.fail("GHIDRA_INSTALL_DIR が見つからないため runtime test を継続できません")
+    pytest.fail("Cannot continue runtime tests because GHIDRA_INSTALL_DIR was not found")
 
 
 def _resolve_runtime_binary_path() -> str:
     value = os.environ.get("GHIDRA_RUNTIME_BINARY_PATH")
     if not value:
-        pytest.fail("GHIDRA_RUNTIME_BINARY_PATH が未設定です（runtime test では必須）")
+        pytest.fail("GHIDRA_RUNTIME_BINARY_PATH is not set (required for runtime tests)")
     path = Path(value).expanduser().resolve()
     if not path.exists():
-        pytest.fail(f"GHIDRA_RUNTIME_BINARY_PATH が存在しません: {path}")
+        pytest.fail(f"GHIDRA_RUNTIME_BINARY_PATH does not exist: {path}")
     return str(path)
 
 
@@ -62,11 +62,11 @@ def _start_pyghidra_if_needed() -> None:
     if pyghidra.started():
         return
     if shutil.which("java") is None:
-        pytest.fail("java コマンドが見つかりません（runtime test では必須）")
+        pytest.fail("java command not found (required for runtime tests)")
     try:
         pyghidra.start(install_dir=_resolve_ghidra_install_dir())
     except Exception as exc:
-        pytest.fail(f"pyghidra 起動に失敗しました: {exc}")
+        pytest.fail(f"Failed to start pyghidra: {exc}")
 
 
 def _ensure_project_created(project_dir: Path, project_name: str) -> None:
@@ -158,7 +158,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             cli.list_functions(offset=0, limit=1, target=target)
         )
         assert isinstance(first_functions, list)
-        assert first_functions, "list_functions が空のため runtime 検証を継続できません"
+        assert first_functions, "Cannot continue runtime validation because list_functions returned empty"
         first = first_functions[0]
         address = first["entry"]
         function_name = first["name"]

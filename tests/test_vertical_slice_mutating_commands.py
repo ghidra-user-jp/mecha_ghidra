@@ -352,9 +352,9 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
 def test_mutating_slice_error_message_is_unchanged(monkeypatch, call):
     class DummyRegistry:
         def call(self, command, params, target):
-            raise RuntimeError(f"セッション '{target}' は初期化されていません")
+            raise RuntimeError(f"Session '{target}' is not initialized")
 
     monkeypatch.setattr(cli, "_registry", DummyRegistry())
 
-    with pytest.raises(RuntimeError, match="セッション 'fw' は初期化されていません"):
+    with pytest.raises(RuntimeError, match="Session 'fw' is not initialized"):
         call()

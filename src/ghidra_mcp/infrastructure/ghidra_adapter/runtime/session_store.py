@@ -29,16 +29,16 @@ class RuntimeSessionStore:
         except KeyError:
             if name in self.target_projects:
                 raise RuntimeError(
-                    f"セッション '{name}' は初期化されていません（プログラム未ロード）。"
-                    " load_project_program で program を開いてください"
+                    f"Session '{name}' is not initialized (program not loaded). "
+                    "Open a program with load_project_program"
                 )
-            raise RuntimeError(f"セッション '{name}' は初期化されていません")
+            raise RuntimeError(f"Session '{name}' is not initialized")
 
     def ensure_lock(self, name: str):
         try:
             return self.locks[name]
         except KeyError:
-            raise RuntimeError(f"セッション '{name}' は初期化されていません")
+            raise RuntimeError(f"Session '{name}' is not initialized")
 
     def get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
         key = ProjectHandle.make_key(project_location, project_name)
@@ -57,7 +57,7 @@ class RuntimeSessionStore:
         try:
             return self.target_projects[name]
         except KeyError:
-            raise RuntimeError(f"ターゲット '{name}' は初期化されていません")
+            raise RuntimeError(f"Target '{name}' is not initialized")
 
     def get_target_handle_locked(self, name: str) -> ProjectHandle:
         session = self.sessions.get(name)
@@ -138,10 +138,10 @@ class RuntimeSessionStore:
         program = session.get_program()
         domain_file = program.getDomainFile()
         if domain_file is None:
-            raise RuntimeError("現在のプログラムにDomainFileがありません")
+            raise RuntimeError("Current program has no DomainFile")
         path = domain_file.getPathname()
         if not path:
-            raise RuntimeError("現在のプログラムのdomain pathを取得できません")
+            raise RuntimeError("failed to resolve domain path for current program")
         return path
 
 

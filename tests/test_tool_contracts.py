@@ -37,7 +37,7 @@ def test_tool_spec_inputs_are_covered_by_command_dep_keys():
         dep_keys = set(COMMAND_DEP_KEYS.get(command, ()))
         unknown = sorted(key for key in input_keys if key not in dep_keys)
         if unknown:
-            mismatches.append(f"{command} が未使用のキー: {', '.join(unknown)}")
+            mismatches.append(f"{command} has unused keys: {', '.join(unknown)}")
     assert not mismatches, "\n".join(mismatches)
 
 

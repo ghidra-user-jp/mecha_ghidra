@@ -53,12 +53,12 @@ def get_function_xrefs(params, *, ensure_context, find_function_by_name, to_int,
     ctx = ensure_context()
     name = params.get("name")
     if not name:
-        raise ValueError("nameが必要です")
+        raise ValueError("name is required")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
     function = find_function_by_name(ctx, name)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % name)
+        raise LookupError("Function not found: %s" % name)
     entry = function.getEntryPoint()
     references = ctx.reference_manager.getReferencesTo(entry)
     results = []

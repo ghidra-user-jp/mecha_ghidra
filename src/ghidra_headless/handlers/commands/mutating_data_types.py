@@ -19,12 +19,12 @@ def create_struct(
     ctx = ensure_context()
     name = params.get("name")
     if not name:
-        raise ValueError("nameが必要です")
+        raise ValueError("name is required")
     category = params.get("category")
     size = to_int(params.get("size"), 0)
     members = params.get("members") or []
     if not isinstance(members, (list, tuple)):
-        raise ValueError("membersはリストで指定してください")
+        raise ValueError("members must be a list")
 
     def _create():
         manager = dt_manager(ctx)
@@ -61,16 +61,16 @@ def add_struct_members(
     ctx = ensure_context()
     struct_name = params.get("struct_name")
     if not struct_name:
-        raise ValueError("struct_nameが必要です")
+        raise ValueError("struct_name is required")
     category = params.get("category")
     members = params.get("members") or []
     if not isinstance(members, (list, tuple)):
-        raise ValueError("membersはリストで指定してください")
+        raise ValueError("members must be a list")
 
     def _update():
         struct = get_struct_datatype(ctx, struct_name, category)
         if struct is None:
-            raise LookupError("構造体が見つかりません: %s" % struct_name)
+            raise LookupError("Struct not found: %s" % struct_name)
         for member in members:
             data_type = parse_data_type(ctx, member.get("type"))
             field_name = member.get("name", "")
@@ -102,13 +102,13 @@ def clear_struct(
     ctx = ensure_context()
     struct_name = params.get("struct_name")
     if not struct_name:
-        raise ValueError("struct_nameが必要です")
+        raise ValueError("struct_name is required")
     category = params.get("category")
 
     def _clear():
         struct = get_struct_datatype(ctx, struct_name, category)
         if struct is None:
-            raise LookupError("構造体が見つかりません: %s" % struct_name)
+            raise LookupError("Struct not found: %s" % struct_name)
         cleared = False
         clear_components = getattr(struct, "clearComponents", None)
         if callable(clear_components):
@@ -122,7 +122,7 @@ def clear_struct(
                 struct.delete(ordinal)
                 cleared = True
         if not cleared:
-            raise RuntimeError("構造体メンバーのクリアに失敗しました")
+            raise RuntimeError("Failed to clear struct members")
         dt_manager(ctx).replaceDataType(struct, struct, True)
         return struct
 
@@ -145,12 +145,12 @@ def create_enum(
     ctx = ensure_context()
     name = params.get("name")
     if not name:
-        raise ValueError("nameが必要です")
+        raise ValueError("name is required")
     category = params.get("category")
     size = to_int(params.get("size"), 4)
     values = params.get("values") or []
     if not isinstance(values, (list, tuple)):
-        raise ValueError("valuesはリストで指定してください")
+        raise ValueError("values must be a list")
 
     def _create():
         enum_dt = enum_data_type(category_path(category) if category else category_path("/"), name, size)
@@ -167,16 +167,16 @@ def add_enum_values(params, *, ensure_context, txn, get_enum_datatype, to_int_au
     ctx = ensure_context()
     name = params.get("enum_name")
     if not name:
-        raise ValueError("enum_nameが必要です")
+        raise ValueError("enum_name is required")
     category = params.get("category")
     values = params.get("values") or []
     if not isinstance(values, (list, tuple)):
-        raise ValueError("valuesはリストで指定してください")
+        raise ValueError("values must be a list")
 
     def _update():
         enum_dt = get_enum_datatype(ctx, name, category)
         if enum_dt is None:
-            raise LookupError("列挙体が見つかりません: %s" % name)
+            raise LookupError("Enum not found: %s" % name)
         for value in values:
             enum_dt.add(value.get("name"), to_int_auto(value.get("value")), value.get("comment"))
         dt_manager(ctx).replaceDataType(enum_dt, enum_dt, True)
@@ -190,16 +190,16 @@ def remove_enum_values(params, *, ensure_context, txn, get_enum_datatype, dt_man
     ctx = ensure_context()
     name = params.get("enum_name")
     if not name:
-        raise ValueError("enum_nameが必要です")
+        raise ValueError("enum_name is required")
     category = params.get("category")
     values = params.get("values") or []
     if not isinstance(values, (list, tuple)):
-        raise ValueError("valuesはリストで指定してください")
+        raise ValueError("values must be a list")
 
     def _update():
         enum_dt = get_enum_datatype(ctx, name, category)
         if enum_dt is None:
-            raise LookupError("列挙体が見つかりません: %s" % name)
+            raise LookupError("Enum not found: %s" % name)
         for value in values:
             enum_dt.remove(value)
         dt_manager(ctx).replaceDataType(enum_dt, enum_dt, True)
@@ -213,16 +213,16 @@ def remove_struct_members(params, *, ensure_context, txn, get_struct_datatype, d
     ctx = ensure_context()
     struct_name = params.get("struct_name")
     if not struct_name:
-        raise ValueError("struct_nameが必要です")
+        raise ValueError("struct_name is required")
     category = params.get("category")
     members = params.get("members") or []
     if not isinstance(members, (list, tuple)):
-        raise ValueError("membersはリストで指定してください")
+        raise ValueError("members must be a list")
 
     def _update():
         struct = get_struct_datatype(ctx, struct_name, category)
         if struct is None:
-            raise LookupError("構造体が見つかりません: %s" % struct_name)
+            raise LookupError("Struct not found: %s" % struct_name)
         target_names = set(members)
         for component in list(struct.getComponents()):
             if component.getFieldName() in target_names:
@@ -251,7 +251,7 @@ def set_global_data_type(
     length = to_int(params.get("length"), -1)
     clear_mode_text = params.get("clear_mode")
     if not address_text or not data_type_text:
-        raise ValueError("addressとdata_typeは必須です")
+        raise ValueError("address and data_type are required")
     address = get_address(ctx, address_text)
     data_type = parse_data_type(ctx, data_type_text)
     clear_mode = parse_clear_data_mode(clear_mode_text)
@@ -259,7 +259,7 @@ def set_global_data_type(
     def _apply():
         created = data_utilities.createData(ctx.program, address, data_type, length, clear_mode)
         if created is None:
-            raise RuntimeError("データ型の設定に失敗しました")
+            raise RuntimeError("Failed to set global data type")
         return True
 
     txn(ctx, "Set global data type", _apply)

@@ -20,8 +20,8 @@ class TargetRepository:
             return
         raise DomainError(
             code=ErrorCode.TARGET_NOT_REGISTERED,
-            message=f"ターゲット '{target}' は登録されていません",
-            hint="register_target または create_session を先に実行してください",
+            message=f"Target '{target}' is not registered",
+            hint="Run register_target or create_session first",
             retryable=False,
             details={"target": target},
         )

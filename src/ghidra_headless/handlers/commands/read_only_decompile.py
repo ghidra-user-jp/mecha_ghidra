@@ -7,10 +7,10 @@ def decompile_function(params, *, ensure_context, find_function_by_name, decompi
     ctx = ensure_context()
     name = params.get("name")
     if not name:
-        raise ValueError("nameが必要です")
+        raise ValueError("name is required")
     function = find_function_by_name(ctx, name)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % name)
+        raise LookupError("Function not found: %s" % name)
 
     return decompile_function_object(ctx, function)
 
@@ -21,7 +21,7 @@ def decompile_function_by_address(params, *, ensure_context, get_address, decomp
     address = get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
-        raise LookupError("アドレスに対応する関数が見つかりません: %s" % address_text)
+        raise LookupError("No function found for address: %s" % address_text)
     return decompile_function_object(ctx, function)
 
 
@@ -31,7 +31,7 @@ def disassemble_function(params, *, ensure_context, get_address, iter_items, cod
     address = get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % address_text)
+        raise LookupError("Function not found: %s" % address_text)
     body = function.getBody()
     instructions = ctx.listing.getInstructions(body, True)
     lines = []
@@ -66,11 +66,11 @@ def get_callee(params, *, ensure_context, get_address, iter_items, task_monitor)
     ctx = ensure_context()
     address_text = params.get("address")
     if not address_text:
-        raise ValueError("addressが必要です")
+        raise ValueError("address is required")
     address = get_address(ctx, address_text)
     function = ctx.function_manager.getFunctionContaining(address)
     if function is None:
-        raise LookupError("関数が見つかりません: %s" % address_text)
+        raise LookupError("Function not found: %s" % address_text)
     callees = function.getCalledFunctions(task_monitor.DUMMY)
     callees_list = list(iter_items(callees))
     if function.isThunk() and not callees_list:

@@ -70,7 +70,7 @@ def test_open_program_rejects_duplicates(monkeypatch):
     handle = build_handle(monkeypatch)
 
     first_session = handle.open_program("/folder/firmware")
-    with pytest.raises(RuntimeError, match="セッションがあります"):
+    with pytest.raises(RuntimeError, match="active session"):
         handle.open_program("/folder/firmware")
 
     assert handle._refcount == 1
@@ -127,7 +127,7 @@ def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
 
     handle.project = DummyProjectWithFailingDelete()
 
-    with pytest.raises(RuntimeError, match="プログラム削除に失敗しました"):
+    with pytest.raises(RuntimeError, match="Failed to remove program"):
         handle._delete_program_locked("/folder/app")
 
 

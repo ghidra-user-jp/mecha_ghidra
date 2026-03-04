@@ -79,7 +79,7 @@ class ServiceRegistryAdapter:
         domain_path: str | None = None,
     ):
         if domain_path is None:
-            raise ValueError("domain_path を指定してください")
+            raise ValueError("domain_path is required")
         return self._target_service.create_session(
             target,
             project_location,

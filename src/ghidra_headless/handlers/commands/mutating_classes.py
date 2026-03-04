@@ -23,19 +23,19 @@ def create_class(
     ctx = ensure_context()
     class_name = params.get("name")
     if not class_name:
-        raise ValueError("nameが必要です")
+        raise ValueError("name is required")
     parent_namespace = params.get("parent_namespace")
     members = params.get("members") or []
     if not isinstance(members, (list, tuple)):
-        raise ValueError("membersはリストで指定してください")
+        raise ValueError("members must be a list")
 
     def _create():
         parent = resolve_namespace(ctx, parent_namespace)
         if parent is None:
-            raise LookupError("親名前空間が見つかりません: %s" % parent_namespace)
+            raise LookupError("Parent namespace not found: %s" % parent_namespace)
         existing_class = find_ghidra_class(ctx, class_name, parent)
         if existing_class is not None:
-            raise ValueError("クラスが既に存在します: %s" % class_name)
+            raise ValueError("Class already exists: %s" % class_name)
 
         class_namespace = ctx.symbol_table.createClass(parent, class_name, source_type.USER_DEFINED)
         category = build_class_category_path(class_namespace)
@@ -70,11 +70,11 @@ def add_class_members(
     ctx = ensure_context()
     class_name = params.get("class_name")
     if not class_name:
-        raise ValueError("class_nameが必要です")
+        raise ValueError("class_name is required")
     parent_namespace = params.get("parent_namespace")
     members = params.get("members") or []
     if not isinstance(members, (list, tuple)):
-        raise ValueError("membersはリストで指定してください")
+        raise ValueError("members must be a list")
 
     def _update():
         _, struct = ensure_class_struct(
@@ -96,11 +96,11 @@ def remove_class_members(params, *, ensure_context, txn, ensure_class_struct, dt
     ctx = ensure_context()
     class_name = params.get("class_name")
     if not class_name:
-        raise ValueError("class_nameが必要です")
+        raise ValueError("class_name is required")
     parent_namespace = params.get("parent_namespace")
     members = params.get("members") or []
     if not isinstance(members, (list, tuple)):
-        raise ValueError("membersはリストで指定してください")
+        raise ValueError("members must be a list")
 
     def _update():
         _, struct = ensure_class_struct(

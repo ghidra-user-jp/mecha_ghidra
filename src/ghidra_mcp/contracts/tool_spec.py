@@ -490,7 +490,7 @@ _KNOWN_OUTPUT_OVERRIDE_NAMES = set(_LIST_OUTPUT_TOOLS) | set(_SCALAR_OUTPUT_TYPE
 _UNKNOWN_OUTPUT_OVERRIDE_NAMES = _KNOWN_OUTPUT_OVERRIDE_NAMES - _ALL_TOOL_NAMES
 if _UNKNOWN_OUTPUT_OVERRIDE_NAMES:
     raise RuntimeError(
-        "output model override に未定義ツールがあります: %s" % ", ".join(sorted(_UNKNOWN_OUTPUT_OVERRIDE_NAMES))
+        "output model override contains undefined tools: %s" % ", ".join(sorted(_UNKNOWN_OUTPUT_OVERRIDE_NAMES))
     )
 
 
@@ -543,7 +543,7 @@ def get_tool_spec(name: str) -> ToolSpec:
     try:
         return _TOOL_SPECS[name]
     except KeyError as exc:
-        raise KeyError(f"未対応のツール仕様です: {name}") from exc
+        raise KeyError(f"Unsupported tool spec: {name}") from exc
 
 
 def get_all_tool_specs(*, include_shared_sync: bool = True) -> dict[str, ToolSpec]:

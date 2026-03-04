@@ -103,7 +103,7 @@ def test_ensure_session_reports_not_loaded_program():
     store, _core = _build_store()
     store.target_projects["fw"] = ("/tmp/prj", "sample")
 
-    with pytest.raises(RuntimeError, match="プログラム未ロード"):
+    with pytest.raises(RuntimeError, match="program not loaded"):
         store.ensure_session("fw")
 
 

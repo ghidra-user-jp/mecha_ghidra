@@ -47,8 +47,8 @@ class RuntimeCoreExecution:
         if status.get("is_checked_out"):
             return
         raise RuntimeError(
-            "CHECKOUT_REQUIRED: 共有プロジェクトの更新系操作には checkout が必要です。"
-            "先に checkout_project_program を実行してください"
+            "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects. "
+            "Run checkout_project_program first"
         )
 
 

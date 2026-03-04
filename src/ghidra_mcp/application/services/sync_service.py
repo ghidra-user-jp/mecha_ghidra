@@ -36,7 +36,7 @@ class SyncService:
         return DomainError(
             code=ErrorCode.SYNC_OPERATION_FAILED,
             message=str(exc),
-            hint="shared project の状態と checkout 状態を確認してください",
+            hint="Check shared-project and checkout state",
             retryable=False,
             details={"operation": operation, "target": target, "domain_path": domain_path},
         )

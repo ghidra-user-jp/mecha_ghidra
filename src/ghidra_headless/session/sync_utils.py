@@ -24,11 +24,11 @@ def _safe_call(obj, name: str, *args):
 def _required_call(obj, name: str, *args):
     method = getattr(obj, name, None)
     if method is None:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: DomainFile.{name} が利用できません")
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: DomainFile.{name} is unavailable")
     try:
         return method(*args)
     except Exception as exc:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: DomainFile.{name} の取得に失敗しました: {exc}")
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.{name}: {exc}")
 
 
 def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:

@@ -26,15 +26,15 @@ _RESULT_ADAPTERS = {
 
 
 def _create_session_error(_exc: Exception, target: str) -> RuntimeError:
-    return RuntimeError(f"セッション '{target}' の作成に失敗しました")
+    return RuntimeError(f"Failed to create session '{target}'")
 
 
 def _close_session_error(_exc: Exception, target: str) -> RuntimeError:
-    return RuntimeError(f"セッション '{target}' のクローズに失敗しました")
+    return RuntimeError(f"Failed to close session '{target}'")
 
 
 def _close_remove_error(_exc: Exception, target: str) -> RuntimeError:
-    return RuntimeError(f"セッション '{target}' のクローズ/削除に失敗しました")
+    return RuntimeError(f"Failed to close/remove session '{target}'")
 
 
 _ERROR_ADAPTERS = {
@@ -54,7 +54,7 @@ def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | Non
     try:
         parsed = model_cls.model_validate(raw_args or {})
     except ValidationError as exc:
-        raise ValueError(f"{spec_name} の入力検証に失敗しました: {exc}") from exc
+        raise ValueError(f"{spec_name} input validation failed: {exc}") from exc
     return parsed.model_dump(exclude_none=True)
 
 
@@ -67,7 +67,7 @@ def _validate_output(spec_name: str, model_cls, result: Any) -> Any:
         try:
             model_cls.model_validate({"payload": result})
         except ValidationError as exc:
-            raise ValueError(f"{spec_name} の出力検証に失敗しました: {exc}") from exc
+            raise ValueError(f"{spec_name} output validation failed: {exc}") from exc
     return result
 
 
@@ -94,7 +94,7 @@ def dispatch_tool(
     try:
         if spec.executor_kind == ExecutorKind.CORE_COMMAND:
             if not hasattr(registry, "call"):
-                raise RuntimeError("CORE_EXECUTOR_UNAVAILABLE: core command dispatcherが利用できません")
+                raise RuntimeError("CORE_EXECUTOR_UNAVAILABLE: core command dispatcher is unavailable")
             result = registry.call(spec.command_or_method, params, target)
 
         else:

@@ -24,8 +24,8 @@ class ProgramLease:
         except Exception as exc:  # noqa: BLE001
             raise DomainError(
                 code=ErrorCode.SAVE_FAILED,
-                message=f"保存に失敗しました: {exc}",
-                hint="対象プログラムの変更状態を確認してください",
+                message=f"Save failed: {exc}",
+                hint="Check the target program's modified state",
                 retryable=False,
             ) from exc
 
@@ -46,8 +46,8 @@ class ProgramLease:
                 details = {"operation_error": str(operation_error)}
             raise DomainError(
                 code=ErrorCode.REOPEN_FAILED,
-                message=f"プログラム再オープンに失敗しました: {exc}",
-                hint="セッションを再作成して再実行してください",
+                message=f"Failed to reopen program: {exc}",
+                hint="Recreate the session and retry",
                 retryable=True,
                 details=details,
             ) from exc

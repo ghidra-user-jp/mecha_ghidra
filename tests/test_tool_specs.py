@@ -35,7 +35,7 @@ def test_core_command_spec_keys_are_consumed_by_handlers():
             key for key in spec.input_model.model_fields.keys() if key not in expected_keys
         )
         if unknown_keys:
-            mismatches.append(f"{command} が未使用のキー: {', '.join(unknown_keys)}")
+            mismatches.append(f"{command} has unused keys: {', '.join(unknown_keys)}")
 
     assert not mismatches, "\n".join(mismatches)
 
