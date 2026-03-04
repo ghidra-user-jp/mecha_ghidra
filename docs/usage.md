@@ -35,6 +35,11 @@ This document explains installation and operations for `ghidra-mcp`. For the ful
    ```bash
    export GHIDRA_INSTALL_DIR=/path/to/ghidra
    ```
+   or
+   ```bash
+   $env:GHIDRA_INSTALL_DIR="C:\path\to\ghidra"
+   ```
+   
    This is required for PyGhidra to locate Ghidra.
 
    If you use Ghidra Server, set the password you configured when creating users:
