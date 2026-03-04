@@ -20,6 +20,7 @@ class RuntimeSessionStore:
         self.locks = state.locks
         self.target_projects = state.target_projects
         self.project_handles = state.project_handles
+        self.analyzed_loads = state.analyzed_loads
         self.registry_lock = state.registry_lock
 
     def ensure_session(self, name: str) -> ProgramSession:
@@ -115,6 +116,22 @@ class RuntimeSessionStore:
             if key is None:
                 return None
             return f"{key[0]}::{key[1]}"
+
+    def is_analyzed_load(self, name: str, domain_path: str) -> bool:
+        return (name, domain_path) in self.analyzed_loads
+
+    def mark_analyzed_load(self, name: str, domain_path: str) -> None:
+        self.analyzed_loads.add((name, domain_path))
+
+    def clear_analyzed_loads_for_target(self, name: str) -> None:
+        if not self.analyzed_loads:
+            return
+        remove_keys = [key for key in self.analyzed_loads if key[0] == name]
+        for key in remove_keys:
+            self.analyzed_loads.discard(key)
+
+    def clear_analyzed_loads(self) -> None:
+        self.analyzed_loads.clear()
 
     @staticmethod
     def session_domain_path(session: ProgramSession) -> str:

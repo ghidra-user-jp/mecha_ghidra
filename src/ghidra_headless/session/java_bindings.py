@@ -10,6 +10,8 @@ _DEFAULT_CHECKIN_HANDLER_CLASS = None
 _PROGRAM_DIFF_CLASS = None
 _PROGRAM_DIFF_FILTER_CLASS = None
 _JAVA_OBJECT_CLASS = None
+_GHIDRA_PROGRAM_UTILITIES_CLASS = None
+_GHIDRA_SCRIPT_UTIL_CLASS = None
 
 
 def _flat_program_api_class():
@@ -53,3 +55,16 @@ def _java_object():
         _JAVA_OBJECT_CLASS = pycore.JClass("java.lang.Object")
     return _JAVA_OBJECT_CLASS()
 
+
+def _ghidra_program_utilities():
+    global _GHIDRA_PROGRAM_UTILITIES_CLASS
+    if _GHIDRA_PROGRAM_UTILITIES_CLASS is None:
+        _GHIDRA_PROGRAM_UTILITIES_CLASS = pycore.JClass("ghidra.program.util.GhidraProgramUtilities")
+    return _GHIDRA_PROGRAM_UTILITIES_CLASS
+
+
+def _ghidra_script_util():
+    global _GHIDRA_SCRIPT_UTIL_CLASS
+    if _GHIDRA_SCRIPT_UTIL_CLASS is None:
+        _GHIDRA_SCRIPT_UTIL_CLASS = pycore.JClass("ghidra.app.script.GhidraScriptUtil")
+    return _GHIDRA_SCRIPT_UTIL_CLASS

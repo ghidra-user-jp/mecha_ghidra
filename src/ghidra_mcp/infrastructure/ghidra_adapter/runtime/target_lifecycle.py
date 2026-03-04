@@ -6,7 +6,7 @@ import logging
 import threading
 from typing import Dict, List, Optional
 
-from ghidra_headless.session import ProgramSession, ProjectHandle
+from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings
 
 from .session_store import RuntimeSessionStore
 
@@ -36,17 +36,20 @@ class RuntimeTargetLifecycle:
             had_lock = name in self._store.locks
             self._store.target_projects[name] = handle.get_key()
             session = handle.open_program(domain_path)
-            self._store.locks.setdefault(name, threading.RLock())
-            self._store.sessions[name] = session
 
             try:
-                program = session.get_program()
-                self._store.core_accessor().initialize(program, key=name)
+                self._initialize_opened_session_locked(
+                    name=name,
+                    session=session,
+                )
+                self._store.locks.setdefault(name, threading.RLock())
+                self._store.sessions[name] = session
                 return session
             except Exception:  # noqa: BLE001
                 self._store.sessions.pop(name, None)
                 try:
-                    session.close()
+                    if session is not None:
+                        session.close()
                 except Exception as close_exc:
                     logger.warning("failed to rollback session close during create_session for target '%s': %s", name, close_exc)
                 if not had_target:
@@ -131,11 +134,12 @@ class RuntimeTargetLifecycle:
                 raise ValueError("domain_path を指定してください")
             handle = self._store.get_target_handle_locked(name)
             new_session = handle.open_program(domain_path)
-            loaded_domain_path = new_session.to_dict().get("domain_path") or ""
             had_session = name in self._store.sessions
             try:
-                new_program = new_session.get_program()
-                self._store.core_accessor().initialize(new_program, key=name)
+                loaded_domain_path = self._initialize_opened_session_locked(
+                    name=name,
+                    session=new_session,
+                )
             except Exception:
                 self._store.cleanup_session(
                     name,
@@ -182,6 +186,7 @@ class RuntimeTargetLifecycle:
             self._store.sessions.clear()
             self._store.locks.clear()
             self._store.target_projects.clear()
+            self._store.clear_analyzed_loads()
             for handle in list(self._store.project_handles.values()):
                 try:
                     handle.close()
@@ -206,7 +211,43 @@ class RuntimeTargetLifecycle:
         self._store.sessions.pop(name, None)
         self._store.locks.pop(name, None)
         self._store.target_projects.pop(name, None)
+        self._store.clear_analyzed_loads_for_target(name)
         self._store.core_accessor().remove_context(name)
+
+    def _initialize_opened_session_locked(
+        self,
+        *,
+        name: str,
+        session: ProgramSession,
+    ) -> str:
+        program = session.get_program()
+        self._store.core_accessor().initialize(program, key=name)
+        loaded_domain_path = session.to_dict().get("domain_path") or self._store.session_domain_path(session)
+        self._analyze_program_on_first_load_locked(name=name, domain_path=loaded_domain_path, session=session)
+        return loaded_domain_path
+
+    def _analyze_program_on_first_load_locked(
+        self,
+        *,
+        name: str,
+        domain_path: str,
+        session: ProgramSession,
+    ) -> None:
+        if self._store.is_analyzed_load(name, domain_path):
+            return
+
+        utilities = java_bindings._ghidra_program_utilities()
+        program = session.get_program()
+        should_analyze = bool(utilities.shouldAskToAnalyze(program))
+        if should_analyze:
+            script_util = java_bindings._ghidra_script_util()
+            script_util.acquireBundleHostReference()
+            try:
+                session.flat_api.analyzeAll(program)
+                utilities.markProgramAnalyzed(program)
+            finally:
+                script_util.releaseBundleHostReference()
+        self._store.mark_analyzed_load(name, domain_path)
 
 
 __all__ = ["RuntimeTargetLifecycle"]

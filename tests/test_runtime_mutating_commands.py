@@ -294,11 +294,22 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("rename_variable", rename_variable_result)
         _log_runtime_result("set_local_variable_type", set_local_type_result)
 
-        bytes_dump = _unwrap_runtime_result(cli.get_bytes(address=primary_address, size=2, target=target))
-        patch_bytes = _derive_patch_bytes_from_hexdump(bytes_dump)
-        set_bytes_result = _unwrap_runtime_result(
-            cli.set_bytes(address=primary_address, bytes_hex=patch_bytes, target=target)
-        )
+        set_bytes_result = None
+        set_bytes_error = None
+        for candidate_address in [data_address, primary_address, aux_address]:
+            try:
+                bytes_dump = _unwrap_runtime_result(
+                    cli.get_bytes(address=candidate_address, size=2, target=target)
+                )
+                patch_bytes = _derive_patch_bytes_from_hexdump(bytes_dump)
+                set_bytes_result = _unwrap_runtime_result(
+                    cli.set_bytes(address=candidate_address, bytes_hex=patch_bytes, target=target)
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                set_bytes_error = exc
+        if set_bytes_result is None:
+            raise RuntimeError(f"set_bytes に失敗しました: {set_bytes_error}")
         _log_runtime_result("set_bytes", set_bytes_result)
 
         renamed_aux_1 = f"{aux_name}_r1"

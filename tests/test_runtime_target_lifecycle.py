@@ -40,9 +40,10 @@ class _FakeProgram:
 
 
 class _FakeSession:
-    def __init__(self, handle, path: str) -> None:  # noqa: ANN001
+    def __init__(self, handle, path: str, flat_api) -> None:  # noqa: ANN001
         self._handle = handle
         self._path = path
+        self.flat_api = flat_api
         self.closed_with: list[bool] = []
 
     def get_program(self):
@@ -64,6 +65,8 @@ class _FakeSession:
 
 class _FakeProjectHandle:
     metadata_programs = None
+    should_analyze = True
+    fail_analyze = False
 
     def __init__(self, project_location: str, project_name: str | None) -> None:
         self._location = project_location
@@ -71,6 +74,7 @@ class _FakeProjectHandle:
         self._key = (self._location, self._name)
         self._closed = False
         self._programs = [{"path": "/main"}]
+        self.analyze_calls: list[str] = []
 
     @staticmethod
     def resolve_project_location_and_file(project_location: str, project_name: str | None) -> tuple[str, str]:
@@ -86,7 +90,15 @@ class _FakeProjectHandle:
 
     def open_program(self, domain_path: str | None = None):
         path = domain_path or "/main"
-        return _FakeSession(self, path)
+        handle = self
+
+        class _FakeFlatAPI:
+            def analyzeAll(self, program):  # noqa: ANN001
+                handle.analyze_calls.append(program.getDomainFile().getPathname())
+                if _FakeProjectHandle.fail_analyze:
+                    raise RuntimeError("analyze failed")
+
+        return _FakeSession(self, path, _FakeFlatAPI())
 
     def import_program(self, binary_path: str):  # noqa: ARG002
         return _FakeDomainFile("/imported.bin")
@@ -117,6 +129,31 @@ def _build_target_lifecycle(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(store_module, "ProjectHandle", _FakeProjectHandle)
     monkeypatch.setattr(lifecycle_module, "ProjectHandle", _FakeProjectHandle)
 
+    class _FakeUtilities:
+        def shouldAskToAnalyze(self, _program) -> bool:  # noqa: ANN001
+            return _FakeProjectHandle.should_analyze
+
+        def markProgramAnalyzed(self, _program) -> None:  # noqa: ANN001
+            return None
+
+    class _FakeScriptUtil:
+        def acquireBundleHostReference(self) -> None:
+            return None
+
+        def releaseBundleHostReference(self) -> None:
+            return None
+
+    class _FakeJavaBindings:
+        @staticmethod
+        def _ghidra_program_utilities():
+            return _FakeUtilities()
+
+        @staticmethod
+        def _ghidra_script_util():
+            return _FakeScriptUtil()
+
+    monkeypatch.setattr(lifecycle_module, "java_bindings", _FakeJavaBindings())
+
     core = _DummyCore()
     state = RuntimeState(
         core_accessor=lambda: core,
@@ -129,6 +166,8 @@ def _build_target_lifecycle(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
     lifecycle, store, core = _build_target_lifecycle(monkeypatch)
 
     registered = lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
@@ -138,6 +177,12 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     session = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
     assert session is store.sessions["fw"]
     assert core.initialized and core.initialized[-1][1] == "fw"
+    assert store.analyzed_loads == {("fw", "/main")}
+
+    loaded = lifecycle.load_program("fw", "/main")
+    assert loaded == "/main"
+    handle = store.get_target_handle_locked("fw")
+    assert handle.analyze_calls == ["/main"]
 
     imported = lifecycle.import_program("fw", "/tmp/binary.exe")
     assert imported == "/imported.bin"
@@ -151,6 +196,8 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
 
 
 def test_target_lifecycle_list_programs_uses_metadata_when_no_session(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
     lifecycle, _store, _core = _build_target_lifecycle(monkeypatch)
     lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
     _FakeProjectHandle.metadata_programs = [{"path": "/meta.bin"}]
@@ -159,3 +206,18 @@ def test_target_lifecycle_list_programs_uses_metadata_when_no_session(monkeypatc
     finally:
         _FakeProjectHandle.metadata_programs = None
     assert programs == [{"path": "/meta.bin"}]
+
+
+def test_target_lifecycle_create_session_rolls_back_on_analysis_failure(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = True
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="analyze failed"):
+        lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    assert "fw" not in store.sessions
+    assert "fw" not in store.locks
+    assert "fw" not in store.target_projects
+    assert not store.analyzed_loads
+    assert core.removed == ["fw"]

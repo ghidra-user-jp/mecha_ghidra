@@ -105,3 +105,23 @@ def test_ensure_session_reports_not_loaded_program():
 
     with pytest.raises(RuntimeError, match="プログラム未ロード"):
         store.ensure_session("fw")
+
+
+def test_analyzed_load_tracking_by_target_and_domain():
+    store, _core = _build_store()
+
+    assert not store.is_analyzed_load("a", "/x")
+    store.mark_analyzed_load("a", "/x")
+    store.mark_analyzed_load("a", "/y")
+    store.mark_analyzed_load("b", "/x")
+    assert store.is_analyzed_load("a", "/x")
+    assert store.is_analyzed_load("a", "/y")
+    assert store.is_analyzed_load("b", "/x")
+
+    store.clear_analyzed_loads_for_target("a")
+    assert not store.is_analyzed_load("a", "/x")
+    assert not store.is_analyzed_load("a", "/y")
+    assert store.is_analyzed_load("b", "/x")
+
+    store.clear_analyzed_loads()
+    assert not store.is_analyzed_load("b", "/x")
