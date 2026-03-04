@@ -35,6 +35,11 @@
    ```bash
    export GHIDRA_INSTALL_DIR=/path/to/ghidra
    ```
+   or
+   ```bash
+   $env:GHIDRA_INSTALL_DIR="C:\path\to\ghidra"
+   ```
+   
    PyGhidra が Ghidra 本体を見つけられるようにしてください。
 
    Ghidra Serverを利用する場合は、ユーザ作成時に変更したパスワードを環境変数に設定する。
