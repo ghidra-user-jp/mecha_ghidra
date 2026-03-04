@@ -1,7 +1,9 @@
-# 開発ガイド
+[English](development.md) | [日本語](development.ja.md)
 
-## 開発・テスト
+# Development Guide
 
-- 依存関係の更新: `uv add <package>` / `uv remove <package>`
-- コード整形・型チェックなど必要に応じてツールを追加し、`uv run <tool>` で実行してください。
-- テスト実行: まず `uv sync --extra test` でテスト依存（`pytest`, `pytest-mock`）をインストールし、`uv run pytest` でユニットテストを実行できます。
+## Development and Testing
+
+- Dependency updates: `uv add <package>` / `uv remove <package>`
+- Add formatting/type-check tools as needed and run them with `uv run <tool>`.
+- Test run: first install test dependencies (`pytest`, `pytest-mock`) with `uv sync --extra test`, then run unit tests with `uv run pytest`.

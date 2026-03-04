@@ -1,28 +1,26 @@
-<img width="4096" height="700" alt="mecha_ghidra_one_line" src="https://github.com/user-attachments/assets/def48147-f8cf-4a6a-b4e6-cb3a43798d56" />
+<img width="4096" height="700" alt="mecha_ghidra_one_lineのコピー" src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" />
 
-# Mecha Ghidra — Headless Ghidra MCP for Ghidra Server
-PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開する Python パッケージです。Ghidra プロジェクトの解析・編集に加え、複数ターゲット管理やプログラムの import/load 切り替え、オプションの shared project 同期機能を使った AI クライアントとの共同解析まで行えます。
+[English](README.md) | [日本語](README.ja.md)
 
-## ドキュメント
+# Mecha Ghidra - Headless Ghidra MCP for Ghidra Server
+Mecha Ghidra is a Python package that exposes Ghidra as a headless MCP server with PyGhidra and FastMCP. It supports analysis and editing in Ghidra projects, multi-target session management, import/load switching, and optional shared-project sync workflows for collaborative AI-assisted reverse engineering.
 
-- [利用ガイド](docs/usage.md): セットアップ、shared project 運用、複数ターゲット運用、Kilocode/Roocode 連携
-- [開発ガイド](docs/development.md): 開発フロー、テスト実行
+## Documentation
 
-## クイックスタート
+- [Usage Guide](docs/usage.md) | [日本語](docs/usage.ja.md): setup, shared-project operations, multi-target workflows, and Codex/Claude/Kilocode integration
+- [Development Guide](docs/development.md) | [日本語](docs/development.ja.md): development flow and testing
 
-1. 依存関係を同期
+## Quick Start
+
+1. Sync dependencies
    ```bash
    uv sync
    ```
-2. Ghidra パスを設定
+2. Set the Ghidra path
    ```bash
    export GHIDRA_INSTALL_DIR=/path/to/ghidra
    ```
-   or
-   ```bash
-   $env:GHIDRA_INSTALL_DIR="C:\path\to\ghidra"
-   ```
-4. サーバーを起動（Streamable HTTP）
+3. Start the server (Streamable HTTP)
    ```bash
    uv run ghidra-mcp \
        --project-location /Users/samsepi0l/ghidra_project.gpr \
@@ -33,106 +31,106 @@ PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開す�
        --mcp-path /mcp
    ```
 
-運用パターンや shared project 認証を含む詳細は [利用ガイド](docs/usage.md) を参照してください。
+For operational patterns and shared-project authentication details, see the [Usage Guide](docs/usage.md).
 
-## 主要機能
+## Key Features
 
-- **関数・シンボル操作**: 関数一覧、デコンパイル、リネーム、Xref 取得など。
-- **データ型編集**: 構造体・列挙体・クラス相当のデータ型作成／更新／削除に対応。
-- **メモリアクセス**: メモリのバイト列取得・検索・書き込み、グローバルデータ型の適用。
-- **コメント付与**: 逆アセンブリ／デコンパイラコメントの設定が可能。
-- **PyGhidra ベース**: Jython ではなく CPython 上で Ghidra API を直接呼び出します。
-- **複数ターゲット管理**: 同一プロセスで複数セッションを保持し、ターゲット名で切り替えながら解析できます。
-- **プロジェクト操作**: `list_project_programs` でプロジェクト内のプログラム一覧を取得し、`import_program` で新規バイナリを追加、`load_project_program` で既存プログラムへ切り替えできます。
+- **Function and symbol operations**: list functions, decompile, rename, retrieve xrefs, and more.
+- **Data-type editing**: create/update/delete structs, enums, and class-like data types.
+- **Memory access**: read/search/write bytes and apply global data types.
+- **Comments**: set disassembly/decompiler comments.
+- **PyGhidra-based runtime**: calls Ghidra APIs directly from CPython (not Jython).
+- **Multi-target management**: hold multiple sessions in one process and switch by target name.
+- **Project operations**: list project programs with `list_project_programs`, import new binaries with `import_program`, and switch loaded programs with `load_project_program`.
 
-FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、MCP クライアントからは `ghidra_mcp.cli` を通じて利用できます。詳しいオプションは `uv run ghidra-mcp --help` を参照してください。
+FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to MCP clients through `ghidra_mcp.cli`. For full CLI options, run `uv run ghidra-mcp --help`.
 
-### 提供ツール一覧
+### Available Tools
 
 #### Core Operations
 
-- `list_targets` - 登録済みターゲットと紐づくプロジェクト情報を一覧表示
-- `create_session` - 既存プロジェクトのプログラムを開いてターゲットを追加
-- `register_target` - プログラムを開かずにターゲットへプロジェクト情報のみ登録
-- `close_session` - ターゲットのセッションをクローズ
-- `close_session_and_remove_program` - セッションを閉じたうえでプログラムをプロジェクトから削除
-- `list_project_programs` - ターゲットが開いているプロジェクト内プログラム一覧を取得
-- `import_program` - バイナリまたは `.gzf` をプロジェクトへインポート
-- `load_project_program` - 既存プログラムを指定 `domain_path` でロード
+- `list_targets` - List registered targets and associated project metadata
+- `create_session` - Add a target by opening an existing project program
+- `register_target` - Register project metadata to a target without opening a program
+- `close_session` - Close a target session
+- `close_session_and_remove_program` - Close a session and remove the program from the project
+- `list_project_programs` - List programs in the target's opened project
+- `import_program` - Import a binary or `.gzf` into the project
+- `load_project_program` - Load an existing program by `domain_path`
 
 #### Function Analysis
 
-- `list_methods` - メソッド一覧を取得（ページング対応）
-- `list_functions` - 関数一覧を取得
-- `list_classes` - クラス一覧を取得
-- `list_namespaces` - 名前空間一覧を取得（ページング対応）
-- `search_functions_by_name` - 関数名の部分一致検索
-- `decompile_function` - 関数名指定で C 擬似コードを取得
-- `decompile_function_by_address` - アドレス指定で C 擬似コードを取得
-- `disassemble_function` - 関数の逆アセンブル結果を取得
-- `get_function_by_address` - アドレスに対応する関数情報を取得
-- `get_function_xrefs` - 関数名を起点に参照元/参照先を取得
-- `get_callee` - 指定アドレスの呼び出し先関数を取得
+- `list_methods` - List methods (with pagination)
+- `list_functions` - List functions
+- `list_classes` - List classes
+- `list_namespaces` - List namespaces (with pagination)
+- `search_functions_by_name` - Partial-match search by function name
+- `decompile_function` - Get C-like pseudocode by function name
+- `decompile_function_by_address` - Get C-like pseudocode by address
+- `disassemble_function` - Get disassembly for a function
+- `get_function_by_address` - Get function metadata by address
+- `get_function_xrefs` - Get incoming/outgoing references from a function name
+- `get_callee` - Get callee function at a specific address
 
-#### Memory & Data
+#### Memory and Data
 
-- `list_segments` - メモリセグメント/レイアウト情報を取得
-- `list_imports` - インポートシンボル一覧を取得
-- `list_exports` - エクスポートシンボル一覧を取得
-- `list_data_items` - データアイテム一覧を取得
-- `list_strings` - 文字列一覧を取得（フィルタ対応）
-- `get_xrefs_to` - 指定アドレスへのクロスリファレンスを取得
-- `get_xrefs_from` - 指定アドレスからのクロスリファレンスを取得
-- `get_data_by_label` - ラベル名からデータを取得
-- `get_bytes` - 指定アドレスのバイト列を取得
-- `search_bytes` - バイトパターン検索
+- `list_segments` - Get memory segment/layout info
+- `list_imports` - List imported symbols
+- `list_exports` - List exported symbols
+- `list_data_items` - List data items
+- `list_strings` - List strings (filterable)
+- `get_xrefs_to` - Get cross-references to an address
+- `get_xrefs_from` - Get cross-references from an address
+- `get_data_by_label` - Get data by label name
+- `get_bytes` - Read bytes at an address
+- `search_bytes` - Search byte patterns
 
-#### Symbol & Comment Editing
+#### Symbol and Comment Editing
 
-- `rename_function` - 関数名を変更（名前指定）
-- `rename_function_by_address` - 関数名を変更（アドレス指定）
-- `rename_variable` - ローカル変数名/引数名を変更
-- `rename_data` - データラベル名を変更
-- `set_function_prototype` - 関数プロトタイプを設定
-- `set_local_variable_type` - ローカル変数/引数の型を設定
-- `set_global_data_type` - グローバルデータの型を設定（`clear_mode` 指定可）
-- `set_bytes` - メモリ内容をバイト列で書き換え
-- `set_decompiler_comment` - デコンパイラコメントを設定
-- `set_disassembly_comment` - 逆アセンブリコメントを設定
-- `add_bookmark` - ブックマークを追加
+- `rename_function` - Rename a function (by old name)
+- `rename_function_by_address` - Rename a function (by address)
+- `rename_variable` - Rename a local variable or argument
+- `rename_data` - Rename a data label
+- `set_function_prototype` - Set function prototype
+- `set_local_variable_type` - Set type for local variable/argument
+- `set_global_data_type` - Set global data type (`clear_mode` optional)
+- `set_bytes` - Write bytes into memory
+- `set_decompiler_comment` - Set decompiler comment
+- `set_disassembly_comment` - Set disassembly comment
+- `add_bookmark` - Add bookmark
 
 #### Data Type Operations
 
-- `create_struct` - 構造体を作成
-- `add_struct_members` - 構造体メンバーを追加
-- `clear_struct` - 構造体メンバーを全削除
-- `remove_struct_members` - 構造体メンバーを選択削除
-- `get_struct` - 構造体定義を取得
-- `create_enum` - 列挙体を作成
-- `add_enum_values` - 列挙体の値を追加
-- `remove_enum_values` - 列挙体の値を削除
-- `get_enum` - 列挙体定義を取得
-- `create_class` - GhidraClass 名前空間と対応構造体を作成
-- `add_class_members` - クラス相当データ型へメンバーを追加
-- `remove_class_members` - クラス相当データ型からメンバーを削除
+- `create_struct` - Create struct
+- `add_struct_members` - Add struct members
+- `clear_struct` - Remove all struct members
+- `remove_struct_members` - Remove selected struct members
+- `get_struct` - Get struct definition
+- `create_enum` - Create enum
+- `add_enum_values` - Add enum values
+- `remove_enum_values` - Remove enum values
+- `get_enum` - Get enum definition
+- `create_class` - Create GhidraClass namespace and backing struct
+- `add_class_members` - Add members to class-like data type
+- `remove_class_members` - Remove members from class-like data type
 
-#### Shared Project Sync (`--enable-shared-project-sync` 指定時のみ)
+#### Shared Project Sync (only with `--enable-shared-project-sync`)
 
-`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` は `domain_path` を任意指定できます（未指定時は現在ロード中のprogram）。
+`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` support optional `domain_path` (if omitted, the currently loaded program is used).
 
-- `get_project_sync_status` - shared project 上の同期状態を取得
-- `get_version_history` - バージョン履歴（version/user/comment/time）を取得
-- `get_version_diff` - 2バージョン間の差分要約（件数/タイプ別/アドレスレンジ）を取得
-- `checkout_project_program` - プログラムを checkout（排他指定可）
-- `add_project_program_to_version_control` - private プログラムを shared 管理へ追加
-- `commit_project_program` - checkout 中の変更を check-in
-- `pull_project_program` - 最新状態を取得（必要に応じて破棄/追従）
-- `undo_checkout_project_program` - checkout を取り消し（ローカル変更破棄可）
-- `terminate_project_program_checkout` - 既存 checkout を checkout ID で強制終了
-- `reload_project_program` - 現在プログラムを再ロード
+- `get_project_sync_status` - Get sync state against shared project
+- `get_version_history` - Get version history (version/user/comment/time)
+- `get_version_diff` - Get summarized differences between two versions (count/type/address range)
+- `checkout_project_program` - Checkout program (exclusive optional)
+- `add_project_program_to_version_control` - Add private program to shared version control
+- `commit_project_program` - Check in checked-out changes
+- `pull_project_program` - Pull latest state (with optional discard/follow behavior)
+- `undo_checkout_project_program` - Undo checkout (optional local change discard)
+- `terminate_project_program_checkout` - Force-close an existing checkout by checkout ID
+- `reload_project_program` - Reload currently opened program
 
-詳細な運用フローや制約事項は [利用ガイド](docs/usage.md) を参照してください。
+See the [Usage Guide](docs/usage.md) for detailed workflows and constraints.
 
-## ライセンス
+## License
 
-このプロジェクトのライセンスは同梱の LICENSE ファイルを参照してください。
+See the bundled LICENSE file for project licensing.

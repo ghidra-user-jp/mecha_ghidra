@@ -1,1726 +1,441 @@
+from __future__ import annotations
+
 import types
-import threading
-from pathlib import Path
 
 import pytest
-from mcp.types import CallToolResult
 
 from ghidra_mcp import cli
-from ghidra_headless import session
+from ghidra_mcp.contracts.tool_spec import get_all_tool_specs
 
 
-def dummy_core(monkeypatch):
-    calls = {
-        "initialize": [],
-        "remove": [],
-        "clear": 0,
-    }
+class FakeCoreCommandService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object], str]] = []
 
-    def init(program, key="default"):
-        calls["initialize"].append((program, key))
-
-    def remove(key):
-        calls["remove"].append(key)
-
-    def clear():
-        calls["clear"] += 1
-
-    core_obj = types.SimpleNamespace(
-        initialize=init,
-        remove_context=remove,
-        clear_contexts=clear,
-    )
-    monkeypatch.setattr(cli, "_core", lambda: core_obj)
-    return calls
+    def call(self, command: str, params: dict[str, object], target: str):
+        self.calls.append((command, dict(params), target))
+        return {"path": "core", "command": command, "target": target}
 
 
-class DummySession:
-    def __init__(self, *, project_handle=None, domain_path=None):
-        self.program = object()
+class FakeTargetService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
         self.closed = False
-        self.project_handle = project_handle
-        self.domain_path = domain_path
 
-    def get_program(self):
-        return self.program
+    def list_targets(self):
+        self.calls.append(("list_targets", (), {}))
+        return [{"target": "fw"}]
 
-    def get_project_handle(self):
-        return self.project_handle
+    def list_programs(self, target: str):
+        self.calls.append(("list_programs", (target,), {}))
+        return ["/main"]
 
-    def close(self, remove_program: bool = False):
-        self.closed = True
-        if self.project_handle is not None:
-            self.project_handle.release_program(self.program, remove_program=remove_program)
+    def register_target(self, target: str, project_location: str, *, project_name: str | None = None):
+        self.calls.append(
+            (
+                "register_target",
+                (target, project_location),
+                {"project_name": project_name},
+            )
+        )
+        return {"status": "ok", "target": target}
 
-    def to_dict(self):
-        project_name = self.project_handle.get_project_name() if self.project_handle else None
-        project_location = self.project_handle.get_project_location() if self.project_handle else None
-        return {
-            "domain_path": self.domain_path,
-            "project_name": project_name,
-            "project_location": project_location,
-        }
+    def load_program(self, target: str, domain_path: str):
+        self.calls.append(("load_program", (target, domain_path), {}))
+        return domain_path
 
+    def import_program(self, target: str, binary_path: str):
+        self.calls.append(("import_program", (target, binary_path), {}))
+        return binary_path
 
-class DummyDomainFileRef:
-    def __init__(self, path):
-        self._path = path
-
-    def getPathname(self):
-        return self._path
-
-
-class DummyProgramRef:
-    def __init__(self, path):
-        self._domain_file = DummyDomainFileRef(path)
-        self._changed = False
-
-    def getDomainFile(self):
-        return self._domain_file
-
-    def isChanged(self):
-        return self._changed
-
-
-class DummyHandle:
-    def __init__(self, key=("./project", "Sample"), name="Sample"):
-        key = (str(Path(key[0]).resolve()), key[1])
-        self.key = key
-        self.closed = False
-        self.last_domain = None
-        self.last_import_path = None
-        self.project_location = key[0]
-        self.project_name = name
-        self.releases = []
-        self.deleted_programs = []
-        self.program_paths: dict[object, str | None] = {}
-        self.sync_calls = []
-        self.version_history_calls = []
-        self.version_diff_calls = []
-        self.sync_status = {
-            "is_versioned": True,
-            "is_checked_out": False,
-            "is_checked_out_exclusive": False,
-            "is_latest_version": True,
-            "modified_since_checkout": False,
-            "can_add_to_repository": False,
-            "can_checkout": True,
-            "can_checkin": False,
-            "can_merge": False,
-            "is_hijacked": False,
-            "version": 1,
-            "latest_version": 1,
-            "checkout_status": None,
-            "checkouts": [],
-            "shared_project_url": "ghidra://server/repo",
-        }
-        self.version_history_payload = {
-            "current_version": 2,
-            "latest_version": 2,
-            "total_versions": 2,
-            "versions": [
+    def create_session(
+        self,
+        target: str,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        domain_path: str | None = None,
+    ):
+        self.calls.append(
+            (
+                "create_session",
+                (target, project_location),
                 {
-                    "version": 2,
-                    "user": "alice",
-                    "comment": "latest",
-                    "create_time": 2000,
-                    "create_time_iso": "1970-01-01T00:00:02Z",
+                    "project_name": project_name,
+                    "domain_path": domain_path,
                 },
-                {
-                    "version": 1,
-                    "user": "bob",
-                    "comment": "initial",
-                    "create_time": 1000,
-                    "create_time_iso": "1970-01-01T00:00:01Z",
-                },
-            ],
-        }
-        self.version_diff_payload = {
-            "from_version": 1,
-            "to_version": 2,
-            "total_diff_addresses": 3,
-            "total_diff_ranges": 2,
-            "diff_types": [{"type": "Bytes", "count": 3}],
-            "ranges": [
-                {"start": "0x1000", "end": "0x1001", "length": 2},
-                {"start": "0x2000", "end": "0x2000", "length": 1},
-            ],
-            "ranges_truncated": False,
-            "warnings": None,
-        }
-        self.project = types.SimpleNamespace(save=lambda program: None)
+            )
+        )
+        return {"status": "ok", "target": target}
 
-    def get_project_location(self):
-        return self.project_location
+    def close_session(self, target: str, *, remove_program: bool = False):
+        self.calls.append(("close_session", (target,), {"remove_program": remove_program}))
+        return {"status": "ok", "target": target}
 
-    def get_project_name(self):
-        return self.project_name
-
-    def get_key(self):
-        return self.key
-
-    def is_closed(self):
-        return self.closed
-
-    def open_program(self, domain_path):
-        self.last_domain = domain_path
-        session = DummySession(domain_path=domain_path)
-        session.project_handle = self
-        session.program = DummyProgramRef(domain_path)
-        self.program_paths[session.program] = session.domain_path
-        return session
-
-    def import_program(self, path):
-        self.last_import_path = path
-
-        class DummyDomainFile:
-            def __init__(self, domain_path):
-                self._domain_path = domain_path
-
-            def getPathname(self):
-                return self._domain_path
-
-        return DummyDomainFile("/" + Path(path).name)
-
-    def list_programs(self):
-        return ["/folder/A", "/folder/B"]
-
-    def close(self):
-        self.closed = True
-
-    def release_program(self, program, *, remove_program: bool = False):
-        self.releases.append({"program": program, "remove_program": remove_program})
-        domain_path = self.program_paths.pop(program, None)
-        if remove_program and domain_path:
-            self.deleted_programs.append(domain_path)
-
-    def get_sync_status(self, domain_path):
-        self.sync_calls.append(("get_sync_status", domain_path))
-        return dict(self.sync_status)
-
-    def checkout_program(self, domain_path, *, exclusive=False):
-        self.sync_calls.append(("checkout_program", domain_path, exclusive))
-        self.sync_status["is_checked_out"] = True
-        self.sync_status["is_checked_out_exclusive"] = bool(exclusive)
+    def has_targets(self) -> bool:
         return True
 
-    def add_program_to_version_control(self, domain_path, comment, *, keep_checked_out=False):
-        self.sync_calls.append(("add_program_to_version_control", domain_path, comment, keep_checked_out))
-        self.sync_status["is_versioned"] = True
-        self.sync_status["can_add_to_repository"] = False
-        self.sync_status["version"] = max(1, int(self.sync_status.get("version") or 0))
-        self.sync_status["latest_version"] = self.sync_status["version"]
-        self.sync_status["is_latest_version"] = True
-        self.sync_status["is_checked_out"] = bool(keep_checked_out)
+    def close_all(self) -> None:
+        self.closed = True
 
-    def commit_program(self, domain_path, message, *, keep_checked_out=False, create_keep_file=False):
-        self.sync_calls.append(("commit_program", domain_path, message, keep_checked_out, create_keep_file))
-        self.sync_status["version"] = int(self.sync_status.get("version") or 0) + 1
-        self.sync_status["latest_version"] = self.sync_status["version"]
-        self.sync_status["is_latest_version"] = True
-        self.sync_status["modified_since_checkout"] = False
-        self.sync_status["can_checkin"] = False
-        self.sync_status["is_checked_out"] = bool(keep_checked_out)
 
-    def merge_program(self, domain_path, *, ok_to_upgrade=True):
-        self.sync_calls.append(("merge_program", domain_path, ok_to_upgrade))
-        self.sync_status["latest_version"] = int(self.sync_status.get("latest_version") or 0) + 1
-        self.sync_status["version"] = self.sync_status["latest_version"]
-        self.sync_status["is_latest_version"] = True
-        self.sync_status["can_merge"] = False
+class FakeSyncService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
 
-    def undo_checkout_program(self, domain_path, *, keep=False):
-        self.sync_calls.append(("undo_checkout_program", domain_path, keep))
-        self.sync_status["is_checked_out"] = False
-        self.sync_status["is_checked_out_exclusive"] = False
-        if not keep:
-            self.sync_status["modified_since_checkout"] = False
+    def get_project_sync_status(self, target: str, *, domain_path: str | None = None):
+        self.calls.append(("get_project_sync_status", (target,), {"domain_path": domain_path}))
+        return {"status": "ok"}
 
-    def terminate_checkout_program(self, domain_path, checkout_id):
-        self.sync_calls.append(("terminate_checkout_program", domain_path, int(checkout_id)))
+    def checkout_project_program(self, target: str, *, exclusive: bool = False, domain_path: str | None = None):
+        self.calls.append(
+            (
+                "checkout_project_program",
+                (target,),
+                {"exclusive": exclusive, "domain_path": domain_path},
+            )
+        )
+        return {"status": "ok"}
 
-    def get_version_history(self, domain_path, *, limit=50):
-        self.version_history_calls.append((domain_path, int(limit)))
-        payload = dict(self.version_history_payload)
-        versions = list(payload.get("versions", []))
-        payload["versions"] = versions[: int(limit)]
-        payload["program"] = domain_path
-        return payload
+    def add_project_program_to_version_control(
+        self,
+        target: str,
+        comment: str,
+        *,
+        keep_checked_out: bool = False,
+        domain_path: str | None = None,
+    ):
+        self.calls.append(
+            (
+                "add_project_program_to_version_control",
+                (target, comment),
+                {
+                    "keep_checked_out": keep_checked_out,
+                    "domain_path": domain_path,
+                },
+            )
+        )
+        return {"status": "ok"}
 
-    def get_version_diff(self, domain_path, *, from_version, to_version, range_limit=200):
-        self.version_diff_calls.append((domain_path, int(from_version), int(to_version), int(range_limit)))
-        payload = dict(self.version_diff_payload)
-        ranges = list(payload.get("ranges", []))
-        payload["ranges"] = ranges[: int(range_limit)]
-        payload["ranges_truncated"] = len(ranges) > len(payload["ranges"])
-        payload["from_version"] = int(from_version)
-        payload["to_version"] = int(to_version)
-        payload["program"] = domain_path
-        return payload
+    def commit_project_program(
+        self,
+        target: str,
+        message: str,
+        *,
+        keep_checked_out: bool = False,
+        auto_checkout: bool = True,
+        domain_path: str | None = None,
+    ):
+        self.calls.append(
+            (
+                "commit_project_program",
+                (target, message),
+                {
+                    "keep_checked_out": keep_checked_out,
+                    "auto_checkout": auto_checkout,
+                    "domain_path": domain_path,
+                },
+            )
+        )
+        return {"status": "ok"}
+
+    def pull_project_program(self, target: str, *, on_local_changes: str = "abort", domain_path: str | None = None):
+        self.calls.append(
+            (
+                "pull_project_program",
+                (target,),
+                {"on_local_changes": on_local_changes, "domain_path": domain_path},
+            )
+        )
+        return {"status": "ok"}
+
+    def undo_checkout_project_program(
+        self,
+        target: str,
+        *,
+        discard_local_changes: bool = True,
+        domain_path: str | None = None,
+    ):
+        self.calls.append(
+            (
+                "undo_checkout_project_program",
+                (target,),
+                {
+                    "discard_local_changes": discard_local_changes,
+                    "domain_path": domain_path,
+                },
+            )
+        )
+        return {"status": "ok"}
+
+    def terminate_project_program_checkout(
+        self,
+        target: str,
+        *,
+        checkout_id: int,
+        domain_path: str | None = None,
+    ):
+        self.calls.append(
+            (
+                "terminate_project_program_checkout",
+                (target,),
+                {"checkout_id": checkout_id, "domain_path": domain_path},
+            )
+        )
+        return {"status": "ok"}
+
+    def reload_project_program(self, target: str, *, domain_path: str | None = None):
+        self.calls.append(("reload_project_program", (target,), {"domain_path": domain_path}))
+        return {"status": "ok"}
+
+    def get_version_history(self, target: str, *, limit: int = 50, domain_path: str | None = None):
+        self.calls.append(("get_version_history", (target,), {"limit": limit, "domain_path": domain_path}))
+        return {"versions": []}
+
+    def get_version_diff(
+        self,
+        target: str,
+        *,
+        from_version: int,
+        to_version: int,
+        range_limit: int = 200,
+        domain_path: str | None = None,
+    ):
+        self.calls.append(
+            (
+                "get_version_diff",
+                (target,),
+                {
+                    "from_version": from_version,
+                    "to_version": to_version,
+                    "range_limit": range_limit,
+                    "domain_path": domain_path,
+                },
+            )
+        )
+        return {"diffs": []}
+
+
+@pytest.fixture
+def adapter() -> tuple[cli.ServiceRegistryAdapter, FakeCoreCommandService, FakeTargetService, FakeSyncService]:
+    core = FakeCoreCommandService()
+    target = FakeTargetService()
+    sync = FakeSyncService()
+    return (
+        cli.ServiceRegistryAdapter(
+            core_command_service=core,
+            target_service=target,
+            sync_service=sync,
+        ),
+        core,
+        target,
+        sync,
+    )
 
 
 def test_parse_session_definition_minimal():
     cfg = cli._parse_session_definition("name=fw,project_location=/tmp/sample.gpr,domain_path=/folder/fw.bin")
-    assert cfg["name"] == "fw"
-    assert cfg["project_location"] == "/tmp/sample.gpr"
-    assert cfg["domain_path"] == "/folder/fw.bin"
+    assert cfg == {
+        "name": "fw",
+        "project_location": "/tmp/sample.gpr",
+        "domain_path": "/folder/fw.bin",
+    }
 
 
 @pytest.mark.parametrize(
     "text",
-    ["project_location=/tmp/sample.gpr", "name=fw,domain_path=/folder/fw.bin"],
+    [
+        "name=fw,domain_path=/folder/fw.bin",
+        "project_location=/tmp/sample.gpr",
+        "name=fw,project_location=/tmp/sample.gpr,broken",
+    ],
 )
 def test_parse_session_definition_invalid(text):
     with pytest.raises(ValueError):
         cli._parse_session_definition(text)
 
 
-def test_project_key_requires_existing_gpr(tmp_path):
-    project_file = tmp_path / "sample.gpr"
-    project_file.write_text("")
-
-    assert session.ProjectHandle.make_key(str(project_file), None) == (
-        str(project_file.parent),
-        "sample",
-    )
-
-    with pytest.raises(ValueError):
-        session.ProjectHandle.make_key(str(tmp_path / "missing.gpr"), None)
-
-
-def test_project_key_requires_existing(tmp_path):
-    project_file = tmp_path / "sample.gpr"
-    project_file.write_text("")
-
-    assert session.ProjectHandle.make_key(str(project_file.parent), "sample") == (
-        str(project_file.parent),
-        "sample",
-    )
-
-    with pytest.raises(ValueError):
-        session.ProjectHandle.make_key(str(tmp_path / "missing.gpr"), None)
-
-
-def test_project_key_rejects_non_gpr(tmp_path):
-    non_gpr_path = tmp_path / "project_dir"
-    non_gpr_path.mkdir()
-
-    with pytest.raises(ValueError):
-        session.ProjectHandle.make_key(str(non_gpr_path), None)
-
-
-def test_session_registry_create_close(tmp_path, monkeypatch):
-    project_file = tmp_path / "sample.gpr"
-    project_file.write_text("")
-    calls = dummy_core(monkeypatch)
-
-    dummy_handle = DummyHandle(key=(str(project_file.parent), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    session = registry.create_session("fw", project_location=str(project_file), domain_path="/folder/fw.bin")
-
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": "/folder/fw.bin",
-            "project_name": "Sample",
-            "project_location": str(tmp_path),
-        }
-    ]
-    assert dummy_handle.last_domain == "/folder/fw.bin"
-    assert calls["initialize"] == [(session.program, "fw")]
-
-    registry.close_session("fw")
-    assert registry.list_targets() == []
-    assert session.closed is True
-    assert calls["remove"] == ["fw"]
-    assert dummy_handle.releases == [{"program": session.program, "remove_program": False}]
-
-
-def test_session_registry_close_and_remove_program(tmp_path, monkeypatch):
-    project_file = tmp_path / "sample.gpr"
-    project_file.write_text("")
-    calls = dummy_core(monkeypatch)
-
-    dummy_handle = DummyHandle(key=(str(project_file.parent), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    session = registry.create_session("fw", project_location=str(project_file), domain_path="/folder/fw.bin")
-
-    registry.close_session("fw", remove_program=True)
-    assert registry.list_targets() == []
-    assert session.closed is True
-    assert calls["remove"] == ["fw"]
-    assert dummy_handle.releases == [{"program": session.program, "remove_program": True}]
-    assert dummy_handle.deleted_programs == ["/folder/fw.bin"]
-
-
-def test_session_registry_close_and_remove_program_failure_keeps_session_visible(tmp_path, monkeypatch):
-    project_file = tmp_path / "sample.gpr"
-    project_file.write_text("")
-    calls = dummy_core(monkeypatch)
-
-    class FailingRemoveHandle(DummyHandle):
-        def release_program(self, program, *, remove_program: bool = False):
-            super().release_program(program, remove_program=remove_program)
-            if remove_program:
-                raise RuntimeError("delete failed")
-
-    dummy_handle = FailingRemoveHandle(key=(str(project_file.parent), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(project_file), domain_path="/folder/fw.bin")
-
-    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED"):
-        registry.close_session("fw", remove_program=True)
-
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": "/folder/fw.bin",
-            "project_name": "Sample",
-            "project_location": str(tmp_path),
-        }
-    ]
-    assert calls["remove"] == []
-
-    registry.close_session("fw", remove_program=False)
-    assert registry.list_targets() == []
-    assert calls["remove"] == ["fw"]
-
-
-def test_registry_close_all(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("a", project_location=str(tmp_path), project_name="sample", domain_path="/folder/a.bin")
-    registry.create_session("b", project_location=str(tmp_path / "sample.gpr"), domain_path="/folder/b.bin")
-
-    registry.close_all()
-    assert registry.list_targets() == []
-    assert set(calls["remove"]) == {"a", "b"}
-    assert calls["clear"] == 1
-
-
-def test_registry_reuses_active_project_handle(monkeypatch):
-    calls = dummy_core(monkeypatch)
-    registry = cli.SessionRegistry()
-    handle = DummyHandle()
-    with registry._registry_lock.write_lock():
-        registry._project_handles[handle.get_key()] = handle
-
-    session = registry.create_session("reuse", project_location=handle.get_key()[0], project_name=handle.get_key()[1], domain_path="/folder/main")
-
-    assert session.get_project_handle() is handle
-    assert handle.last_domain == "/folder/main"
-    assert calls["initialize"] == [(session.program, "reuse")]
-
-
-def test_registry_register_target_without_program(tmp_path):
-    registry = cli.SessionRegistry()
-
-    result = registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    assert result == {
-        "target": "fw",
-        "project_location": str(tmp_path.resolve()),
-        "project_name": "sample",
-        "domain_path": None,
-    }
-    assert registry.list_targets() == [result]
-    assert registry.has_targets() is True
-    assert registry.has_sessions() is False
-
-
-def test_registry_import_program(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    imported_path = registry.import_program("fw", "/tmp/new.bin")
-
-    assert imported_path == "/new.bin"
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": "/folder/old",
-            "project_name": "Sample",
-            "project_location": str(tmp_path),
-        }
-    ]
-    assert dummy_handle.last_import_path == "/tmp/new.bin"
-    assert dummy_handle.releases == []
-    assert len(calls["initialize"]) == 1
-
-
-def test_registry_import_program_without_loaded_program(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    imported_path = registry.import_program("fw", "/tmp/new.bin")
-
-    assert imported_path == "/new.bin"
-    assert dummy_handle.last_import_path == "/tmp/new.bin"
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": None,
-            "project_name": "sample",
-            "project_location": str(tmp_path.resolve()),
-        }
-    ]
-    assert calls["initialize"] == []
-
-
-def test_registry_load_program_requires_domain_path(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    with pytest.raises(ValueError, match="domain_path"):
-        registry.load_program("fw", None)
-
-    assert len(calls["initialize"]) == 1
-
-
-def test_registry_load_program_from_registered_target(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    loaded = registry.load_program("fw", "/folder/new")
-
-    assert loaded == "/folder/new"
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": "/folder/new",
-            "project_name": "Sample",
-            "project_location": str(tmp_path),
-        }
-    ]
-    assert len(calls["initialize"]) == 1
-
-
-def test_program_session_to_dict_binary(tmp_path):
-    class DummyProgram:
-        def getDomainFile(self):
-            class DummyDomainFile:
-                def getPathname(self):
-                    return "/fw.bin"
-            return DummyDomainFile()
-
-    session = cli.ProgramSession(
-        flat_api=None,
-        program=DummyProgram(),
-        project_handle=DummyHandle(key=(str(tmp_path), "Sample")),
-    )
-
-    assert session.to_dict() == {
-        "domain_path": "/fw.bin",
-        "project_name": "Sample",
-        "project_location": str(tmp_path),
-    }
-
-
-def test_program_session_to_dict_project():
-    class DummyProgram:
-        def getDomainFile(self):
-            class DummyDomainFile:
-                def getPathname(self):
-                    return "/main.bin"
-            return DummyDomainFile()
-
-    handle = DummyHandle(key=("./projects", "ProjectX.gpr"), name="ProjectX")
-    session = cli.ProgramSession(
-        flat_api=None,
-        program=DummyProgram(),
-        project_handle=handle,
-    )
-
-    assert session.to_dict() == {
-        "domain_path": "/main.bin",
-        "project_name": "ProjectX",
-        "project_location": str(Path("./projects").resolve()),
-    }
-
-
-def test_list_programs_for_target_returns_programs():
-    registry = cli.SessionRegistry()
-    handle_a = DummyHandle(name="A")
-    handle_b = DummyHandle(key=("/project", "B"), name="B")
-    session_a = DummySession(project_handle=handle_a, domain_path="/folder/A")
-    session_b = DummySession(project_handle=handle_b, domain_path="/folder/B")
-    with registry._registry_lock.write_lock():
-        registry._sessions["a"] = session_a
-        registry._sessions["b"] = session_b
-
-    result = registry.list_programs("a")
-
-    assert result == handle_a.list_programs()
-
-
-def test_list_programs_for_project_only_target_uses_metadata(monkeypatch):
-    registry = cli.SessionRegistry()
-    key = (str(Path("/project").resolve()), "Sample")
-    with registry._registry_lock.write_lock():
-        registry._target_projects["a"] = key
-        registry._locks["a"] = threading.RLock()
-
-    expected = [{"domain_path": "/from/metadata", "domain_name": "metadata", "contentType": "Program"}]
-    monkeypatch.setattr(
-        cli.ProjectHandle,
-        "list_programs_from_metadata",
-        staticmethod(lambda project_location, project_name: expected),
-    )
-    monkeypatch.setattr(
-        registry,
-        "_get_or_create_project_handle",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not open project handle")),
-    )
-
-    result = registry.list_programs("a")
-
-    assert result == expected
-
-
-def test_list_programs_for_project_only_target_falls_back_to_handle(monkeypatch):
-    registry = cli.SessionRegistry()
-    key = (str(Path("/project").resolve()), "Sample")
-    with registry._registry_lock.write_lock():
-        registry._target_projects["a"] = key
-        registry._locks["a"] = threading.RLock()
-
-    handle = DummyHandle(key=key, name="Sample")
-    monkeypatch.setattr(
-        cli.ProjectHandle,
-        "list_programs_from_metadata",
-        staticmethod(lambda _project_location, _project_name: None),
-    )
-    monkeypatch.setattr(registry, "_get_or_create_project_handle", lambda *_args, **_kwargs: handle)
-
-    result = registry.list_programs("a")
-
-    assert result == handle.list_programs()
-
-
-def test_list_programs_requires_existing_target():
-    registry = cli.SessionRegistry()
-    with pytest.raises(RuntimeError, match="初期化されていません"):
-        registry.list_programs("missing")
-
-
-def test_add_bookmark_tool_invokes_core(monkeypatch):
-    recorded = {}
-
-    def fake_call(self, command, params, target):
-        recorded["command"] = command
-        recorded["params"] = params
-        recorded["target"] = target
-        return {"status": "ok"}
-
-    monkeypatch.setattr(cli.SessionRegistry, "call", fake_call)
-
-    result = cli.add_bookmark(
-        address="0x401000",
-        category="Analysis",
-        comment="Check this later",
-        type="Info",
-        target="note",
-    )
-
-    assert result == {"status": "ok"}
-    assert recorded == {
-        "command": "add_bookmark",
-        "params": {
-            "address": "0x401000",
-            "category": "Analysis",
-            "comment": "Check this later",
-            "type": "Info",
-            "format": "json",
-        },
-        "target": "note",
-    }
-
-
-def test_add_bookmark_tool_allows_format_override(monkeypatch):
-    recorded = {}
-
-    def fake_call(self, command, params, target):
-        recorded["command"] = command
-        recorded["params"] = params
-        recorded["target"] = target
-        return {"status": "ok"}
-
-    monkeypatch.setattr(cli.SessionRegistry, "call", fake_call)
-
-    result = cli.add_bookmark(
-        address="0x401000",
-        category="Analysis",
-        comment="Check this later",
-        type="Info",
-        format="legacy",
-        target="note",
-    )
-
-    assert result == {"status": "ok"}
-    assert recorded["command"] == "add_bookmark"
-    assert recorded["params"]["format"] == "legacy"
-    assert recorded["target"] == "note"
-
-
-def test_list_functions_tool_forwards_offset_and_limit(monkeypatch):
-    recorded = {}
-
-    def fake_call(self, command, params, target):
-        recorded["command"] = command
-        recorded["params"] = params
-        recorded["target"] = target
-        return {"status": "ok"}
-
-    monkeypatch.setattr(cli.SessionRegistry, "call", fake_call)
-
-    result = cli.list_functions(offset=7, limit=3, target="fw")
-
-    assert result == {"status": "ok"}
-    assert recorded == {
-        "command": "list_functions",
-        "params": {"offset": 7, "limit": 3},
-        "target": "fw",
-    }
-
-
-def test_search_functions_by_name_tool_requires_query():
-    with pytest.raises(ValueError, match="query"):
-        cli.search_functions_by_name("")
-
-
-def test_close_session_and_remove_program_tool(monkeypatch):
-    called = {}
-
-    def fake_close(name, *, remove_program=False):
-        called["target"] = name
-        called["remove_program"] = remove_program
-
-    monkeypatch.setattr(cli._registry, "close_session", fake_close)
-
-    result = cli.close_session_and_remove_program("target1")
-
-    assert result == {"status": "ok", "target": "target1"}
-    assert called == {"target": "target1", "remove_program": True}
-
-
-def test_cleanup_session_raises_when_session_close_fails(monkeypatch):
-    registry = cli.SessionRegistry()
-    removed = []
-    monkeypatch.setattr(cli, "_core", lambda: types.SimpleNamespace(remove_context=lambda name: removed.append(name)))
-
-    class BrokenSession:
-        def close(self, remove_program=False):
-            raise RuntimeError("close failed")
-
-    class DummyHandleForCleanup:
-        def is_closed(self):
-            return False
-
-        def get_key(self):
-            return ("/project", "Sample")
-
-    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED"):
-        registry._cleanup_session(
-            "fw",
-            BrokenSession(),
-            DummyHandleForCleanup(),
-            remove_registry_entry=False,
-            remove_context=True,
-            remove_program=False,
-        )
-
-    assert removed == ["fw"]
-
-
-def test_registry_call_uses_instance_methods_instead_of_global_registry(monkeypatch):
-    registry = cli.SessionRegistry()
-    used = {}
-
-    lock = threading.RLock()
-
-    def fake_ensure(name):
-        used["ensure"] = name
-
-    def fake_lock(name):
-        used["lock"] = name
-        return lock
-
-    monkeypatch.setattr(registry, "_ensure", fake_ensure)
-    monkeypatch.setattr(registry, "_lock", fake_lock)
-    monkeypatch.setattr(
-        cli,
-        "_core",
-        lambda: types.SimpleNamespace(
-            execute=lambda command, params, key: {"command": command, "params": params, "key": key}
+@pytest.mark.parametrize(
+    ("call", "expected"),
+    [
+        (
+            lambda a: a.call("list_functions", {"offset": 1, "limit": 2}, "fw"),
+            {"path": "core", "command": "list_functions", "target": "fw"},
         ),
-    )
+        (
+            lambda a: a.list_targets(),
+            [{"target": "fw"}],
+        ),
+        (
+            lambda a: a.list_programs("fw"),
+            ["/main"],
+        ),
+        (
+            lambda a: a.register_target("fw", project_location="/tmp/p.gpr", project_name=None),
+            {"status": "ok", "target": "fw"},
+        ),
+        (
+            lambda a: a.load_program("fw", "/app"),
+            "/app",
+        ),
+        (
+            lambda a: a.import_program("fw", "/tmp/a.exe"),
+            "/tmp/a.exe",
+        ),
+        (
+            lambda a: a.create_session("fw", "/tmp/p.gpr", project_name="p", domain_path="/app"),
+            {"status": "ok", "target": "fw"},
+        ),
+        (
+            lambda a: a.close_session("fw"),
+            {"status": "ok", "target": "fw"},
+        ),
+        (
+            lambda a: a.close_session("fw", remove_program=True),
+            {"status": "ok", "target": "fw"},
+        ),
+        (
+            lambda a: a.get_project_sync_status("fw", domain_path="/app"),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.checkout_project_program("fw", exclusive=True, domain_path="/app"),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.add_project_program_to_version_control(
+                "fw",
+                comment="init",
+                keep_checked_out=True,
+                domain_path="/app",
+            ),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.commit_project_program(
+                "fw",
+                message="msg",
+                keep_checked_out=False,
+                auto_checkout=False,
+                domain_path="/app",
+            ),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.pull_project_program("fw", on_local_changes="discard", domain_path="/app"),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.undo_checkout_project_program("fw", discard_local_changes=False, domain_path="/app"),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.terminate_project_program_checkout("fw", checkout_id=7, domain_path="/app"),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.reload_project_program("fw", domain_path="/app"),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.get_version_history("fw", limit=5, domain_path="/app"),
+            {"versions": []},
+        ),
+        (
+            lambda a: a.get_version_diff("fw", from_version=1, to_version=2, range_limit=30, domain_path="/app"),
+            {"diffs": []},
+        ),
+    ],
+)
+def test_service_registry_adapter_routes_calls(adapter, call, expected):
+    registry, _core, _target, _sync = adapter
+    assert call(registry) == expected
 
-    monkeypatch.setattr(
-        cli._registry,
-        "_ensure",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("global ensure should not be used")),
-    )
-    monkeypatch.setattr(
-        cli._registry,
-        "_lock",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("global lock should not be used")),
-    )
 
-    result = registry.call("list_methods", {"offset": 0, "limit": 1}, target="fw")
-
-    assert result == {"command": "list_methods", "params": {"offset": 0, "limit": 1}, "key": "fw"}
-    assert used == {"ensure": "fw", "lock": "fw"}
+def test_service_registry_adapter_requires_domain_path_for_create_session(adapter):
+    registry, _core, _target, _sync = adapter
+    with pytest.raises(ValueError, match="domain_path is required"):
+        registry.create_session("fw", "/tmp/p.gpr", project_name="p")
 
 
-def test_registry_call_wraps_empty_list_result(monkeypatch):
-    registry = cli.SessionRegistry()
-    lock = threading.RLock()
-
-    monkeypatch.setattr(registry, "_ensure", lambda _name: None)
-    monkeypatch.setattr(registry, "_lock", lambda _name: lock)
-    monkeypatch.setattr(
-        cli,
-        "_core",
-        lambda: types.SimpleNamespace(execute=lambda _command, _params, key: []),
-    )
-
-    result = registry.call("search_functions_by_name", {"query": "__missing__"}, target="fw")
-
-    assert isinstance(result, CallToolResult)
-    assert len(result.content) == 1
-    assert result.content[0].type == "text"
-    assert result.content[0].text == "[]"
+def test_service_registry_adapter_has_targets_and_close_all(adapter):
+    registry, _core, target, _sync = adapter
+    assert registry.has_targets() is True
+    registry.close_all()
+    assert target.closed is True
 
 
-def test_registry_call_rejects_mutating_command_when_versioned_not_checked_out(tmp_path, monkeypatch):
-    calls = {"initialize": [], "execute": []}
+@pytest.mark.parametrize(
+    ("call", "expected_spec", "expected_args"),
+    [
+        (
+            lambda: cli.list_methods(offset=1, limit=2, target="fw"),
+            "list_methods",
+            {"offset": 1, "limit": 2},
+        ),
+        (
+            lambda: cli.list_classes(offset=3, limit=4, target="fw"),
+            "list_classes",
+            {"offset": 3, "limit": 4},
+        ),
+    ],
+)
+def test_list_methods_and_list_classes_use_dispatcher(monkeypatch, call, expected_spec, expected_args):
+    called: dict[str, object] = {}
 
-    def init(program, key="default"):
-        calls["initialize"].append((program, key))
-
-    def execute(command, params, key="default"):
-        calls["execute"].append((command, params, key))
+    def fake_dispatch(spec_name, raw_args, target, *, registry, core_executor=None):
+        called["spec_name"] = spec_name
+        called["raw_args"] = dict(raw_args)
+        called["target"] = target
+        called["registry"] = registry
+        called["core_executor"] = core_executor
         return {"status": "ok"}
 
-    core_obj = types.SimpleNamespace(
-        initialize=init,
-        remove_context=lambda _key: None,
-        clear_contexts=lambda: None,
-        execute=execute,
-    )
-    monkeypatch.setattr(cli, "_core", lambda: core_obj)
-
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_versioned"] = True
-    dummy_handle.sync_status["is_checked_out"] = False
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    with pytest.raises(RuntimeError, match="CHECKOUT_REQUIRED"):
-        registry.call(
-            "rename_function_by_address",
-            {"function_address": "140001040", "new_name": "tmp_name"},
-            target="fw",
-        )
-
-    assert calls["execute"] == []
-
-
-def test_registry_call_allows_mutating_command_when_checked_out(tmp_path, monkeypatch):
-    calls = {"initialize": [], "execute": []}
-
-    def init(program, key="default"):
-        calls["initialize"].append((program, key))
-
-    def execute(command, params, key="default"):
-        calls["execute"].append((command, params, key))
-        return {"status": "ok"}
-
-    core_obj = types.SimpleNamespace(
-        initialize=init,
-        remove_context=lambda _key: None,
-        clear_contexts=lambda: None,
-        execute=execute,
-    )
-    monkeypatch.setattr(cli, "_core", lambda: core_obj)
-
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_versioned"] = True
-    dummy_handle.sync_status["is_checked_out"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.call(
-        "rename_function_by_address",
-        {"function_address": "140001040", "new_name": "tmp_name"},
-        target="fw",
-    )
-
-    assert result == {"status": "ok"}
-    assert calls["execute"] == [
-        ("rename_function_by_address", {"function_address": "140001040", "new_name": "tmp_name"}, "fw")
-    ]
-
-
-def test_create_session_tool_uses_domain_path(monkeypatch):
-    called = {}
-
-    def fake_create_session(name, project_location, *, project_name=None, domain_path=None):
-        called["name"] = name
-        called["project_location"] = project_location
-        called["project_name"] = project_name
-        called["domain_path"] = domain_path
-
-    monkeypatch.setattr(cli._registry, "create_session", fake_create_session)
-
-    result = cli.create_session(
-        target="fw",
-        project_location="/tmp/sample.gpr",
-        domain_path="/folder/fw.bin",
-    )
-
-    assert result == {"status": "ok", "target": "fw"}
-    assert called == {
-        "name": "fw",
-        "project_location": "/tmp/sample.gpr",
-        "project_name": None,
-        "domain_path": "/folder/fw.bin",
-    }
-
-
-def test_create_session_tool_rejects_binary_path():
-    with pytest.raises(TypeError):
-        cli.create_session(
-            target="fw",
-            project_location="/tmp/sample.gpr",
-            binary_path="/tmp/fw.bin",
-        )
-
-
-def test_create_session_tool_requires_domain_path():
-    with pytest.raises(TypeError):
-        cli.create_session(
-            target="fw",
-            project_location="/tmp/sample.gpr",
-        )
-
-
-def test_register_target_tool(monkeypatch):
-    called = {}
-
-    def fake_register_target(name, project_location, *, project_name=None):
-        called["name"] = name
-        called["project_location"] = project_location
-        called["project_name"] = project_name
-        return {"status": "ok", "target": name}
-
-    monkeypatch.setattr(cli._registry, "register_target", fake_register_target)
-
-    result = cli.register_target(
-        target="fw",
-        project_location="/tmp/sample.gpr",
-    )
-
-    assert result == {"status": "ok", "target": "fw"}
-    assert called == {
-        "name": "fw",
-        "project_location": "/tmp/sample.gpr",
-        "project_name": None,
-    }
-
-
-def test_list_project_programs_tool_requires_target():
-    with pytest.raises(TypeError):
-        cli.list_project_programs()
-
-
-def test_list_project_programs_tool_passes_target(monkeypatch):
-    called = {}
-
-    def fake_list_programs(target):
-        called["target"] = target
-        return ["/folder/A", "/folder/B"]
-
-    monkeypatch.setattr(cli._registry, "list_programs", fake_list_programs)
-
-    result = cli.list_project_programs("fw")
-
-    assert result == ["/folder/A", "/folder/B"]
-    assert called == {"target": "fw"}
-
-
-def test_list_project_programs_tool_wraps_empty_result(monkeypatch):
-    monkeypatch.setattr(cli._registry, "list_programs", lambda _target: [])
-
-    result = cli.list_project_programs("fw")
-
-    assert isinstance(result, CallToolResult)
-    assert len(result.content) == 1
-    assert result.content[0].text == "[]"
-
-
-def test_import_program_tool(monkeypatch):
-    called = {}
-
-    def fake_import_program(target, binary_path):
-        called["target"] = target
-        called["binary_path"] = binary_path
-        return "/imported/fw.bin"
-
-    monkeypatch.setattr(cli._registry, "import_program", fake_import_program)
-
-    result = cli.import_program(target="fw", binary_path="/tmp/fw.bin")
-
-    assert result == {"status": "ok", "target": "fw", "program": "/imported/fw.bin"}
-    assert called == {
-        "target": "fw",
-        "binary_path": "/tmp/fw.bin",
-    }
-
-
-def test_load_project_program_tool_accepts_domain_path(monkeypatch):
-    called = {}
-
-    def fake_load_program(target, domain_path):
-        called["target"] = target
-        called["domain_path"] = domain_path
-        return domain_path
-
-    monkeypatch.setattr(cli._registry, "load_program", fake_load_program)
-
-    result = cli.load_project_program(target="fw", domain_path="/folder/current.bin")
-
-    assert result == {"status": "ok", "target": "fw", "program": "/folder/current.bin"}
-    assert called == {
-        "target": "fw",
-        "domain_path": "/folder/current.bin",
-    }
-
-
-def test_list_targets_tool_wraps_empty_result(monkeypatch):
-    monkeypatch.setattr(cli._registry, "list_targets", lambda: [])
-
-    result = cli.list_targets()
-
-    assert isinstance(result, CallToolResult)
-    assert len(result.content) == 1
-    assert result.content[0].text == "[]"
-
-
-def test_registry_get_project_sync_status(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    status = registry.get_project_sync_status("fw")
-
-    assert status["target"] == "fw"
-    assert status["program"] == "/folder/old"
-    assert status["is_versioned"] is True
-    assert len(calls["initialize"]) == 1
-
-
-def test_registry_get_project_sync_status_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    status = registry.get_project_sync_status("fw", domain_path="/folder/new")
-
-    assert status["target"] == "fw"
-    assert status["program"] == "/folder/new"
-    assert status["is_versioned"] is True
-    assert ("get_sync_status", "/folder/new") in dummy_handle.sync_calls
-    assert calls["initialize"] == []
-
-
-def test_registry_get_version_history_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.get_version_history("fw", domain_path="/folder/new", limit=1)
-
-    assert result["target"] == "fw"
-    assert result["program"] == "/folder/new"
-    assert result["total_versions"] == 2
-    assert len(result["versions"]) == 1
-    assert dummy_handle.version_history_calls == [("/folder/new", 1)]
-    assert calls["initialize"] == []
-
-
-def test_registry_get_version_diff_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.get_version_diff(
-        "fw",
-        domain_path="/folder/new",
-        from_version=1,
-        to_version=2,
-        range_limit=1,
-    )
-
-    assert result["target"] == "fw"
-    assert result["program"] == "/folder/new"
-    assert result["from_version"] == 1
-    assert result["to_version"] == 2
-    assert result["ranges_truncated"] is True
-    assert len(result["ranges"]) == 1
-    assert dummy_handle.version_diff_calls == [("/folder/new", 1, 2, 1)]
-    assert calls["initialize"] == []
-
-
-def test_registry_checkout_project_program(tmp_path, monkeypatch):
-    calls = dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.checkout_project_program("fw", exclusive=True)
-
-    assert result["status"] == "ok"
-    assert result["checked_out"] is True
-    assert result["exclusive"] is True
-    assert ("checkout_program", "/folder/old", True) in dummy_handle.sync_calls
-    assert len(dummy_handle.releases) == 1
-    assert calls["initialize"][-1][1] == "fw"
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": "/folder/old",
-            "project_name": "Sample",
-            "project_location": str(tmp_path),
-        }
-    ]
-
-
-def test_registry_checkout_project_program_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.checkout_project_program("fw", exclusive=True, domain_path="/folder/new")
-
-    assert result["status"] == "ok"
-    assert result["program"] == "/folder/new"
-    assert result["checked_out"] is True
-    assert ("checkout_program", "/folder/new", True) in dummy_handle.sync_calls
-
-
-def test_registry_add_project_program_to_version_control(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_versioned"] = False
-    dummy_handle.sync_status["can_add_to_repository"] = True
-    dummy_handle.sync_status["version"] = 0
-    dummy_handle.sync_status["latest_version"] = 0
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.add_project_program_to_version_control("fw", "enable shared", keep_checked_out=True)
-
-    assert result["status"] == "ok"
-    assert result["is_versioned"] is True
-    assert result["effective_keep_checked_out"] is True
-    assert any(call[0] == "add_program_to_version_control" for call in dummy_handle.sync_calls)
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_add_project_program_to_version_control_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_versioned"] = False
-    dummy_handle.sync_status["can_add_to_repository"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.add_project_program_to_version_control(
-        "fw",
-        "enable shared",
-        keep_checked_out=False,
-        domain_path="/folder/new",
-    )
-
-    assert result["status"] == "ok"
-    assert result["program"] == "/folder/new"
-    assert any(call[0] == "add_program_to_version_control" and call[1] == "/folder/new" for call in dummy_handle.sync_calls)
-    assert dummy_handle.releases == []
-
-
-def test_registry_commit_project_program(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["can_checkin"] = True
-    dummy_handle.sync_status["modified_since_checkout"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.commit_project_program("fw", "sync result")
-
-    assert result["status"] == "ok"
-    assert result["new_version"] == 2
-    assert result["effective_keep_checked_out"] is False
-    assert any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_commit_project_program_saves_active_changes_before_precheck(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["can_checkin"] = False
-    dummy_handle.sync_status["modified_since_checkout"] = False
-
-    class SaveProject:
-        def __init__(self, handle):
-            self.saved_count = 0
-            self._handle = handle
-
-        def save(self, program):
-            self.saved_count += 1
-            program._changed = False
-            self._handle.sync_status["modified_since_checkout"] = True
-            self._handle.sync_status["can_checkin"] = True
-
-    save_project = SaveProject(dummy_handle)
-    dummy_handle.project = save_project
-
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    created = registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-    created.program._changed = True
-
-    result = registry.commit_project_program("fw", "sync result")
-
-    assert result["status"] == "ok"
-    assert result["new_version"] == 2
-    assert save_project.saved_count >= 1
-    assert any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
-
-
-def test_registry_commit_project_program_forces_save_even_when_is_changed_false(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["can_checkin"] = False
-    dummy_handle.sync_status["modified_since_checkout"] = False
-
-    class SaveProject:
-        def __init__(self, handle):
-            self.saved_count = 0
-            self._handle = handle
-
-        def save(self, _program):
-            self.saved_count += 1
-            self._handle.sync_status["modified_since_checkout"] = True
-            self._handle.sync_status["can_checkin"] = True
-
-    save_project = SaveProject(dummy_handle)
-    dummy_handle.project = save_project
-
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    created = registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-    created.program._changed = False
-
-    result = registry.commit_project_program("fw", "sync result")
-
-    assert result["status"] == "ok"
-    assert result["new_version"] == 2
-    assert save_project.saved_count >= 1
-    assert any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
-
-
-def test_registry_commit_project_program_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["can_checkin"] = True
-    dummy_handle.sync_status["modified_since_checkout"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.commit_project_program("fw", "sync result", domain_path="/folder/new")
-
-    assert result["status"] == "ok"
-    assert result["program"] == "/folder/new"
-    assert any(call[0] == "commit_program" and call[1] == "/folder/new" for call in dummy_handle.sync_calls)
-    assert dummy_handle.releases == []
-
-
-def test_registry_commit_project_program_with_domain_path_keeps_active_session(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["can_checkin"] = True
-    dummy_handle.sync_status["modified_since_checkout"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.commit_project_program("fw", "sync result", domain_path="/folder/new")
-
-    assert result["status"] == "ok"
-    assert result["program"] == "/folder/new"
-    assert any(call[0] == "commit_program" and call[1] == "/folder/new" for call in dummy_handle.sync_calls)
-    assert dummy_handle.releases == []
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": "/folder/old",
-            "project_name": "Sample",
-            "project_location": str(tmp_path),
-        }
-    ]
-
-
-def test_registry_commit_project_program_auto_checkout_failure(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = False
-    dummy_handle.sync_status["can_checkout"] = True
-    dummy_handle.sync_status["can_checkin"] = False
-    dummy_handle.sync_status["modified_since_checkout"] = False
-
-    def checkout_fail(domain_path, *, exclusive=False):
-        dummy_handle.sync_calls.append(("checkout_program", domain_path, exclusive))
-        return False
-
-    dummy_handle.checkout_program = checkout_fail
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    with pytest.raises(RuntimeError, match="AUTO_CHECKOUT_FAILED"):
-        registry.commit_project_program(
-            "fw",
-            "sync result",
-            auto_checkout=True,
-            domain_path="/folder/new",
-        )
-
-    assert any(call[0] == "checkout_program" and call[1] == "/folder/new" for call in dummy_handle.sync_calls)
-    assert not any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
-
-
-def test_registry_commit_project_program_auto_checkout_reopens_active_program(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = False
-    dummy_handle.sync_status["can_checkout"] = True
-    dummy_handle.sync_status["can_checkin"] = False
-    dummy_handle.sync_status["modified_since_checkout"] = False
-
-    def checkout_ok(domain_path, *, exclusive=False):
-        dummy_handle.sync_calls.append(("checkout_program", domain_path, exclusive))
-        dummy_handle.sync_status["is_checked_out"] = True
-        dummy_handle.sync_status["is_checked_out_exclusive"] = bool(exclusive)
-        dummy_handle.sync_status["can_checkin"] = True
-        dummy_handle.sync_status["modified_since_checkout"] = True
-        return True
-
-    dummy_handle.checkout_program = checkout_ok
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.commit_project_program("fw", "sync result", auto_checkout=True)
-
-    assert result["status"] == "ok"
-    assert any(call[0] == "checkout_program" for call in dummy_handle.sync_calls)
-    assert any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
-    assert len(dummy_handle.releases) >= 2
-
-
-def test_registry_commit_project_program_discards_on_conflict(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["can_checkin"] = True
-    dummy_handle.sync_status["modified_since_checkout"] = True
-    dummy_handle.sync_status["can_merge"] = True
-    dummy_handle.sync_status["version"] = 2
-    dummy_handle.sync_status["latest_version"] = 3
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.commit_project_program("fw", "sync result")
-
-    assert result["status"] == "noop"
-    assert result["reason"] == "conflict_discarded"
-    assert result["discarded_local_changes"] is True
-    assert result["merged"] is False
-    assert result["checked_out"] is False
-    assert not any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
-    assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
-    assert not any(call[0] == "merge_program" for call in dummy_handle.sync_calls)
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_commit_project_program_discards_checkout_on_conflict_without_local_changes(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["can_checkin"] = False
-    dummy_handle.sync_status["modified_since_checkout"] = False
-    dummy_handle.sync_status["can_merge"] = True
-    dummy_handle.sync_status["version"] = 2
-    dummy_handle.sync_status["latest_version"] = 3
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.commit_project_program("fw", "sync result")
-
-    assert result["status"] == "noop"
-    assert result["reason"] == "conflict_discarded"
-    assert result["discarded_local_changes"] is False
-    assert result["merged"] is False
-    assert result["checked_out"] is False
-    assert not any(call[0] == "commit_program" for call in dummy_handle.sync_calls)
-    assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
-    assert not any(call[0] == "merge_program" for call in dummy_handle.sync_calls)
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_pull_project_program_with_discard(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["modified_since_checkout"] = True
-    dummy_handle.sync_status["can_merge"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.pull_project_program("fw", on_local_changes="discard")
-
-    assert result["status"] == "ok"
-    assert result["discarded_local_changes"] is True
-    assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_pull_project_program_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    dummy_handle.sync_status["modified_since_checkout"] = True
-    dummy_handle.sync_status["can_merge"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.pull_project_program("fw", on_local_changes="discard", domain_path="/folder/new")
-
-    assert result["status"] == "ok"
-    assert result["program"] == "/folder/new"
-    assert any(call[0] == "undo_checkout_program" and call[1] == "/folder/new" for call in dummy_handle.sync_calls)
-    assert dummy_handle.releases == []
-
-
-def test_registry_undo_checkout_project_program(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.undo_checkout_project_program("fw", discard_local_changes=True)
-
-    assert result["status"] == "ok"
-    assert result["checked_out"] is False
-    assert any(call[0] == "undo_checkout_program" for call in dummy_handle.sync_calls)
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_undo_checkout_project_program_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    dummy_handle.sync_status["is_checked_out"] = True
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.undo_checkout_project_program("fw", discard_local_changes=True, domain_path="/folder/new")
-
-    assert result["status"] == "ok"
-    assert result["program"] == "/folder/new"
-    assert any(call[0] == "undo_checkout_program" and call[1] == "/folder/new" for call in dummy_handle.sync_calls)
-    assert dummy_handle.releases == []
-
-
-def test_registry_terminate_project_program_checkout(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.terminate_project_program_checkout("fw", checkout_id=12)
-
-    assert result["status"] == "ok"
-    assert result["checkout_id"] == 12
-    assert ("terminate_checkout_program", "/folder/old", 12) in dummy_handle.sync_calls
-
-
-def test_registry_terminate_project_program_checkout_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.terminate_project_program_checkout("fw", checkout_id=12, domain_path="/folder/new")
-
-    assert result["status"] == "ok"
-    assert result["program"] == "/folder/new"
-    assert ("terminate_checkout_program", "/folder/new", 12) in dummy_handle.sync_calls
-
-
-def test_registry_reload_project_program(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.reload_project_program("fw")
-
-    assert result == {
-        "status": "ok",
-        "target": "fw",
-        "program": "/folder/old",
-        "reloaded": True,
-    }
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_reload_project_program_with_domain_path_on_project_only_target(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.register_target("fw", project_location=str(tmp_path), project_name="sample")
-
-    result = registry.reload_project_program("fw", domain_path="/folder/new")
-
-    assert result == {
-        "status": "ok",
-        "target": "fw",
-        "program": "/folder/new",
-        "reloaded": True,
-    }
-    assert len(dummy_handle.releases) == 1
-
-
-def test_registry_reload_project_program_with_domain_path_keeps_active_session(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    result = registry.reload_project_program("fw", domain_path="/folder/new")
-
-    assert result == {
-        "status": "ok",
-        "target": "fw",
-        "program": "/folder/new",
-        "reloaded": True,
-    }
-    assert len(dummy_handle.releases) == 1
-    assert registry.list_targets() == [
-        {
-            "target": "fw",
-            "domain_path": "/folder/old",
-            "project_name": "Sample",
-            "project_location": str(tmp_path),
-        }
-    ]
-
-
-def test_registry_reload_project_program_fails_when_pre_save_fails(tmp_path, monkeypatch):
-    dummy_core(monkeypatch)
-    dummy_handle = DummyHandle(key=(str(tmp_path), "sample"))
-
-    class FailingProject:
-        def save(self, _program):
-            raise RuntimeError("save failed")
-
-    dummy_handle.project = FailingProject()
-    monkeypatch.setattr(cli.SessionRegistry, "_get_or_create_project_handle", lambda self, *args, **kwargs: dummy_handle)
-    registry = cli.SessionRegistry()
-    registry.create_session("fw", project_location=str(tmp_path), project_name="sample", domain_path="/folder/old")
-
-    with pytest.raises(RuntimeError, match="SAVE_FAILED"):
-        registry.reload_project_program("fw")
-
-    assert dummy_handle.releases == []
-
-
-def test_shared_project_sync_tool_wrappers(monkeypatch):
-    called = {}
-
-    def fake_status(target, domain_path=None):
-        called["status"] = (target, domain_path)
-        return {"target": target}
-
-    def fake_history(target, domain_path=None, limit=50):
-        called["history"] = (target, domain_path, limit)
-        return {"target": target, "versions": []}
-
-    def fake_diff(target, from_version, to_version, domain_path=None, range_limit=200):
-        called["diff"] = (target, from_version, to_version, domain_path, range_limit)
-        return {"target": target, "total_diff_addresses": 0}
-
-    def fake_checkout(target, exclusive=False, domain_path=None):
-        called["checkout"] = (target, exclusive, domain_path)
-        return {}
-
-    def fake_commit(target, message, keep_checked_out=False, auto_checkout=True, domain_path=None):
-        called["commit"] = (target, message, keep_checked_out, auto_checkout, domain_path)
-        return {}
-
-    def fake_pull(target, on_local_changes="abort", domain_path=None):
-        called["pull"] = (target, on_local_changes, domain_path)
-        return {}
-
-    def fake_undo(target, discard_local_changes=True, domain_path=None):
-        called["undo"] = (target, discard_local_changes, domain_path)
-        return {}
-
-    def fake_terminate(target, checkout_id, domain_path=None):
-        called["terminate"] = (target, checkout_id, domain_path)
-        return {}
-
-    def fake_add(target, comment, keep_checked_out=False, domain_path=None):
-        called["add"] = (target, comment, keep_checked_out, domain_path)
-        return {}
-
-    def fake_reload(target, domain_path=None):
-        called["reload"] = (target, domain_path)
-        return {}
-
-    monkeypatch.setattr(cli._registry, "get_project_sync_status", fake_status)
-    monkeypatch.setattr(cli._registry, "get_version_history", fake_history)
-    monkeypatch.setattr(cli._registry, "get_version_diff", fake_diff)
-    monkeypatch.setattr(cli._registry, "checkout_project_program", fake_checkout)
-    monkeypatch.setattr(cli._registry, "commit_project_program", fake_commit)
-    monkeypatch.setattr(cli._registry, "pull_project_program", fake_pull)
-    monkeypatch.setattr(cli._registry, "undo_checkout_project_program", fake_undo)
-    monkeypatch.setattr(cli._registry, "terminate_project_program_checkout", fake_terminate)
-    monkeypatch.setattr(cli._registry, "add_project_program_to_version_control", fake_add)
-    monkeypatch.setattr(cli._registry, "reload_project_program", fake_reload)
-
-    assert cli.get_project_sync_status("fw", domain_path="/folder/new") == {"target": "fw"}
-    assert cli.get_version_history("fw", domain_path="/folder/new", limit=5) == {"target": "fw", "versions": []}
-    assert cli.get_version_diff(
-        "fw",
-        from_version=1,
-        to_version=2,
-        domain_path="/folder/new",
-        range_limit=10,
-    ) == {"target": "fw", "total_diff_addresses": 0}
-    cli.checkout_project_program("fw", exclusive=True, domain_path="/folder/new")
-    cli.add_project_program_to_version_control("fw", comment="enable shared", keep_checked_out=False, domain_path="/folder/new")
-    cli.commit_project_program("fw", "msg", keep_checked_out=True, auto_checkout=False, domain_path="/folder/new")
-    cli.pull_project_program("fw", on_local_changes="discard", domain_path="/folder/new")
-    cli.undo_checkout_project_program("fw", discard_local_changes=False, domain_path="/folder/new")
-    cli.terminate_project_program_checkout("fw", checkout_id=7, domain_path="/folder/new")
-    cli.reload_project_program("fw", domain_path="/folder/new")
-
-    assert called["status"] == ("fw", "/folder/new")
-    assert called["history"] == ("fw", "/folder/new", 5)
-    assert called["diff"] == ("fw", 1, 2, "/folder/new", 10)
-    assert called["checkout"] == ("fw", True, "/folder/new")
-    assert called["add"] == ("fw", "enable shared", False, "/folder/new")
-    assert called["commit"] == ("fw", "msg", True, False, "/folder/new")
-    assert called["pull"] == ("fw", "discard", "/folder/new")
-    assert called["undo"] == ("fw", False, "/folder/new")
-    assert called["terminate"] == ("fw", 7, "/folder/new")
-    assert called["reload"] == ("fw", "/folder/new")
-
-
-def test_register_shared_project_sync_tools(monkeypatch):
-    recorded = []
-
-    def fake_add_tool(fn, **kwargs):
-        recorded.append((fn.__name__, kwargs.get("description")))
-
+    monkeypatch.setattr(cli, "dispatch_tool", fake_dispatch)
+
+    assert call() == {"status": "ok"}
+    assert called["spec_name"] == expected_spec
+    assert called["raw_args"] == expected_args
+    assert called["target"] == "fw"
+    assert called["registry"] is cli._registry
+    assert called["core_executor"] is None
+
+
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        (
+            lambda: cli.list_methods(offset=0, limit=10, target="fw"),
+            "Session 'fw' is not initialized",
+        ),
+        (
+            lambda: cli.list_classes(offset=0, limit=10, target="fw"),
+            "Session 'fw' is not initialized",
+        ),
+    ],
+)
+def test_list_methods_and_list_classes_error_message_compat(monkeypatch, call, message):
+    class DummyRegistry:
+        def call(self, command, params, target):  # noqa: ARG002
+            raise RuntimeError(f"Session '{target}' is not initialized")
+
+    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+
+    with pytest.raises(RuntimeError, match=message):
+        call()
+
+
+def test_register_shared_project_sync_tools_is_idempotent(monkeypatch):
+    calls: list[str] = []
+    fake_runtime = types.SimpleNamespace(register_shared_sync=lambda: calls.append("register"))
+
+    monkeypatch.setattr(cli, "_runtime", fake_runtime)
     monkeypatch.setattr(cli, "_shared_project_sync_tools_registered", False)
-    monkeypatch.setattr(cli.mcp, "add_tool", fake_add_tool)
 
     cli.register_shared_project_sync_tools()
     cli.register_shared_project_sync_tools()
 
-    names = [name for name, _ in recorded]
-    assert names == [
-        "get_project_sync_status",
-        "get_version_history",
-        "get_version_diff",
-        "checkout_project_program",
-        "add_project_program_to_version_control",
-        "commit_project_program",
-        "pull_project_program",
-        "undo_checkout_project_program",
-        "terminate_project_program_checkout",
-        "reload_project_program",
-    ]
+    assert calls == ["register"]
 
 
 def test_parse_args_accepts_http():
@@ -1923,7 +638,7 @@ def test_configure_ghidra_server_auth_requires_user_and_env(monkeypatch, usernam
         ghidra_server_user=username,
         ghidra_server_password_env=password_env_name,
     )
-    with pytest.raises(ValueError, match="セットで指定してください"):
+    with pytest.raises(ValueError, match="must be set together"):
         cli.configure_ghidra_server_auth(args)
 
 
@@ -1933,7 +648,7 @@ def test_configure_ghidra_server_auth_requires_non_empty_env_value(monkeypatch):
         ghidra_server_user="alice",
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
-    with pytest.raises(ValueError, match="空です"):
+    with pytest.raises(ValueError, match="is empty"):
         cli.configure_ghidra_server_auth(args)
 
 
@@ -1943,5 +658,9 @@ def test_configure_ghidra_server_auth_requires_existing_env(monkeypatch):
         ghidra_server_user="alice",
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
-    with pytest.raises(ValueError, match="未設定です"):
+    with pytest.raises(ValueError, match="is not set"):
         cli.configure_ghidra_server_auth(args)
+
+
+def test_public_tool_functions_match_declared_specs():
+    assert set(cli.PUBLIC_TOOL_FUNCTIONS) == set(get_all_tool_specs(include_shared_sync=True))
