@@ -52,6 +52,49 @@ This document explains installation and operations for `ghidra-mcp`. For the ful
    uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport http --mcp-host 127.0.0.1 --mcp-port 8081 --mcp-path /mcp
    ```
 
+## Docker Setup
+
+If you want to try the server without installing Ghidra on the host, use the bundled `Dockerfile` and `docker-compose.yml`.
+
+1. **Create a directory for analysis targets**
+   ```bash
+   mkdir -p samples
+   ```
+2. **Build the Docker image (recommended)**
+   ```bash
+   ./build_docker_image.sh
+   ```
+3. **Start the MCP server**
+   ```bash
+   docker compose up -d
+   ```
+4. **Connect your MCP client**
+   `http://127.0.0.1:8081/mcp`
+
+In this compose setup, the server starts with `--project-location /data/projects --project-name default`, creating an empty project whose on-disk files live at `/data/projects/default.gpr` and `/data/projects/default.rep`. No program is loaded at startup, so the first workflow is `import_program` followed by `load_project_program`.
+
+- `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, matching the bundled Linux decompiler.
+- You can override `DOCKER_PLATFORM`, but on Apple Silicon `linux/arm64` is likely to break decompilation even if Java-backed commands such as `list_targets` or `list_functions` still work.
+
+### Docker Path Sharing
+
+- Analysis targets: bind mount `./samples` to `/samples` (read-only)
+- Ghidra project: mount the named volume `ghidra-projects` at `/data/projects` (read-write)
+
+This is the recommended default for two reasons.
+
+- `import_program` copies the input file into the Ghidra project, so the source file only needs to be readable.
+- The `.rep` tree inside a Ghidra project produces many small I/O operations, and on Docker Desktop a named volume is typically more stable and faster than a bind mount.
+
+### Import Example After Docker Startup
+
+If you place `./samples/hello.bin` on the host, use it from the MCP client like this:
+
+- `import_program(target="default", binary_path="/samples/hello.bin")`
+- `load_project_program(target="default", domain_path="/hello.bin")`
+
+`import_program` imports into the project root, so the returned `domain_path` is usually `/<filename>`. Reuse that `domain_path` for `load_project_program` and any shared-project sync tools.
+
 ## Notes
 
 - `--transport http` is recommended for HTTP connectivity. This starts FastMCP in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
@@ -70,6 +113,8 @@ This document explains installation and operations for `ghidra-mcp`. For the ful
 - Due to Ghidra limitations, merge conflict resolution is not supported in headless mode (`checkin/merge` return `requires merge ... not supported in headless mode`).
 - `pull_project_program(on_local_changes="discard")` only uses `undoCheckout(keep=False)` and does not force-discard.
 - `commit_project_program` detects merge conflicts (`can_merge=true`) and, by default, discards local changes to follow the latest state, returning `status=noop` / `reason=conflict_discarded` (human-side updates are prioritized).
+- In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
+- The Docker server starts with project metadata only, so import first with `import_program` and then open the imported program with `load_project_program`.
 
 ### Startup Example with Shared-Project Authentication
 

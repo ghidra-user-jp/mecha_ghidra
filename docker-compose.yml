@@ -1,0 +1,21 @@
+services:
+  ghidra-mcp:
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      args:
+        TARGETPLATFORM: ${DOCKER_PLATFORM:-linux/amd64}
+        GHIDRA_DIST_URL: ${GHIDRA_DIST_URL:-https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.0.4_build/ghidra_12.0.4_PUBLIC_20260303.zip}
+        GHIDRA_DIST_SHA256: ${GHIDRA_DIST_SHA256:-c3b458661d69e26e203d739c0c82d143cc8a4a29d9e571f099c2cf4bda62a120}
+    image: ghidra-mcp:local
+    ports:
+      - "8081:8081"
+    environment:
+      GHIDRA_INSTALL_DIR: /opt/ghidra
+      GHIDRA_SERVER_PASSWORD: ${GHIDRA_SERVER_PASSWORD:-}
+    volumes:
+      - ./samples:/samples:ro
+      - ghidra-projects:/data/projects
+
+volumes:
+  ghidra-projects:

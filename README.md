@@ -33,6 +33,31 @@ Mecha Ghidra is a Python package that exposes Ghidra as a headless MCP server wi
 
 For operational patterns and shared-project authentication details, see the [Usage Guide](docs/usage.md).
 
+## Docker Quick Start
+
+If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-compose.yml`.
+
+1. Create a directory for analysis targets
+   ```bash
+   mkdir -p samples
+   ```
+2. Build the image (recommended)
+   ```bash
+   ./build_docker_image.sh
+   ```
+3. Start the MCP server
+   ```bash
+   docker compose up -d
+   ```
+4. Point your MCP client to `http://127.0.0.1:8081/mcp`
+
+- `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, which is required for the bundled Linux decompiler.
+- On Apple Silicon, avoid overriding `DOCKER_PLATFORM` to `linux/arm64` unless you also replace the decompiler toolchain. Java-backed tools may still work, but `decompile_function` and other native decompiler operations can fail because Ghidra launches `linux_x86_64/decompile`.
+- `./samples` is shared into the container as `/samples` in read-only mode. Use `/samples/<filename>` with `import_program`.
+- Ghidra project data is persisted in the named volume `ghidra-projects`, and the default project `default` is created at `/data/projects/default.gpr`.
+- The server starts with project metadata only and no program loaded. Run `import_program(target="default", binary_path="/samples/<filename>")`, then pass the returned `domain_path` to `load_project_program`.
+- The recommended sharing model is `input bind mount (read-only) + Ghidra project named volume (read-write)`. `import_program` copies the input into the project, so the source file does not need write access, and the `.rep` tree tends to behave more reliably on a volume than a bind mount.
+
 ## Key Features
 
 - **Function and symbol operations**: list functions, decompile, rename, retrieve xrefs, and more.

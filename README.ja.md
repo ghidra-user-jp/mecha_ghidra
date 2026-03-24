@@ -23,15 +23,40 @@ PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開す�
 3. サーバーを起動（Streamable HTTP）
    ```bash
    uv run ghidra-mcp \
-       --project-location /Users/samsepi0l/ghidra_project.gpr \
-       --domain-path /main \
+        --project-location /Users/samsepi0l/ghidra_project.gpr \
+        --domain-path /main \
        --transport http \
        --mcp-host 127.0.0.1 \
        --mcp-port 8081 \
-       --mcp-path /mcp
+        --mcp-path /mcp
    ```
 
 運用パターンや shared project 認証を含む詳細は [利用ガイド](docs/usage.ja.md) を参照してください。
+
+## Docker クイックスタート
+
+Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` と `docker-compose.yml` を使えます。
+
+1. 解析対象を置くディレクトリを作成
+   ```bash
+   mkdir -p samples
+   ```
+2. イメージをビルド（推奨）
+   ```bash
+   ./build_docker_image.sh
+   ```
+3. MCP サーバーを起動
+   ```bash
+   docker compose up -d
+   ```
+4. MCP クライアントは `http://127.0.0.1:8081/mcp` に接続
+
+- `docker compose build` も引き続き利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、これは同梱 Linux decompiler を動かすために必要です。
+- Apple Silicon では、decompiler を差し替えない限り `DOCKER_PLATFORM=linux/arm64` への上書きは避けてください。Java API ベースのツールが動いても、`decompile_function` など native decompiler を起動する処理は `linux_x86_64/decompile` の不一致で失敗します。
+- `./samples` はコンテナ内に `/samples` として read-only 共有されます。`import_program` では `/samples/<filename>` を指定してください。
+- Ghidra project は named volume `ghidra-projects` に永続化され、既定の project `default` は `/data/projects/default.gpr` として作成されます。
+- 起動直後は program 未ロードの状態です。`import_program(target="default", binary_path="/samples/<filename>")` 実行後、返ってきた `domain_path` を `load_project_program` に渡してください。
+- 推奨共有方法は「入力 bind mount(read-only) + Ghidra project named volume(read-write)」です。`import_program` は入力ファイルを project にコピーするので入力側は read-only で十分で、`.rep` 配下の重い I/O は bind mount より volume の方が安定しやすいためです。
 
 ## 主要機能
 
