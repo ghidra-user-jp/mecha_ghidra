@@ -51,6 +51,27 @@ log_step() {
   echo "==> $1"
 }
 
+run_with_retry() {
+  local attempts delay status
+  attempts="$1"
+  delay="$2"
+  shift 2
+  status=0
+  for ((attempt=1; attempt<=attempts; attempt++)); do
+    if "$@"; then
+      return 0
+    fi
+    status=$?
+    if [[ "${attempt}" -ge "${attempts}" ]]; then
+      return "${status}"
+    fi
+    echo "Warning: command failed (attempt ${attempt}/${attempts}): $*" >&2
+    echo "Retrying in ${delay}s..." >&2
+    /bin/sleep "${delay}"
+  done
+  return "${status}"
+}
+
 is_linux_arm64() {
   local os arch
   os="$(uname -s)"
@@ -141,9 +162,11 @@ if [[ "${USE_DOCKER}" == "auto" ]]; then
   fi
 fi
 
+/bin/mkdir -p "${OUTPUT_DIR}"
+OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
+
 if [[ "${USE_DOCKER}" == "1" ]]; then
   require_command docker
-  /bin/mkdir -p "${OUTPUT_DIR}"
   docker_inner_args=(--no-docker --output-dir /out --upstream-ref "${UPSTREAM_REF}" --ghidra-dist-url "${GHIDRA_DIST_URL}" --ghidra-dist-sha256 "${GHIDRA_DIST_SHA256}")
   docker_run_args=(--rm --platform linux/arm64
     -e DEBIAN_FRONTEND=noninteractive
@@ -189,8 +212,6 @@ require_command python3
 require_command bison
 require_command flex
 require_command file
-
-/bin/mkdir -p "${OUTPUT_DIR}"
 
 if [[ -z "${WORK_DIR}" ]]; then
   WORK_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/mecha-ghidra-linux-arm64.XXXXXX")"
@@ -242,7 +263,13 @@ log_step "Preparing upstream Gradle dependencies"
 /usr/bin/printf "rootProject.name = 'mecha-ghidra-fetch-deps'\n" > "${FETCH_DEPS_DIR}/settings.gradle"
 /usr/bin/printf "plugins { id 'base' }\n" > "${FETCH_DEPS_DIR}/build.gradle"
 pushd "${FETCH_DEPS_DIR}" >/dev/null
-"${GHIDRA_SRC_DIR}/gradlew" --console plain -DhideDownloadProgress=true -I "${GHIDRA_SRC_DIR}/gradle/support/fetchDependencies.gradle" help || {
+run_with_retry 3 10 \
+  "${GHIDRA_SRC_DIR}/gradlew" \
+  --no-daemon \
+  --console plain \
+  -DhideDownloadProgress=true \
+  -I "${GHIDRA_SRC_DIR}/gradle/support/fetchDependencies.gradle" \
+  help || {
   echo "Error: failed during fetchDependencies." >&2
   exit 1
 }
@@ -255,7 +282,7 @@ pushd "${DECOMPILER_DIR}" >/dev/null
 /usr/bin/printf "rootProject.name = 'DecompilerNative'\n" > "${DECOMPILER_SETTINGS}"
 /bin/mv "${DECOMPILER_BUILD}" "${DECOMPILER_BUILD_BACKUP}"
 /bin/cp buildNatives.gradle "${DECOMPILER_BUILD}"
-../../../gradlew --console plain buildNatives_linux_arm_64 || {
+run_with_retry 2 10 ../../../gradlew --no-daemon --console plain buildNatives_linux_arm_64 || {
   echo "Error: failed during native build." >&2
   exit 1
 }
@@ -265,6 +292,8 @@ popd >/dev/null
 BUILD_OUTPUT_DIR="${GHIDRA_SRC_DIR}/Ghidra/Features/Decompiler/build/os/linux_arm_64"
 DECOMPILE_BIN="${BUILD_OUTPUT_DIR}/decompile"
 SLEIGH_BIN="${BUILD_OUTPUT_DIR}/sleigh"
+
+/bin/rm -rf "${OVERLAY_ROOT}" "${PATCH_ROOT}"
 
 for binary in "${DECOMPILE_BIN}" "${SLEIGH_BIN}"; do
   [[ -x "${binary}" ]] || {
