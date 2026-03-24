@@ -74,7 +74,31 @@ If you want to try the server without installing Ghidra on the host, use the bun
 In this compose setup, the server starts with `--project-location /data/projects --project-name default`, creating an empty project whose on-disk files live at `/data/projects/default.gpr` and `/data/projects/default.rep`. No program is loaded at startup, so the first workflow is `import_program` followed by `load_project_program`.
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, matching the bundled Linux decompiler.
-- You can override `DOCKER_PLATFORM`, but on Apple Silicon `linux/arm64` is likely to break decompilation even if Java-backed commands such as `list_targets` or `list_functions` still work.
+- You can override `DOCKER_PLATFORM`, but `linux/arm64` now requires a patched Ghidra distribution that already contains `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}`. With the upstream official ZIP, Docker now fails fast during build instead of failing later inside `decompile_function`.
+
+### ARM64 Docker Build
+
+For Linux ARM64 or Apple Silicon Docker builds, point `GHIDRA_DIST_URL` at the patched ARM64 distribution asset published by this repository's release workflow.
+
+```bash
+DOCKER_PLATFORM=linux/arm64 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<sha256> \
+docker compose build
+
+DOCKER_PLATFORM=linux/arm64 docker compose up -d
+```
+
+For direct artifact generation, run:
+
+```bash
+./scripts/build_linux_arm64_decompiler.sh
+```
+
+This creates:
+
+- `dist/ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
+- `dist/ghidra_*_linux_arm_64_decompiler.zip`
 
 ### Docker Path Sharing
 
@@ -103,6 +127,7 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - Enable shared-project sync tools with `--enable-shared-project-sync` only when you need to expose `commit/pull/checkout` operations.
 - If shared-project authentication is required, specify both `--ghidra-server-user` and `--ghidra-server-password-env`. Supplying only one causes startup failure (direct plaintext password arg is not supported).
 - Startup also fails when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged.
+- On Linux ARM64, startup/decompiler initialization now fails with a specific message when `Ghidra/Features/Decompiler/os/linux_arm_64` is missing or not executable.
 - If `--domain-path` is omitted, startup registers only the project target (works with empty projects). In this mode, import with `import_program` and open with `load_project_program`.
 - Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
 - In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis.

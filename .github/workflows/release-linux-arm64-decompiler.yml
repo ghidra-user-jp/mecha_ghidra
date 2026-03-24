@@ -1,0 +1,60 @@
+name: release-linux-arm64-decompiler
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-arm64-decompiler:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x scripts/build_linux_arm64_decompiler.sh
+
+      - name: Build linux_arm_64 overlay and patched distribution
+        run: ./scripts/build_linux_arm64_decompiler.sh --no-docker --output-dir dist
+
+      - name: Verify overlay contents
+        run: |
+          overlay="$(find dist -maxdepth 1 -type f -name '*linux_arm_64_decompiler_overlay.tar.gz' | head -n 1)"
+          test -n "${overlay}"
+          tar -tzf "${overlay}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
+          tar -tzf "${overlay}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
+
+      - name: Verify patched distribution contents
+        run: |
+          patched_zip="$(find dist -maxdepth 1 -type f -name '*linux_arm_64_decompiler.zip' | head -n 1)"
+          test -n "${patched_zip}"
+          unzip -Z1 "${patched_zip}" | grep '/Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
+          unzip -Z1 "${patched_zip}" | grep '/Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghidra-linux-arm64-decompiler
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+      - name: Publish release assets
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256

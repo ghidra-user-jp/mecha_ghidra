@@ -2,6 +2,7 @@
 
 from __future__ import absolute_import, print_function
 
+import os
 from numbers import Integral
 
 import jpype
@@ -28,6 +29,7 @@ from ghidra.program.model.data import (
     StringDataType,
     UnicodeDataType,
 )
+from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
 
 _GHIDRA_PROGRAM_UTILITIES = None
 _GHIDRA_SCRIPT_UTIL = None
@@ -461,6 +463,11 @@ def _decompile_function_object(ctx, function):
         interface = DecompInterface()
         try:
             if not interface.openProgram(ctx.program):
+                ghidra_install_dir = os.environ.get("GHIDRA_INSTALL_DIR")
+                try:
+                    validate_linux_arm64_decompiler_install(ghidra_install_dir)
+                except RuntimeError as exc:
+                    raise RuntimeError(str(exc))
                 raise RuntimeError("Failed to initialize decompiler")
             results = interface.decompileFunction(function, 120, ctx.monitor())
             if results is None:
@@ -493,6 +500,11 @@ def _decompile_high_function(ctx, function):
         interface = DecompInterface()
         try:
             if not interface.openProgram(ctx.program):
+                ghidra_install_dir = os.environ.get("GHIDRA_INSTALL_DIR")
+                try:
+                    validate_linux_arm64_decompiler_install(ghidra_install_dir)
+                except RuntimeError as exc:
+                    raise RuntimeError(str(exc))
                 raise RuntimeError("Failed to initialize decompiler")
             results = interface.decompileFunction(function, 120, ctx.monitor())
             if results is None:

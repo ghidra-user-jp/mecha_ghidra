@@ -74,7 +74,31 @@ Ghidra をホストへ個別インストールせずに試したい場合は、�
 この compose 構成では、起動時に `--project-location /data/projects --project-name default` を使って空の project を自動作成し、実体は `/data/projects/default.gpr` / `/data/projects/default.rep` に保存されます。起動直後は program 未ロードなので、最初に `import_program` と `load_project_program` を呼んでください。
 
 - `docker compose build` も利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、同梱 Linux decompiler と一致させます。
-- `DOCKER_PLATFORM` は上書きできますが、Apple Silicon で `linux/arm64` にすると `list_targets` や `list_functions` のような Java ベースの処理が動いても、`decompile_function` は native decompiler 不一致で壊れやすくなります。
+- `DOCKER_PLATFORM` は上書きできますが、`linux/arm64` を使う場合は `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` を含む patched Ghidra 配布物が必要です。upstream 公式 ZIP のままでは、`decompile_function` 実行時に遅れて壊れる代わりに Docker build 時点で fail-fast します。
+
+### ARM64 Docker build
+
+Linux ARM64 や Apple Silicon で Docker を native 実行したい場合は、このリポジトリの release workflow が publish する patched ARM64 配布物を `GHIDRA_DIST_URL` に指定してください。
+
+```bash
+DOCKER_PLATFORM=linux/arm64 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<sha256> \
+docker compose build
+
+DOCKER_PLATFORM=linux/arm64 docker compose up -d
+```
+
+配布物を自前で生成したい場合は次を実行します。
+
+```bash
+./scripts/build_linux_arm64_decompiler.sh
+```
+
+生成物:
+
+- `dist/ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
+- `dist/ghidra_*_linux_arm_64_decompiler.zip`
 
 ### Docker での共有パス
 
@@ -103,6 +127,7 @@ Ghidra をホストへ個別インストールせずに試したい場合は、�
 - `commit/pull/checkout` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
 - shared project の認証が必要な場合は `--ghidra-server-user` と `--ghidra-server-password-env` をセットで指定してください。片方のみ指定した場合は起動エラーになります（パスワードの直接引数は未対応）。
 - `--ghidra-server-password-env` で指定した環境変数が未設定または空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。
+- Linux ARM64 では `Ghidra/Features/Decompiler/os/linux_arm_64` が不足していると、起動時または decompiler 初期化時に専用メッセージ付きで失敗します。
 - `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
 - 既存ターゲットへ program をロード/切り替える操作は `load_project_program` を使い、新規ターゲット作成は `create_session` を使います。program 未指定で先にターゲットだけ作る場合は `register_target` を使ってください。
 - `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。

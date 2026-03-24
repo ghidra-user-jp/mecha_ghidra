@@ -662,5 +662,24 @@ def test_configure_ghidra_server_auth_requires_existing_env(monkeypatch):
         cli.configure_ghidra_server_auth(args)
 
 
+def test_ensure_supported_ghidra_installation_allows_non_arm_linux(monkeypatch, tmp_path):
+    install_dir = tmp_path / "ghidra"
+    install_dir.mkdir()
+
+    monkeypatch.setattr(cli, "validate_linux_arm64_decompiler_install", lambda _path: None)
+
+    cli._ensure_supported_ghidra_installation(str(install_dir))
+
+
+def test_ensure_supported_ghidra_installation_raises_for_missing_linux_arm64(monkeypatch):
+    def fake_validate(_path: str) -> None:
+        raise RuntimeError("Linux ARM64 requires Ghidra native decompiler binaries")
+
+    monkeypatch.setattr(cli, "validate_linux_arm64_decompiler_install", fake_validate)
+
+    with pytest.raises(RuntimeError, match="Linux ARM64 requires Ghidra native decompiler binaries"):
+        cli._ensure_supported_ghidra_installation("/tmp/ghidra")
+
+
 def test_public_tool_functions_match_declared_specs():
     assert set(cli.PUBLIC_TOOL_FUNCTIONS) == set(get_all_tool_specs(include_shared_sync=True))

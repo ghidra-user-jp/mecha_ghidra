@@ -171,7 +171,7 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if ! docker buildx version >/dev/null 2>&1; then
-  echo "Error: docker buildx is required to build a linux/amd64 image reliably." >&2
+  echo "Error: docker buildx is required to build multi-architecture images reliably." >&2
   exit 127
 fi
 
@@ -194,6 +194,9 @@ if [[ -n "${DOCKER_CONTEXT}" ]]; then
   echo "Using docker context: ${DOCKER_CONTEXT}"
 fi
 echo "Using docker platform: ${PLATFORM}"
+if [[ "${PLATFORM}" == "linux/arm64" ]]; then
+  echo "Note: linux/arm64 requires GHIDRA_DIST_URL to point at a patched Ghidra distribution that already contains linux_arm_64 decompiler binaries."
+fi
 echo "Repository root: ${REPO_ROOT}"
 
 "${DOCKER_CMD[@]}" buildx build \

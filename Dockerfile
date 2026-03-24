@@ -13,11 +13,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN image_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     image_platform="${TARGETPLATFORM:-linux/${image_arch}}"; \
-    if [ "${image_arch}" != "amd64" ]; then \
-      echo >&2 "Error: Ghidra Linux decompiler support in this image requires linux/amd64, but Docker is building for '${image_platform}'."; \
-      echo >&2 "Hint: set DOCKER_PLATFORM=linux/amd64 or build with ./build_docker_image.sh."; \
+    case "${image_arch}" in \
+      amd64|arm64) ;; \
+      *) \
+      echo >&2 "Error: unsupported Docker target platform '${image_platform}'."; \
+      echo >&2 "Hint: use linux/amd64, or linux/arm64 with a Ghidra distribution that already contains linux_arm_64 decompiler binaries."; \
       exit 1; \
-    fi
+      ;; \
+    esac
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -32,6 +35,12 @@ RUN mkdir -p /tmp/ghidra /opt /data/projects /samples \
  && echo "${GHIDRA_DIST_SHA256}  /tmp/ghidra/ghidra.zip" | sha256sum -c - \
  && unzip -q /tmp/ghidra/ghidra.zip -d /opt \
  && mv "$(find /opt -mindepth 1 -maxdepth 1 -type d -name 'ghidra_*' | head -n 1)" "${GHIDRA_INSTALL_DIR}" \
+ && image_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    if [ "${image_arch}" = "arm64" ] && { [ ! -x "${GHIDRA_INSTALL_DIR}/Ghidra/Features/Decompiler/os/linux_arm_64/decompile" ] || [ ! -x "${GHIDRA_INSTALL_DIR}/Ghidra/Features/Decompiler/os/linux_arm_64/sleigh" ]; }; then \
+      echo >&2 "Error: linux/arm64 Docker builds require a Ghidra distribution that already contains Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}."; \
+      echo >&2 "Hint: set GHIDRA_DIST_URL to the patched mecha_ghidra linux_arm_64 distribution release artifact, or apply the linux_arm_64 overlay before building this image."; \
+      exit 1; \
+    fi \
  && rm -rf /tmp/ghidra
 
 RUN pip install --no-cache-dir uv
