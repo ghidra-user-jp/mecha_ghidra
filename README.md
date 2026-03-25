@@ -24,11 +24,7 @@ Mecha Ghidra is a Python package that exposes Ghidra as a headless MCP server wi
    ```bash
    uv run ghidra-mcp \
        --project-location /Users/samsepi0l/ghidra_project.gpr \
-       --domain-path /main \
        --transport http \
-       --mcp-host 127.0.0.1 \
-       --mcp-port 8081 \
-       --mcp-path /mcp
    ```
 
 For operational patterns and shared-project authentication details, see the [Usage Guide](docs/usage.md).
