@@ -60,21 +60,72 @@ jobs:
           unzip -Z1 "${patched_zip}" | grep '/Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
           unzip -Z1 "${patched_zip}" | grep '/Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
 
+      - name: Prepare user-facing release assets
+        run: |
+          set -eu
+          . ./scripts/ghidra_release.env
+          mkdir -p release-assets
+
+          overlay="$(find dist -maxdepth 1 -type f -name '*linux_arm_64_decompiler_overlay.tar.gz' | head -n 1)"
+          patched_zip="$(find dist -maxdepth 1 -type f -name '*linux_arm_64_decompiler.zip' | head -n 1)"
+          test -n "${overlay}"
+          test -n "${patched_zip}"
+
+          cp "${overlay}" "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}"
+          sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}" > \
+            "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}.sha256"
+
+          cp "${patched_zip}" "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}"
+          sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}" > \
+            "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}.sha256"
+
+          git archive --format=zip --prefix=mecha_ghidra/ HEAD -o \
+            "release-assets/${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}"
+          sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}" > \
+            "release-assets/${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}.sha256"
+
+          cat > "release-assets/${MECHA_GHIDRA_RELEASE_ASSET_GUIDE_BASENAME}" <<EOF
+          mecha_ghidra release assets
+
+          - ${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}
+            Regular source code snapshot of this repository.
+            通常の mecha_ghidra ソースコード一式です。
+
+          - ${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}
+            Patched Ghidra bundle for Apple Silicon / Linux ARM64 Docker use.
+            Apple Silicon / Linux ARM64 の Docker 用 Ghidra バンドルです。
+            This is not the normal source code ZIP.
+            通常のソースコード ZIP ではありません。
+
+          - ${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}
+            linux_arm_64 decompiler overlay for an existing Ghidra install.
+            既存 Ghidra install に重ねる linux_arm_64 decompiler overlay です。
+
+          GitHub's built-in "Source code (zip)" and "Source code (tar.gz)" links
+          are also regular source snapshots.
+          GitHub 標準の "Source code (zip)" / "Source code (tar.gz)" も通常のソースコードです。
+          EOF
+
+      - name: Verify user-facing release assets
+        run: |
+          set -eu
+          . ./scripts/ghidra_release.env
+          test -f "release-assets/${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}"
+          test -f "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}"
+          test -f "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}"
+          test -f "release-assets/${MECHA_GHIDRA_RELEASE_ASSET_GUIDE_BASENAME}"
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ghidra-linux-arm64-decompiler
+          name: mecha-ghidra-release-assets
           if-no-files-found: error
           path: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sha256
+            release-assets/*
 
       - name: Publish release assets
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sha256
+            release-assets/*

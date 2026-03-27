@@ -52,9 +52,10 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 4. MCP クライアントは `http://127.0.0.1:8081/mcp` に接続
 
 - `docker compose build` も引き続き利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、これは同梱 Linux decompiler を動かすために必要です。
-- `linux/arm64` を使う場合は、`GHIDRA_DIST_URL` を `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` を含む patched Ghidra 配布物へ向けてください。upstream の公式 ZIP のままでは、`decompile_function` 実行時に遅れて落ちる代わりに、build 時点で明確なエラーを返すようになりました。
+- `linux/arm64` を使う場合は、Docker build が既定で mecha_ghidra release `v0.1.0-rc.1` の patched Ghidra 配布物を自動選択します。upstream の公式 ZIP を ARM64 へ無理に指定した場合は、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
+- 独自の patched ZIP を使いたい場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定して上書きできます。
 - `./samples` はコンテナ内に `/samples` として read-only 共有されます。`import_program` では `/samples/<filename>` を指定してください。
-- Ghidra project は named volume `ghidra-projects` に永続化され、既定の project `default` は `/data/projects/default.gpr` として作成されます。
+- Ghidra project は named volume `ghidra-projects` に永続化され、既定の project path は `/data/projects/default.gpr` です。初回利用前に一度その project を作成するか、既存の Ghidra project をそこへ mount してください。
 - 起動直後は program 未ロードの状態です。`import_program(target="default", binary_path="/samples/<filename>")` 実行後、返ってきた `domain_path` を `load_project_program` に渡してください。
 - 推奨共有方法は「入力 bind mount(read-only) + Ghidra project named volume(read-write)」です。`import_program` は入力ファイルを project にコピーするので入力側は read-only で十分で、`.rep` 配下の重い I/O は bind mount より volume の方が安定しやすいためです。
 
@@ -68,14 +69,24 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
   - `ghidra_*_linux_arm_64_decompiler.zip`
 - overlay tarball には `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` のパスがそのまま入るので、既存の Ghidra install にそのまま展開できます。
 - patched ZIP は ARM Linux の Docker build や、ARM Linux へそのまま配置する用途を想定しています。
+- GitHub release には、通常のリポジトリ一式だと分かるように `mecha_ghidra_source_code.zip` も別途 publish します。
+- GitHub release には、Apple Silicon / Linux ARM64 の Docker 用・overlay 用だと分かるように `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` も publish します。
+- GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` も通常のソースコード snapshot です。Docker 専用配布物ではありません。
 
 ARM64 Docker build 例:
 
 ```bash
-./build_docker_image.sh \
-    --platform linux/arm64 \
-    --ghidra-dist-url https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-    --ghidra-dist-sha256 <sha256>
+DOCKER_PLATFORM=linux/arm64 docker compose build
+DOCKER_PLATFORM=linux/arm64 docker compose up -d
+```
+
+別の成果物へ上書きしたい場合:
+
+```bash
+DOCKER_PLATFORM=linux/arm64 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+docker compose build
 ```
 
 ARM Linux 上で patched binary が無いまま起動した場合は、`linux_arm_64` native が不足していることを明示するエラーを返します。

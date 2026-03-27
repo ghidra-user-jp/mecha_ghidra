@@ -16,4 +16,8 @@
   - `dist/ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
   - `dist/ghidra_*_linux_arm_64_decompiler.zip`
   - 対応する `.sha256`
-- GitHub Actions の `.github/workflows/release-linux-arm64-decompiler.yml` では同じ build を `ubuntu-24.04-arm` 上で実行し、workflow artifact と release asset の両方に publish します。
+- GitHub Actions の `.github/workflows/release-linux-arm64-decompiler.yml` では同じ build を `ubuntu-24.04-arm` 上で実行します。
+- GitHub release へは、用途が分かりやすい user-facing asset 名で publish します。
+  - `mecha_ghidra_source_code.zip`: 通常のリポジトリ snapshot
+  - `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz`: Apple Silicon / Linux ARM64 の Docker 関連成果物
+  - `mecha_ghidra_release_assets.txt`: 用途の短い案内
