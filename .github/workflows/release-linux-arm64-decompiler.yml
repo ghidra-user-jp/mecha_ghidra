@@ -115,6 +115,31 @@ jobs:
           test -f "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}"
           test -f "release-assets/${MECHA_GHIDRA_RELEASE_ASSET_GUIDE_BASENAME}"
 
+      - name: Prepare release body
+        run: |
+          set -eu
+          . ./scripts/ghidra_release.env
+          cat > release-body.md <<EOF
+          ## Release Assets
+
+          - \`${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}\`
+            Regular source code snapshot of this repository.
+            If you want the normal Mecha Ghidra source tree, use this file.
+
+          - \`${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}\`
+            Patched Ghidra bundle for Apple Silicon / Linux ARM64 Docker use.
+            This is not the normal source code ZIP.
+
+          - \`${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}\`
+            linux_arm_64 decompiler overlay for an existing Ghidra installation.
+
+          - \`*.sha256\`
+            SHA-256 checksum files for the assets above.
+
+          GitHub's built-in \`Source code (zip)\` and \`Source code (tar.gz)\`
+          links are also regular source code snapshots.
+          EOF
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -123,8 +148,16 @@ jobs:
           path: |
             release-assets/*
 
-      - name: Publish release assets
-        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+      - name: Publish release assets for tag pushes
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/*
+          body_path: release-body.md
+
+      - name: Publish release assets for published releases
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
