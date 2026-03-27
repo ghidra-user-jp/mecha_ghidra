@@ -20,4 +20,4 @@
 - For GitHub releases, the workflow now republishes clearer user-facing asset names:
   - `mecha_ghidra_source_code.zip` for the normal repository snapshot
   - `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` for Apple Silicon or Linux ARM64 Docker-related artifacts
-- The release page body also explains what each asset is for in English.
+- The release page body also explains what each asset is for in English and shows the SHA-256 values directly, so separate `.sha256` release assets are not published.
