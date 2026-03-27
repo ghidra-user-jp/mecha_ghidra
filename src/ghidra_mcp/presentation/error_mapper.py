@@ -11,6 +11,7 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.NOT_SHARED_PROJECT: "NOT_SHARED_PROJECT: target program is not under shared-project version control",
     ErrorCode.NOT_CHECKED_OUT: "NOT_CHECKED_OUT: program is not checked out",
     ErrorCode.LOCAL_CHANGES_EXIST: "LOCAL_CHANGES_EXIST: operation aborted due to local changes",
+    ErrorCode.MERGE_REQUIRED: "MERGE_REQUIRED: automatic merge is disabled; reopen the latest version or re-checkout before retrying",
     ErrorCode.LOCK_TIMEOUT: "LOCK_TIMEOUT: failed to acquire lock",
     ErrorCode.SESSION_NOT_FOUND: "SESSION_NOT_FOUND: session not found",
     ErrorCode.TARGET_NOT_REGISTERED: "TARGET_NOT_REGISTERED: target is not registered",

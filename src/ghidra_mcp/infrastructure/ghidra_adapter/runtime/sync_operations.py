@@ -228,6 +228,7 @@ class RuntimeSyncOperations:
                 action = {
                     "discarded_local_changes": False,
                     "merged": False,
+                    "followed_latest": False,
                 }
                 if needs_operation:
                     action = self._run_sync_operation_for_domain_locked(
@@ -246,9 +247,12 @@ class RuntimeSyncOperations:
                     "status": "ok",
                     "target": name,
                     "program": resolved_domain_path,
-                    "updated": bool(action["merged"] or action["discarded_local_changes"]),
+                    "updated": bool(
+                        action["merged"] or action["discarded_local_changes"] or action["followed_latest"]
+                    ),
                     "merged": bool(action["merged"]),
                     "discarded_local_changes": bool(action["discarded_local_changes"]),
+                    "followed_latest": bool(action["followed_latest"]),
                     "version": updated.get("version"),
                     "latest_version": updated.get("latest_version"),
                     "is_latest_version": bool(updated.get("is_latest_version")),
@@ -549,12 +553,29 @@ class RuntimeSyncOperations:
             status = handle.get_sync_status(domain_path)
 
         merged = False
+        followed_latest = False
         if status.get("can_merge"):
-            handle.merge_program(domain_path, ok_to_upgrade=True)
-            merged = True
+            if not status.get("is_checked_out"):
+                raise RuntimeError(
+                    "UNSAFE_MERGE_REQUIRED: remote changes require a Ghidra merge, "
+                    "but automatic merge is disabled because PropertyList merges can crash. "
+                    "Reopen the program from the latest version or re-checkout before retrying."
+                )
+
+            # Avoid DomainFile.merge() here. In Ghidra 12.0.4 the PropertyList merge path can
+            # throw a NullPointerException when comment/property state diverges. Dropping a stale
+            # checkout and reopening is safer when we only need to follow the latest server state.
+            handle.undo_checkout_program(domain_path, keep=False)
+            status = handle.get_sync_status(domain_path)
+            if status.get("can_merge"):
+                raise RuntimeError(
+                    "FOLLOW_LATEST_FAILED: checkout was dropped, but the program still reports a pending merge"
+                )
+            followed_latest = True
         return {
             "discarded_local_changes": discarded_local_changes,
             "merged": merged,
+            "followed_latest": followed_latest,
         }
 
     @staticmethod
