@@ -20,4 +20,4 @@
 - GitHub release へは、用途が分かりやすい user-facing asset 名で publish します。
   - `mecha_ghidra_source_code.zip`: 通常のリポジトリ snapshot
   - `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz`: Apple Silicon / Linux ARM64 の Docker 関連成果物
-  - `mecha_ghidra_release_assets.txt`: 用途の短い案内
+- release page 本文にも、各 asset の用途を英語で説明するようにしています。
