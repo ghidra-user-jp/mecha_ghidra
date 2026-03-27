@@ -71,22 +71,29 @@ If you want to try the server without installing Ghidra on the host, use the bun
 4. **Connect your MCP client**
    `http://127.0.0.1:8081/mcp`
 
-In this compose setup, the server starts with `--project-location /data/projects --project-name default`, creating an empty project whose on-disk files live at `/data/projects/default.gpr` and `/data/projects/default.rep`. No program is loaded at startup, so the first workflow is `import_program` followed by `load_project_program`.
+In this compose setup, the server starts with `--project-location /data/projects --project-name default` and expects the project files to live at `/data/projects/default.gpr` and `/data/projects/default.rep`. Create that Ghidra project once before first use, then import a binary and load it. No program is loaded at startup, so the first workflow is `import_program` followed by `load_project_program`.
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, matching the bundled Linux decompiler.
-- You can override `DOCKER_PLATFORM`, but `linux/arm64` now requires a patched Ghidra distribution that already contains `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}`. With the upstream official ZIP, Docker now fails fast during build instead of failing later inside `decompile_function`.
+- You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build now auto-selects the mecha_ghidra `v0.1.0-rc.1` patched Ghidra distribution.
+- If you explicitly force the upstream official ZIP on ARM64, Docker now fails fast during build instead of failing later inside `decompile_function`.
+- If you want a custom artifact, provide both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`.
 
 ### ARM64 Docker Build
 
-For Linux ARM64 or Apple Silicon Docker builds, point `GHIDRA_DIST_URL` at the patched ARM64 distribution asset published by this repository's release workflow.
+For Linux ARM64 or Apple Silicon Docker builds, `DOCKER_PLATFORM=linux/arm64` is now enough to use the default patched ARM64 distribution.
+
+```bash
+DOCKER_PLATFORM=linux/arm64 docker compose build
+DOCKER_PLATFORM=linux/arm64 docker compose up -d
+```
+
+To override the bundled ARM64 artifact:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=<sha256> \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
 docker compose build
-
-DOCKER_PLATFORM=linux/arm64 docker compose up -d
 ```
 
 For direct artifact generation, run:
@@ -136,7 +143,8 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - In shared projects, mutating tools like `rename_*` and `set_*` require `checkout_project_program` beforehand (`CHECKOUT_REQUIRED` error if not checked out).
 - `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints.
 - Due to Ghidra limitations, merge conflict resolution is not supported in headless mode (`checkin/merge` return `requires merge ... not supported in headless mode`).
-- `pull_project_program(on_local_changes="discard")` only uses `undoCheckout(keep=False)` and does not force-discard.
+- `pull_project_program(on_local_changes="discard")` uses `undoCheckout(keep=False)` for local changes, and if `can_merge=true` on a checked-out program it follows the latest server state by dropping the stale checkout instead of calling `DomainFile.merge()`.
+- When `can_merge=true` but there is no disposable checkout to drop, `pull_project_program` fails with `UNSAFE_MERGE_REQUIRED` instead of invoking Ghidra's PropertyList merge path.
 - `commit_project_program` detects merge conflicts (`can_merge=true`) and, by default, discards local changes to follow the latest state, returning `status=noop` / `reason=conflict_discarded` (human-side updates are prioritized).
 - In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
 - The Docker server starts with project metadata only, so import first with `import_program` and then open the imported program with `load_project_program`.

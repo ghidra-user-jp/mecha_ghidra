@@ -7,8 +7,11 @@ SCRIPT_DIR="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 DEFAULT_IMAGE_TAG="ghidra-mcp:local"
 DEFAULT_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
-DEFAULT_GHIDRA_DIST_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.0.4_build/ghidra_12.0.4_PUBLIC_20260303.zip"
-DEFAULT_GHIDRA_DIST_SHA256="c3b458661d69e26e203d739c0c82d143cc8a4a29d9e571f099c2cf4bda62a120"
+RELEASE_ENV_FILE="${REPO_ROOT}/scripts/ghidra_release.env"
+DEFAULT_GHIDRA_DIST_URL_AMD64=""
+DEFAULT_GHIDRA_DIST_SHA256_AMD64=""
+DEFAULT_GHIDRA_DIST_URL_ARM64=""
+DEFAULT_GHIDRA_DIST_SHA256_ARM64=""
 DOCKER_CONTEXT=""
 IMAGE_TAG="${DEFAULT_IMAGE_TAG}"
 PLATFORM="${DEFAULT_PLATFORM}"
@@ -42,6 +45,10 @@ Environment:
   DOCKER_PLATFORM       Default platform override.
   GHIDRA_DIST_URL       Default Ghidra ZIP URL override.
   GHIDRA_DIST_SHA256    Default Ghidra ZIP SHA256 override.
+
+Defaults:
+  linux/amd64           Uses the upstream official Ghidra 12.0.4 ZIP.
+  linux/arm64           Uses the mecha_ghidra patched ARM64 Ghidra ZIP.
 EOF
 }
 
@@ -50,6 +57,21 @@ trim() {
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "${value}"
+}
+
+load_release_env() {
+  [[ -f "${RELEASE_ENV_FILE}" ]] || {
+    echo "Error: release metadata file not found: ${RELEASE_ENV_FILE}" >&2
+    exit 1
+  }
+
+  # shellcheck disable=SC1090
+  source "${RELEASE_ENV_FILE}"
+
+  DEFAULT_GHIDRA_DIST_URL_AMD64="${MECHA_GHIDRA_GHIDRA_DIST_URL}"
+  DEFAULT_GHIDRA_DIST_SHA256_AMD64="${MECHA_GHIDRA_GHIDRA_DIST_SHA256}"
+  DEFAULT_GHIDRA_DIST_URL_ARM64="${MECHA_GHIDRA_ARM64_PATCHED_DIST_URL}"
+  DEFAULT_GHIDRA_DIST_SHA256_ARM64="${MECHA_GHIDRA_ARM64_PATCHED_DIST_SHA256}"
 }
 
 load_env_file() {
@@ -120,6 +142,32 @@ prepare_docker_environment() {
   echo "Warning: docker-credential-${credential_helper} was not found; using temporary Docker config fallback." >&2
 }
 
+select_ghidra_distribution() {
+  if [[ -n "${GHIDRA_DIST_URL}" || -n "${GHIDRA_DIST_SHA256}" ]]; then
+    if [[ -z "${GHIDRA_DIST_URL}" || -z "${GHIDRA_DIST_SHA256}" ]]; then
+      echo "Error: GHIDRA_DIST_URL and GHIDRA_DIST_SHA256 must be provided together." >&2
+      exit 2
+    fi
+    return 0
+  fi
+
+  case "${PLATFORM}" in
+    linux/amd64*)
+      GHIDRA_DIST_URL="${DEFAULT_GHIDRA_DIST_URL_AMD64}"
+      GHIDRA_DIST_SHA256="${DEFAULT_GHIDRA_DIST_SHA256_AMD64}"
+      ;;
+    linux/arm64*)
+      GHIDRA_DIST_URL="${DEFAULT_GHIDRA_DIST_URL_ARM64}"
+      GHIDRA_DIST_SHA256="${DEFAULT_GHIDRA_DIST_SHA256_ARM64}"
+      ;;
+    *)
+      echo "Error: unsupported Docker platform '${PLATFORM}'." >&2
+      echo "Hint: use linux/amd64 or linux/arm64." >&2
+      exit 2
+      ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tag)
@@ -160,10 +208,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+load_release_env
 load_env_file
-
-GHIDRA_DIST_URL="${GHIDRA_DIST_URL:-${DEFAULT_GHIDRA_DIST_URL}}"
-GHIDRA_DIST_SHA256="${GHIDRA_DIST_SHA256:-${DEFAULT_GHIDRA_DIST_SHA256}}"
+select_ghidra_distribution
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Error: docker command not found." >&2
@@ -194,9 +241,8 @@ if [[ -n "${DOCKER_CONTEXT}" ]]; then
   echo "Using docker context: ${DOCKER_CONTEXT}"
 fi
 echo "Using docker platform: ${PLATFORM}"
-if [[ "${PLATFORM}" == "linux/arm64" ]]; then
-  echo "Note: linux/arm64 requires GHIDRA_DIST_URL to point at a patched Ghidra distribution that already contains linux_arm_64 decompiler binaries."
-fi
+echo "Using Ghidra distribution URL: ${GHIDRA_DIST_URL}"
+echo "Using Ghidra distribution SHA256: ${GHIDRA_DIST_SHA256}"
 echo "Repository root: ${REPO_ROOT}"
 
 "${DOCKER_CMD[@]}" buildx build \
