@@ -69,9 +69,8 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
   - `ghidra_*_linux_arm_64_decompiler.zip`
 - overlay tarball には `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` のパスがそのまま入るので、既存の Ghidra install にそのまま展開できます。
 - patched ZIP は ARM Linux の Docker build や、ARM Linux へそのまま配置する用途を想定しています。
-- GitHub release には、通常のリポジトリ一式だと分かるように `mecha_ghidra_source_code.zip` も別途 publish します。
 - GitHub release には、Apple Silicon / Linux ARM64 の Docker 用・overlay 用だと分かるように `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` も publish します。
-- GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` も通常のソースコード snapshot です。Docker 専用配布物ではありません。
+- 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使ってください。
 
 ARM64 Docker build 例:
 

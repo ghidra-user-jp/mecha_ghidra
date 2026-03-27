@@ -69,9 +69,8 @@ The repository now ships a dedicated build path for Linux ARM64 Ghidra decompile
   - `ghidra_*_linux_arm_64_decompiler.zip`
 - The overlay archive preserves the exact path `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` so it can be unpacked directly into an existing Ghidra install.
 - The patched ZIP is intended for ARM Linux Docker builds and direct ARM Linux installs.
-- GitHub releases now publish a separate `mecha_ghidra_source_code.zip` so users can clearly download the normal repository snapshot.
 - GitHub releases also publish `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` assets whose names explicitly indicate they are for Apple Silicon / Linux ARM64 Docker or overlay use.
-- GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links are also regular source snapshots, not Docker-only bundles.
+- For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
 
 Example ARM64 Docker build:
 

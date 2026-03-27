@@ -75,14 +75,10 @@ jobs:
 
           cp "${patched_zip}" "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}"
 
-          git archive --format=zip --prefix=mecha_ghidra/ HEAD -o \
-            "release-assets/${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}"
-
       - name: Verify user-facing release assets
         run: |
           set -eu
           . ./scripts/ghidra_release.env
-          test -f "release-assets/${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}"
           test -f "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}"
           test -f "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}"
 
@@ -90,16 +86,10 @@ jobs:
         run: |
           set -eu
           . ./scripts/ghidra_release.env
-          source_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}" | awk '{print $1}')"
           patched_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}" | awk '{print $1}')"
           overlay_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_ARM64_OVERLAY_BASENAME}" | awk '{print $1}')"
           cat > release-body.md <<EOF
           ## Release Assets
-
-          - \`${MECHA_GHIDRA_RELEASE_SOURCE_BASENAME}\`
-            Regular source code snapshot of this repository.
-            If you want the normal Mecha Ghidra source tree, use this file.
-            SHA-256: \`${source_sha256}\`
 
           - \`${MECHA_GHIDRA_RELEASE_ARM64_PATCHED_DIST_BASENAME}\`
             Patched Ghidra bundle for Apple Silicon / Linux ARM64 Docker use.
@@ -111,7 +101,7 @@ jobs:
             SHA-256: \`${overlay_sha256}\`
 
           GitHub's built-in \`Source code (zip)\` and \`Source code (tar.gz)\`
-          links are also regular source code snapshots.
+          links are the normal source code snapshots for this repository.
 
           Separate \`.sha256\` release assets are no longer published.
           The SHA-256 values are listed in this release body instead.
@@ -144,6 +134,7 @@ jobs:
           delete_patterns = [
               "*.sha256",
               "mecha_ghidra_release_assets.txt",
+              "mecha_ghidra_source_code.zip",
               "ghidra_*_linux_arm_64_decompiler.zip",
               "ghidra_*_linux_arm_64_decompiler_overlay.tar.gz",
           ]
