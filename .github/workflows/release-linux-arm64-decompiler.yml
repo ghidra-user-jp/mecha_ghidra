@@ -112,7 +112,66 @@ jobs:
 
           GitHub's built-in \`Source code (zip)\` and \`Source code (tar.gz)\`
           links are also regular source code snapshots.
+
+          Separate \`.sha256\` release assets are no longer published.
+          The SHA-256 values are listed in this release body instead.
           EOF
+
+      - name: Remove legacy release assets
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -eu
+          status_code="$(curl -sSL -o release.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          if [ "${status_code}" = "404" ]; then
+            echo "No existing release found for tag ${RELEASE_TAG}; skipping legacy asset cleanup."
+            exit 0
+          fi
+          [ "${status_code}" = "200" ]
+          RELEASE_JSON="$(cat release.json)" python3 - <<'PY'
+          import fnmatch
+          import json
+          import os
+          import subprocess
+
+          payload = json.loads(os.environ["RELEASE_JSON"])
+          delete_patterns = [
+              "*.sha256",
+              "mecha_ghidra_release_assets.txt",
+              "ghidra_*_linux_arm_64_decompiler.zip",
+              "ghidra_*_linux_arm_64_decompiler_overlay.tar.gz",
+          ]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+
+          for asset in payload.get("assets", []):
+              name = asset.get("name", "")
+              if not any(fnmatch.fnmatch(name, pattern) for pattern in delete_patterns):
+                  continue
+              asset_id = asset["id"]
+              url = f"https://api.github.com/repos/{repo}/releases/assets/{asset_id}"
+              subprocess.run(
+                  [
+                      "curl",
+                      "-fsSL",
+                      "-X",
+                      "DELETE",
+                      "-H",
+                      f"Authorization: Bearer {token}",
+                      "-H",
+                      "Accept: application/vnd.github+json",
+                      url,
+                  ],
+                  check=True,
+              )
+              print(f"Deleted legacy release asset: {name}")
+          PY
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

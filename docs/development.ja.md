@@ -15,9 +15,9 @@
 - 既定の出力先は次のとおりです。
   - `dist/ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
   - `dist/ghidra_*_linux_arm_64_decompiler.zip`
-  - 対応する `.sha256`
+  - ローカル検証用の対応する `.sha256`
 - GitHub Actions の `.github/workflows/release-linux-arm64-decompiler.yml` では同じ build を `ubuntu-24.04-arm` 上で実行します。
 - GitHub release へは、用途が分かりやすい user-facing asset 名で publish します。
   - `mecha_ghidra_source_code.zip`: 通常のリポジトリ snapshot
   - `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz`: Apple Silicon / Linux ARM64 の Docker 関連成果物
-- release page 本文にも、各 asset の用途を英語で説明し、SHA-256 も直接表示します。そのため `.sha256` の release asset は publish しません。
+- release page 本文にも、各 asset の用途を英語で説明し、SHA-256 も直接表示します。そのため `.sha256` の release asset は publish せず、古い legacy checksum asset も publish 時に削除します。

@@ -15,9 +15,9 @@
 - The default outputs are:
   - `dist/ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
   - `dist/ghidra_*_linux_arm_64_decompiler.zip`
-  - matching `.sha256` files
+  - matching `.sha256` files for local verification
 - The GitHub Actions workflow `.github/workflows/release-linux-arm64-decompiler.yml` runs the same build natively on `ubuntu-24.04-arm`.
 - For GitHub releases, the workflow now republishes clearer user-facing asset names:
   - `mecha_ghidra_source_code.zip` for the normal repository snapshot
   - `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` for Apple Silicon or Linux ARM64 Docker-related artifacts
-- The release page body also explains what each asset is for in English and shows the SHA-256 values directly, so separate `.sha256` release assets are not published.
+- The release page body also explains what each asset is for in English and shows the SHA-256 values directly, so separate `.sha256` release assets are not published and older legacy checksum assets are removed during publish.
