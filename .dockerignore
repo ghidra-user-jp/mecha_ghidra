@@ -1,0 +1,12 @@
+.git
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+build
+dist
+htmlcov
+samples
+*.gpr
+*.rep
+*.gzf

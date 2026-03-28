@@ -21,6 +21,7 @@ import pyghidra
 import pyghidra.core as pycore
 from mcp.server.transport_security import TransportSecuritySettings
 
+from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
 from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter, create_cli_runtime
 from ghidra_mcp.presentation.transport import (
     configure_mcp_for_sse as _configure_mcp_for_sse,
@@ -216,6 +217,12 @@ def configure_ghidra_server_auth(args) -> None:
     )
 
 
+def _ensure_supported_ghidra_installation(ghidra_path: str | None) -> None:
+    if not ghidra_path:
+        return
+    validate_linux_arm64_decompiler_install(ghidra_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     global _core_module
     if argv is None:
@@ -226,6 +233,12 @@ def main(argv: list[str] | None = None) -> int:
 
     ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
     if ghidra_path:
+        os.environ["GHIDRA_INSTALL_DIR"] = ghidra_path
+        try:
+            _ensure_supported_ghidra_installation(ghidra_path)
+        except RuntimeError as exc:
+            logger.error("%s", exc)
+            return 1
         logger.debug("pyghidra.start install_dir=%s", ghidra_path)
         pyghidra.start(install_dir=ghidra_path)
     else:

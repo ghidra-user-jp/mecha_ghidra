@@ -41,6 +41,8 @@ def to_domain_error(
         code = ErrorCode.NOT_CHECKED_OUT
     elif message.startswith("LOCAL_CHANGES_EXIST"):
         code = ErrorCode.LOCAL_CHANGES_EXIST
+    elif message.startswith("UNSAFE_MERGE_REQUIRED"):
+        code = ErrorCode.MERGE_REQUIRED
     elif message.startswith("LOCK_TIMEOUT"):
         code = ErrorCode.LOCK_TIMEOUT
         retryable = True

@@ -18,3 +18,19 @@ def test_map_exception_masks_internal_domain_message_for_sync_operation_failed()
     assert getattr(mapped, "domain_error")["code"] == ErrorCode.SYNC_OPERATION_FAILED.value
     assert getattr(mapped, "domain_error")["details"]["target"] == "fw"
 
+
+def test_map_exception_exposes_merge_required_guidance():
+    exc = DomainError(
+        code=ErrorCode.MERGE_REQUIRED,
+        message="UNSAFE_MERGE_REQUIRED: automatic merge is disabled",
+        details={"target": "fw"},
+    )
+
+    mapped = map_exception(exc)
+
+    assert isinstance(mapped, RuntimeError)
+    assert (
+        str(mapped)
+        == "MERGE_REQUIRED: automatic merge is disabled; reopen the latest version or re-checkout before retrying"
+    )
+    assert getattr(mapped, "domain_error")["code"] == ErrorCode.MERGE_REQUIRED.value

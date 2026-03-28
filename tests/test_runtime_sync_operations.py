@@ -69,6 +69,8 @@ class _FakeHandle:
         self.project = _FakeProject()
         self._closed = False
         self.fail_reopen = False
+        self.merge_calls = 0
+        self.undo_checkout_calls = 0
         self._status: dict[str, object] = {
             "is_versioned": True,
             "is_checked_out": False,
@@ -114,12 +116,17 @@ class _FakeHandle:
         self._status["is_latest_version"] = True
 
     def undo_checkout_program(self, domain_path: str, *, keep: bool = False):  # noqa: ARG002
+        self.undo_checkout_calls += 1
         self._status["is_checked_out"] = bool(keep)
+        self._status["modified_since_checkout"] = False
+        self._status["can_merge"] = False
+        self._status["is_latest_version"] = True
 
     def terminate_checkout_program(self, domain_path: str, checkout_id: int):  # noqa: ARG002
         return None
 
     def merge_program(self, domain_path: str, *, ok_to_upgrade: bool = True):  # noqa: ARG002
+        self.merge_calls += 1
         self._status["can_merge"] = False
         self._status["is_latest_version"] = True
 
@@ -180,6 +187,38 @@ def test_pull_abort_on_local_changes(monkeypatch: pytest.MonkeyPatch):
 
     with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
         sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+
+def test_pull_follows_latest_by_dropping_stale_checkout_instead_of_merging(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status["is_checked_out"] = True  # noqa: SLF001
+    handle._status["can_merge"] = True  # noqa: SLF001
+    handle._status["is_latest_version"] = False  # noqa: SLF001
+    handle._status["latest_version"] = 2  # noqa: SLF001
+
+    result = sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    assert result["status"] == "ok"
+    assert result["updated"] is True
+    assert result["merged"] is False
+    assert result["followed_latest"] is True
+    assert result["discarded_local_changes"] is False
+    assert handle.undo_checkout_calls == 1
+    assert handle.merge_calls == 0
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
+    assert handle._status["can_merge"] is False  # noqa: SLF001
+
+
+def test_pull_rejects_unsafe_merge_when_merge_is_required_without_checkout(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status["is_checked_out"] = False  # noqa: SLF001
+    handle._status["can_merge"] = True  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="UNSAFE_MERGE_REQUIRED"):
+        sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    assert handle.undo_checkout_calls == 0
+    assert handle.merge_calls == 0
 
 
 def test_checkout_reloads_active_program_and_rebinds_context(monkeypatch: pytest.MonkeyPatch):

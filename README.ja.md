@@ -23,15 +23,72 @@ PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開す�
 3. サーバーを起動（Streamable HTTP）
    ```bash
    uv run ghidra-mcp \
-       --project-location /Users/samsepi0l/ghidra_project.gpr \
-       --domain-path /main \
+        --project-location /Users/samsepi0l/ghidra_project.gpr \
+        --domain-path /main \
        --transport http \
        --mcp-host 127.0.0.1 \
        --mcp-port 8081 \
-       --mcp-path /mcp
+        --mcp-path /mcp
    ```
 
 運用パターンや shared project 認証を含む詳細は [利用ガイド](docs/usage.ja.md) を参照してください。
+
+## Docker クイックスタート
+
+Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` と `docker-compose.yml` を使えます。
+
+1. 解析対象を置くディレクトリを作成
+   ```bash
+   mkdir -p samples
+   ```
+2. イメージをビルド（推奨）
+   ```bash
+   ./build_docker_image.sh
+   ```
+3. MCP サーバーを起動
+   ```bash
+   docker compose up -d
+   ```
+4. MCP クライアントは `http://127.0.0.1:8081/mcp` に接続
+
+- `docker compose build` も引き続き利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、これは同梱 Linux decompiler を動かすために必要です。
+- `linux/arm64` を使う場合は、Docker build が既定で mecha_ghidra release `v0.1.0-rc.1` の patched Ghidra 配布物を自動選択します。upstream の公式 ZIP を ARM64 へ無理に指定した場合は、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
+- 独自の patched ZIP を使いたい場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定して上書きできます。
+- `./samples` はコンテナ内に `/samples` として read-only 共有されます。`import_program` では `/samples/<filename>` を指定してください。
+- Ghidra project は named volume `ghidra-projects` に永続化され、既定の project path は `/data/projects/default.gpr` です。初回利用前に一度その project を作成するか、既存の Ghidra project をそこへ mount してください。
+- 起動直後は program 未ロードの状態です。`import_program(target="default", binary_path="/samples/<filename>")` 実行後、返ってきた `domain_path` を `load_project_program` に渡してください。
+- 推奨共有方法は「入力 bind mount(read-only) + Ghidra project named volume(read-write)」です。`import_program` は入力ファイルを project にコピーするので入力側は read-only で十分で、`.rep` 配下の重い I/O は bind mount より volume の方が安定しやすいためです。
+
+## Linux ARM64 decompiler 配布物
+
+このリポジトリには、Linux ARM64 向け Ghidra decompiler を生成して配布する専用導線を追加しました。
+
+- `./scripts/build_linux_arm64_decompiler.sh` で `linux_arm_64` 用の native `decompile` / `sleigh` をビルドできます。
+- release workflow では次の 2 種類を publish します。
+  - `ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
+  - `ghidra_*_linux_arm_64_decompiler.zip`
+- overlay tarball には `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` のパスがそのまま入るので、既存の Ghidra install にそのまま展開できます。
+- patched ZIP は ARM Linux の Docker build や、ARM Linux へそのまま配置する用途を想定しています。
+- GitHub release には、Apple Silicon / Linux ARM64 の Docker 用・overlay 用だと分かるように `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` も publish します。
+- 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使ってください。
+
+ARM64 Docker build 例:
+
+```bash
+DOCKER_PLATFORM=linux/arm64 docker compose build
+DOCKER_PLATFORM=linux/arm64 docker compose up -d
+```
+
+別の成果物へ上書きしたい場合:
+
+```bash
+DOCKER_PLATFORM=linux/arm64 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+docker compose build
+```
+
+ARM Linux 上で patched binary が無いまま起動した場合は、`linux_arm_64` native が不足していることを明示するエラーを返します。
 
 ## 主要機能
 
