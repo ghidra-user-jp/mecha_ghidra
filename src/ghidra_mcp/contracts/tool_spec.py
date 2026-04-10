@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import BaseModel
 
@@ -18,9 +18,33 @@ from .tool_models import (
 )
 
 
-class ToolExposure(str, Enum):
-    ALWAYS = "always"
+class ToolCategoryTag(str, Enum):
+    CORE = "core"
+    FUNCTION_ANALYSIS = "function_analysis"
+    MEMORY_DATA = "memory_data"
+    SYMBOL_COMMENT_EDIT = "symbol_comment_edit"
+    DATATYPE_OPS = "datatype_ops"
     SHARED_SYNC = "shared_sync"
+
+
+class ToolSafetyTag(str, Enum):
+    SAFE_READONLY = "safe_readonly"
+    SAFE_NONSEMANTIC_EDIT = "safe_nonsemantic_edit"
+    UNSAFE_SEMANTIC_EDIT = "unsafe_semantic_edit"
+    UNSAFE_BINARY_DESTRUCTIVE = "unsafe_binary_destructive"
+    UNSAFE_NONBINARY_DESTRUCTIVE = "unsafe_nonbinary_destructive"
+
+
+class ToolOperationLevel(str, Enum):
+    BASIC = "basic"
+    STANDARD = "standard"
+    ADVANCED = "advanced"
+
+
+class ToolProfile(str, Enum):
+    DEFAULT = "default"
+    READONLY = "readonly"
+    FULL = "full"
 
 
 class ExecutorKind(str, Enum):
@@ -32,7 +56,9 @@ class ExecutorKind(str, Enum):
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
-    exposure: ToolExposure
+    category_tag: ToolCategoryTag
+    safety_tag: ToolSafetyTag
+    operation_level: ToolOperationLevel
     executor_kind: ExecutorKind
     command_or_method: str
     input_model: type[BaseModel]
@@ -45,6 +71,13 @@ class ToolSpec:
     static_kwargs: dict[str, Any] = field(default_factory=dict)
     result_adapter: str | None = None
     error_adapter: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolProfileSpec:
+    categories: frozenset[ToolCategoryTag]
+    safety_tags: frozenset[ToolSafetyTag] | None = None
+    operation_levels: frozenset[ToolOperationLevel] | None = None
 
 
 _CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
@@ -202,6 +235,246 @@ _DIRECT_OUTPUT_FIELDS: dict[str, dict[str, tuple[type[Any], Any]]] = {
         "target": (str, ...),
         "remove_program": (bool, ...),
     },
+}
+
+_TOOL_CATEGORY_BY_NAME: dict[str, ToolCategoryTag] = {
+    # core
+    "list_targets": ToolCategoryTag.CORE,
+    "create_session": ToolCategoryTag.CORE,
+    "register_target": ToolCategoryTag.CORE,
+    "close_session": ToolCategoryTag.CORE,
+    "close_session_and_remove_program": ToolCategoryTag.CORE,
+    "list_project_programs": ToolCategoryTag.CORE,
+    "import_program": ToolCategoryTag.CORE,
+    "load_project_program": ToolCategoryTag.CORE,
+    # function_analysis
+    "list_methods": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "list_functions": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "list_classes": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "list_namespaces": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "search_functions_by_name": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "decompile_function": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "decompile_function_by_address": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "disassemble_function": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "get_function_by_address": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "get_function_xrefs": ToolCategoryTag.FUNCTION_ANALYSIS,
+    "get_callee": ToolCategoryTag.FUNCTION_ANALYSIS,
+    # memory_data
+    "list_segments": ToolCategoryTag.MEMORY_DATA,
+    "list_imports": ToolCategoryTag.MEMORY_DATA,
+    "list_exports": ToolCategoryTag.MEMORY_DATA,
+    "list_data_items": ToolCategoryTag.MEMORY_DATA,
+    "list_strings": ToolCategoryTag.MEMORY_DATA,
+    "get_xrefs_to": ToolCategoryTag.MEMORY_DATA,
+    "get_xrefs_from": ToolCategoryTag.MEMORY_DATA,
+    "get_data_by_label": ToolCategoryTag.MEMORY_DATA,
+    "get_bytes": ToolCategoryTag.MEMORY_DATA,
+    "search_bytes": ToolCategoryTag.MEMORY_DATA,
+    # symbol_comment_edit
+    "rename_function": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "rename_function_by_address": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "rename_variable": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "rename_data": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "set_function_prototype": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "set_local_variable_type": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "set_global_data_type": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "set_bytes": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "set_decompiler_comment": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "set_disassembly_comment": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    "add_bookmark": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    # datatype_ops
+    "create_struct": ToolCategoryTag.DATATYPE_OPS,
+    "add_struct_members": ToolCategoryTag.DATATYPE_OPS,
+    "clear_struct": ToolCategoryTag.DATATYPE_OPS,
+    "remove_struct_members": ToolCategoryTag.DATATYPE_OPS,
+    "get_struct": ToolCategoryTag.DATATYPE_OPS,
+    "create_enum": ToolCategoryTag.DATATYPE_OPS,
+    "add_enum_values": ToolCategoryTag.DATATYPE_OPS,
+    "remove_enum_values": ToolCategoryTag.DATATYPE_OPS,
+    "get_enum": ToolCategoryTag.DATATYPE_OPS,
+    "create_class": ToolCategoryTag.DATATYPE_OPS,
+    "add_class_members": ToolCategoryTag.DATATYPE_OPS,
+    "remove_class_members": ToolCategoryTag.DATATYPE_OPS,
+    # shared_sync
+    "get_project_sync_status": ToolCategoryTag.SHARED_SYNC,
+    "get_version_history": ToolCategoryTag.SHARED_SYNC,
+    "get_version_diff": ToolCategoryTag.SHARED_SYNC,
+    "checkout_project_program": ToolCategoryTag.SHARED_SYNC,
+    "add_project_program_to_version_control": ToolCategoryTag.SHARED_SYNC,
+    "commit_project_program": ToolCategoryTag.SHARED_SYNC,
+    "pull_project_program": ToolCategoryTag.SHARED_SYNC,
+    "undo_checkout_project_program": ToolCategoryTag.SHARED_SYNC,
+    "terminate_project_program_checkout": ToolCategoryTag.SHARED_SYNC,
+    "reload_project_program": ToolCategoryTag.SHARED_SYNC,
+}
+
+_TOOL_SAFETY_BY_NAME: dict[str, ToolSafetyTag] = {
+    # core
+    "list_targets": ToolSafetyTag.SAFE_READONLY,
+    "create_session": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "register_target": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "close_session": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "close_session_and_remove_program": ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+    "list_project_programs": ToolSafetyTag.SAFE_READONLY,
+    "import_program": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "load_project_program": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    # function_analysis
+    "list_methods": ToolSafetyTag.SAFE_READONLY,
+    "list_functions": ToolSafetyTag.SAFE_READONLY,
+    "list_classes": ToolSafetyTag.SAFE_READONLY,
+    "list_namespaces": ToolSafetyTag.SAFE_READONLY,
+    "search_functions_by_name": ToolSafetyTag.SAFE_READONLY,
+    "decompile_function": ToolSafetyTag.SAFE_READONLY,
+    "decompile_function_by_address": ToolSafetyTag.SAFE_READONLY,
+    "disassemble_function": ToolSafetyTag.SAFE_READONLY,
+    "get_function_by_address": ToolSafetyTag.SAFE_READONLY,
+    "get_function_xrefs": ToolSafetyTag.SAFE_READONLY,
+    "get_callee": ToolSafetyTag.SAFE_READONLY,
+    # memory_data
+    "list_segments": ToolSafetyTag.SAFE_READONLY,
+    "list_imports": ToolSafetyTag.SAFE_READONLY,
+    "list_exports": ToolSafetyTag.SAFE_READONLY,
+    "list_data_items": ToolSafetyTag.SAFE_READONLY,
+    "list_strings": ToolSafetyTag.SAFE_READONLY,
+    "get_xrefs_to": ToolSafetyTag.SAFE_READONLY,
+    "get_xrefs_from": ToolSafetyTag.SAFE_READONLY,
+    "get_data_by_label": ToolSafetyTag.SAFE_READONLY,
+    "get_bytes": ToolSafetyTag.SAFE_READONLY,
+    "search_bytes": ToolSafetyTag.SAFE_READONLY,
+    # symbol_comment_edit
+    "rename_function": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "rename_function_by_address": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "rename_variable": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "rename_data": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "set_function_prototype": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "set_local_variable_type": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "set_global_data_type": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "set_bytes": ToolSafetyTag.UNSAFE_BINARY_DESTRUCTIVE,
+    "set_decompiler_comment": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "set_disassembly_comment": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    "add_bookmark": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+    # datatype_ops
+    "create_struct": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "add_struct_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "clear_struct": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "remove_struct_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "get_struct": ToolSafetyTag.SAFE_READONLY,
+    "create_enum": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "add_enum_values": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "remove_enum_values": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "get_enum": ToolSafetyTag.SAFE_READONLY,
+    "create_class": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "add_class_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "remove_class_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    # shared_sync
+    "get_project_sync_status": ToolSafetyTag.SAFE_READONLY,
+    "get_version_history": ToolSafetyTag.SAFE_READONLY,
+    "get_version_diff": ToolSafetyTag.SAFE_READONLY,
+    "checkout_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "add_project_program_to_version_control": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "commit_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "pull_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+    "undo_checkout_project_program": ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+    "terminate_project_program_checkout": ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+    "reload_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+}
+
+_TOOL_OPERATION_LEVEL_BY_NAME: dict[str, ToolOperationLevel] = {
+    # core
+    "list_targets": ToolOperationLevel.BASIC,
+    "create_session": ToolOperationLevel.STANDARD,
+    "register_target": ToolOperationLevel.STANDARD,
+    "close_session": ToolOperationLevel.STANDARD,
+    "close_session_and_remove_program": ToolOperationLevel.ADVANCED,
+    "list_project_programs": ToolOperationLevel.STANDARD,
+    "import_program": ToolOperationLevel.ADVANCED,
+    "load_project_program": ToolOperationLevel.BASIC,
+    # function_analysis
+    "list_methods": ToolOperationLevel.BASIC,
+    "list_functions": ToolOperationLevel.STANDARD,
+    "list_classes": ToolOperationLevel.ADVANCED,
+    "list_namespaces": ToolOperationLevel.ADVANCED,
+    "search_functions_by_name": ToolOperationLevel.STANDARD,
+    "decompile_function": ToolOperationLevel.BASIC,
+    "decompile_function_by_address": ToolOperationLevel.STANDARD,
+    "disassemble_function": ToolOperationLevel.STANDARD,
+    "get_function_by_address": ToolOperationLevel.STANDARD,
+    "get_function_xrefs": ToolOperationLevel.BASIC,
+    "get_callee": ToolOperationLevel.STANDARD,
+    # memory_data
+    "list_segments": ToolOperationLevel.ADVANCED,
+    "list_imports": ToolOperationLevel.BASIC,
+    "list_exports": ToolOperationLevel.BASIC,
+    "list_data_items": ToolOperationLevel.ADVANCED,
+    "list_strings": ToolOperationLevel.BASIC,
+    "get_xrefs_to": ToolOperationLevel.STANDARD,
+    "get_xrefs_from": ToolOperationLevel.STANDARD,
+    "get_data_by_label": ToolOperationLevel.STANDARD,
+    "get_bytes": ToolOperationLevel.STANDARD,
+    "search_bytes": ToolOperationLevel.STANDARD,
+    # symbol_comment_edit
+    "rename_function": ToolOperationLevel.BASIC,
+    "rename_function_by_address": ToolOperationLevel.STANDARD,
+    "rename_variable": ToolOperationLevel.BASIC,
+    "rename_data": ToolOperationLevel.ADVANCED,
+    "set_function_prototype": ToolOperationLevel.STANDARD,
+    "set_local_variable_type": ToolOperationLevel.STANDARD,
+    "set_global_data_type": ToolOperationLevel.ADVANCED,
+    "set_bytes": ToolOperationLevel.ADVANCED,
+    "set_decompiler_comment": ToolOperationLevel.STANDARD,
+    "set_disassembly_comment": ToolOperationLevel.STANDARD,
+    "add_bookmark": ToolOperationLevel.STANDARD,
+    # datatype_ops
+    "create_struct": ToolOperationLevel.STANDARD,
+    "add_struct_members": ToolOperationLevel.STANDARD,
+    "clear_struct": ToolOperationLevel.STANDARD,
+    "remove_struct_members": ToolOperationLevel.STANDARD,
+    "get_struct": ToolOperationLevel.STANDARD,
+    "create_enum": ToolOperationLevel.ADVANCED,
+    "add_enum_values": ToolOperationLevel.ADVANCED,
+    "remove_enum_values": ToolOperationLevel.ADVANCED,
+    "get_enum": ToolOperationLevel.ADVANCED,
+    "create_class": ToolOperationLevel.ADVANCED,
+    "add_class_members": ToolOperationLevel.ADVANCED,
+    "remove_class_members": ToolOperationLevel.ADVANCED,
+    # shared_sync
+    "get_project_sync_status": ToolOperationLevel.BASIC,
+    "get_version_history": ToolOperationLevel.STANDARD,
+    "get_version_diff": ToolOperationLevel.ADVANCED,
+    "checkout_project_program": ToolOperationLevel.BASIC,
+    "add_project_program_to_version_control": ToolOperationLevel.STANDARD,
+    "commit_project_program": ToolOperationLevel.BASIC,
+    "pull_project_program": ToolOperationLevel.BASIC,
+    "undo_checkout_project_program": ToolOperationLevel.STANDARD,
+    "terminate_project_program_checkout": ToolOperationLevel.ADVANCED,
+    "reload_project_program": ToolOperationLevel.ADVANCED,
+}
+
+_DEFAULT_PROFILE_CATEGORIES: frozenset[ToolCategoryTag] = frozenset(
+    {
+        ToolCategoryTag.CORE,
+        ToolCategoryTag.FUNCTION_ANALYSIS,
+        ToolCategoryTag.MEMORY_DATA,
+        ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        ToolCategoryTag.DATATYPE_OPS,
+    }
+)
+
+_ALL_CATEGORIES: frozenset[ToolCategoryTag] = frozenset(ToolCategoryTag)
+_ALL_SAFETY_TAGS: frozenset[ToolSafetyTag] = frozenset(ToolSafetyTag)
+_ALL_OPERATION_LEVELS: frozenset[ToolOperationLevel] = frozenset(ToolOperationLevel)
+
+_PROFILE_SPECS: dict[ToolProfile, ToolProfileSpec] = {
+    ToolProfile.DEFAULT: ToolProfileSpec(categories=_DEFAULT_PROFILE_CATEGORIES),
+    ToolProfile.READONLY: ToolProfileSpec(
+        categories=_DEFAULT_PROFILE_CATEGORIES,
+        safety_tags=frozenset({ToolSafetyTag.SAFE_READONLY}),
+    ),
+    ToolProfile.FULL: ToolProfileSpec(
+        categories=_ALL_CATEGORIES,
+        safety_tags=_ALL_SAFETY_TAGS,
+        operation_levels=_ALL_OPERATION_LEVELS,
+    ),
 }
 
 
@@ -485,21 +758,14 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
     return create_optional_any_input_model(model_name, field_names)
 
 
-_ALL_TOOL_NAMES = set(_CORE_COMMAND_PARAM_KEYS) | set(_REGISTRY_METHOD_SPECS) | set(_SHARED_SYNC_METHOD_SPECS)
-_KNOWN_OUTPUT_OVERRIDE_NAMES = set(_LIST_OUTPUT_TOOLS) | set(_SCALAR_OUTPUT_TYPES) | set(_DIRECT_OUTPUT_FIELDS)
-_UNKNOWN_OUTPUT_OVERRIDE_NAMES = _KNOWN_OUTPUT_OVERRIDE_NAMES - _ALL_TOOL_NAMES
-if _UNKNOWN_OUTPUT_OVERRIDE_NAMES:
-    raise RuntimeError(
-        "output model override contains undefined tools: %s" % ", ".join(sorted(_UNKNOWN_OUTPUT_OVERRIDE_NAMES))
-    )
-
-
 _TOOL_SPECS: dict[str, ToolSpec] = {}
 
 for command_name, field_names in _CORE_COMMAND_PARAM_KEYS.items():
     _TOOL_SPECS[command_name] = ToolSpec(
         name=command_name,
-        exposure=ToolExposure.ALWAYS,
+        category_tag=_TOOL_CATEGORY_BY_NAME[command_name],
+        safety_tag=_TOOL_SAFETY_BY_NAME[command_name],
+        operation_level=_TOOL_OPERATION_LEVEL_BY_NAME[command_name],
         executor_kind=ExecutorKind.CORE_COMMAND,
         command_or_method=command_name,
         input_model=_build_input_model(command_name, field_names),
@@ -513,7 +779,9 @@ for spec_name, (method_name, field_names, include_target, static_kwargs) in _REG
     signature_fields = ("target", *field_names) if include_target else field_names
     _TOOL_SPECS[spec_name] = ToolSpec(
         name=spec_name,
-        exposure=ToolExposure.ALWAYS,
+        category_tag=_TOOL_CATEGORY_BY_NAME[spec_name],
+        safety_tag=_TOOL_SAFETY_BY_NAME[spec_name],
+        operation_level=_TOOL_OPERATION_LEVEL_BY_NAME[spec_name],
         executor_kind=ExecutorKind.REGISTRY_METHOD,
         command_or_method=method_name,
         input_model=_build_input_model(spec_name, field_names),
@@ -528,7 +796,9 @@ for spec_name, (method_name, field_names, include_target, static_kwargs) in _REG
 for spec_name, (method_name, field_names) in _SHARED_SYNC_METHOD_SPECS.items():
     _TOOL_SPECS[spec_name] = ToolSpec(
         name=spec_name,
-        exposure=ToolExposure.SHARED_SYNC,
+        category_tag=_TOOL_CATEGORY_BY_NAME[spec_name],
+        safety_tag=_TOOL_SAFETY_BY_NAME[spec_name],
+        operation_level=_TOOL_OPERATION_LEVEL_BY_NAME[spec_name],
         executor_kind=ExecutorKind.SHARED_SYNC_METHOD,
         command_or_method=method_name,
         input_model=_build_input_model(spec_name, field_names),
@@ -539,6 +809,27 @@ for spec_name, (method_name, field_names) in _SHARED_SYNC_METHOD_SPECS.items():
     )
 
 
+def _coerce_enum_member(value: str | Enum, enum_cls: type[Enum], label: str):
+    if isinstance(value, enum_cls):
+        return value
+    try:
+        return enum_cls(value)
+    except ValueError as exc:
+        allowed = ", ".join(member.value for member in enum_cls)
+        raise ValueError(f"Unsupported {label}: {value!r} (expected one of: {allowed})") from exc
+
+
+def _coerce_enum_set(
+    values: Iterable[str | Enum] | None,
+    *,
+    enum_cls: type[Enum],
+    label: str,
+) -> set[Enum] | None:
+    if values is None:
+        return None
+    return {_coerce_enum_member(value, enum_cls, label) for value in values}
+
+
 def get_tool_spec(name: str) -> ToolSpec:
     try:
         return _TOOL_SPECS[name]
@@ -546,21 +837,94 @@ def get_tool_spec(name: str) -> ToolSpec:
         raise KeyError(f"Unsupported tool spec: {name}") from exc
 
 
-def get_all_tool_specs(*, include_shared_sync: bool = True) -> dict[str, ToolSpec]:
-    if include_shared_sync:
-        return dict(_TOOL_SPECS)
-    return {name: spec for name, spec in _TOOL_SPECS.items() if spec.exposure == ToolExposure.ALWAYS}
+def filter_tool_specs(
+    *,
+    specs: dict[str, ToolSpec] | None = None,
+    profile: ToolProfile | str = ToolProfile.DEFAULT,
+    allow_categories: Iterable[ToolCategoryTag | str] | None = None,
+    add_categories: Iterable[ToolCategoryTag | str] | None = None,
+    allow_safety: Iterable[ToolSafetyTag | str] | None = None,
+    allow_operation_levels: Iterable[ToolOperationLevel | str] | None = None,
+    enable_tools: Iterable[str] | None = None,
+    disable_tools: Iterable[str] | None = None,
+) -> dict[str, ToolSpec]:
+    available_specs = _TOOL_SPECS if specs is None else specs
+    profile_spec = _PROFILE_SPECS[_coerce_enum_member(profile, ToolProfile, "tool profile")]
+
+    categories = set(profile_spec.categories)
+    allow_category_set = _coerce_enum_set(
+        allow_categories,
+        enum_cls=ToolCategoryTag,
+        label="category",
+    )
+    if allow_category_set is not None:
+        categories = set(allow_category_set)
+    add_category_set = _coerce_enum_set(
+        add_categories,
+        enum_cls=ToolCategoryTag,
+        label="category",
+    )
+    if add_category_set is not None:
+        categories.update(add_category_set)
+
+    safety_tags = set(profile_spec.safety_tags) if profile_spec.safety_tags is not None else None
+    requested_safety = _coerce_enum_set(
+        allow_safety,
+        enum_cls=ToolSafetyTag,
+        label="safety tag",
+    )
+    if requested_safety is not None:
+        safety_tags = requested_safety if safety_tags is None else safety_tags & requested_safety
+
+    operation_levels = set(profile_spec.operation_levels) if profile_spec.operation_levels is not None else None
+    requested_operation_levels = _coerce_enum_set(
+        allow_operation_levels,
+        enum_cls=ToolOperationLevel,
+        label="operation level",
+    )
+    if requested_operation_levels is not None:
+        operation_levels = (
+            requested_operation_levels
+            if operation_levels is None
+            else operation_levels & requested_operation_levels
+        )
+
+    selected_names = {
+        name
+        for name, spec in available_specs.items()
+        if spec.category_tag in categories
+        and (safety_tags is None or spec.safety_tag in safety_tags)
+        and (operation_levels is None or spec.operation_level in operation_levels)
+    }
+
+    enabled_names = set(enable_tools or ())
+    disabled_names = set(disable_tools or ())
+
+    selected_names.update(enabled_names)
+    selected_names.difference_update(disabled_names)
+
+    return {
+        name: spec
+        for name, spec in available_specs.items()
+        if name in selected_names
+    }
+def get_all_tool_specs() -> dict[str, ToolSpec]:
+    return dict(_TOOL_SPECS)
 
 
-def get_public_tool_names(*, include_shared_sync: bool = True) -> set[str]:
-    return set(get_all_tool_specs(include_shared_sync=include_shared_sync).keys())
+def get_public_tool_names() -> set[str]:
+    return set(_TOOL_SPECS.keys())
 
 
 __all__ = [
     "ExecutorKind",
-    "ToolExposure",
+    "ToolCategoryTag",
+    "ToolOperationLevel",
+    "ToolProfile",
+    "ToolSafetyTag",
     "ToolSpec",
-    "get_tool_spec",
+    "filter_tool_specs",
     "get_all_tool_specs",
     "get_public_tool_names",
+    "get_tool_spec",
 ]

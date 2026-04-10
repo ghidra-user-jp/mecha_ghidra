@@ -2,8 +2,12 @@
 
 from .tool_spec import (
     ExecutorKind,
-    ToolExposure,
+    ToolCategoryTag,
+    ToolOperationLevel,
+    ToolProfile,
+    ToolSafetyTag,
     ToolSpec,
+    filter_tool_specs,
     get_all_tool_specs,
     get_public_tool_names,
     get_tool_spec,
@@ -11,8 +15,12 @@ from .tool_spec import (
 
 __all__ = [
     "ExecutorKind",
-    "ToolExposure",
+    "ToolCategoryTag",
+    "ToolOperationLevel",
+    "ToolProfile",
+    "ToolSafetyTag",
     "ToolSpec",
+    "filter_tool_specs",
     "get_tool_spec",
     "get_all_tool_specs",
     "get_public_tool_names",

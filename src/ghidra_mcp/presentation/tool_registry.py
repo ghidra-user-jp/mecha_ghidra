@@ -7,7 +7,10 @@ from typing import Any, Callable
 
 from mcp.types import ToolAnnotations
 
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, ToolSpec, get_all_tool_specs
+from ghidra_mcp.contracts.tool_spec import (
+    ExecutorKind,
+    ToolSpec,
+)
 
 
 _RAW_TO_PUBLIC_NAME: dict[str, dict[str, str]] = {
@@ -97,19 +100,6 @@ _TOOL_DECORATOR_OPTIONS: dict[str, dict[str, Any]] = {
         "annotations": ToolAnnotations(readOnlyHint=False, idempotentHint=False),
     },
 }
-
-_SHARED_SYNC_TOOL_ORDER: tuple[str, ...] = (
-    "get_project_sync_status",
-    "get_version_history",
-    "get_version_diff",
-    "checkout_project_program",
-    "add_project_program_to_version_control",
-    "commit_project_program",
-    "pull_project_program",
-    "undo_checkout_project_program",
-    "terminate_project_program_checkout",
-    "reload_project_program",
-)
 
 _SHARED_SYNC_DESCRIPTIONS: dict[str, str] = {
     "get_project_sync_status": "Get shared-project version-control status for the target program",
@@ -222,13 +212,12 @@ def _build_callable(
 
 def build_tool_functions(
     *,
-    specs: dict[str, ToolSpec] | None = None,
+    specs: dict[str, ToolSpec],
     dispatcher_provider: Callable[[], Callable[..., Any]],
     registry_provider: Callable[[], Any],
 ) -> dict[str, Callable[..., Any]]:
-    selected_specs = specs or get_all_tool_specs(include_shared_sync=True)
     tools: dict[str, Callable[..., Any]] = {}
-    for spec in selected_specs.values():
+    for spec in specs.values():
         callable_obj = _build_callable(
             spec,
             dispatcher_provider=dispatcher_provider,
@@ -238,9 +227,22 @@ def build_tool_functions(
     return tools
 
 
-def register_shared_sync_tools(mcp, *, tools: dict[str, Callable[..., Any]]) -> None:
-    for name in _SHARED_SYNC_TOOL_ORDER:
-        mcp.add_tool(tools[name], description=_SHARED_SYNC_DESCRIPTIONS[name])
+def _tool_registration_options(name: str) -> dict[str, Any]:
+    options = dict(_TOOL_DECORATOR_OPTIONS.get(name, {}))
+    if "description" not in options and name in _SHARED_SYNC_DESCRIPTIONS:
+        options["description"] = _SHARED_SYNC_DESCRIPTIONS[name]
+    return options
+
+
+def register_tool_functions(
+    mcp,
+    *,
+    tools: dict[str, Callable[..., Any]],
+    specs: dict[str, ToolSpec],
+) -> None:
+    for spec in specs.values():
+        decorator = mcp.tool(**_tool_registration_options(spec.name))
+        decorator(tools[spec.name])
 
 
 class ToolRegistry:
@@ -250,30 +252,18 @@ class ToolRegistry:
         specs: dict[str, ToolSpec],
         dispatcher_provider: Callable[[], Callable[..., Any]],
         registry_provider: Callable[[], Any],
-        *,
-        include_shared_sync: bool = False,
     ) -> dict[str, Callable[..., Any]]:
         tools = build_tool_functions(
             specs=specs,
             dispatcher_provider=dispatcher_provider,
             registry_provider=registry_provider,
         )
-
-        for name, spec in specs.items():
-            if spec.exposure != ToolExposure.ALWAYS:
-                continue
-            options = dict(_TOOL_DECORATOR_OPTIONS.get(name, {}))
-            decorator = mcp.tool(**options)
-            decorator(tools[name])
-
-        if include_shared_sync:
-            register_shared_sync_tools(mcp, tools=tools)
-
+        register_tool_functions(mcp, tools=tools, specs=specs)
         return tools
 
 
 __all__ = [
     "ToolRegistry",
     "build_tool_functions",
-    "register_shared_sync_tools",
+    "register_tool_functions",
 ]

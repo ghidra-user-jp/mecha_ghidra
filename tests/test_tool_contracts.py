@@ -13,7 +13,7 @@ LEGACY_SERVICES_DIR = ROOT / "src" / "ghidra_mcp" / "services"
 
 
 def _core_command_specs() -> dict[str, tuple[str, ...]]:
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
     return {
         spec.command_or_method: tuple(spec.input_model.model_fields.keys())
         for spec in specs.values()

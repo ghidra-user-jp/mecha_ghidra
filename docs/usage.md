@@ -131,7 +131,11 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - `--transport http` is recommended for HTTP connectivity. This starts FastMCP in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
 - `--transport sse` is still available for compatibility (`/sse`).
 - If you bind to `--mcp-host 0.0.0.0` (or `::`), protection assumptions differ from local-only mode. Use reverse proxy, TLS, and access controls for external exposure.
-- Enable shared-project sync tools with `--enable-shared-project-sync` only when you need to expose `commit/pull/checkout` operations.
+- Tool exposure is controlled by `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, and `--disable-tool`.
+- `shared_sync` is now a regular category. Add it with `--add-category shared_sync` or use `--tool-profile full` when you need shared-project sync operations.
+- No tool flags is equivalent to `--tool-profile default`, which keeps the pre-existing default set and excludes `shared_sync`.
+- `--allow-category` replaces the current category set, `--add-category` extends it, same-type allow flags are OR, and different allow types are AND.
+- `--enable-shared-project-sync` has been removed.
 - If shared-project authentication is required, specify both `--ghidra-server-user` and `--ghidra-server-password-env`. Supplying only one causes startup failure (direct plaintext password arg is not supported).
 - Startup also fails when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged.
 - On Linux ARM64, startup/decompiler initialization now fails with a specific message when `Ghidra/Features/Decompiler/os/linux_arm_64` is missing or not executable.
@@ -148,6 +152,26 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - `commit_project_program` detects merge conflicts (`can_merge=true`) and, by default, discards local changes to follow the latest state, returning `status=noop` / `reason=conflict_discarded` (human-side updates are prioritized).
 - In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
 - The Docker server starts with project metadata only, so import first with `import_program` and then open the imported program with `load_project_program`.
+
+### Tool Exposure Examples
+
+Readonly profile:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile readonly
+```
+
+Default profile plus shared-project sync:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --add-category shared_sync
+```
+
+Full profile narrowed to readonly tools:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety safe_readonly
+```
 
 ### Startup Example with Shared-Project Authentication
 

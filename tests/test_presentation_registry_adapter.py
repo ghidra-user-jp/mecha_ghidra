@@ -156,7 +156,7 @@ def _required_raw_args(spec_name: str) -> dict[str, Any]:
     return raw
 
 
-@pytest.mark.parametrize("tool_name", sorted(get_all_tool_specs(include_shared_sync=True).keys()))
+@pytest.mark.parametrize("tool_name", sorted(get_all_tool_specs().keys()))
 def test_service_registry_adapter_routes_all_tools(tool_name: str):
     spec = get_tool_spec(tool_name)
     target_name = "fw"

@@ -131,7 +131,11 @@ docker compose build
 - http接続時の推奨は `--transport http` です。FastMCP の Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
 - `--mcp-host 0.0.0.0`（または `::`）で起動する場合、ローカル限定時とは保護設定が異なります。外部公開時は必ずリバースプロキシ/TLS/アクセス制御を併用してください。
-- `commit/pull/checkout` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
+- ツール公開は `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, `--disable-tool` で制御します。
+- `shared_sync` は通常の category になりました。shared project 同期ツールが必要な場合は `--add-category shared_sync` を追加するか、`--tool-profile full` を使ってください。
+- ツール制御引数を何も付けない場合は `--tool-profile default` と同じで、従来どおり `shared_sync` は含みません。
+- `--allow-category` は現在の category 集合を置き換え、`--add-category` は追加します。同じ種類の allow は OR、異なる種類は AND で評価されます。
+- `--enable-shared-project-sync` は廃止されました。
 - shared project の認証が必要な場合は `--ghidra-server-user` と `--ghidra-server-password-env` をセットで指定してください。片方のみ指定した場合は起動エラーになります（パスワードの直接引数は未対応）。
 - `--ghidra-server-password-env` で指定した環境変数が未設定または空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。
 - Linux ARM64 では `Ghidra/Features/Decompiler/os/linux_arm_64` が不足していると、起動時または decompiler 初期化時に専用メッセージ付きで失敗します。
@@ -148,6 +152,26 @@ docker compose build
 - `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでローカル変更を破棄して最新状態へ追従し、`status=noop` / `reason=conflict_discarded` を返します（人間側の更新を優先）。
 - Docker 構成では `./samples:/samples:ro` と `ghidra-projects:/data/projects` を既定で使います。入力ファイルは `/samples/<filename>` として指定してください。
 - Docker で初回起動する server は project のみを登録した状態で立ち上がるため、まず `import_program` で取り込み、続けて `load_project_program` で program を開いてください。
+
+### ツール公開制御の例
+
+readonly:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile readonly
+```
+
+default + shared_sync:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --add-category shared_sync
+```
+
+full を readonly に絞る:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety safe_readonly
+```
 
 ### shared project 認証つき起動例
 
