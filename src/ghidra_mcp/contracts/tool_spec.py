@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from .tool_models import (
     create_list_output_model,
     create_map_output_model,
-    create_optional_any_input_model,
     create_scalar_output_model,
     create_typed_input_model,
     create_typed_output_model,
@@ -53,6 +52,9 @@ class ExecutorKind(str, Enum):
     SHARED_SYNC_METHOD = "shared_sync_method"
 
 
+ToolFieldSpec = tuple[str, Any, Any]
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -71,6 +73,13 @@ class ToolSpec:
     static_kwargs: dict[str, Any] = field(default_factory=dict)
     result_adapter: str | None = None
     error_adapter: str | None = None
+    public_name_overrides: dict[str, str] = field(default_factory=dict)
+    include_none_keys: frozenset[str] = field(default_factory=frozenset)
+    omit_falsey_keys: frozenset[str] = field(default_factory=frozenset)
+    description: str | None = None
+    read_only_hint: bool | None = None
+    idempotent_hint: bool | None = None
+    checkout_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,377 +89,953 @@ class ToolProfileSpec:
     operation_levels: frozenset[ToolOperationLevel] | None = None
 
 
-_CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
-    "list_methods": ("offset", "limit"),
-    "list_functions": ("offset", "limit"),
-    "list_classes": ("offset", "limit"),
-    "decompile_function": ("name",),
-    "decompile_function_by_address": ("address",),
-    "rename_function": ("oldName", "newName"),
-    "rename_function_by_address": ("function_address", "new_name"),
-    "rename_data": ("address", "newName"),
-    "rename_variable": ("functionName", "oldName", "newName"),
-    "list_segments": ("offset", "limit"),
-    "list_imports": ("offset", "limit"),
-    "list_exports": ("offset", "limit"),
-    "list_namespaces": ("offset", "limit"),
-    "list_data_items": ("offset", "limit"),
-    "search_functions_by_name": ("query", "offset", "limit"),
-    "get_function_by_address": ("address",),
-    "disassemble_function": ("address",),
-    "set_decompiler_comment": ("address", "comment"),
-    "set_disassembly_comment": ("address", "comment"),
-    "set_function_prototype": ("function_address", "prototype"),
-    "set_local_variable_type": ("function_address", "variable_name", "new_type"),
-    "get_xrefs_to": ("address", "offset", "limit"),
-    "get_xrefs_from": ("address", "offset", "limit"),
-    "get_function_xrefs": ("name", "offset", "limit"),
-    "list_strings": ("offset", "limit", "filter"),
-    "create_struct": ("name", "size", "category", "members"),
-    "add_struct_members": ("struct_name", "members", "category"),
-    "clear_struct": ("struct_name", "category"),
-    "get_struct": ("name", "category"),
-    "get_data_by_label": ("label",),
-    "get_bytes": ("address", "size"),
-    "search_bytes": ("bytes", "offset", "limit"),
-    "create_enum": ("name", "size", "category", "values"),
-    "add_enum_values": ("enum_name", "values", "category"),
-    "get_enum": ("name", "category"),
-    "set_global_data_type": ("address", "data_type", "length", "clear_mode"),
-    "create_class": ("name", "parent_namespace", "members"),
-    "add_class_members": ("class_name", "members", "parent_namespace"),
-    "remove_class_members": ("class_name", "members", "parent_namespace"),
-    "remove_enum_values": ("enum_name", "values", "category"),
-    "remove_struct_members": ("struct_name", "members", "category"),
-    "set_bytes": ("address", "bytes"),
-    "get_callee": ("address",),
-    "add_bookmark": ("address", "category", "comment", "type", "format"),
-}
+_NO_FIELDS: tuple[ToolFieldSpec, ...] = ()
+_OFFSET_LIMIT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("offset", int, 0),
+    ("limit", int, 100),
+)
+_DOMAIN_PATH_FIELD: ToolFieldSpec = ("domain_path", str | None, None)
+_CREATE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("target", str, ...),
+    ("project_location", str, ...),
+    ("project_name", str | None, None),
+    ("domain_path", str | None, None),
+)
+_CLOSE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("closed", bool, ...),
+    ("target", str, ...),
+    ("remove_program", bool, ...),
+)
 
-# name -> (registry_method, input_fields, include_target, static_kwargs)
-_REGISTRY_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...], bool, dict[str, Any]]] = {
-    "list_targets": ("list_targets", (), False, {}),
-    "list_project_programs": ("list_programs", (), True, {}),
-    "register_target": ("register_target", ("project_location", "project_name"), True, {}),
-    "load_project_program": ("load_program", ("domain_path",), True, {}),
-    "import_program": ("import_program", ("binary_path",), True, {}),
-    "create_session": (
+
+def _pascal_case(name: str) -> str:
+    return "".join(part.capitalize() for part in name.split("_"))
+
+
+def _typed_fields(fields: tuple[ToolFieldSpec, ...]) -> dict[str, tuple[Any, Any]]:
+    return {name: (annotation, default) for name, annotation, default in fields}
+
+
+def _build_input_model(tool_name: str, input_fields: tuple[ToolFieldSpec, ...]) -> type[BaseModel]:
+    return create_typed_input_model(f"{_pascal_case(tool_name)}Input", _typed_fields(input_fields))
+
+
+def _build_output_model(
+    tool_name: str,
+    *,
+    list_output: bool = False,
+    scalar_output_type: type[Any] | None = None,
+    output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+) -> type[BaseModel]:
+    model_name = f"{_pascal_case(tool_name)}Output"
+    if output_fields:
+        return create_typed_output_model(model_name, _typed_fields(output_fields))
+    if scalar_output_type is not None:
+        return create_scalar_output_model(model_name, scalar_output_type, allow_empty_list=True)
+    if list_output:
+        return create_list_output_model(model_name, object)
+    return create_map_output_model(model_name, object, allow_empty_list=True)
+
+
+def _build_public_signature(
+    executor_kind: ExecutorKind,
+    *,
+    include_target: bool,
+    input_fields: tuple[ToolFieldSpec, ...],
+) -> tuple[str, ...]:
+    field_names = tuple(name for name, _, _ in input_fields)
+    if executor_kind == ExecutorKind.CORE_COMMAND and include_target:
+        return (*field_names, "target")
+    if include_target:
+        return ("target", *field_names)
+    return field_names
+
+
+def _tool(
+    *,
+    name: str,
+    category_tag: ToolCategoryTag,
+    safety_tag: ToolSafetyTag,
+    operation_level: ToolOperationLevel,
+    executor_kind: ExecutorKind,
+    command_or_method: str,
+    input_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    list_output: bool = False,
+    scalar_output_type: type[Any] | None = None,
+    output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    include_target: bool = True,
+    static_kwargs: dict[str, Any] | None = None,
+    result_adapter: str | None = None,
+    error_adapter: str | None = None,
+    public_name_overrides: dict[str, str] | None = None,
+    include_none_keys: Iterable[str] = (),
+    omit_falsey_keys: Iterable[str] = (),
+    description: str | None = None,
+    read_only_hint: bool | None = None,
+    idempotent_hint: bool | None = None,
+    checkout_required: bool = False,
+) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        category_tag=category_tag,
+        safety_tag=safety_tag,
+        operation_level=operation_level,
+        executor_kind=executor_kind,
+        command_or_method=command_or_method,
+        input_model=_build_input_model(name, input_fields),
+        output_model=_build_output_model(
+            name,
+            list_output=list_output,
+            scalar_output_type=scalar_output_type,
+            output_fields=output_fields,
+        ),
+        public_signature=_build_public_signature(
+            executor_kind,
+            include_target=include_target,
+            input_fields=input_fields,
+        ),
+        include_target=include_target,
+        static_kwargs=dict(static_kwargs or {}),
+        result_adapter=result_adapter,
+        error_adapter=error_adapter,
+        public_name_overrides=dict(public_name_overrides or {}),
+        include_none_keys=frozenset(include_none_keys),
+        omit_falsey_keys=frozenset(omit_falsey_keys),
+        description=description,
+        read_only_hint=read_only_hint,
+        idempotent_hint=idempotent_hint,
+        checkout_required=checkout_required,
+    )
+
+
+def _core_tool(
+    name: str,
+    *,
+    category_tag: ToolCategoryTag,
+    safety_tag: ToolSafetyTag,
+    operation_level: ToolOperationLevel,
+    input_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    list_output: bool = False,
+    scalar_output_type: type[Any] | None = None,
+    output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    public_name_overrides: dict[str, str] | None = None,
+    include_none_keys: Iterable[str] = (),
+    omit_falsey_keys: Iterable[str] = (),
+    description: str | None = None,
+    read_only_hint: bool | None = None,
+    idempotent_hint: bool | None = None,
+    checkout_required: bool = False,
+) -> ToolSpec:
+    return _tool(
+        name=name,
+        category_tag=category_tag,
+        safety_tag=safety_tag,
+        operation_level=operation_level,
+        executor_kind=ExecutorKind.CORE_COMMAND,
+        command_or_method=name,
+        input_fields=input_fields,
+        list_output=list_output,
+        scalar_output_type=scalar_output_type,
+        output_fields=output_fields,
+        public_name_overrides=public_name_overrides,
+        include_none_keys=include_none_keys,
+        omit_falsey_keys=omit_falsey_keys,
+        description=description,
+        read_only_hint=read_only_hint,
+        idempotent_hint=idempotent_hint,
+        checkout_required=checkout_required,
+    )
+
+
+def _registry_tool(
+    name: str,
+    *,
+    method_name: str,
+    category_tag: ToolCategoryTag,
+    safety_tag: ToolSafetyTag,
+    operation_level: ToolOperationLevel,
+    input_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    list_output: bool = False,
+    scalar_output_type: type[Any] | None = None,
+    output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    include_target: bool = True,
+    static_kwargs: dict[str, Any] | None = None,
+    result_adapter: str | None = None,
+    error_adapter: str | None = None,
+    public_name_overrides: dict[str, str] | None = None,
+    include_none_keys: Iterable[str] = (),
+    omit_falsey_keys: Iterable[str] = (),
+    description: str | None = None,
+    read_only_hint: bool | None = None,
+    idempotent_hint: bool | None = None,
+) -> ToolSpec:
+    return _tool(
+        name=name,
+        category_tag=category_tag,
+        safety_tag=safety_tag,
+        operation_level=operation_level,
+        executor_kind=ExecutorKind.REGISTRY_METHOD,
+        command_or_method=method_name,
+        input_fields=input_fields,
+        list_output=list_output,
+        scalar_output_type=scalar_output_type,
+        output_fields=output_fields,
+        include_target=include_target,
+        static_kwargs=static_kwargs,
+        result_adapter=result_adapter,
+        error_adapter=error_adapter,
+        public_name_overrides=public_name_overrides,
+        include_none_keys=include_none_keys,
+        omit_falsey_keys=omit_falsey_keys,
+        description=description,
+        read_only_hint=read_only_hint,
+        idempotent_hint=idempotent_hint,
+    )
+
+
+def _shared_sync_tool(
+    name: str,
+    *,
+    method_name: str,
+    safety_tag: ToolSafetyTag,
+    operation_level: ToolOperationLevel,
+    input_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    description: str | None = None,
+    include_none_keys: Iterable[str] = (),
+) -> ToolSpec:
+    return _tool(
+        name=name,
+        category_tag=ToolCategoryTag.SHARED_SYNC,
+        safety_tag=safety_tag,
+        operation_level=operation_level,
+        executor_kind=ExecutorKind.SHARED_SYNC_METHOD,
+        command_or_method=method_name,
+        input_fields=input_fields,
+        include_none_keys=include_none_keys,
+        description=description,
+    )
+
+
+_TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
+    # core
+    _registry_tool(
+        "list_targets",
+        method_name="list_targets",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        include_target=False,
+        list_output=True,
+        description=(
+            "List registered targets and their state, including project info and whether a program "
+            "is loaded (domain_path). Call this before target-scoped operations."
+        ),
+        read_only_hint=True,
+        idempotent_hint=True,
+    ),
+    _registry_tool(
         "create_session",
-        ("project_location", "domain_path", "project_name"),
-        True,
-        {},
+        method_name="create_session",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("project_location", str, ...),
+            ("domain_path", str, ...),
+            ("project_name", str | None, None),
+        ),
+        output_fields=_CREATE_SESSION_OUTPUT_FIELDS,
+        result_adapter="status_target_ok",
+        error_adapter="create_session_error",
+        include_none_keys=("project_name",),
+        description=(
+            "Create a new target session by opening a program in a Ghidra project. "
+            "This is non-idempotent and fails if the target already exists. "
+            "If the target already exists, use load_project_program."
+        ),
+        read_only_hint=False,
+        idempotent_hint=False,
     ),
-    "close_session": ("close_session", (), True, {}),
-    "close_session_and_remove_program": ("close_session", (), True, {"remove_program": True}),
-}
-
-# name -> (registry_method, input_fields)
-_SHARED_SYNC_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "get_project_sync_status": ("get_project_sync_status", ("domain_path",)),
-    "get_version_history": ("get_version_history", ("limit", "domain_path")),
-    "get_version_diff": (
+    _registry_tool(
+        "register_target",
+        method_name="register_target",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("project_location", str, ...),
+            ("project_name", str | None, None),
+        ),
+        include_none_keys=("project_name",),
+        description=(
+            "Register a target with project information only, without loading a program yet. "
+            "Use load_project_program later to open a domain path."
+        ),
+        read_only_hint=False,
+        idempotent_hint=False,
+    ),
+    _registry_tool(
+        "close_session",
+        method_name="close_session",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        output_fields=_CLOSE_SESSION_OUTPUT_FIELDS,
+        result_adapter="status_target_ok",
+        error_adapter="close_session_error",
+    ),
+    _registry_tool(
+        "close_session_and_remove_program",
+        method_name="close_session",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        output_fields=_CLOSE_SESSION_OUTPUT_FIELDS,
+        static_kwargs={"remove_program": True},
+        result_adapter="status_target_ok",
+        error_adapter="close_remove_error",
+    ),
+    _registry_tool(
+        "list_project_programs",
+        method_name="list_programs",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        list_output=True,
+    ),
+    _registry_tool(
+        "import_program",
+        method_name="import_program",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(("binary_path", str, ...),),
+        scalar_output_type=str,
+        result_adapter="status_program_ok",
+        description="Import a binary or Ghidra archive (.gzf) into the current target's project",
+    ),
+    _registry_tool(
+        "load_project_program",
+        method_name="load_program",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(("domain_path", str, ...),),
+        scalar_output_type=str,
+        result_adapter="status_program_ok",
+        description=(
+            "Load or switch a program for an existing target by domain path. "
+            "Use this for targets that already exist (including project-only targets) "
+            "instead of create_session."
+        ),
+        read_only_hint=False,
+        idempotent_hint=False,
+    ),
+    # function_analysis
+    _core_tool(
+        "list_methods",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+    ),
+    _core_tool(
+        "list_functions",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+        description=(
+            "List all functions in the loaded program for the target session. "
+            "Requires an initialized target with a loaded program; call list_targets first, "
+            "then use create_session or load_project_program when needed."
+        ),
+        read_only_hint=True,
+        idempotent_hint=True,
+    ),
+    _core_tool(
+        "list_classes",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+    ),
+    _core_tool(
+        "list_namespaces",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+    ),
+    _core_tool(
+        "search_functions_by_name",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("query", str, ...), *_OFFSET_LIMIT_FIELDS),
+        list_output=True,
+    ),
+    _core_tool(
+        "decompile_function",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(("name", str, ...),),
+        scalar_output_type=str,
+    ),
+    _core_tool(
+        "decompile_function_by_address",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("address", str, ...),),
+        scalar_output_type=str,
+    ),
+    _core_tool(
+        "disassemble_function",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("address", str, ...),),
+        list_output=True,
+    ),
+    _core_tool(
+        "get_function_by_address",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("address", str, ...),),
+    ),
+    _core_tool(
+        "get_function_xrefs",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(("name", str, ...), *_OFFSET_LIMIT_FIELDS),
+        list_output=True,
+    ),
+    _core_tool(
+        "get_callee",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("address", str, ...),),
+        list_output=True,
+    ),
+    # memory_data
+    _core_tool(
+        "list_segments",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+    ),
+    _core_tool(
+        "list_imports",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+    ),
+    _core_tool(
+        "list_exports",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+    ),
+    _core_tool(
+        "list_data_items",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=_OFFSET_LIMIT_FIELDS,
+        list_output=True,
+    ),
+    _core_tool(
+        "list_strings",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(
+            ("offset", int, 0),
+            ("limit", int, 2000),
+            ("filter", str | None, None),
+        ),
+        list_output=True,
+        omit_falsey_keys=("filter",),
+    ),
+    _core_tool(
+        "get_xrefs_to",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("address", str, ...), *_OFFSET_LIMIT_FIELDS),
+        list_output=True,
+    ),
+    _core_tool(
+        "get_xrefs_from",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("address", str, ...), *_OFFSET_LIMIT_FIELDS),
+        list_output=True,
+    ),
+    _core_tool(
+        "get_data_by_label",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("label", str, ...),),
+        list_output=True,
+    ),
+    _core_tool(
+        "get_bytes",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("address", str, ...),
+            ("size", int, 16),
+        ),
+        scalar_output_type=str,
+    ),
+    _core_tool(
+        "search_bytes",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("bytes", str, ...),
+            *_OFFSET_LIMIT_FIELDS,
+        ),
+        list_output=True,
+        public_name_overrides={"bytes": "pattern"},
+    ),
+    # symbol_comment_edit
+    _core_tool(
+        "rename_function",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(
+            ("oldName", str, ...),
+            ("newName", str, ...),
+        ),
+        public_name_overrides={"oldName": "old_name", "newName": "new_name"},
+        checkout_required=True,
+    ),
+    _core_tool(
+        "rename_function_by_address",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("function_address", str, ...),
+            ("new_name", str, ...),
+        ),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "rename_variable",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(
+            ("functionName", str, ...),
+            ("oldName", str, ...),
+            ("newName", str, ...),
+        ),
+        public_name_overrides={
+            "functionName": "function_name",
+            "oldName": "old_name",
+            "newName": "new_name",
+        },
+        checkout_required=True,
+    ),
+    _core_tool(
+        "rename_data",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("address", str, ...),
+            ("newName", str, ...),
+        ),
+        public_name_overrides={"newName": "new_name"},
+        checkout_required=True,
+    ),
+    _core_tool(
+        "set_function_prototype",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("function_address", str, ...),
+            ("prototype", str, ...),
+        ),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "set_local_variable_type",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("function_address", str, ...),
+            ("variable_name", str, ...),
+            ("new_type", str, ...),
+        ),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "set_global_data_type",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("address", str, ...),
+            ("data_type", str, ...),
+            ("length", int | None, None),
+            ("clear_mode", str | None, None),
+        ),
+        omit_falsey_keys=("clear_mode",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "set_bytes",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.UNSAFE_BINARY_DESTRUCTIVE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("address", str, ...),
+            ("bytes", str, ...),
+        ),
+        public_name_overrides={"bytes": "bytes_hex"},
+        checkout_required=True,
+    ),
+    _core_tool(
+        "set_decompiler_comment",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("address", str, ...),
+            ("comment", str, ...),
+        ),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "set_disassembly_comment",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("address", str, ...),
+            ("comment", str, ...),
+        ),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "add_bookmark",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("address", str, ...),
+            ("category", str, ...),
+            ("comment", str, ...),
+            ("type", str, ...),
+            ("format", str, "json"),
+        ),
+        checkout_required=True,
+    ),
+    # datatype_ops
+    _core_tool(
+        "create_struct",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("name", str, ...),
+            ("size", int, 0),
+            ("category", str | None, None),
+            ("members", list[dict] | None, None),
+        ),
+        omit_falsey_keys=("category", "members"),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "add_struct_members",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("struct_name", str, ...),
+            ("members", list[dict], ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "clear_struct",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("struct_name", str, ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "remove_struct_members",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("struct_name", str, ...),
+            ("members", list[str], ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "get_struct",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("name", str, ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+    ),
+    _core_tool(
+        "create_enum",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("name", str, ...),
+            ("size", int, 4),
+            ("category", str | None, None),
+            ("values", list[dict] | None, None),
+        ),
+        omit_falsey_keys=("category", "values"),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "add_enum_values",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("enum_name", str, ...),
+            ("values", list[dict], ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "remove_enum_values",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("enum_name", str, ...),
+            ("values", list[str], ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "get_enum",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("name", str, ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+    ),
+    _core_tool(
+        "create_class",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("name", str, ...),
+            ("parent_namespace", str | None, None),
+            ("members", list[dict] | None, None),
+        ),
+        omit_falsey_keys=("members", "parent_namespace"),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "add_class_members",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("class_name", str, ...),
+            ("members", list[dict], ...),
+            ("parent_namespace", str | None, None),
+        ),
+        omit_falsey_keys=("parent_namespace",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "remove_class_members",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("class_name", str, ...),
+            ("members", list[str], ...),
+            ("parent_namespace", str | None, None),
+        ),
+        omit_falsey_keys=("parent_namespace",),
+        checkout_required=True,
+    ),
+    # shared_sync
+    _shared_sync_tool(
+        "get_project_sync_status",
+        method_name="get_project_sync_status",
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(_DOMAIN_PATH_FIELD,),
+        include_none_keys=("domain_path",),
+        description="Get shared-project version-control status for the target program",
+    ),
+    _shared_sync_tool(
+        "get_version_history",
+        method_name="get_version_history",
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("limit", int, 50),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Get version history metadata for the target program in a shared project",
+    ),
+    _shared_sync_tool(
         "get_version_diff",
-        ("from_version", "to_version", "range_limit", "domain_path"),
+        method_name="get_version_diff",
+        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("from_version", int, ...),
+            ("to_version", int, ...),
+            ("range_limit", int, 200),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Get a summary of differences between two shared-project versions of the target program",
     ),
-    "checkout_project_program": ("checkout_project_program", ("exclusive", "domain_path")),
-    "add_project_program_to_version_control": (
+    _shared_sync_tool(
+        "checkout_project_program",
+        method_name="checkout_project_program",
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(
+            ("exclusive", bool, False),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Checkout the target program in a shared project",
+    ),
+    _shared_sync_tool(
         "add_project_program_to_version_control",
-        ("comment", "keep_checked_out", "domain_path"),
+        method_name="add_project_program_to_version_control",
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("comment", str, ...),
+            ("keep_checked_out", bool, False),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Add the target program to shared-project version control",
     ),
-    "commit_project_program": (
+    _shared_sync_tool(
         "commit_project_program",
-        ("message", "keep_checked_out", "auto_checkout", "domain_path"),
+        method_name="commit_project_program",
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(
+            ("message", str, ...),
+            ("keep_checked_out", bool, False),
+            ("auto_checkout", bool, True),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Check-in changes of the target program to the shared project server",
     ),
-    "pull_project_program": ("pull_project_program", ("on_local_changes", "domain_path")),
-    "undo_checkout_project_program": (
+    _shared_sync_tool(
+        "pull_project_program",
+        method_name="pull_project_program",
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(
+            ("on_local_changes", str, "abort"),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Pull/merge latest remote changes for the target program",
+    ),
+    _shared_sync_tool(
         "undo_checkout_project_program",
-        ("discard_local_changes", "domain_path"),
+        method_name="undo_checkout_project_program",
+        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("discard_local_changes", bool, True),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Undo checkout for the target program (optionally discard local changes)",
     ),
-    "terminate_project_program_checkout": (
+    _shared_sync_tool(
         "terminate_project_program_checkout",
-        ("checkout_id", "domain_path"),
+        method_name="terminate_project_program_checkout",
+        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("checkout_id", int, ...),
+            _DOMAIN_PATH_FIELD,
+        ),
+        include_none_keys=("domain_path",),
+        description="Terminate a stale checkout by checkout id for the target program",
     ),
-    "reload_project_program": ("reload_project_program", ("domain_path",)),
-}
+    _shared_sync_tool(
+        "reload_project_program",
+        method_name="reload_project_program",
+        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(_DOMAIN_PATH_FIELD,),
+        include_none_keys=("domain_path",),
+        description="Reload the target program by closing and reopening the current domain path",
+    ),
+)
 
-_RESULT_ADAPTERS_BY_SPEC: dict[str, str] = {
-    "load_project_program": "status_program_ok",
-    "import_program": "status_program_ok",
-    "create_session": "status_target_ok",
-    "close_session": "status_target_ok",
-    "close_session_and_remove_program": "status_target_ok",
-}
+_TOOL_SPECS: dict[str, ToolSpec] = {spec.name: spec for spec in _TOOL_SPEC_LIST}
 
-_ERROR_ADAPTERS_BY_SPEC: dict[str, str] = {
-    "create_session": "create_session_error",
-    "close_session": "close_session_error",
-    "close_session_and_remove_program": "close_remove_error",
-}
-
-
-_LIST_OUTPUT_TOOLS: set[str] = {
-    "list_methods",
-    "list_functions",
-    "list_classes",
-    "search_functions_by_name",
-    "disassemble_function",
-    "get_callee",
-    "get_xrefs_to",
-    "get_xrefs_from",
-    "get_function_xrefs",
-    "list_segments",
-    "list_imports",
-    "list_exports",
-    "list_namespaces",
-    "list_data_items",
-    "list_strings",
-    "get_data_by_label",
-    "search_bytes",
-    "list_targets",
-    "list_project_programs",
-}
-
-_SCALAR_OUTPUT_TYPES: dict[str, type[Any]] = {
-    "decompile_function": str,
-    "decompile_function_by_address": str,
-    "get_bytes": str,
-    "load_project_program": str,
-    "import_program": str,
-}
-
-_DIRECT_OUTPUT_FIELDS: dict[str, dict[str, tuple[type[Any], Any]]] = {
-    "create_session": {
-        "target": (str, ...),
-        "project_location": (str, ...),
-        "project_name": (str | None, None),
-        "domain_path": (str | None, None),
-    },
-    "close_session": {
-        "closed": (bool, ...),
-        "target": (str, ...),
-        "remove_program": (bool, ...),
-    },
-    "close_session_and_remove_program": {
-        "closed": (bool, ...),
-        "target": (str, ...),
-        "remove_program": (bool, ...),
-    },
-}
-
-_TOOL_CATEGORY_BY_NAME: dict[str, ToolCategoryTag] = {
-    # core
-    "list_targets": ToolCategoryTag.CORE,
-    "create_session": ToolCategoryTag.CORE,
-    "register_target": ToolCategoryTag.CORE,
-    "close_session": ToolCategoryTag.CORE,
-    "close_session_and_remove_program": ToolCategoryTag.CORE,
-    "list_project_programs": ToolCategoryTag.CORE,
-    "import_program": ToolCategoryTag.CORE,
-    "load_project_program": ToolCategoryTag.CORE,
-    # function_analysis
-    "list_methods": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "list_functions": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "list_classes": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "list_namespaces": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "search_functions_by_name": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "decompile_function": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "decompile_function_by_address": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "disassemble_function": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "get_function_by_address": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "get_function_xrefs": ToolCategoryTag.FUNCTION_ANALYSIS,
-    "get_callee": ToolCategoryTag.FUNCTION_ANALYSIS,
-    # memory_data
-    "list_segments": ToolCategoryTag.MEMORY_DATA,
-    "list_imports": ToolCategoryTag.MEMORY_DATA,
-    "list_exports": ToolCategoryTag.MEMORY_DATA,
-    "list_data_items": ToolCategoryTag.MEMORY_DATA,
-    "list_strings": ToolCategoryTag.MEMORY_DATA,
-    "get_xrefs_to": ToolCategoryTag.MEMORY_DATA,
-    "get_xrefs_from": ToolCategoryTag.MEMORY_DATA,
-    "get_data_by_label": ToolCategoryTag.MEMORY_DATA,
-    "get_bytes": ToolCategoryTag.MEMORY_DATA,
-    "search_bytes": ToolCategoryTag.MEMORY_DATA,
-    # symbol_comment_edit
-    "rename_function": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "rename_function_by_address": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "rename_variable": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "rename_data": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "set_function_prototype": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "set_local_variable_type": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "set_global_data_type": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "set_bytes": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "set_decompiler_comment": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "set_disassembly_comment": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    "add_bookmark": ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-    # datatype_ops
-    "create_struct": ToolCategoryTag.DATATYPE_OPS,
-    "add_struct_members": ToolCategoryTag.DATATYPE_OPS,
-    "clear_struct": ToolCategoryTag.DATATYPE_OPS,
-    "remove_struct_members": ToolCategoryTag.DATATYPE_OPS,
-    "get_struct": ToolCategoryTag.DATATYPE_OPS,
-    "create_enum": ToolCategoryTag.DATATYPE_OPS,
-    "add_enum_values": ToolCategoryTag.DATATYPE_OPS,
-    "remove_enum_values": ToolCategoryTag.DATATYPE_OPS,
-    "get_enum": ToolCategoryTag.DATATYPE_OPS,
-    "create_class": ToolCategoryTag.DATATYPE_OPS,
-    "add_class_members": ToolCategoryTag.DATATYPE_OPS,
-    "remove_class_members": ToolCategoryTag.DATATYPE_OPS,
-    # shared_sync
-    "get_project_sync_status": ToolCategoryTag.SHARED_SYNC,
-    "get_version_history": ToolCategoryTag.SHARED_SYNC,
-    "get_version_diff": ToolCategoryTag.SHARED_SYNC,
-    "checkout_project_program": ToolCategoryTag.SHARED_SYNC,
-    "add_project_program_to_version_control": ToolCategoryTag.SHARED_SYNC,
-    "commit_project_program": ToolCategoryTag.SHARED_SYNC,
-    "pull_project_program": ToolCategoryTag.SHARED_SYNC,
-    "undo_checkout_project_program": ToolCategoryTag.SHARED_SYNC,
-    "terminate_project_program_checkout": ToolCategoryTag.SHARED_SYNC,
-    "reload_project_program": ToolCategoryTag.SHARED_SYNC,
-}
-
-_TOOL_SAFETY_BY_NAME: dict[str, ToolSafetyTag] = {
-    # core
-    "list_targets": ToolSafetyTag.SAFE_READONLY,
-    "create_session": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "register_target": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "close_session": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "close_session_and_remove_program": ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
-    "list_project_programs": ToolSafetyTag.SAFE_READONLY,
-    "import_program": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "load_project_program": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    # function_analysis
-    "list_methods": ToolSafetyTag.SAFE_READONLY,
-    "list_functions": ToolSafetyTag.SAFE_READONLY,
-    "list_classes": ToolSafetyTag.SAFE_READONLY,
-    "list_namespaces": ToolSafetyTag.SAFE_READONLY,
-    "search_functions_by_name": ToolSafetyTag.SAFE_READONLY,
-    "decompile_function": ToolSafetyTag.SAFE_READONLY,
-    "decompile_function_by_address": ToolSafetyTag.SAFE_READONLY,
-    "disassemble_function": ToolSafetyTag.SAFE_READONLY,
-    "get_function_by_address": ToolSafetyTag.SAFE_READONLY,
-    "get_function_xrefs": ToolSafetyTag.SAFE_READONLY,
-    "get_callee": ToolSafetyTag.SAFE_READONLY,
-    # memory_data
-    "list_segments": ToolSafetyTag.SAFE_READONLY,
-    "list_imports": ToolSafetyTag.SAFE_READONLY,
-    "list_exports": ToolSafetyTag.SAFE_READONLY,
-    "list_data_items": ToolSafetyTag.SAFE_READONLY,
-    "list_strings": ToolSafetyTag.SAFE_READONLY,
-    "get_xrefs_to": ToolSafetyTag.SAFE_READONLY,
-    "get_xrefs_from": ToolSafetyTag.SAFE_READONLY,
-    "get_data_by_label": ToolSafetyTag.SAFE_READONLY,
-    "get_bytes": ToolSafetyTag.SAFE_READONLY,
-    "search_bytes": ToolSafetyTag.SAFE_READONLY,
-    # symbol_comment_edit
-    "rename_function": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "rename_function_by_address": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "rename_variable": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "rename_data": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "set_function_prototype": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "set_local_variable_type": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "set_global_data_type": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "set_bytes": ToolSafetyTag.UNSAFE_BINARY_DESTRUCTIVE,
-    "set_decompiler_comment": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "set_disassembly_comment": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    "add_bookmark": ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
-    # datatype_ops
-    "create_struct": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "add_struct_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "clear_struct": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "remove_struct_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "get_struct": ToolSafetyTag.SAFE_READONLY,
-    "create_enum": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "add_enum_values": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "remove_enum_values": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "get_enum": ToolSafetyTag.SAFE_READONLY,
-    "create_class": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "add_class_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "remove_class_members": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    # shared_sync
-    "get_project_sync_status": ToolSafetyTag.SAFE_READONLY,
-    "get_version_history": ToolSafetyTag.SAFE_READONLY,
-    "get_version_diff": ToolSafetyTag.SAFE_READONLY,
-    "checkout_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "add_project_program_to_version_control": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "commit_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "pull_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-    "undo_checkout_project_program": ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
-    "terminate_project_program_checkout": ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
-    "reload_project_program": ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
-}
-
-_TOOL_OPERATION_LEVEL_BY_NAME: dict[str, ToolOperationLevel] = {
-    # core
-    "list_targets": ToolOperationLevel.BASIC,
-    "create_session": ToolOperationLevel.STANDARD,
-    "register_target": ToolOperationLevel.STANDARD,
-    "close_session": ToolOperationLevel.STANDARD,
-    "close_session_and_remove_program": ToolOperationLevel.ADVANCED,
-    "list_project_programs": ToolOperationLevel.STANDARD,
-    "import_program": ToolOperationLevel.ADVANCED,
-    "load_project_program": ToolOperationLevel.BASIC,
-    # function_analysis
-    "list_methods": ToolOperationLevel.BASIC,
-    "list_functions": ToolOperationLevel.STANDARD,
-    "list_classes": ToolOperationLevel.ADVANCED,
-    "list_namespaces": ToolOperationLevel.ADVANCED,
-    "search_functions_by_name": ToolOperationLevel.STANDARD,
-    "decompile_function": ToolOperationLevel.BASIC,
-    "decompile_function_by_address": ToolOperationLevel.STANDARD,
-    "disassemble_function": ToolOperationLevel.STANDARD,
-    "get_function_by_address": ToolOperationLevel.STANDARD,
-    "get_function_xrefs": ToolOperationLevel.BASIC,
-    "get_callee": ToolOperationLevel.STANDARD,
-    # memory_data
-    "list_segments": ToolOperationLevel.ADVANCED,
-    "list_imports": ToolOperationLevel.BASIC,
-    "list_exports": ToolOperationLevel.BASIC,
-    "list_data_items": ToolOperationLevel.ADVANCED,
-    "list_strings": ToolOperationLevel.BASIC,
-    "get_xrefs_to": ToolOperationLevel.STANDARD,
-    "get_xrefs_from": ToolOperationLevel.STANDARD,
-    "get_data_by_label": ToolOperationLevel.STANDARD,
-    "get_bytes": ToolOperationLevel.STANDARD,
-    "search_bytes": ToolOperationLevel.STANDARD,
-    # symbol_comment_edit
-    "rename_function": ToolOperationLevel.BASIC,
-    "rename_function_by_address": ToolOperationLevel.STANDARD,
-    "rename_variable": ToolOperationLevel.BASIC,
-    "rename_data": ToolOperationLevel.ADVANCED,
-    "set_function_prototype": ToolOperationLevel.STANDARD,
-    "set_local_variable_type": ToolOperationLevel.STANDARD,
-    "set_global_data_type": ToolOperationLevel.ADVANCED,
-    "set_bytes": ToolOperationLevel.ADVANCED,
-    "set_decompiler_comment": ToolOperationLevel.STANDARD,
-    "set_disassembly_comment": ToolOperationLevel.STANDARD,
-    "add_bookmark": ToolOperationLevel.STANDARD,
-    # datatype_ops
-    "create_struct": ToolOperationLevel.STANDARD,
-    "add_struct_members": ToolOperationLevel.STANDARD,
-    "clear_struct": ToolOperationLevel.STANDARD,
-    "remove_struct_members": ToolOperationLevel.STANDARD,
-    "get_struct": ToolOperationLevel.STANDARD,
-    "create_enum": ToolOperationLevel.ADVANCED,
-    "add_enum_values": ToolOperationLevel.ADVANCED,
-    "remove_enum_values": ToolOperationLevel.ADVANCED,
-    "get_enum": ToolOperationLevel.ADVANCED,
-    "create_class": ToolOperationLevel.ADVANCED,
-    "add_class_members": ToolOperationLevel.ADVANCED,
-    "remove_class_members": ToolOperationLevel.ADVANCED,
-    # shared_sync
-    "get_project_sync_status": ToolOperationLevel.BASIC,
-    "get_version_history": ToolOperationLevel.STANDARD,
-    "get_version_diff": ToolOperationLevel.ADVANCED,
-    "checkout_project_program": ToolOperationLevel.BASIC,
-    "add_project_program_to_version_control": ToolOperationLevel.STANDARD,
-    "commit_project_program": ToolOperationLevel.BASIC,
-    "pull_project_program": ToolOperationLevel.BASIC,
-    "undo_checkout_project_program": ToolOperationLevel.STANDARD,
-    "terminate_project_program_checkout": ToolOperationLevel.ADVANCED,
-    "reload_project_program": ToolOperationLevel.ADVANCED,
-}
-
-_DEFAULT_PROFILE_CATEGORIES: frozenset[ToolCategoryTag] = frozenset(
+_DEFAULT_PROFILE_CATEGORIES = frozenset(
     {
         ToolCategoryTag.CORE,
         ToolCategoryTag.FUNCTION_ANALYSIS,
@@ -460,10 +1045,6 @@ _DEFAULT_PROFILE_CATEGORIES: frozenset[ToolCategoryTag] = frozenset(
     }
 )
 
-_ALL_CATEGORIES: frozenset[ToolCategoryTag] = frozenset(ToolCategoryTag)
-_ALL_SAFETY_TAGS: frozenset[ToolSafetyTag] = frozenset(ToolSafetyTag)
-_ALL_OPERATION_LEVELS: frozenset[ToolOperationLevel] = frozenset(ToolOperationLevel)
-
 _PROFILE_SPECS: dict[ToolProfile, ToolProfileSpec] = {
     ToolProfile.DEFAULT: ToolProfileSpec(categories=_DEFAULT_PROFILE_CATEGORIES),
     ToolProfile.READONLY: ToolProfileSpec(
@@ -471,342 +1052,11 @@ _PROFILE_SPECS: dict[ToolProfile, ToolProfileSpec] = {
         safety_tags=frozenset({ToolSafetyTag.SAFE_READONLY}),
     ),
     ToolProfile.FULL: ToolProfileSpec(
-        categories=_ALL_CATEGORIES,
-        safety_tags=_ALL_SAFETY_TAGS,
-        operation_levels=_ALL_OPERATION_LEVELS,
+        categories=frozenset(ToolCategoryTag),
+        safety_tags=frozenset(ToolSafetyTag),
+        operation_levels=frozenset(ToolOperationLevel),
     ),
 }
-
-
-def _build_output_model(tool_name: str) -> type[BaseModel]:
-    model_name = f"{_pascal_case(tool_name)}Output"
-    if tool_name in _DIRECT_OUTPUT_FIELDS:
-        return create_typed_output_model(model_name, _DIRECT_OUTPUT_FIELDS[tool_name])
-    if tool_name in _SCALAR_OUTPUT_TYPES:
-        return create_scalar_output_model(model_name, _SCALAR_OUTPUT_TYPES[tool_name], allow_empty_list=True)
-    if tool_name in _LIST_OUTPUT_TOOLS:
-        return create_list_output_model(model_name, object)
-    return create_map_output_model(model_name, object, allow_empty_list=True)
-
-
-def _pascal_case(name: str) -> str:
-    return "".join(part.capitalize() for part in name.split("_"))
-
-
-def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[BaseModel]:
-    model_name = f"{_pascal_case(tool_name)}Input"
-    typed_fields_by_tool: dict[str, dict[str, tuple[type[Any], Any]]] = {
-        "list_targets": {},
-        "list_project_programs": {},
-        "register_target": {
-            "project_location": (str, ...),
-            "project_name": (str | None, None),
-        },
-        "load_project_program": {
-            "domain_path": (str, ...),
-        },
-        "import_program": {
-            "binary_path": (str, ...),
-        },
-        "create_session": {
-            "project_location": (str, ...),
-            "domain_path": (str, ...),
-            "project_name": (str | None, None),
-        },
-        "close_session": {},
-        "close_session_and_remove_program": {},
-        "get_project_sync_status": {
-            "domain_path": (str | None, None),
-        },
-        "checkout_project_program": {
-            "exclusive": (bool, False),
-            "domain_path": (str | None, None),
-        },
-        "add_project_program_to_version_control": {
-            "comment": (str, ...),
-            "keep_checked_out": (bool, False),
-            "domain_path": (str | None, None),
-        },
-        "commit_project_program": {
-            "message": (str, ...),
-            "keep_checked_out": (bool, False),
-            "auto_checkout": (bool, True),
-            "domain_path": (str | None, None),
-        },
-        "pull_project_program": {
-            "on_local_changes": (str, "abort"),
-            "domain_path": (str | None, None),
-        },
-        "undo_checkout_project_program": {
-            "discard_local_changes": (bool, True),
-            "domain_path": (str | None, None),
-        },
-        "terminate_project_program_checkout": {
-            "checkout_id": (int, ...),
-            "domain_path": (str | None, None),
-        },
-        "reload_project_program": {
-            "domain_path": (str | None, None),
-        },
-        "get_version_history": {
-            "limit": (int, 50),
-            "domain_path": (str | None, None),
-        },
-        "get_version_diff": {
-            "from_version": (int, ...),
-            "to_version": (int, ...),
-            "range_limit": (int, 200),
-            "domain_path": (str | None, None),
-        },
-        "list_methods": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_functions": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_classes": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "search_functions_by_name": {
-            "query": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "get_function_by_address": {
-            "address": (str, ...),
-        },
-        "decompile_function": {
-            "name": (str, ...),
-        },
-        "decompile_function_by_address": {
-            "address": (str, ...),
-        },
-        "disassemble_function": {
-            "address": (str, ...),
-        },
-        "get_callee": {
-            "address": (str, ...),
-        },
-        "get_xrefs_to": {
-            "address": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "get_xrefs_from": {
-            "address": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "get_function_xrefs": {
-            "name": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_segments": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_imports": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_exports": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_namespaces": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_data_items": {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "list_strings": {
-            "offset": (int, 0),
-            "limit": (int, 2000),
-            "filter": (str | None, None),
-        },
-        "get_data_by_label": {
-            "label": (str, ...),
-        },
-        "get_bytes": {
-            "address": (str, ...),
-            "size": (int, 16),
-        },
-        "search_bytes": {
-            "bytes": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-        "get_struct": {
-            "name": (str, ...),
-            "category": (str | None, None),
-        },
-        "get_enum": {
-            "name": (str, ...),
-            "category": (str | None, None),
-        },
-        "rename_function": {
-            "oldName": (str, ...),
-            "newName": (str, ...),
-        },
-        "rename_function_by_address": {
-            "function_address": (str, ...),
-            "new_name": (str, ...),
-        },
-        "rename_data": {
-            "address": (str, ...),
-            "newName": (str, ...),
-        },
-        "rename_variable": {
-            "functionName": (str, ...),
-            "oldName": (str, ...),
-            "newName": (str, ...),
-        },
-        "set_decompiler_comment": {
-            "address": (str, ...),
-            "comment": (str, ...),
-        },
-        "set_disassembly_comment": {
-            "address": (str, ...),
-            "comment": (str, ...),
-        },
-        "set_function_prototype": {
-            "function_address": (str, ...),
-            "prototype": (str, ...),
-        },
-        "set_local_variable_type": {
-            "function_address": (str, ...),
-            "variable_name": (str, ...),
-            "new_type": (str, ...),
-        },
-        "create_struct": {
-            "name": (str, ...),
-            "size": (int, 0),
-            "category": (str | None, None),
-            "members": (list[dict] | None, None),
-        },
-        "add_struct_members": {
-            "struct_name": (str, ...),
-            "members": (list[dict], ...),
-            "category": (str | None, None),
-        },
-        "clear_struct": {
-            "struct_name": (str, ...),
-            "category": (str | None, None),
-        },
-        "create_enum": {
-            "name": (str, ...),
-            "size": (int, 4),
-            "category": (str | None, None),
-            "values": (list[dict] | None, None),
-        },
-        "add_enum_values": {
-            "enum_name": (str, ...),
-            "values": (list[dict], ...),
-            "category": (str | None, None),
-        },
-        "remove_enum_values": {
-            "enum_name": (str, ...),
-            "values": (list[str], ...),
-            "category": (str | None, None),
-        },
-        "create_class": {
-            "name": (str, ...),
-            "parent_namespace": (str | None, None),
-            "members": (list[dict] | None, None),
-        },
-        "add_class_members": {
-            "class_name": (str, ...),
-            "members": (list[dict], ...),
-            "parent_namespace": (str | None, None),
-        },
-        "remove_class_members": {
-            "class_name": (str, ...),
-            "members": (list[str], ...),
-            "parent_namespace": (str | None, None),
-        },
-        "remove_struct_members": {
-            "struct_name": (str, ...),
-            "members": (list[str], ...),
-            "category": (str | None, None),
-        },
-        "set_global_data_type": {
-            "address": (str, ...),
-            "data_type": (str, ...),
-            "length": (int | None, None),
-            "clear_mode": (str | None, None),
-        },
-        "set_bytes": {
-            "address": (str, ...),
-            "bytes": (str, ...),
-        },
-        "add_bookmark": {
-            "address": (str, ...),
-            "category": (str, ...),
-            "comment": (str, ...),
-            "type": (str, ...),
-            "format": (str, "json"),
-        },
-    }
-    if tool_name in typed_fields_by_tool:
-        return create_typed_input_model(model_name, typed_fields_by_tool[tool_name])
-    return create_optional_any_input_model(model_name, field_names)
-
-
-_TOOL_SPECS: dict[str, ToolSpec] = {}
-
-for command_name, field_names in _CORE_COMMAND_PARAM_KEYS.items():
-    _TOOL_SPECS[command_name] = ToolSpec(
-        name=command_name,
-        category_tag=_TOOL_CATEGORY_BY_NAME[command_name],
-        safety_tag=_TOOL_SAFETY_BY_NAME[command_name],
-        operation_level=_TOOL_OPERATION_LEVEL_BY_NAME[command_name],
-        executor_kind=ExecutorKind.CORE_COMMAND,
-        command_or_method=command_name,
-        input_model=_build_input_model(command_name, field_names),
-        output_model=_build_output_model(command_name),
-        public_signature=(*field_names, "target"),
-        result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(command_name),
-        error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(command_name),
-    )
-
-for spec_name, (method_name, field_names, include_target, static_kwargs) in _REGISTRY_METHOD_SPECS.items():
-    signature_fields = ("target", *field_names) if include_target else field_names
-    _TOOL_SPECS[spec_name] = ToolSpec(
-        name=spec_name,
-        category_tag=_TOOL_CATEGORY_BY_NAME[spec_name],
-        safety_tag=_TOOL_SAFETY_BY_NAME[spec_name],
-        operation_level=_TOOL_OPERATION_LEVEL_BY_NAME[spec_name],
-        executor_kind=ExecutorKind.REGISTRY_METHOD,
-        command_or_method=method_name,
-        input_model=_build_input_model(spec_name, field_names),
-        output_model=_build_output_model(spec_name),
-        public_signature=signature_fields,
-        include_target=include_target,
-        static_kwargs=dict(static_kwargs),
-        result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(spec_name),
-        error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(spec_name),
-    )
-
-for spec_name, (method_name, field_names) in _SHARED_SYNC_METHOD_SPECS.items():
-    _TOOL_SPECS[spec_name] = ToolSpec(
-        name=spec_name,
-        category_tag=_TOOL_CATEGORY_BY_NAME[spec_name],
-        safety_tag=_TOOL_SAFETY_BY_NAME[spec_name],
-        operation_level=_TOOL_OPERATION_LEVEL_BY_NAME[spec_name],
-        executor_kind=ExecutorKind.SHARED_SYNC_METHOD,
-        command_or_method=method_name,
-        input_model=_build_input_model(spec_name, field_names),
-        output_model=_build_output_model(spec_name),
-        public_signature=("target", *field_names),
-        result_adapter=_RESULT_ADAPTERS_BY_SPEC.get(spec_name),
-        error_adapter=_ERROR_ADAPTERS_BY_SPEC.get(spec_name),
-    )
 
 
 def _coerce_enum_member(value: str | Enum, enum_cls: type[Enum], label: str):
@@ -830,11 +1080,42 @@ def _coerce_enum_set(
     return {_coerce_enum_member(value, enum_cls, label) for value in values}
 
 
+def _resolve_profile_constraint(
+    profile_values: frozenset[Enum] | None,
+    requested_values: Iterable[str | Enum] | None,
+    *,
+    enum_cls: type[Enum],
+    label: str,
+) -> set[Enum] | None:
+    resolved = set(profile_values) if profile_values is not None else None
+    requested = _coerce_enum_set(requested_values, enum_cls=enum_cls, label=label)
+    if requested is None:
+        return resolved
+    return requested if resolved is None else resolved & requested
+
+
 def get_tool_spec(name: str) -> ToolSpec:
     try:
         return _TOOL_SPECS[name]
     except KeyError as exc:
         raise KeyError(f"Unsupported tool spec: {name}") from exc
+
+
+def get_all_tool_specs() -> dict[str, ToolSpec]:
+    return dict(_TOOL_SPECS)
+
+
+def get_public_tool_names() -> set[str]:
+    return set(_TOOL_SPECS)
+
+
+def get_checkout_required_tool_names(specs: dict[str, ToolSpec] | None = None) -> set[str]:
+    available_specs = _TOOL_SPECS if specs is None else specs
+    return {
+        spec.command_or_method
+        for spec in available_specs.values()
+        if spec.executor_kind == ExecutorKind.CORE_COMMAND and spec.checkout_required
+    }
 
 
 def filter_tool_specs(
@@ -852,42 +1133,33 @@ def filter_tool_specs(
     profile_spec = _PROFILE_SPECS[_coerce_enum_member(profile, ToolProfile, "tool profile")]
 
     categories = set(profile_spec.categories)
-    allow_category_set = _coerce_enum_set(
+    allowed_categories = _coerce_enum_set(
         allow_categories,
         enum_cls=ToolCategoryTag,
         label="category",
     )
-    if allow_category_set is not None:
-        categories = set(allow_category_set)
-    add_category_set = _coerce_enum_set(
+    if allowed_categories is not None:
+        categories = set(allowed_categories)
+    added_categories = _coerce_enum_set(
         add_categories,
         enum_cls=ToolCategoryTag,
         label="category",
     )
-    if add_category_set is not None:
-        categories.update(add_category_set)
+    if added_categories is not None:
+        categories.update(added_categories)
 
-    safety_tags = set(profile_spec.safety_tags) if profile_spec.safety_tags is not None else None
-    requested_safety = _coerce_enum_set(
+    safety_tags = _resolve_profile_constraint(
+        profile_spec.safety_tags,
         allow_safety,
         enum_cls=ToolSafetyTag,
         label="safety tag",
     )
-    if requested_safety is not None:
-        safety_tags = requested_safety if safety_tags is None else safety_tags & requested_safety
-
-    operation_levels = set(profile_spec.operation_levels) if profile_spec.operation_levels is not None else None
-    requested_operation_levels = _coerce_enum_set(
+    operation_levels = _resolve_profile_constraint(
+        profile_spec.operation_levels,
         allow_operation_levels,
         enum_cls=ToolOperationLevel,
         label="operation level",
     )
-    if requested_operation_levels is not None:
-        operation_levels = (
-            requested_operation_levels
-            if operation_levels is None
-            else operation_levels & requested_operation_levels
-        )
 
     selected_names = {
         name
@@ -897,23 +1169,10 @@ def filter_tool_specs(
         and (operation_levels is None or spec.operation_level in operation_levels)
     }
 
-    enabled_names = set(enable_tools or ())
-    disabled_names = set(disable_tools or ())
+    selected_names.update(enable_tools or ())
+    selected_names.difference_update(disable_tools or ())
 
-    selected_names.update(enabled_names)
-    selected_names.difference_update(disabled_names)
-
-    return {
-        name: spec
-        for name, spec in available_specs.items()
-        if name in selected_names
-    }
-def get_all_tool_specs() -> dict[str, ToolSpec]:
-    return dict(_TOOL_SPECS)
-
-
-def get_public_tool_names() -> set[str]:
-    return set(_TOOL_SPECS.keys())
+    return {name: spec for name, spec in available_specs.items() if name in selected_names}
 
 
 __all__ = [
@@ -925,6 +1184,7 @@ __all__ = [
     "ToolSpec",
     "filter_tool_specs",
     "get_all_tool_specs",
+    "get_checkout_required_tool_names",
     "get_public_tool_names",
     "get_tool_spec",
 ]

@@ -691,6 +691,35 @@ def test_public_tool_functions_match_declared_specs():
     assert set(cli.PUBLIC_TOOL_FUNCTIONS) == set(get_all_tool_specs())
 
 
+def test_get_registry_keeps_empty_selected_specs(monkeypatch):
+    captured: dict[str, object] = {}
+    sentinel_registry = object()
+    sentinel_mcp = object()
+
+    def fake_create_cli_runtime(
+        *,
+        registered_specs,
+        core_accessor,
+        checkout_required_commands,
+        dispatcher_provider,
+        registry_provider,
+    ):
+        captured["registered_specs"] = dict(registered_specs)
+        captured["checkout_required_commands"] = set(checkout_required_commands)
+        return types.SimpleNamespace(
+            registry=sentinel_registry,
+            runtime=types.SimpleNamespace(mcp=sentinel_mcp),
+        )
+
+    monkeypatch.setattr(cli, "_registry", None)
+    monkeypatch.setattr(cli, "create_cli_runtime", fake_create_cli_runtime)
+
+    assert cli._get_registry({}) is sentinel_registry
+    assert captured["registered_specs"] == {}
+    assert captured["checkout_required_commands"] == set()
+    assert cli.mcp is sentinel_mcp
+
+
 def test_resolve_tool_specs_from_args_defaults_to_default_profile():
     args = cli.parse_args(
         [

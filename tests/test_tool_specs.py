@@ -11,6 +11,7 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSafetyTag,
     filter_tool_specs,
     get_all_tool_specs,
+    get_checkout_required_tool_names,
 )
 from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
 from ghidra_mcp.presentation import cli as presentation_cli
@@ -593,6 +594,41 @@ def test_specs_include_contract_driven_metadata():
     assert specs["list_targets"].public_signature == ()
     assert specs["create_session"].error_policy == "legacy_compatible"
     assert hasattr(specs["create_session"], "output_model")
+    assert specs["rename_function"].public_name_overrides == {
+        "oldName": "old_name",
+        "newName": "new_name",
+    }
+    assert specs["create_session"].include_none_keys == frozenset({"project_name"})
+    assert specs["list_strings"].omit_falsey_keys == frozenset({"filter"})
+    assert specs["list_targets"].description is not None
+    assert specs["list_targets"].read_only_hint is True
+    assert specs["list_targets"].idempotent_hint is True
+
+
+def test_checkout_required_tools_are_declared_on_specs():
+    assert get_checkout_required_tool_names() == {
+        "rename_function",
+        "rename_function_by_address",
+        "rename_data",
+        "rename_variable",
+        "set_decompiler_comment",
+        "set_disassembly_comment",
+        "set_function_prototype",
+        "set_local_variable_type",
+        "set_global_data_type",
+        "create_struct",
+        "create_class",
+        "add_struct_members",
+        "clear_struct",
+        "create_enum",
+        "add_enum_values",
+        "add_class_members",
+        "remove_class_members",
+        "remove_enum_values",
+        "remove_struct_members",
+        "set_bytes",
+        "add_bookmark",
+    }
 
 
 def test_all_output_models_are_strict_and_typed():

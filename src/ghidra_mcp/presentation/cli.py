@@ -30,6 +30,7 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSpec,
     filter_tool_specs,
     get_all_tool_specs,
+    get_checkout_required_tool_names,
 )
 from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
 from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter, create_cli_runtime
@@ -52,30 +53,6 @@ _PASSWORD_CLIENT_AUTHENTICATOR_CLASS = None
 _CLIENT_UTIL_CLASS = None
 _registry = None
 mcp = FastMCP("GhidraMCP Headless")
-
-_CHECKOUT_REQUIRED_COMMANDS = {
-    "rename_function",
-    "rename_function_by_address",
-    "rename_data",
-    "rename_variable",
-    "set_decompiler_comment",
-    "set_disassembly_comment",
-    "set_function_prototype",
-    "set_local_variable_type",
-    "set_global_data_type",
-    "create_struct",
-    "create_class",
-    "add_struct_members",
-    "clear_struct",
-    "create_enum",
-    "add_enum_values",
-    "add_class_members",
-    "remove_class_members",
-    "remove_enum_values",
-    "remove_struct_members",
-    "set_bytes",
-    "add_bookmark",
-}
 
 _ALL_TOOL_SPECS = get_all_tool_specs()
 _DEFAULT_TOOL_SPECS = filter_tool_specs(specs=_ALL_TOOL_SPECS, profile=ToolProfile.DEFAULT)
@@ -109,10 +86,11 @@ def _get_registry(selected_specs: dict[str, ToolSpec] | None = None) -> ServiceR
     global _registry, mcp
     if selected_specs is None and _registry is not None:
         return _registry
+    effective_specs = _DEFAULT_TOOL_SPECS if selected_specs is None else selected_specs
     bundle = create_cli_runtime(
-        registered_specs=selected_specs or _DEFAULT_TOOL_SPECS,
+        registered_specs=effective_specs,
         core_accessor=lambda: _core(),
-        checkout_required_commands=set(_CHECKOUT_REQUIRED_COMMANDS),
+        checkout_required_commands=get_checkout_required_tool_names(effective_specs),
         dispatcher_provider=lambda: dispatch_tool,
         registry_provider=lambda: _registry,
     )

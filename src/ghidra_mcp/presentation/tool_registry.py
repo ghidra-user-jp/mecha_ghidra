@@ -13,110 +13,8 @@ from ghidra_mcp.contracts.tool_spec import (
 )
 
 
-_RAW_TO_PUBLIC_NAME: dict[str, dict[str, str]] = {
-    "rename_function": {"oldName": "old_name", "newName": "new_name"},
-    "rename_data": {"newName": "new_name"},
-    "rename_variable": {
-        "functionName": "function_name",
-        "oldName": "old_name",
-        "newName": "new_name",
-    },
-    "set_bytes": {"bytes": "bytes_hex"},
-    "search_bytes": {"bytes": "pattern"},
-}
-
-_ALWAYS_INCLUDE_NONE_KEYS: dict[str, set[str]] = {
-    "register_target": {"project_name"},
-    "create_session": {"project_name"},
-    "get_project_sync_status": {"domain_path"},
-    "checkout_project_program": {"domain_path"},
-    "add_project_program_to_version_control": {"domain_path"},
-    "commit_project_program": {"domain_path"},
-    "pull_project_program": {"domain_path"},
-    "undo_checkout_project_program": {"domain_path"},
-    "terminate_project_program_checkout": {"domain_path"},
-    "reload_project_program": {"domain_path"},
-    "get_version_history": {"domain_path"},
-    "get_version_diff": {"domain_path"},
-}
-
-_OMIT_FALSEY_KEYS: dict[str, set[str]] = {
-    "list_strings": {"filter"},
-    "create_struct": {"category", "members"},
-    "add_struct_members": {"category"},
-    "clear_struct": {"category"},
-    "get_struct": {"category"},
-    "create_enum": {"category", "values"},
-    "add_enum_values": {"category"},
-    "get_enum": {"category"},
-    "create_class": {"parent_namespace", "members"},
-    "add_class_members": {"parent_namespace"},
-    "remove_class_members": {"parent_namespace"},
-    "remove_enum_values": {"category"},
-    "remove_struct_members": {"category"},
-    "set_global_data_type": {"clear_mode"},
-}
-
-_TOOL_DECORATOR_OPTIONS: dict[str, dict[str, Any]] = {
-    "list_functions": {
-        "description": (
-            "List all functions in the loaded program for the target session. "
-            "Requires an initialized target with a loaded program; call list_targets first, "
-            "then use create_session or load_project_program when needed."
-        ),
-        "annotations": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    },
-    "list_targets": {
-        "description": (
-            "List registered targets and their state, including project info and whether a program "
-            "is loaded (domain_path). Call this before target-scoped operations."
-        ),
-        "annotations": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    },
-    "register_target": {
-        "description": (
-            "Register a target with project information only, without loading a program yet. "
-            "Use load_project_program later to open a domain path."
-        ),
-        "annotations": ToolAnnotations(readOnlyHint=False, idempotentHint=False),
-    },
-    "load_project_program": {
-        "description": (
-            "Load or switch a program for an existing target by domain path. "
-            "Use this for targets that already exist (including project-only targets) "
-            "instead of create_session."
-        ),
-        "annotations": ToolAnnotations(readOnlyHint=False, idempotentHint=False),
-    },
-    "import_program": {
-        "description": "Import a binary or Ghidra archive (.gzf) into the current target's project",
-    },
-    "create_session": {
-        "description": (
-            "Create a new target session by opening a program in a Ghidra project. "
-            "This is non-idempotent and fails if the target already exists. "
-            "If the target already exists, use load_project_program."
-        ),
-        "annotations": ToolAnnotations(readOnlyHint=False, idempotentHint=False),
-    },
-}
-
-_SHARED_SYNC_DESCRIPTIONS: dict[str, str] = {
-    "get_project_sync_status": "Get shared-project version-control status for the target program",
-    "get_version_history": "Get version history metadata for the target program in a shared project",
-    "get_version_diff": "Get a summary of differences between two shared-project versions of the target program",
-    "checkout_project_program": "Checkout the target program in a shared project",
-    "add_project_program_to_version_control": "Add the target program to shared-project version control",
-    "commit_project_program": "Check-in changes of the target program to the shared project server",
-    "pull_project_program": "Pull/merge latest remote changes for the target program",
-    "undo_checkout_project_program": "Undo checkout for the target program (optionally discard local changes)",
-    "terminate_project_program_checkout": "Terminate a stale checkout by checkout id for the target program",
-    "reload_project_program": "Reload the target program by closing and reopening the current domain path",
-}
-
-
-def _public_name(spec_name: str, raw_key: str) -> str:
-    return _RAW_TO_PUBLIC_NAME.get(spec_name, {}).get(raw_key, raw_key)
+def _public_name(spec: ToolSpec, raw_key: str) -> str:
+    return spec.public_name_overrides.get(raw_key, raw_key)
 
 
 def _build_signature(spec: ToolSpec) -> inspect.Signature:
@@ -132,7 +30,7 @@ def _build_signature(spec: ToolSpec) -> inspect.Signature:
         )
 
     for raw_key, field in spec.input_model.model_fields.items():
-        public_name = _public_name(spec.name, raw_key)
+        public_name = _public_name(spec, raw_key)
         default = inspect.Parameter.empty if field.is_required() else field.default
         params.append(
             inspect.Parameter(
@@ -157,16 +55,13 @@ def _build_signature(spec: ToolSpec) -> inspect.Signature:
 
 
 def _build_raw_args(spec: ToolSpec, bound: inspect.BoundArguments) -> tuple[dict[str, Any], str]:
-    include_none_keys = _ALWAYS_INCLUDE_NONE_KEYS.get(spec.name, set())
-    omit_falsey = _OMIT_FALSEY_KEYS.get(spec.name, set())
-
     raw_args: dict[str, Any] = {}
     for raw_key in spec.input_model.model_fields:
-        public_key = _public_name(spec.name, raw_key)
+        public_key = _public_name(spec, raw_key)
         value = bound.arguments.get(public_key)
-        if raw_key in omit_falsey and not value:
+        if raw_key in spec.omit_falsey_keys and not value:
             continue
-        if value is None and raw_key not in include_none_keys:
+        if value is None and raw_key not in spec.include_none_keys:
             continue
         raw_args[raw_key] = value
 
@@ -199,7 +94,7 @@ def _build_callable(
 
     _tool_callable.__name__ = spec.name
     _tool_callable.__qualname__ = spec.name
-    _tool_callable.__doc__ = f"Auto-generated MCP wrapper for {spec.name}."
+    _tool_callable.__doc__ = spec.description or f"Auto-generated MCP wrapper for {spec.name}."
     _tool_callable.__signature__ = signature  # type: ignore[attr-defined]
     annotations: dict[str, Any] = {
         param.name: param.annotation
@@ -227,10 +122,15 @@ def build_tool_functions(
     return tools
 
 
-def _tool_registration_options(name: str) -> dict[str, Any]:
-    options = dict(_TOOL_DECORATOR_OPTIONS.get(name, {}))
-    if "description" not in options and name in _SHARED_SYNC_DESCRIPTIONS:
-        options["description"] = _SHARED_SYNC_DESCRIPTIONS[name]
+def _tool_registration_options(spec: ToolSpec) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    if spec.description:
+        options["description"] = spec.description
+    if spec.read_only_hint is not None or spec.idempotent_hint is not None:
+        options["annotations"] = ToolAnnotations(
+            readOnlyHint=spec.read_only_hint,
+            idempotentHint=spec.idempotent_hint,
+        )
     return options
 
 
@@ -241,7 +141,7 @@ def register_tool_functions(
     specs: dict[str, ToolSpec],
 ) -> None:
     for spec in specs.values():
-        decorator = mcp.tool(**_tool_registration_options(spec.name))
+        decorator = mcp.tool(**_tool_registration_options(spec))
         decorator(tools[spec.name])
 
 
