@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import pathlib
 import threading
 from typing import Dict, List, Optional
 
-from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings
+from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings, path_utils
 
 from .session_store import RuntimeSessionStore
 
@@ -133,7 +135,25 @@ class RuntimeTargetLifecycle:
             if not domain_path:
                 raise ValueError("domain_path is required")
             handle = self._store.get_target_handle_locked(name)
-            new_session = handle.open_program(domain_path)
+            normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
+            owner_target = self._find_loaded_target_locked(handle=handle, domain_path=normalized_domain_path)
+            if owner_target is not None:
+                details = {
+                    "operation": "load_program",
+                    "target": name,
+                    "domain_path": normalized_domain_path,
+                }
+                if owner_target != name:
+                    details["owner_target"] = owner_target
+                raise DomainError(
+                    code=ErrorCode.TARGET_ALREADY_LOADED,
+                    message=f"TARGET_ALREADY_LOADED: program already loaded: {normalized_domain_path}",
+                    hint="Use the existing target directly instead of reloading the same program",
+                    retryable=False,
+                    details=details,
+                )
+
+            new_session = handle.open_program(normalized_domain_path)
             had_session = name in self._store.sessions
             try:
                 loaded_domain_path = self._initialize_opened_session_locked(
@@ -167,6 +187,21 @@ class RuntimeTargetLifecycle:
             if not binary_path:
                 raise ValueError("binary_path is required")
             handle = self._store.get_target_handle_locked(name)
+            binary = pathlib.Path(binary_path)
+            existing_domain_path = self._existing_imported_program_path_locked(handle, binary)
+            if existing_domain_path is not None:
+                raise DomainError(
+                    code=ErrorCode.PROGRAM_ALREADY_IMPORTED,
+                    message=f"PROGRAM_ALREADY_IMPORTED: program already exists: {existing_domain_path}",
+                    hint="Use load_project_program with the existing domain path instead of importing again",
+                    retryable=False,
+                    details={
+                        "operation": "import_program",
+                        "target": name,
+                        "binary_path": binary_path,
+                        "existing_domain_path": existing_domain_path,
+                    },
+                )
             domain_file = handle.import_program(binary_path, **kwargs)
             self._store.target_projects[name] = handle.get_key()
             return domain_file.getPathname()
@@ -248,6 +283,31 @@ class RuntimeTargetLifecycle:
             finally:
                 script_util.releaseBundleHostReference()
         self._store.mark_analyzed_load(name, domain_path)
+
+    @staticmethod
+    def _normalize_domain_path_locked(handle: ProjectHandle, domain_path: str | None) -> str:
+        domain_dir, domain_name = path_utils._parse_domain_path(handle.project, domain_path)
+        normalized_path = (pathlib.PurePosixPath(domain_dir) / domain_name).as_posix()
+        if not normalized_path.startswith("/"):
+            normalized_path = "/" + normalized_path
+        return normalized_path
+
+    def _find_loaded_target_locked(self, *, handle: ProjectHandle, domain_path: str) -> str | None:
+        requested_key = handle.get_key()
+        for target_name, session in self._store.sessions.items():
+            session_handle = session.get_project_handle()
+            if session_handle.get_key() != requested_key:
+                continue
+            if self._store.session_domain_path(session) == domain_path:
+                return target_name
+        return None
+
+    @staticmethod
+    def _existing_imported_program_path_locked(handle: ProjectHandle, binary_path: pathlib.Path) -> str | None:
+        domain_file = handle.project.getProjectData().getFile("/" + binary_path.name)
+        if domain_file is None:
+            return None
+        return domain_file.getPathname()
 
 
 __all__ = ["RuntimeTargetLifecycle"]
