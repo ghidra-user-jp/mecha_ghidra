@@ -28,7 +28,7 @@ class TargetRuntimePort(Protocol):
     def load_program(self, name: str, domain_path: str) -> str:
         ...
 
-    def import_program(self, name: str, binary_path: str) -> str:
+    def import_program(self, name: str, binary_path: str, **kwargs: Any) -> str:
         ...
 
     def close_session(self, name: str, *, remove_program: bool = False) -> None:

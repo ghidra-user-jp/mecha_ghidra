@@ -47,8 +47,8 @@ class DummyRuntime:
         self.calls.append(("load_program", (name, domain_path), {}))
         return domain_path
 
-    def import_program(self, name: str, binary_path: str):
-        self.calls.append(("import_program", (name, binary_path), {}))
+    def import_program(self, name: str, binary_path: str, **kwargs):
+        self.calls.append(("import_program", (name, binary_path), dict(kwargs)))
         return "/imported.bin"
 
     def close_session(self, name: str, *, remove_program: bool = False):
@@ -80,7 +80,16 @@ def test_target_service_lifecycle_and_lock_routing():
     assert service.list_targets() == [{"target": "fw"}]
     assert service.list_programs("fw") == []
     assert service.load_program("fw", "/next") == "/next"
-    assert service.import_program("fw", "/tmp/a.exe") == "/imported.bin"
+    assert (
+        service.import_program(
+            "fw",
+            "/tmp/a.exe",
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            base_address="0x401000",
+        )
+        == "/imported.bin"
+    )
     assert service.close_session("fw", remove_program=True) == {
         "closed": True,
         "target": "fw",
@@ -148,7 +157,7 @@ def test_target_service_fallback_non_domain_error_is_sync_operation_failed():
 
 def test_target_service_preserves_domain_error_and_merges_details():
     class Runtime(DummyRuntime):
-        def import_program(self, name: str, binary_path: str):  # noqa: ARG002
+        def import_program(self, name: str, binary_path: str, **kwargs):  # noqa: ARG002
             raise DomainError(
                 code=ErrorCode.PROGRAM_NOT_FOUND,
                 message="program not found",

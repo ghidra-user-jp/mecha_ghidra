@@ -102,11 +102,11 @@ class RuntimeBackend:
             func=lambda: self._target_lifecycle.load_program(name, domain_path),
         )
 
-    def import_program(self, name: str, binary_path: str) -> str:
+    def import_program(self, name: str, binary_path: str, **kwargs) -> str:
         return self._invoke(
             operation="import_program",
             target=name,
-            func=lambda: self._target_lifecycle.import_program(name, binary_path),
+            func=lambda: self._target_lifecycle.import_program(name, binary_path, **kwargs),
         )
 
     def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:

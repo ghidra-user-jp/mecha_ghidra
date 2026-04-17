@@ -154,6 +154,7 @@ def test_dispatch_tool_validation_error():
         ("register_target", {"project_name": "sample"}),
         ("load_project_program", {}),
         ("import_program", {}),
+        ("import_program", {"binary_path": "/tmp/a.bin", "import_mode": "raw_binary"}),
         ("create_session", {"project_location": "/tmp/sample.gpr"}),
         ("add_project_program_to_version_control", {"keep_checked_out": False}),
         ("commit_project_program", {"keep_checked_out": False, "auto_checkout": True}),
@@ -215,6 +216,9 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("register_target", {"project_location": 1, "project_name": None}),
         ("load_project_program", {"domain_path": 1}),
         ("import_program", {"binary_path": 1}),
+        ("import_program", {"binary_path": "/tmp/a.bin", "base_address": 123}),
+        ("import_program", {"binary_path": "/tmp/a.bin", "base_address": "nope"}),
+        ("import_program", {"binary_path": "/tmp/a.bin", "entry_address": "0x401000", "entry_offset": 0}),
         ("create_session", {"project_location": "/tmp/sample.gpr", "domain_path": 1}),
         ("get_project_sync_status", {"domain_path": 1}),
         ("checkout_project_program", {"exclusive": "yes", "domain_path": None}),
@@ -256,6 +260,40 @@ def test_dispatch_tool_routes_target_to_core_command():
 
     assert result == [{"name": "main", "entry": "0x401000"}]
     assert registry.core_calls == [("list_functions", {"offset": 0, "limit": 10}, "firmware")]
+
+
+def test_dispatch_tool_routes_import_program_with_raw_binary_kwargs():
+    registry = DummyRegistry()
+
+    result = dispatch_tool(
+        "import_program",
+        {
+            "binary_path": "/tmp/shellcode.bin",
+            "import_mode": "raw_binary",
+            "language_id": "x86:LE:32:default",
+            "base_address": "0x401000",
+            "entry_offset": 0,
+        },
+        "firmware",
+        registry=registry,
+    )
+
+    assert result == {"status": "ok", "target": "firmware", "program": "/imported.bin"}
+    assert registry.registry_calls == [
+        (
+            "import_program",
+            {
+                "target": "firmware",
+                "binary_path": "/tmp/shellcode.bin",
+                "import_mode": "raw_binary",
+                "language_id": "x86:LE:32:default",
+                "base_address": "0x401000",
+                "overlay": False,
+                "entry_offset": 0,
+                "analyze_imported": True,
+            },
+        )
+    ]
 
 
 def test_dispatch_tool_routes_target_to_registry_method():

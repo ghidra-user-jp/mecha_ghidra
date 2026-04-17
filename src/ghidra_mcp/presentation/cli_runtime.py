@@ -67,8 +67,8 @@ class ServiceRegistryAdapter:
     def load_program(self, target: str, domain_path: str):
         return self._target_service.load_program(target, domain_path)
 
-    def import_program(self, target: str, binary_path: str):
-        return self._target_service.import_program(target, binary_path)
+    def import_program(self, target: str, binary_path: str, **kwargs):
+        return self._target_service.import_program(target, binary_path, **kwargs)
 
     def create_session(
         self,

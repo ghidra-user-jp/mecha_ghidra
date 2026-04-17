@@ -36,6 +36,7 @@ class DummyProject:
     def __init__(self) -> None:
         self.saved: list[DummyProgram] = []
         self.closed: list[DummyProgram | None] = []
+        self._project_ref = types.SimpleNamespace(getName=lambda: "DummyProject")
 
     def openProgram(self, domain_dir, domain_name, flag):
         return DummyProgram((pathlib.PurePosixPath(domain_dir) / domain_name).as_posix())
@@ -47,7 +48,7 @@ class DummyProject:
         self.closed.append(program)
 
     def getProject(self):
-        return types.SimpleNamespace(getName=lambda: "DummyProject")
+        return self._project_ref
 
 
 def build_handle(monkeypatch):
@@ -373,3 +374,299 @@ def test_list_programs_from_metadata_parses_program_entries(tmp_path):
 def test_list_programs_from_metadata_returns_none_when_rep_missing(tmp_path):
     result = session.ProjectHandle.list_programs_from_metadata(str(tmp_path), "sample")
     assert result is None
+
+
+def test_import_program_auto_uses_legacy_import_path(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "sample.bin"
+    binary_path.write_bytes(b"\x90")
+    imported_program = DummyProgram("/sample.bin")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class ImportProject(DummyProject):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saved_as = None
+            self.imported = []
+
+        def getProjectData(self):
+            return DummyProjectData()
+
+        def importProgram(self, java_file):
+            self.imported.append(java_file)
+            return imported_program
+
+        def saveAs(self, program, program_dir, program_name, overwrite):
+            self.saved_as = (program, program_dir, program_name, overwrite)
+
+    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
+    handle.project = ImportProject()
+
+    domain_file = handle.import_program(str(binary_path))
+
+    assert domain_file.getPathname() == "/sample.bin"
+    assert handle.project.imported == [str(binary_path)]
+    assert handle.project.saved_as == (imported_program, "/", "sample.bin", True)
+    assert handle.project.closed == [imported_program]
+
+
+def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "shellcode.bin"
+    binary_path.write_bytes(b"\x90\xc3")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class RawImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+    class FakeLoaded:
+        def save(self, _monitor):
+            return DummyDomainFile("/shellcode.bin")
+
+    class FakeLoadResults:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def getPrimary(self):
+            return FakeLoaded()
+
+        def close(self):
+            self.closed = True
+
+    class FakeBuilder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+            self.load_results = FakeLoadResults()
+
+        def project(self, value):
+            self.calls.append(("project", value))
+            return self
+
+        def projectFolderPath(self, value):
+            self.calls.append(("projectFolderPath", value))
+            return self
+
+        def source(self, value):
+            self.calls.append(("source", value))
+            return self
+
+        def name(self, value):
+            self.calls.append(("name", value))
+            return self
+
+        def loaders(self, value):
+            self.calls.append(("loaders", value))
+            return self
+
+        def language(self, value):
+            self.calls.append(("language", value))
+            return self
+
+        def compiler(self, value):
+            self.calls.append(("compiler", value))
+            return self
+
+        def addLoaderArg(self, key, value):
+            self.calls.append(("addLoaderArg", (key, value)))
+            return self
+
+        def load(self):
+            self.calls.append(("load", None))
+            return self.load_results
+
+    fake_builder = FakeBuilder()
+    monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", lambda: fake_builder, raising=False)
+    handle.project = RawImportProject()
+
+    domain_file = handle.import_program(
+        str(binary_path),
+        import_mode="raw_binary",
+        language_id="x86:LE:32:default",
+        compiler_spec_id="gcc",
+        base_address="0x401000",
+        file_offset=4,
+        length=16,
+        block_name=".text",
+        overlay=True,
+        analyze_imported=False,
+    )
+
+    assert domain_file.getPathname() == "/shellcode.bin"
+    assert fake_builder.calls == [
+        ("project", handle.project.getProject()),
+        ("projectFolderPath", "/"),
+        ("source", str(binary_path)),
+        ("name", "shellcode.bin"),
+        ("loaders", "ghidra.app.util.opinion.BinaryLoader"),
+        ("language", "x86:LE:32:default"),
+        ("compiler", "gcc"),
+        ("addLoaderArg", ("Base Address", "0x401000")),
+        ("addLoaderArg", ("File Offset", "4")),
+        ("addLoaderArg", ("Length", "16")),
+        ("addLoaderArg", ("Block Name", ".text")),
+        ("addLoaderArg", ("Overlay", "true")),
+        ("load", None),
+    ]
+    assert fake_builder.load_results.closed is True
+
+
+def test_post_process_imported_program_bootstraps_entry_and_analysis(monkeypatch):
+    handle = build_handle(monkeypatch)
+    created_flat_apis = []
+
+    class DummyAddress:
+        def __init__(self, offset: int) -> None:
+            self._offset = offset
+
+        def getOffset(self) -> int:
+            return self._offset
+
+    class DummyAddressSpace:
+        def getAddress(self, offset: int):
+            return DummyAddress(offset)
+
+    class DummyAddressFactory:
+        def getDefaultAddressSpace(self):
+            return DummyAddressSpace()
+
+    class DummyAddressSet:
+        def getMinAddress(self):
+            return DummyAddress(0x401000)
+
+    class DummyMemory:
+        def getLoadedAndInitializedAddressSet(self):
+            return DummyAddressSet()
+
+    class DummyListing:
+        def __init__(self) -> None:
+            self.instructions: dict[int, object] = {}
+
+        def getInstructionAt(self, address):
+            return self.instructions.get(address.getOffset())
+
+    class DummyFunctionManager:
+        def __init__(self) -> None:
+            self.functions: dict[int, object] = {}
+
+        def getFunctionAt(self, address):
+            return self.functions.get(address.getOffset())
+
+    class DummySymbolTable:
+        def __init__(self) -> None:
+            self.entry_points: set[int] = set()
+
+        def isExternalEntryPoint(self, address):
+            return address.getOffset() in self.entry_points
+
+    class DummyImportedProgram:
+        def __init__(self) -> None:
+            self.listing = DummyListing()
+            self.function_manager = DummyFunctionManager()
+            self.symbol_table = DummySymbolTable()
+            self.transactions: list[tuple[int, bool]] = []
+            self._tx_id = 0
+
+        def startTransaction(self, _description):
+            self._tx_id += 1
+            return self._tx_id
+
+        def endTransaction(self, tx, commit):
+            self.transactions.append((tx, commit))
+
+        def getListing(self):
+            return self.listing
+
+        def getFunctionManager(self):
+            return self.function_manager
+
+        def getSymbolTable(self):
+            return self.symbol_table
+
+        def getMemory(self):
+            return DummyMemory()
+
+        def getAddressFactory(self):
+            return DummyAddressFactory()
+
+    class TrackingFlatAPI:
+        def __init__(self, program, _monitor) -> None:
+            self.program = program
+            self.calls: list[tuple[str, int | None]] = []
+            created_flat_apis.append(self)
+
+        def disassemble(self, address):
+            self.calls.append(("disassemble", address.getOffset()))
+            self.program.listing.instructions[address.getOffset()] = object()
+            return True
+
+        def createFunction(self, address, _name):
+            self.calls.append(("createFunction", address.getOffset()))
+            self.program.function_manager.functions[address.getOffset()] = object()
+            return object()
+
+        def addEntryPoint(self, address):
+            self.calls.append(("addEntryPoint", address.getOffset()))
+            self.program.symbol_table.entry_points.add(address.getOffset())
+
+        def analyzeAll(self, _program):
+            self.calls.append(("analyzeAll", None))
+
+    class DummyUtilities:
+        def __init__(self) -> None:
+            self.marked = []
+
+        def shouldAskToAnalyze(self, _program):
+            return True
+
+        def markProgramAnalyzed(self, program):
+            self.marked.append(program)
+
+    class DummyScriptUtil:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def acquireBundleHostReference(self):
+            self.calls.append("acquire")
+
+        def releaseBundleHostReference(self):
+            self.calls.append("release")
+
+    imported_program = DummyImportedProgram()
+    utilities = DummyUtilities()
+    script_util = DummyScriptUtil()
+
+    class PostProcessProject(DummyProject):
+        def openProgram(self, domain_dir, domain_name, flag):  # noqa: ARG002
+            assert (domain_dir, domain_name) == ("/", "shellcode.bin")
+            return imported_program
+
+    handle.project = PostProcessProject()
+    monkeypatch.setattr(session.java_bindings, "_flat_program_api_class", lambda: TrackingFlatAPI)
+    monkeypatch.setattr(session.java_bindings, "_ghidra_program_utilities", lambda: utilities)
+    monkeypatch.setattr(session.java_bindings, "_ghidra_script_util", lambda: script_util)
+
+    handle._post_process_imported_program_locked(
+        "/shellcode.bin",
+        entry_address=None,
+        entry_offset=0,
+        analyze_imported=True,
+    )
+
+    assert created_flat_apis[0].calls == [
+        ("disassemble", 0x401000),
+        ("createFunction", 0x401000),
+        ("addEntryPoint", 0x401000),
+        ("analyzeAll", None),
+    ]
+    assert utilities.marked == [imported_program]
+    assert script_util.calls == ["acquire", "release"]
+    assert imported_program.transactions == [(1, True)]
+    assert handle.project.saved == [imported_program]
+    assert handle.project.closed == [imported_program]

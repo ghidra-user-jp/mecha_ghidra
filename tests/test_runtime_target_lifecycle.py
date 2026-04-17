@@ -75,6 +75,7 @@ class _FakeProjectHandle:
         self._closed = False
         self._programs = [{"path": "/main"}]
         self.analyze_calls: list[str] = []
+        self.import_calls: list[dict[str, object]] = []
 
     @staticmethod
     def resolve_project_location_and_file(project_location: str, project_name: str | None) -> tuple[str, str]:
@@ -100,7 +101,8 @@ class _FakeProjectHandle:
 
         return _FakeSession(self, path, _FakeFlatAPI())
 
-    def import_program(self, binary_path: str):  # noqa: ARG002
+    def import_program(self, binary_path: str, **kwargs):
+        self.import_calls.append({"binary_path": binary_path, **kwargs})
         return _FakeDomainFile("/imported.bin")
 
     def list_programs(self):
@@ -184,9 +186,23 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     handle = store.get_target_handle_locked("fw")
     assert handle.analyze_calls == ["/main"]
 
-    imported = lifecycle.import_program("fw", "/tmp/binary.exe")
+    imported = lifecycle.import_program(
+        "fw",
+        "/tmp/binary.exe",
+        import_mode="raw_binary",
+        language_id="x86:LE:32:default",
+        entry_offset=0,
+    )
     assert imported == "/imported.bin"
     assert lifecycle.list_programs("fw") == [{"path": "/main"}]
+    assert handle.import_calls == [
+        {
+            "binary_path": "/tmp/binary.exe",
+            "import_mode": "raw_binary",
+            "language_id": "x86:LE:32:default",
+            "entry_offset": 0,
+        }
+    ]
 
     lifecycle.close_session("fw", remove_program=True)
     assert "fw" not in store.sessions

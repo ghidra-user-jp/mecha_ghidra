@@ -86,7 +86,11 @@ _TOOL_DECORATOR_OPTIONS: dict[str, dict[str, Any]] = {
         "annotations": ToolAnnotations(readOnlyHint=False, idempotentHint=False),
     },
     "import_program": {
-        "description": "Import a binary or Ghidra archive (.gzf) into the current target's project",
+        "description": (
+            "Import a binary, Ghidra archive (.gzf), or raw binary / shellcode into the current "
+            "target's project. Raw imports support BinaryLoader options such as language_id, "
+            "base_address, entry bootstrap, and automatic analysis."
+        ),
     },
     "create_session": {
         "description": (

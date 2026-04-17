@@ -44,8 +44,8 @@ class FakeTargetService:
         self.calls.append(("load_program", (target, domain_path), {}))
         return domain_path
 
-    def import_program(self, target: str, binary_path: str):
-        self.calls.append(("import_program", (target, binary_path), {}))
+    def import_program(self, target: str, binary_path: str, **kwargs):
+        self.calls.append(("import_program", (target, binary_path), dict(kwargs)))
         return binary_path
 
     def create_session(
@@ -279,7 +279,13 @@ def test_parse_session_definition_invalid(text):
             "/app",
         ),
         (
-            lambda a: a.import_program("fw", "/tmp/a.exe"),
+            lambda a: a.import_program(
+                "fw",
+                "/tmp/a.exe",
+                import_mode="raw_binary",
+                language_id="x86:LE:32:default",
+                entry_offset=0,
+            ),
             "/tmp/a.exe",
         ),
         (

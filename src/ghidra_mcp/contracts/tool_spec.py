@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 from .tool_models import (
+    ToolInputModel,
     create_list_output_model,
     create_map_output_model,
     create_optional_any_input_model,
@@ -45,6 +46,85 @@ class ToolSpec:
     static_kwargs: dict[str, Any] = field(default_factory=dict)
     result_adapter: str | None = None
     error_adapter: str | None = None
+
+
+_IMPORT_PROGRAM_FIELDS: tuple[str, ...] = (
+    "binary_path",
+    "import_mode",
+    "language_id",
+    "compiler_spec_id",
+    "base_address",
+    "file_offset",
+    "length",
+    "block_name",
+    "overlay",
+    "entry_address",
+    "entry_offset",
+    "analyze_imported",
+)
+
+
+class ImportProgramInput(ToolInputModel):
+    binary_path: str
+    import_mode: Literal["auto", "raw_binary"] = "auto"
+    language_id: str | None = None
+    compiler_spec_id: str | None = None
+    base_address: str | None = None
+    file_offset: int | None = None
+    length: int | None = None
+    block_name: str | None = None
+    overlay: bool = False
+    entry_address: str | None = None
+    entry_offset: int | None = None
+    analyze_imported: bool | None = None
+
+    @field_validator("binary_path", "language_id", "compiler_spec_id", "block_name")
+    @classmethod
+    def _strip_non_empty_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    @field_validator("base_address", "entry_address")
+    @classmethod
+    def _validate_address_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        try:
+            int(text, 0)
+        except ValueError as exc:
+            raise ValueError("must be a valid integer address such as 0x401000") from exc
+        return text
+
+    @field_validator("file_offset", "entry_offset")
+    @classmethod
+    def _validate_non_negative(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("must be >= 0")
+        return value
+
+    @field_validator("length")
+    @classmethod
+    def _validate_positive_length(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("must be > 0")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_import_options(self) -> "ImportProgramInput":
+        if self.import_mode == "raw_binary" and not self.language_id:
+            raise ValueError("language_id is required when import_mode='raw_binary'")
+        if self.entry_address is not None and self.entry_offset is not None:
+            raise ValueError("entry_address and entry_offset cannot both be set")
+        if self.analyze_imported is None:
+            self.analyze_imported = self.import_mode == "raw_binary"
+        return self
 
 
 _CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
@@ -100,7 +180,7 @@ _REGISTRY_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...], bool, dict[str, An
     "list_project_programs": ("list_programs", (), True, {}),
     "register_target": ("register_target", ("project_location", "project_name"), True, {}),
     "load_project_program": ("load_program", ("domain_path",), True, {}),
-    "import_program": ("import_program", ("binary_path",), True, {}),
+    "import_program": ("import_program", _IMPORT_PROGRAM_FIELDS, True, {}),
     "create_session": (
         "create_session",
         ("project_location", "domain_path", "project_name"),
@@ -222,6 +302,8 @@ def _pascal_case(name: str) -> str:
 
 def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[BaseModel]:
     model_name = f"{_pascal_case(tool_name)}Input"
+    if tool_name == "import_program":
+        return ImportProgramInput
     typed_fields_by_tool: dict[str, dict[str, tuple[type[Any], Any]]] = {
         "list_targets": {},
         "list_project_programs": {},
@@ -231,9 +313,6 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
         },
         "load_project_program": {
             "domain_path": (str, ...),
-        },
-        "import_program": {
-            "binary_path": (str, ...),
         },
         "create_session": {
             "project_location": (str, ...),

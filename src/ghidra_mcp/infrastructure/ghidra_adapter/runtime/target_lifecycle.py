@@ -162,12 +162,12 @@ class RuntimeTargetLifecycle:
                     self._store.project_handles.pop(handle.get_key(), None)
             return loaded_domain_path
 
-    def import_program(self, name: str, binary_path: str) -> str:
+    def import_program(self, name: str, binary_path: str, **kwargs) -> str:
         with self._store.registry_lock.write_lock():
             if not binary_path:
                 raise ValueError("binary_path is required")
             handle = self._store.get_target_handle_locked(name)
-            domain_file = handle.import_program(binary_path)
+            domain_file = handle.import_program(binary_path, **kwargs)
             self._store.target_projects[name] = handle.get_key()
             return domain_file.getPathname()
 

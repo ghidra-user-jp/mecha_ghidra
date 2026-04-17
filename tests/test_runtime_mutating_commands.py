@@ -205,6 +205,50 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
     )
 
 
+def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
+    _start_pyghidra_if_needed()
+
+    target = f"runtime_raw_{uuid.uuid4().hex[:8]}"
+    project_dir = tmp_path / "runtime_raw_project"
+    project_name = "runtime_raw_validation"
+    raw_blob = tmp_path / "shellcode.bin"
+    raw_blob.write_bytes(b"\x55\x8b\xec\xc3")
+    _ensure_project_created(project_dir, project_name)
+
+    try:
+        cli.register_target(
+            target=target,
+            project_location=str(project_dir),
+            project_name=project_name,
+        )
+        imported = cli.import_program(
+            target=target,
+            binary_path=str(raw_blob),
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            base_address="0x401000",
+            entry_offset=0,
+        )
+        domain_path = imported["program"]
+        cli.load_project_program(target=target, domain_path=domain_path)
+
+        function_info = _unwrap_runtime_result(
+            cli.get_function_by_address(address="0x401000", target=target)
+        )
+        assert isinstance(function_info, dict)
+        assert function_info["entry"].lower().endswith("401000")
+
+        disassembly = _unwrap_runtime_result(
+            cli.disassemble_function(address="0x401000", target=target)
+        )
+        assert isinstance(disassembly, list) and disassembly
+    finally:
+        try:
+            cli.close_session(target=target)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def test_runtime_mutating_commands_all_success(tmp_path):
     _start_pyghidra_if_needed()
     binary_path = _resolve_runtime_binary_path()

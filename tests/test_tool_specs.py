@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import ghidra_mcp.contracts.tool_models as tool_models
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_tool_specs
@@ -441,6 +441,17 @@ def test_typed_input_models_for_function_listing_slice():
         "import_program",
         {
             "binary_path": (str, ...),
+            "import_mode": (Literal["auto", "raw_binary"], "auto"),
+            "language_id": (str | None, None),
+            "compiler_spec_id": (str | None, None),
+            "base_address": (str | None, None),
+            "file_offset": (int | None, None),
+            "length": (int | None, None),
+            "block_name": (str | None, None),
+            "overlay": (bool, False),
+            "entry_address": (str | None, None),
+            "entry_offset": (int | None, None),
+            "analyze_imported": (bool | None, None),
         },
     )
     _assert_fields(

@@ -94,10 +94,10 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="load_program", target=name)
 
-    def import_program(self, name: str, binary_path: str):
+    def import_program(self, name: str, binary_path: str, **kwargs):
         try:
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
-                return self._runtime.import_program(name, binary_path)
+                return self._runtime.import_program(name, binary_path, **kwargs)
         except Exception as exc:
             self._raise_domain_error(exc, operation="import_program", target=name)
 
