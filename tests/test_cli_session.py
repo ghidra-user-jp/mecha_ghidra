@@ -512,6 +512,23 @@ def test_parse_args_ghidra_server_auth_options():
     assert args.ghidra_server_password_env == "GHIDRA_SERVER_PASSWORD"
 
 
+def test_parse_args_ghidra_server_auth_direct_password_option():
+    args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--ghidra-server-user",
+            "alice",
+            "--ghidra-server-password",
+            "secret",
+        ]
+    )
+    assert args.ghidra_server_user == "alice"
+    assert args.ghidra_server_password == "secret"
+
+
 def test_normalize_transport_alias():
     assert cli._normalize_transport("http") == "streamable-http"
     assert cli._normalize_transport("sse") == "sse"
@@ -605,7 +622,7 @@ def test_configure_mcp_for_sse_with_loopback_host_keeps_local_security(monkeypat
     assert "127.0.0.1:*" in security.allowed_hosts
 
 
-def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
+def test_configure_ghidra_server_auth_sets_client_authenticator_from_env(monkeypatch):
     called = {}
 
     class FakePasswordAuthenticator:
@@ -623,6 +640,7 @@ def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
 
     args = types.SimpleNamespace(
         ghidra_server_user="alice",
+        ghidra_server_password=None,
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
     cli.configure_ghidra_server_auth(args)
@@ -632,19 +650,71 @@ def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("username", "password_env_name"),
+    ("username", "password_arg", "password_env_name"),
     [
-        ("alice", ""),
-        ("", "GHIDRA_SERVER_PASSWORD"),
+        ("alice", None, ""),
+        ("", None, "GHIDRA_SERVER_PASSWORD"),
+        ("alice", None, None),
+        ("", "secret", None),
     ],
 )
-def test_configure_ghidra_server_auth_requires_user_and_env(monkeypatch, username, password_env_name):
+def test_configure_ghidra_server_auth_requires_user_and_password_source(
+    monkeypatch, username, password_arg, password_env_name
+):
     monkeypatch.delenv("GHIDRA_SERVER_PASSWORD", raising=False)
     args = types.SimpleNamespace(
         ghidra_server_user=username,
+        ghidra_server_password=password_arg,
         ghidra_server_password_env=password_env_name,
     )
     with pytest.raises(ValueError, match="must be set together"):
+        cli.configure_ghidra_server_auth(args)
+
+
+def test_configure_ghidra_server_auth_sets_client_authenticator_from_direct_password(monkeypatch):
+    called = {}
+
+    class FakePasswordAuthenticator:
+        def __init__(self, username, password):
+            called["constructor"] = (username, password)
+
+    class FakeClientUtil:
+        @staticmethod
+        def setClientAuthenticator(authenticator):
+            called["authenticator"] = authenticator
+
+    monkeypatch.setattr(cli, "_password_client_authenticator_class", lambda: FakePasswordAuthenticator)
+    monkeypatch.setattr(cli, "_client_util_class", lambda: FakeClientUtil)
+
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password="secret",
+        ghidra_server_password_env=None,
+    )
+    cli.configure_ghidra_server_auth(args)
+
+    assert called["constructor"] == ("alice", "secret")
+    assert isinstance(called["authenticator"], FakePasswordAuthenticator)
+
+
+def test_configure_ghidra_server_auth_rejects_both_direct_password_and_env(monkeypatch):
+    monkeypatch.setenv("GHIDRA_SERVER_PASSWORD", "secret")
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password="secret",
+        ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
+    )
+    with pytest.raises(ValueError, match="cannot be used together"):
+        cli.configure_ghidra_server_auth(args)
+
+
+def test_configure_ghidra_server_auth_requires_non_empty_direct_password():
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password="",
+        ghidra_server_password_env=None,
+    )
+    with pytest.raises(ValueError, match="is empty"):
         cli.configure_ghidra_server_auth(args)
 
 
@@ -652,6 +722,7 @@ def test_configure_ghidra_server_auth_requires_non_empty_env_value(monkeypatch):
     monkeypatch.setenv("GHIDRA_SERVER_PASSWORD", "")
     args = types.SimpleNamespace(
         ghidra_server_user="alice",
+        ghidra_server_password=None,
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
     with pytest.raises(ValueError, match="is empty"):
@@ -662,6 +733,7 @@ def test_configure_ghidra_server_auth_requires_existing_env(monkeypatch):
     monkeypatch.delenv("GHIDRA_SERVER_PASSWORD", raising=False)
     args = types.SimpleNamespace(
         ghidra_server_user="alice",
+        ghidra_server_password=None,
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
     with pytest.raises(ValueError, match="is not set"):

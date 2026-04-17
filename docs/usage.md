@@ -132,8 +132,8 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - `--transport sse` is still available for compatibility (`/sse`).
 - If you bind to `--mcp-host 0.0.0.0` (or `::`), protection assumptions differ from local-only mode. Use reverse proxy, TLS, and access controls for external exposure.
 - Enable shared-project sync tools with `--enable-shared-project-sync` only when you need to expose `commit/pull/checkout` operations.
-- If shared-project authentication is required, specify both `--ghidra-server-user` and `--ghidra-server-password-env`. Supplying only one causes startup failure (direct plaintext password arg is not supported).
-- Startup also fails when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged.
+- If shared-project authentication is required, specify `--ghidra-server-user` together with exactly one of `--ghidra-server-password` or `--ghidra-server-password-env`. Supplying only one side, or supplying both password options together, causes startup failure.
+- Startup also fails when `--ghidra-server-password` is empty or when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged. If you want to avoid exposing secrets in process arguments, prefer `--ghidra-server-password-env`.
 - On Linux ARM64, startup/decompiler initialization now fails with a specific message when `Ghidra/Features/Decompiler/os/linux_arm_64` is missing or not executable.
 - If `--domain-path` is omitted, startup registers only the project target (works with empty projects). In this mode, import with `import_program` and open with `load_project_program`.
 - Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
@@ -162,6 +162,20 @@ uv run ghidra-mcp \
     --mcp-path /mcp \
     --ghidra-server-user your-user \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
+```
+
+You can also pass the password directly:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --domain-path /main \
+    --transport http \
+    --mcp-host 127.0.0.1 \
+    --mcp-port 8081 \
+    --mcp-path /mcp \
+    --ghidra-server-user your-user \
+    --ghidra-server-password 'your-password'
 ```
 
 ## Ghidra Server Setup
@@ -254,7 +268,7 @@ Recommended `streamable-http` example:
 claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
 ```
 
-If shared-project authentication is required on the server side, start `ghidra-mcp` with `--ghidra-server-user` and `--ghidra-server-password-env` (plaintext password passing from MCP client side is not used).
+If shared-project authentication is required on the server side, start `ghidra-mcp` with `--ghidra-server-user` and either `--ghidra-server-password` or `--ghidra-server-password-env`.
 
 ## MCP Configuration for Kilocode/Roocode
 

@@ -132,8 +132,8 @@ docker compose build
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
 - `--mcp-host 0.0.0.0`（または `::`）で起動する場合、ローカル限定時とは保護設定が異なります。外部公開時は必ずリバースプロキシ/TLS/アクセス制御を併用してください。
 - `commit/pull/checkout` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
-- shared project の認証が必要な場合は `--ghidra-server-user` と `--ghidra-server-password-env` をセットで指定してください。片方のみ指定した場合は起動エラーになります（パスワードの直接引数は未対応）。
-- `--ghidra-server-password-env` で指定した環境変数が未設定または空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。
+- shared project の認証が必要な場合は `--ghidra-server-user` と、`--ghidra-server-password` または `--ghidra-server-password-env` のどちらか片方をセットで指定してください。片方だけ指定した場合や、両方のパスワード指定を同時に行った場合は起動エラーになります。
+- `--ghidra-server-password` が空文字の場合、または `--ghidra-server-password-env` で指定した環境変数が未設定/空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。プロセス引数へ秘密情報を出したくない場合は `--ghidra-server-password-env` を推奨します。
 - Linux ARM64 では `Ghidra/Features/Decompiler/os/linux_arm_64` が不足していると、起動時または decompiler 初期化時に専用メッセージ付きで失敗します。
 - `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
 - 既存ターゲットへ program をロード/切り替える操作は `load_project_program` を使い、新規ターゲット作成は `create_session` を使います。program 未指定で先にターゲットだけ作る場合は `register_target` を使ってください。
@@ -162,6 +162,20 @@ uv run ghidra-mcp \
     --mcp-path /mcp \
     --ghidra-server-user your-user \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
+```
+
+パスワード文字列を直接渡すこともできます。
+
+```bash
+uv run ghidra-mcp \
+    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --domain-path /main \
+    --transport http \
+    --mcp-host 127.0.0.1 \
+    --mcp-port 8081 \
+    --mcp-path /mcp \
+    --ghidra-server-user your-user \
+    --ghidra-server-password 'your-password'
 ```
 
 ## Ghidra Serverの設定
@@ -252,7 +266,7 @@ Claude Code では CLI から MCP サーバーを登録できます。推奨の 
 claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
 ```
 
-サーバー側で shared project 認証が必要な場合は、`ghidra-mcp` 起動時に `--ghidra-server-user` と `--ghidra-server-password-env` を指定してください（MCPクライアント側で平文パスワードを渡す方式ではありません）。
+サーバー側で shared project 認証が必要な場合は、`ghidra-mcp` 起動時に `--ghidra-server-user` と `--ghidra-server-password` または `--ghidra-server-password-env` を指定してください。
 
 ## Kilocode/Roocode での MCP 設定
 

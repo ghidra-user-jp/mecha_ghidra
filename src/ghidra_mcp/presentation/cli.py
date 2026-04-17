@@ -152,6 +152,10 @@ def parse_args(argv: list[str]):
         help="Ghidra server username for shared-project connections",
     )
     parser.add_argument(
+        "--ghidra-server-password",
+        help="Ghidra server password for shared-project connections",
+    )
+    parser.add_argument(
         "--ghidra-server-password-env",
         help="Environment variable name holding the Ghidra server password",
     )
@@ -196,24 +200,39 @@ def _configure_transport_security_for_host(host: str) -> None:
 
 def configure_ghidra_server_auth(args) -> None:
     username = (getattr(args, "ghidra_server_user", None) or "").strip()
+    password_arg = getattr(args, "ghidra_server_password", None)
     password_env_name = (getattr(args, "ghidra_server_password_env", None) or "").strip()
-    if not username and not password_env_name:
+    has_password_arg = password_arg is not None
+    has_password_env = bool(password_env_name)
+    if not username and not has_password_arg and not has_password_env:
         return
-    if not username or not password_env_name:
-        raise ValueError("--ghidra-server-user and --ghidra-server-password-env must be set together")
+    if not username or not (has_password_arg or has_password_env):
+        raise ValueError(
+            "--ghidra-server-user and one of --ghidra-server-password/--ghidra-server-password-env "
+            "must be set together"
+        )
+    if has_password_arg and has_password_env:
+        raise ValueError("--ghidra-server-password and --ghidra-server-password-env cannot be used together")
 
-    password = os.environ.get(password_env_name)
-    if password is None:
-        raise ValueError(f"Environment variable '{password_env_name}' is not set")
-    if password == "":
-        raise ValueError(f"Environment variable '{password_env_name}' is empty")
+    if has_password_arg:
+        if password_arg == "":
+            raise ValueError("--ghidra-server-password is empty")
+        password = password_arg
+        password_log_hint = "password=<provided>"
+    else:
+        password = os.environ.get(password_env_name)
+        if password is None:
+            raise ValueError(f"Environment variable '{password_env_name}' is not set")
+        if password == "":
+            raise ValueError(f"Environment variable '{password_env_name}' is empty")
+        password_log_hint = f"password_env={password_env_name}"
 
     authenticator = _password_client_authenticator_class()(username, password)
     _client_util_class().setClientAuthenticator(authenticator)
     logger.info(
-        "Configured Ghidra server authentication (user=%s, password_env=%s)",
+        "Configured Ghidra server authentication (user=%s, %s)",
         username,
-        password_env_name,
+        password_log_hint,
     )
 
 
