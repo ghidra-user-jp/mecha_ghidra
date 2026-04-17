@@ -46,6 +46,10 @@ def to_domain_error(
     elif message.startswith("LOCK_TIMEOUT"):
         code = ErrorCode.LOCK_TIMEOUT
         retryable = True
+    elif message.startswith("TARGET_ALREADY_LOADED"):
+        code = ErrorCode.TARGET_ALREADY_LOADED
+    elif message.startswith("PROGRAM_ALREADY_IMPORTED"):
+        code = ErrorCode.PROGRAM_ALREADY_IMPORTED
     elif "Session '" in message and ("does not exist" in message or "is not initialized" in message):
         code = ErrorCode.SESSION_NOT_FOUND
     elif "Target '" in message and "is not initialized" in message:

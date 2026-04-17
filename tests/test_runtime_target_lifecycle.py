@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
+from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.target_lifecycle import RuntimeTargetLifecycle
 
@@ -39,6 +40,22 @@ class _FakeProgram:
         return _FakeDomainFile(self._path)
 
 
+class _FakeProjectData:
+    def __init__(self) -> None:
+        self.files: dict[str, _FakeDomainFile] = {}
+
+    def getFile(self, path: str):
+        return self.files.get(path)
+
+
+class _FakeProject:
+    def __init__(self) -> None:
+        self._data = _FakeProjectData()
+
+    def getProjectData(self):
+        return self._data
+
+
 class _FakeSession:
     def __init__(self, handle, path: str, flat_api) -> None:  # noqa: ANN001
         self._handle = handle
@@ -73,6 +90,7 @@ class _FakeProjectHandle:
         self._name = project_name or ""
         self._key = (self._location, self._name)
         self._closed = False
+        self.project = _FakeProject()
         self._programs = [{"path": "/main"}]
         self.analyze_calls: list[str] = []
         self.import_calls: list[dict[str, object]] = []
@@ -181,10 +199,10 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     assert core.initialized and core.initialized[-1][1] == "fw"
     assert store.analyzed_loads == {("fw", "/main")}
 
-    loaded = lifecycle.load_program("fw", "/main")
-    assert loaded == "/main"
+    loaded = lifecycle.load_program("fw", "/next")
+    assert loaded == "/next"
     handle = store.get_target_handle_locked("fw")
-    assert handle.analyze_calls == ["/main"]
+    assert handle.analyze_calls == ["/main", "/next"]
 
     imported = lifecycle.import_program(
         "fw",
@@ -237,3 +255,66 @@ def test_target_lifecycle_create_session_rolls_back_on_analysis_failure(monkeypa
     assert "fw" not in store.target_projects
     assert not store.analyzed_loads
     assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_duplicate_load_same_target_raises_specific_error(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, _store, _core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    with pytest.raises(DomainError) as exc_info:
+        lifecycle.load_program("fw", "/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.TARGET_ALREADY_LOADED
+    assert err.details == {
+        "operation": "load_program",
+        "target": "fw",
+        "domain_path": "/main",
+    }
+
+
+def test_target_lifecycle_duplicate_load_other_target_includes_owner(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, _store, _core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.create_session("fw-primary", "/tmp/prj", project_name="sample", domain_path="/main")
+    lifecycle.register_target("fw-shadow", "/tmp/prj", project_name="sample")
+
+    with pytest.raises(DomainError) as exc_info:
+        lifecycle.load_program("fw-shadow", "/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.TARGET_ALREADY_LOADED
+    assert err.details == {
+        "operation": "load_program",
+        "target": "fw-shadow",
+        "domain_path": "/main",
+        "owner_target": "fw-primary",
+    }
+
+
+def test_target_lifecycle_duplicate_import_raises_specific_error(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    handle = store.get_target_handle_locked("fw")
+    handle.project.getProjectData().files["/binary.exe"] = _FakeDomainFile("/binary.exe")
+
+    with pytest.raises(DomainError) as exc_info:
+        lifecycle.import_program("fw", "/tmp/binary.exe")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.PROGRAM_ALREADY_IMPORTED
+    assert err.details == {
+        "operation": "import_program",
+        "target": "fw",
+        "binary_path": "/tmp/binary.exe",
+        "existing_domain_path": "/binary.exe",
+    }
+    assert handle.import_calls == []

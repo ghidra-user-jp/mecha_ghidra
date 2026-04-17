@@ -178,3 +178,58 @@ def test_target_service_preserves_domain_error_and_merges_details():
         "operation": "import_program",
         "target": "fw",
     }
+
+
+def test_target_service_preserves_target_already_loaded_error_details():
+    class Runtime(DummyRuntime):
+        def load_program(self, name: str, domain_path: str):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.TARGET_ALREADY_LOADED,
+                message="TARGET_ALREADY_LOADED: program already loaded: /main",
+                hint="Use the existing target directly instead of reloading the same program",
+                retryable=False,
+                details={"domain_path": domain_path, "owner_target": "fw-primary"},
+            )
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.load_program("fw-shadow", "/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.TARGET_ALREADY_LOADED
+    assert err.details == {
+        "domain_path": "/main",
+        "owner_target": "fw-primary",
+        "operation": "load_program",
+        "target": "fw-shadow",
+    }
+
+
+def test_target_service_preserves_program_already_imported_error_details():
+    class Runtime(DummyRuntime):
+        def import_program(self, name: str, binary_path: str, **kwargs):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.PROGRAM_ALREADY_IMPORTED,
+                message="PROGRAM_ALREADY_IMPORTED: program already exists: /sample.exe",
+                hint="Use load_project_program with the existing domain path instead of importing again",
+                retryable=False,
+                details={
+                    "binary_path": binary_path,
+                    "existing_domain_path": "/sample.exe",
+                },
+            )
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.import_program("fw", "/tmp/sample.exe")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.PROGRAM_ALREADY_IMPORTED
+    assert err.details == {
+        "binary_path": "/tmp/sample.exe",
+        "existing_domain_path": "/sample.exe",
+        "operation": "import_program",
+        "target": "fw",
+    }

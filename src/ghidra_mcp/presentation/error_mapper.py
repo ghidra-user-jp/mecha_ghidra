@@ -13,6 +13,8 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.LOCAL_CHANGES_EXIST: "LOCAL_CHANGES_EXIST: operation aborted due to local changes",
     ErrorCode.MERGE_REQUIRED: "MERGE_REQUIRED: automatic merge is disabled; reopen the latest version or re-checkout before retrying",
     ErrorCode.LOCK_TIMEOUT: "LOCK_TIMEOUT: failed to acquire lock",
+    ErrorCode.TARGET_ALREADY_LOADED: "TARGET_ALREADY_LOADED: program is already loaded; use the existing target",
+    ErrorCode.PROGRAM_ALREADY_IMPORTED: "PROGRAM_ALREADY_IMPORTED: program already exists in project; use load_project_program",
     ErrorCode.SESSION_NOT_FOUND: "SESSION_NOT_FOUND: session not found",
     ErrorCode.TARGET_NOT_REGISTERED: "TARGET_NOT_REGISTERED: target is not registered",
     ErrorCode.PROGRAM_NOT_FOUND: "PROGRAM_NOT_FOUND: program not found",
