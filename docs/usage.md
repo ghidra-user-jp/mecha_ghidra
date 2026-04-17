@@ -155,11 +155,10 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 export GHIDRA_SERVER_PASSWORD='your-password'
 uv run ghidra-mcp \
     --project-location /Users/samsepi0l/ghidra_project.gpr \
-    --domain-path /main \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
-    --mcp-path /mcp \
+    --enable-shared-project-sync \
     --ghidra-server-user your-user \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
 ```
@@ -169,11 +168,10 @@ You can also pass the password directly:
 ```bash
 uv run ghidra-mcp \
     --project-location /Users/samsepi0l/ghidra_project.gpr \
-    --domain-path /main \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
-    --mcp-path /mcp \
+    --enable-shared-project-sync \
     --ghidra-server-user your-user \
     --ghidra-server-password 'your-password'
 ```
