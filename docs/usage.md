@@ -49,7 +49,7 @@ This document explains installation and operations for `ghidra-mcp`. For the ful
 
 5. **Start the MCP server**
    ```bash
-   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport http --mcp-host 127.0.0.1 --mcp-port 8081 --mcp-path /mcp
+   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr  --transport http --mcp-host 127.0.0.1 --mcp-port 8081 
    ```
 
 ## Docker Setup
