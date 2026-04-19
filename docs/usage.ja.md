@@ -74,7 +74,7 @@ Ghidra をホストへ個別インストールせずに試したい場合は、�
 この compose 構成では、`--project-location /data/projects --project-name default` を使い、project 実体は `/data/projects/default.gpr` / `/data/projects/default.rep` に置く前提です。初回利用前にその Ghidra project を一度作成し、そのあと binary を import して load してください。起動直後は program 未ロードなので、最初の導線は `import_program` と `load_project_program` です。
 
 - `docker compose build` も利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、同梱 Linux decompiler と一致させます。
-- `DOCKER_PLATFORM` は上書きできます。`linux/arm64` を使う場合、Docker build は既定で mecha_ghidra release `v0.1.0-rc.1` の patched Ghidra 配布物を自動選択します。
+- `DOCKER_PLATFORM` は上書きできます。`linux/arm64` を使う場合、Docker build は既定で同梱の mecha_ghidra patched Ghidra 配布物を自動選択します。
 - ARM64 で upstream 公式 ZIP を明示指定すると、`decompile_function` 実行時に遅れて壊れる代わりに Docker build 時点で fail-fast します。
 - 独自成果物を使う場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定してください。
 
@@ -91,8 +91,8 @@ DOCKER_PLATFORM=linux/arm64 docker compose up -d
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 

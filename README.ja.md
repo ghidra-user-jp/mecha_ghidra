@@ -52,7 +52,7 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 4. MCP クライアントは `http://127.0.0.1:8081/mcp` に接続
 
 - `docker compose build` も引き続き利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、これは同梱 Linux decompiler を動かすために必要です。
-- `linux/arm64` を使う場合は、Docker build が既定で mecha_ghidra release `v0.1.0-rc.1` の patched Ghidra 配布物を自動選択します。upstream の公式 ZIP を ARM64 へ無理に指定した場合は、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
+- `linux/arm64` を使う場合は、Docker build が既定で同梱の mecha_ghidra patched Ghidra 配布物を自動選択します。upstream の公式 ZIP を ARM64 へ無理に指定した場合は、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
 - 独自の patched ZIP を使いたい場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定して上書きできます。
 - `./samples` はコンテナ内に `/samples` として read-only 共有されます。`import_program` では `/samples/<filename>` を指定してください。
 - Ghidra project は named volume `ghidra-projects` に永続化され、既定の project path は `/data/projects/default.gpr` です。初回利用前に一度その project を作成するか、既存の Ghidra project をそこへ mount してください。
@@ -83,8 +83,8 @@ DOCKER_PLATFORM=linux/arm64 docker compose up -d
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 

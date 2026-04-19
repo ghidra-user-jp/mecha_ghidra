@@ -26,7 +26,7 @@ from ghidra_mcp import cli
         (
             "import_program",
             lambda: cli.import_program(target="fw", binary_path="/tmp/app.bin"),
-            {"binary_path": "/tmp/app.bin"},
+            {"binary_path": "/tmp/app.bin", "import_mode": "auto", "overlay": False},
             "fw",
         ),
         (

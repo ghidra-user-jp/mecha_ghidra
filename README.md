@@ -48,7 +48,7 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 4. Point your MCP client to `http://127.0.0.1:8081/mcp`
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, which is required for the bundled Linux decompiler.
-- When you switch to `linux/arm64`, Docker now auto-selects the mecha_ghidra `v0.1.0-rc.1` patched Ghidra distribution. If you force the upstream official ZIP on ARM64, the build fails early with a clear error instead of failing later inside `decompile_function`.
+- When you switch to `linux/arm64`, Docker now auto-selects the bundled mecha_ghidra patched Ghidra distribution. If you force the upstream official ZIP on ARM64, the build fails early with a clear error instead of failing later inside `decompile_function`.
 - You can still override the bundle by setting both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`.
 - `./samples` is shared into the container as `/samples` in read-only mode. Use `/samples/<filename>` with `import_program`.
 - Ghidra project data is persisted in the named volume `ghidra-projects`, and the default project path is `/data/projects/default.gpr`. Create that project once before first use, or mount an existing Ghidra project there.
@@ -79,8 +79,8 @@ Override example:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
