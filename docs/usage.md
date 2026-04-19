@@ -74,7 +74,7 @@ If you want to try the server without installing Ghidra on the host, use the bun
 In this compose setup, the server starts with `--project-location /data/projects --project-name default` and expects the project files to live at `/data/projects/default.gpr` and `/data/projects/default.rep`. Create that Ghidra project once before first use, then import a binary and load it. No program is loaded at startup, so the first workflow is `import_program` followed by `load_project_program`.
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, matching the bundled Linux decompiler.
-- You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build now auto-selects the mecha_ghidra `v0.1.0-rc.1` patched Ghidra distribution.
+- You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build now auto-selects the bundled mecha_ghidra patched Ghidra distribution.
 - If you explicitly force the upstream official ZIP on ARM64, Docker now fails fast during build instead of failing later inside `decompile_function`.
 - If you want a custom artifact, provide both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`.
 
@@ -91,8 +91,8 @@ To override the bundled ARM64 artifact:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
