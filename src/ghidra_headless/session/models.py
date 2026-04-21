@@ -33,14 +33,28 @@ class ProgramSession:
             raise RuntimeError("Session is already closed")
         return self.project_handle
 
-    def close(self, *, remove_program: bool = False) -> None:
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
         if self.project_handle is None:
             raise RuntimeError("Session is already closed")
-        self.project_handle.release_program(self.program, remove_program=remove_program)
 
-        self.project_handle = None
-        self.flat_api = None
-        self.program = None
+        def _mark_closed() -> None:
+            self.project_handle = None
+            self.flat_api = None
+            self.program = None
+
+        try:
+            self.project_handle.release_program(self.program, save=save, remove_program=remove_program)
+        except Exception as exc:
+            message = str(exc)
+            if (
+                message.startswith("SAVE_FAILED:")
+                or message.startswith("SESSION_CLOSE_FAILED:")
+                or message.startswith("REMOVE_PROGRAM_FAILED:")
+            ):
+                _mark_closed()
+            raise
+
+        _mark_closed()
 
     def to_dict(self) -> Dict[str, Optional[str]]:
         project_name: Optional[str] = None

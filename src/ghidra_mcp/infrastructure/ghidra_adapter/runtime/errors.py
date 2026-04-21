@@ -7,6 +7,22 @@ from typing import Any
 from ghidra_mcp.domain import DomainError, ErrorCode
 
 
+_SYNC_OPERATIONS = frozenset(
+    {
+        "get_project_sync_status",
+        "checkout_project_program",
+        "add_project_program_to_version_control",
+        "commit_project_program",
+        "pull_project_program",
+        "undo_checkout_project_program",
+        "terminate_project_program_checkout",
+        "reload_project_program",
+        "get_version_history",
+        "get_version_diff",
+    }
+)
+
+
 def to_domain_error(
     exc: Exception,
     *,
@@ -30,10 +46,14 @@ def to_domain_error(
         )
 
     message = str(exc)
-    code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else ErrorCode.SYNC_OPERATION_FAILED
+    code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else ErrorCode.OPERATION_FAILED
     retryable = False
 
-    if message.startswith("CHECKOUT_REQUIRED"):
+    if message.startswith("OPERATION_FAILED"):
+        code = ErrorCode.OPERATION_FAILED
+    elif message.startswith("SYNC_OPERATION_FAILED"):
+        code = ErrorCode.SYNC_OPERATION_FAILED
+    elif message.startswith("CHECKOUT_REQUIRED"):
         code = ErrorCode.CHECKOUT_REQUIRED
     elif message.startswith("NOT_SHARED_PROJECT"):
         code = ErrorCode.NOT_SHARED_PROJECT
@@ -41,6 +61,8 @@ def to_domain_error(
         code = ErrorCode.NOT_CHECKED_OUT
     elif message.startswith("LOCAL_CHANGES_EXIST"):
         code = ErrorCode.LOCAL_CHANGES_EXIST
+    elif message.startswith("UNSAFE_ACTIVE_CHECKOUT_TERMINATE"):
+        code = ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE
     elif message.startswith("UNSAFE_MERGE_REQUIRED"):
         code = ErrorCode.MERGE_REQUIRED
     elif message.startswith("LOCK_TIMEOUT"):
@@ -63,6 +85,8 @@ def to_domain_error(
         code = ErrorCode.SAVE_FAILED
     elif "CORE_EXECUTOR_UNAVAILABLE" in message:
         code = ErrorCode.CORE_EXECUTOR_UNAVAILABLE
+    elif code is ErrorCode.OPERATION_FAILED and operation in _SYNC_OPERATIONS:
+        code = ErrorCode.SYNC_OPERATION_FAILED
 
     details: dict[str, Any] = {"operation": operation}
     if target is not None:

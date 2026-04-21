@@ -22,14 +22,14 @@ def _normalize_empty_list_result(result: Any) -> Any:
     return result
 
 
-class _LazyCoreExecutor:
-    """Resolve ghidra core module lazily to avoid import-time dependency on started JVM."""
+class _RuntimeBackendCoreExecutor:
+    """Delegate core commands through RuntimeBackend for consistent state tracking."""
 
-    def __init__(self, core_accessor: Callable[[], Any]) -> None:
-        self._core_accessor = core_accessor
+    def __init__(self, runtime_backend: RuntimeBackend) -> None:
+        self._runtime_backend = runtime_backend
 
     def execute(self, command: str, params: dict[str, Any], key: str) -> Any:
-        return self._core_accessor().execute(command, params, key=key)
+        return self._runtime_backend.execute_core_command(command, params, target=key)
 
 
 class ServiceRegistryAdapter:
@@ -225,7 +225,7 @@ def create_cli_runtime(
     lock_manager = LockManager()
     target_service = TargetService(runtime_backend, lock_manager=lock_manager)
     sync_service = SyncService(runtime_backend, lock_manager=lock_manager)
-    core_gateway = CoreGateway(_LazyCoreExecutor(core_accessor))
+    core_gateway = CoreGateway(_RuntimeBackendCoreExecutor(runtime_backend))
     core_command_service = CoreCommandService(core_gateway)
     registry = ServiceRegistryAdapter(
         core_command_service=core_command_service,

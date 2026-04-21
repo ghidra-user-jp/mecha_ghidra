@@ -141,7 +141,7 @@ def test_target_service_preserves_session_not_found_domain_error():
     assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
 
 
-def test_target_service_fallback_non_domain_error_is_sync_operation_failed():
+def test_target_service_fallback_non_domain_error_is_operation_failed():
     class Runtime(DummyRuntime):
         def list_programs(self, name: str):  # noqa: ARG002
             raise RuntimeError("unexpected failure")
@@ -151,7 +151,7 @@ def test_target_service_fallback_non_domain_error_is_sync_operation_failed():
     with pytest.raises(DomainError) as exc_info:
         service.list_programs("fw")
 
-    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.code == ErrorCode.OPERATION_FAILED
     assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
 
 

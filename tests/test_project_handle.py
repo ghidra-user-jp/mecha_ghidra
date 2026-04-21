@@ -22,14 +22,18 @@ class DummyDomainFile:
 
 
 class DummyProgram:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, changed: bool = True) -> None:
         self._domain_file = DummyDomainFile(path)
+        self._changed = changed
 
     def getDomainFile(self):
         return self._domain_file
 
     def getName(self) -> str:
         return pathlib.Path(self._domain_file.getPathname()).name
+
+    def isChanged(self) -> bool:
+        return self._changed
 
 
 class DummyProject:
@@ -91,6 +95,83 @@ def test_open_program_allows_reopen_after_release(monkeypatch):
     new_handle = build_handle(monkeypatch)
     session_two = new_handle.open_program("/folder/app")
     assert session_two.get_program().getDomainFile().getPathname() == "/folder/app"
+
+
+def test_close_can_skip_save(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+    opened.close(save=False)
+
+    assert handle.project.saved == []
+    assert handle.project.closed == [program, None]
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
+
+
+def test_close_surfaces_save_failed_after_closing_program(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class FailingSaveProject(DummyProject):
+        def save(self, _program):
+            raise RuntimeError("disk full")
+
+    handle.project = FailingSaveProject()
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save program before close: disk full"):
+        opened.close()
+
+    with pytest.raises(RuntimeError, match="Session is already closed"):
+        opened.get_program()
+    assert handle.project.saved == []
+    assert handle.project.closed == [program, None]
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
+
+
+def test_close_surfaces_close_failed_and_marks_session_closed(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class FailingCloseProject(DummyProject):
+        def close(self, program=None):
+            super().close(program)
+            if program is not None:
+                raise RuntimeError("close failed")
+
+    handle.project = FailingCloseProject()
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+
+    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED: failed to close program: close failed"):
+        opened.close()
+
+    with pytest.raises(RuntimeError, match="Session is already closed"):
+        opened.get_program()
+    assert handle.is_closed() is True
+    assert handle.project.closed == [program, None]
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
+
+
+def test_close_skips_save_for_clean_program(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class CleanProject(DummyProject):
+        def openProgram(self, domain_dir, domain_name, flag):  # noqa: ARG002
+            return DummyProgram((pathlib.PurePosixPath(domain_dir) / domain_name).as_posix(), changed=False)
+
+    handle.project = CleanProject()
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+    opened.close()
+
+    assert handle.project.saved == []
+    assert handle.project.closed == [program, None]
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
 
 
 def test_sync_status_raises_when_required_call_fails():
@@ -374,6 +455,41 @@ def test_list_programs_from_metadata_parses_program_entries(tmp_path):
 def test_list_programs_from_metadata_returns_none_when_rep_missing(tmp_path):
     result = session.ProjectHandle.list_programs_from_metadata(str(tmp_path), "sample")
     assert result is None
+
+
+def test_is_repository_project_from_metadata_detects_server_backed_project(tmp_path):
+    rep_dir = tmp_path / "sample.rep"
+    rep_dir.mkdir(parents=True)
+    (rep_dir / "project.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="SERVER" TYPE="string" VALUE="127.0.0.1" />
+    <STATE NAME="REPOSITORY_NAME" TYPE="string" VALUE="shared" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+
+    assert session.ProjectHandle.is_repository_project_from_metadata(str(tmp_path), "sample") is True
+
+
+def test_is_repository_project_from_metadata_is_false_for_local_project(tmp_path):
+    rep_dir = tmp_path / "sample.rep"
+    rep_dir.mkdir(parents=True)
+    (rep_dir / "project.prp").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<FILE_INFO>
+  <BASIC_INFO>
+    <STATE NAME="OWNER" TYPE="string" VALUE="ghidra" />
+  </BASIC_INFO>
+</FILE_INFO>
+""",
+        encoding="utf-8",
+    )
+
+    assert session.ProjectHandle.is_repository_project_from_metadata(str(tmp_path), "sample") is False
 
 
 def test_import_program_auto_uses_legacy_import_path(monkeypatch, tmp_path):

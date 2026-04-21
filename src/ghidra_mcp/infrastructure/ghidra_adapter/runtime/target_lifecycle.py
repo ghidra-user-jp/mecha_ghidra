@@ -35,11 +35,12 @@ class RuntimeTargetLifecycle:
 
             handle = self._store.get_or_create_project_handle(project_location, project_name)
             had_target = name in self._store.target_projects
+            previous_target_key = self._store.target_projects.get(name)
             had_lock = name in self._store.locks
             self._store.target_projects[name] = handle.get_key()
-            session = handle.open_program(domain_path)
 
             try:
+                session = handle.open_program(domain_path)
                 self._initialize_opened_session_locked(
                     name=name,
                     session=session,
@@ -49,21 +50,25 @@ class RuntimeTargetLifecycle:
                 return session
             except Exception:  # noqa: BLE001
                 self._store.sessions.pop(name, None)
-                try:
-                    if session is not None:
-                        session.close()
-                except Exception as close_exc:
-                    logger.warning("failed to rollback session close during create_session for target '%s': %s", name, close_exc)
-                if not had_target:
+                rollback_error = None
+                if handle is not None:
+                    rollback_error = self._cleanup_failed_create_session_locked(
+                        name=name,
+                        session=session,
+                        handle=handle,
+                    )
+                if rollback_error is not None:
+                    logger.warning(
+                        "failed to rollback session close during create_session for target '%s': %s",
+                        name,
+                        rollback_error,
+                    )
+                if had_target and previous_target_key is not None:
+                    self._store.target_projects[name] = previous_target_key
+                else:
                     self._store.target_projects.pop(name, None)
                 if not had_lock:
                     self._store.locks.pop(name, None)
-                try:
-                    self._store.core_accessor().remove_context(name)
-                except Exception as remove_exc:
-                    logger.warning("failed to rollback context removal during create_session for target '%s': %s", name, remove_exc)
-                if handle is not None and handle.is_closed():
-                    self._store.project_handles.pop(handle.get_key(), None)
                 raise
 
     def register_target(
@@ -119,9 +124,10 @@ class RuntimeTargetLifecycle:
                 return handle.list_programs()
 
             key = self._store.get_target_project_key_locked(name)
-            metadata_programs = ProjectHandle.list_programs_from_metadata(key[0], key[1])
-            if metadata_programs is not None:
-                return metadata_programs
+            if not ProjectHandle.is_repository_project_from_metadata(key[0], key[1]):
+                metadata_programs = ProjectHandle.list_programs_from_metadata(key[0], key[1])
+                if metadata_programs is not None:
+                    return metadata_programs
 
             handle = self._store.get_or_create_project_handle(key[0], key[1])
             return handle.list_programs()
@@ -153,33 +159,48 @@ class RuntimeTargetLifecycle:
                     details=details,
                 )
 
+            old_session = self._store.sessions.get(name)
+            old_domain_path = None
+            if old_session is not None:
+                try:
+                    old_domain_path = self._store.session_domain_path(old_session)
+                except Exception:
+                    old_domain_path = None
             new_session = handle.open_program(normalized_domain_path)
-            had_session = name in self._store.sessions
             try:
                 loaded_domain_path = self._initialize_opened_session_locked(
                     name=name,
                     session=new_session,
                 )
             except Exception:
-                self._store.cleanup_session(
-                    name,
-                    new_session,
-                    handle,
-                    remove_registry_entry=False,
-                    remove_context=not had_session,
+                self._rollback_failed_load_initialization_locked(
+                    name=name,
+                    handle=handle,
+                    new_session=new_session,
+                    old_session=old_session,
                 )
                 raise
 
-            old_session = self._store.sessions.get(name)
-            self._store.sessions[name] = new_session
             self._store.locks.setdefault(name, threading.RLock())
             self._store.target_projects[name] = handle.get_key()
             try:
                 if old_session is not None:
                     old_session.close()
-            finally:
-                if handle.is_closed():
-                    self._store.project_handles.pop(handle.get_key(), None)
+            except Exception:
+                self._rollback_failed_session_replacement_locked(
+                    name=name,
+                    handle=handle,
+                    new_session=new_session,
+                    old_session=old_session,
+                    old_domain_path=old_domain_path,
+                )
+                raise
+
+            self._store.sessions[name] = new_session
+            if old_domain_path is not None:
+                self._store.clear_dirty_program(name, old_domain_path)
+            if handle.is_closed():
+                self._store.project_handles.pop(handle.get_key(), None)
             return loaded_domain_path
 
     def import_program(self, name: str, binary_path: str, **kwargs) -> str:
@@ -222,6 +243,7 @@ class RuntimeTargetLifecycle:
             self._store.locks.clear()
             self._store.target_projects.clear()
             self._store.clear_analyzed_loads()
+            self._store.clear_dirty_programs()
             for handle in list(self._store.project_handles.values()):
                 try:
                     handle.close()
@@ -235,19 +257,29 @@ class RuntimeTargetLifecycle:
         if session is None:
             raise RuntimeError(f"Session '{name}' does not exist")
         handle = session.get_project_handle()
-        self._store.cleanup_session(
-            name,
-            session,
-            handle,
-            remove_registry_entry=False,
-            remove_context=False,
-            remove_program=remove_program,
-        )
-        self._store.sessions.pop(name, None)
-        self._store.locks.pop(name, None)
-        self._store.target_projects.pop(name, None)
-        self._store.clear_analyzed_loads_for_target(name)
-        self._store.core_accessor().remove_context(name)
+        close_error = None
+        try:
+            self._store.cleanup_session(
+                name,
+                session,
+                handle,
+                remove_registry_entry=False,
+                remove_context=False,
+                remove_program=remove_program,
+            )
+        except Exception as exc:
+            close_error = exc
+
+        if close_error is None or self._session_is_closed(session):
+            self._store.sessions.pop(name, None)
+            self._store.locks.pop(name, None)
+            self._store.target_projects.pop(name, None)
+            self._store.clear_analyzed_loads_for_target(name)
+            self._store.clear_dirty_programs_for_target(name)
+            self._store.core_accessor().remove_context(name)
+
+        if close_error is not None:
+            raise close_error
 
     def _initialize_opened_session_locked(
         self,
@@ -284,6 +316,139 @@ class RuntimeTargetLifecycle:
                 script_util.releaseBundleHostReference()
         self._store.mark_analyzed_load(name, domain_path)
 
+    def _rollback_failed_load_initialization_locked(
+        self,
+        *,
+        name: str,
+        handle: ProjectHandle,
+        new_session: ProgramSession,
+        old_session: ProgramSession | None,
+    ) -> None:
+        cleanup_error = self._cleanup_failed_session_locked(
+            name=name,
+            session=new_session,
+            handle=handle,
+            remove_context=old_session is None,
+            allow_handle_close=old_session is None,
+        )
+        restore_error = None
+        if old_session is not None and not self._session_is_closed(old_session):
+            try:
+                self._restore_session_context_locked(name, old_session)
+            except Exception as exc:  # noqa: BLE001
+                restore_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
+        if restore_error is not None:
+            raise restore_error
+
+    def _rollback_failed_session_replacement_locked(
+        self,
+        *,
+        name: str,
+        handle: ProjectHandle,
+        new_session: ProgramSession,
+        old_session: ProgramSession,
+        old_domain_path: str | None,
+    ) -> None:
+        old_session_closed = self._session_is_closed(old_session)
+        cleanup_error = self._cleanup_failed_session_locked(
+            name=name,
+            session=new_session,
+            handle=handle,
+            remove_context=old_session_closed,
+            allow_handle_close=old_session_closed,
+        )
+        if old_session_closed:
+            self._store.sessions.pop(name, None)
+            if old_domain_path is not None:
+                self._store.clear_dirty_program(name, old_domain_path)
+            if cleanup_error is not None:
+                raise cleanup_error
+            return
+
+        restore_error = None
+        try:
+            self._restore_session_context_locked(name, old_session)
+        except Exception as exc:  # noqa: BLE001
+            restore_error = exc
+        if cleanup_error is not None:
+            raise cleanup_error
+        if restore_error is not None:
+            raise restore_error
+
+    def _cleanup_failed_session_locked(
+        self,
+        *,
+        name: str,
+        session: ProgramSession,
+        handle: ProjectHandle,
+        remove_context: bool,
+        allow_handle_close: bool,
+    ) -> Exception | None:
+        cleanup_error = None
+        try:
+            self._store.cleanup_session(
+                name,
+                session,
+                handle,
+                remove_registry_entry=False,
+                remove_context=remove_context,
+                save=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            cleanup_error = exc
+
+        if allow_handle_close and not handle.is_closed() and not self._handle_has_live_sessions_locked(handle):
+            try:
+                handle.close()
+            except Exception as handle_exc:  # noqa: BLE001
+                logger.warning("failed to close leaked project handle during rollback for target '%s': %s", name, handle_exc)
+        if handle.is_closed():
+            self._store.project_handles.pop(handle.get_key(), None)
+        return cleanup_error
+
+    def _cleanup_failed_create_session_locked(
+        self,
+        *,
+        name: str,
+        session: ProgramSession | None,
+        handle: ProjectHandle,
+    ) -> Exception | None:
+        if session is not None:
+            return self._cleanup_failed_session_locked(
+                name=name,
+                session=session,
+                handle=handle,
+                remove_context=True,
+                allow_handle_close=True,
+            )
+
+        if not handle.is_closed() and not self._handle_has_live_sessions_locked(handle):
+            try:
+                handle.close()
+            except Exception as handle_exc:  # noqa: BLE001
+                logger.warning("failed to close leaked project handle during rollback for target '%s': %s", name, handle_exc)
+        if handle.is_closed():
+            self._store.project_handles.pop(handle.get_key(), None)
+        return None
+
+    def _handle_has_live_sessions_locked(self, handle: ProjectHandle) -> bool:
+        handle_key = handle.get_key()
+        for session in self._store.sessions.values():
+            if self._session_is_closed(session):
+                continue
+            try:
+                session_handle = session.get_project_handle()
+            except Exception:
+                continue
+            if session_handle.get_key() == handle_key:
+                return True
+        return False
+
+    def _restore_session_context_locked(self, name: str, session: ProgramSession) -> None:
+        self._store.core_accessor().initialize(session.get_program(), key=name)
+
     @staticmethod
     def _normalize_domain_path_locked(handle: ProjectHandle, domain_path: str | None) -> str:
         domain_dir, domain_name = path_utils._parse_domain_path(handle.project, domain_path)
@@ -308,6 +473,13 @@ class RuntimeTargetLifecycle:
         if domain_file is None:
             return None
         return domain_file.getPathname()
+
+    @staticmethod
+    def _session_is_closed(session: ProgramSession) -> bool:
+        try:
+            return session.get_project_handle() is None
+        except Exception:
+            return True
 
 
 __all__ = ["RuntimeTargetLifecycle"]

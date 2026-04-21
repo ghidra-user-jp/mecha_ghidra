@@ -24,6 +24,20 @@ class _DummyCore:
         self.cleared += 1
 
 
+class _TrackingCore(_DummyCore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.contexts: dict[str, str] = {}
+
+    def initialize(self, program, key: str):  # noqa: ANN001
+        super().initialize(program, key)
+        self.contexts[key] = program.getDomainFile().getPathname()
+
+    def remove_context(self, key: str) -> None:
+        super().remove_context(key)
+        self.contexts.pop(key, None)
+
+
 class _FakeDomainFile:
     def __init__(self, path: str) -> None:
         self._path = path
@@ -61,7 +75,7 @@ class _FakeSession:
         self._handle = handle
         self._path = path
         self.flat_api = flat_api
-        self.closed_with: list[bool] = []
+        self.closed_with: list[tuple[bool, bool]] = []
 
     def get_program(self):
         return _FakeProgram(self._path)
@@ -69,8 +83,8 @@ class _FakeSession:
     def get_project_handle(self):
         return self._handle
 
-    def close(self, *, remove_program: bool = False) -> None:
-        self.closed_with.append(remove_program)
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+        self.closed_with.append((save, remove_program))
 
     def to_dict(self) -> dict[str, str | None]:
         return {
@@ -82,6 +96,7 @@ class _FakeSession:
 
 class _FakeProjectHandle:
     metadata_programs = None
+    repository_backed = False
     should_analyze = True
     fail_analyze = False
 
@@ -106,6 +121,10 @@ class _FakeProjectHandle:
     @staticmethod
     def list_programs_from_metadata(project_location: str, project_name: str | None):  # noqa: ARG004
         return _FakeProjectHandle.metadata_programs
+
+    @staticmethod
+    def is_repository_project_from_metadata(project_location: str, project_name: str | None):  # noqa: ARG004
+        return _FakeProjectHandle.repository_backed
 
     def open_program(self, domain_path: str | None = None):
         path = domain_path or "/main"
@@ -142,10 +161,30 @@ class _FakeProjectHandle:
         self._closed = True
 
 
-def _build_target_lifecycle(monkeypatch: pytest.MonkeyPatch):
+class _FailingSaveCloseSession(_FakeSession):
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+        self.closed_with.append((save, remove_program))
+        self._handle = None
+        raise RuntimeError("SAVE_FAILED: failed to save program before close: disk full")
+
+    def get_project_handle(self):
+        if self._handle is None:
+            raise RuntimeError("Session is already closed")
+        return self._handle
+
+
+class _FailingRollbackCloseSession(_FakeSession):
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+        self.closed_with.append((save, remove_program))
+        raise RuntimeError("rollback close failed")
+
+
+def _build_target_lifecycle(monkeypatch: pytest.MonkeyPatch, *, core: _DummyCore | None = None):
     import ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store as store_module
     import ghidra_mcp.infrastructure.ghidra_adapter.runtime.target_lifecycle as lifecycle_module
 
+    _FakeProjectHandle.metadata_programs = None
+    _FakeProjectHandle.repository_backed = False
     monkeypatch.setattr(store_module, "ProjectHandle", _FakeProjectHandle)
     monkeypatch.setattr(lifecycle_module, "ProjectHandle", _FakeProjectHandle)
 
@@ -174,7 +213,7 @@ def _build_target_lifecycle(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(lifecycle_module, "java_bindings", _FakeJavaBindings())
 
-    core = _DummyCore()
+    core = core or _DummyCore()
     state = RuntimeState(
         core_accessor=lambda: core,
         checkout_required_commands=set(),
@@ -232,6 +271,7 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
 def test_target_lifecycle_list_programs_uses_metadata_when_no_session(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
+    _FakeProjectHandle.repository_backed = False
     lifecycle, _store, _core = _build_target_lifecycle(monkeypatch)
     lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
     _FakeProjectHandle.metadata_programs = [{"path": "/meta.bin"}]
@@ -240,6 +280,22 @@ def test_target_lifecycle_list_programs_uses_metadata_when_no_session(monkeypatc
     finally:
         _FakeProjectHandle.metadata_programs = None
     assert programs == [{"path": "/meta.bin"}]
+
+
+def test_target_lifecycle_list_programs_ignores_metadata_for_repository_projects(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    _FakeProjectHandle.repository_backed = True
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    _FakeProjectHandle.metadata_programs = [{"path": "/meta.bin"}]
+    try:
+        programs = lifecycle.list_programs("fw")
+    finally:
+        _FakeProjectHandle.metadata_programs = None
+        _FakeProjectHandle.repository_backed = False
+    assert programs == [{"path": "/main"}]
+    assert store.get_target_handle_locked("fw").list_programs() == [{"path": "/main"}]
 
 
 def test_target_lifecycle_create_session_rolls_back_on_analysis_failure(monkeypatch: pytest.MonkeyPatch):
@@ -254,6 +310,196 @@ def test_target_lifecycle_create_session_rolls_back_on_analysis_failure(monkeypa
     assert "fw" not in store.locks
     assert "fw" not in store.target_projects
     assert not store.analyzed_loads
+    assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_create_session_closes_leaked_handle_when_rollback_close_fails(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+    original_open = _FakeProjectHandle.open_program
+
+    def patched_open(self, domain_path: str | None = None):  # noqa: ANN001
+        path = domain_path or "/main"
+        if path == "/main":
+            handle = self
+
+            class _FailingFlatAPI:
+                def analyzeAll(self, program):  # noqa: ANN001
+                    raise RuntimeError("analyze failed")
+
+            return _FailingRollbackCloseSession(handle, path, _FailingFlatAPI())
+        return original_open(self, domain_path)
+
+    monkeypatch.setattr(_FakeProjectHandle, "open_program", patched_open)
+
+    with pytest.raises(RuntimeError, match="analyze failed"):
+        lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    assert not store.project_handles
+    assert core.contexts == {}
+
+
+def test_target_lifecycle_create_session_failure_does_not_close_shared_handle(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+
+    created = lifecycle.create_session("fw1", "/tmp/prj", project_name="sample", domain_path="/main")
+    _FakeProjectHandle.fail_analyze = True
+
+    with pytest.raises(RuntimeError, match="analyze failed"):
+        lifecycle.create_session("fw2", "/tmp/prj", project_name="sample", domain_path="/bad")
+
+    assert created.get_project_handle().is_closed() is False
+    assert store.session_domain_path(store.sessions["fw1"]) == "/main"
+    assert core.contexts == {"fw1": "/main"}
+
+
+def test_target_lifecycle_create_session_failure_restores_registered_target_project(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.register_target("fw", "/tmp/orig", project_name="orig")
+    _FakeProjectHandle.fail_analyze = True
+
+    with pytest.raises(RuntimeError, match="analyze failed"):
+        lifecycle.create_session("fw", "/tmp/new", project_name="new", domain_path="/main")
+
+    assert store.target_projects["fw"] == ("/tmp/orig", "orig")
+    assert "fw" in store.locks
+    assert "fw" not in store.sessions
+
+
+def test_target_lifecycle_create_session_open_failure_restores_registered_target_project(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    original_open = _FakeProjectHandle.open_program
+
+    def patched_open(self, domain_path: str | None = None):  # noqa: ANN001
+        path = domain_path or "/main"
+        if path == "/bad":
+            raise RuntimeError("open failed")
+        return original_open(self, domain_path)
+
+    monkeypatch.setattr(_FakeProjectHandle, "open_program", patched_open)
+    lifecycle.register_target("fw", "/tmp/orig", project_name="orig")
+
+    with pytest.raises(RuntimeError, match="open failed"):
+        lifecycle.create_session("fw", "/tmp/new", project_name="new", domain_path="/bad")
+
+    assert store.target_projects["fw"] == ("/tmp/orig", "orig")
+    assert "fw" in store.locks
+    assert "fw" not in store.sessions
+    assert ("/tmp/new", "new") not in store.project_handles
+
+
+def test_target_lifecycle_load_program_restores_existing_context_on_analysis_failure(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    assert core.contexts == {"fw": "/main"}
+
+    _FakeProjectHandle.fail_analyze = True
+    with pytest.raises(RuntimeError, match="analyze failed"):
+        lifecycle.load_program("fw", "/next")
+
+    assert store.session_domain_path(store.sessions["fw"]) == "/main"
+    assert core.contexts == {"fw": "/main"}
+
+
+def test_target_lifecycle_load_program_failure_does_not_close_shared_handle(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+
+    created = lifecycle.create_session("fw1", "/tmp/prj", project_name="sample", domain_path="/main")
+    lifecycle.register_target("fw2", "/tmp/prj", project_name="sample")
+    _FakeProjectHandle.fail_analyze = True
+
+    with pytest.raises(RuntimeError, match="analyze failed"):
+        lifecycle.load_program("fw2", "/bad")
+
+    assert created.get_project_handle().is_closed() is False
+    assert store.session_domain_path(store.sessions["fw1"]) == "/main"
+    assert core.contexts == {"fw1": "/main"}
+
+
+def test_target_lifecycle_load_program_restores_existing_context_when_rollback_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    original_open = _FakeProjectHandle.open_program
+
+    def patched_open(self, domain_path: str | None = None):  # noqa: ANN001
+        path = domain_path or "/main"
+        if path == "/next":
+            handle = self
+
+            class _FailingFlatAPI:
+                def analyzeAll(self, program):  # noqa: ANN001
+                    raise RuntimeError("analyze failed")
+
+            return _FailingRollbackCloseSession(handle, path, _FailingFlatAPI())
+        return original_open(self, domain_path)
+
+    monkeypatch.setattr(_FakeProjectHandle, "open_program", patched_open)
+
+    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED: rollback close failed"):
+        lifecycle.load_program("fw", "/next")
+
+    assert store.session_domain_path(store.sessions["fw"]) == "/main"
+    assert core.contexts == {"fw": "/main"}
+
+
+def test_target_lifecycle_load_program_rolls_back_new_session_when_old_close_fails(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+
+    created = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    store.mark_dirty_program("fw", "/main")
+    store.sessions["fw"] = _FailingSaveCloseSession(created.get_project_handle(), "/main", created.flat_api)
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save program before close: disk full"):
+        lifecycle.load_program("fw", "/next")
+
+    assert "fw" not in store.sessions
+    assert "fw" in store.target_projects
+    assert "fw" in store.locks
+    assert not store.is_dirty_program("fw", "/main")
+    assert core.contexts == {}
+    assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_close_session_preserves_save_failed_and_cleans_closed_session(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
+
+    created = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    failing = _FailingSaveCloseSession(created.get_project_handle(), "/main", created.flat_api)
+    store.sessions["fw"] = failing
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save program before close: disk full"):
+        lifecycle.close_session("fw")
+
+    assert "fw" not in store.sessions
+    assert "fw" not in store.locks
+    assert "fw" not in store.target_projects
     assert core.removed == ["fw"]
 
 

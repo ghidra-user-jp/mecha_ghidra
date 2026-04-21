@@ -21,6 +21,7 @@ class RuntimeSessionStore:
         self.target_projects = state.target_projects
         self.project_handles = state.project_handles
         self.analyzed_loads = state.analyzed_loads
+        self.dirty_programs = state.dirty_programs
         self.registry_lock = state.registry_lock
 
     def ensure_session(self, name: str) -> ProgramSession:
@@ -77,7 +78,14 @@ class RuntimeSessionStore:
         remove_registry_entry: bool,
         remove_context: bool = True,
         remove_program: bool = False,
+        save: bool = True,
     ) -> None:
+        session_domain_path = None
+        if session is not None:
+            try:
+                session_domain_path = self.session_domain_path(session)
+            except Exception:
+                session_domain_path = None
         if remove_registry_entry:
             self.sessions.pop(name, None)
             self.locks.pop(name, None)
@@ -85,7 +93,7 @@ class RuntimeSessionStore:
         close_error = None
         try:
             if session is not None:
-                session.close(remove_program=remove_program)
+                session.close(save=save, remove_program=remove_program)
         except Exception as exc:  # noqa: BLE001
             close_error = exc
 
@@ -94,8 +102,15 @@ class RuntimeSessionStore:
 
         if handle is not None and handle.is_closed():
             self.project_handles.pop(handle.get_key(), None)
+        if session_domain_path is not None:
+            self.clear_dirty_program(name, session_domain_path)
 
         if close_error is not None:
+            message = str(close_error)
+            if message.startswith("SAVE_FAILED:") or message.startswith("SESSION_CLOSE_FAILED:") or message.startswith(
+                "REMOVE_PROGRAM_FAILED:"
+            ):
+                raise RuntimeError(message) from close_error
             raise RuntimeError(f"SESSION_CLOSE_FAILED: {close_error}")
 
     def has_sessions(self) -> bool:
@@ -132,6 +147,25 @@ class RuntimeSessionStore:
 
     def clear_analyzed_loads(self) -> None:
         self.analyzed_loads.clear()
+
+    def is_dirty_program(self, name: str, domain_path: str) -> bool:
+        return (name, domain_path) in self.dirty_programs
+
+    def mark_dirty_program(self, name: str, domain_path: str) -> None:
+        self.dirty_programs.add((name, domain_path))
+
+    def clear_dirty_program(self, name: str, domain_path: str) -> None:
+        self.dirty_programs.discard((name, domain_path))
+
+    def clear_dirty_programs_for_target(self, name: str) -> None:
+        if not self.dirty_programs:
+            return
+        remove_keys = [key for key in self.dirty_programs if key[0] == name]
+        for key in remove_keys:
+            self.dirty_programs.discard(key)
+
+    def clear_dirty_programs(self) -> None:
+        self.dirty_programs.clear()
 
     @staticmethod
     def session_domain_path(session: ProgramSession) -> str:

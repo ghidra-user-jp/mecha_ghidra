@@ -109,6 +109,19 @@ class RuntimeBackend:
             func=lambda: self._target_lifecycle.import_program(name, binary_path, **kwargs),
         )
 
+    def execute_core_command(
+        self,
+        command: str,
+        params: Dict[str, Any] | None = None,
+        *,
+        target: str = "default",
+    ) -> Any:
+        return self._invoke(
+            operation=command,
+            target=target,
+            func=lambda: self._core_execution.call(command, params or {}, target=target),
+        )
+
     def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         return self._invoke(
             operation="get_project_sync_status",

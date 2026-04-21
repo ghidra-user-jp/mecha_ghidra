@@ -49,12 +49,23 @@ class ProjectHandle:
 
     @staticmethod
     def list_programs_from_metadata(project_location: str, project_name: Optional[str]) -> Optional[list[Dict[str, str]]]:
-        resolved_location, resolved_name = ProjectHandle.resolve_project_location_and_file(project_location, project_name)
-        rep_dir = pathlib.Path(resolved_location) / f"{resolved_name}.rep"
+        rep_dir = ProjectHandle._project_rep_dir(project_location, project_name)
         idata_dir = rep_dir / "idata"
         if not idata_dir.is_dir():
             return None
         return path_utils._collect_program_files_from_idata(idata_dir)
+
+    @staticmethod
+    def is_repository_project_from_metadata(project_location: str, project_name: Optional[str]) -> bool:
+        info = path_utils._read_prp_basic_info(ProjectHandle._project_rep_dir(project_location, project_name) / "project.prp")
+        if not info:
+            return False
+        return bool(str(info.get("SERVER") or "").strip())
+
+    @staticmethod
+    def _project_rep_dir(project_location: str, project_name: Optional[str]) -> pathlib.Path:
+        resolved_location, resolved_name = ProjectHandle.resolve_project_location_and_file(project_location, project_name)
+        return pathlib.Path(resolved_location) / f"{resolved_name}.rep"
 
     def get_project_location(self) -> str:
         return self.project_location
@@ -321,7 +332,7 @@ class ProjectHandle:
             domain_file = self._get_domain_file_locked(domain_path)
             domain_file.terminateCheckout(int(checkout_id))
 
-    def release_program(self, program, *, remove_program: bool = False) -> None:
+    def release_program(self, program, *, save: bool = True, remove_program: bool = False) -> None:
         with self._lock:
             if self._closed:
                 return
@@ -329,16 +340,20 @@ class ProjectHandle:
             if domain_path is None:
                 raise RuntimeError("Failed to resolve path of program to remove")
             domain_key = path_utils._parse_domain_path(self.project, domain_path)
+            save_error = None
+            close_error = None
             remove_error = None
             try:
-                if program is not None:
+                if save and program is not None and self._program_needs_save(program):
                     self.project.save(program)
             except Exception as exc:
+                save_error = exc
                 logger.warning("program save failed before close: %s", exc)
             try:
                 if program is not None:
                     self.project.close(program)
             except Exception as exc:
+                close_error = exc
                 logger.warning("program close failed: %s", exc)
             if remove_program:
                 try:
@@ -349,8 +364,21 @@ class ProjectHandle:
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
                 self._close_project_locked()
+            if close_error is not None:
+                messages = []
+                if save_error is not None:
+                    messages.append(f"failed to save program before close: {save_error}")
+                messages.append(f"failed to close program: {close_error}")
+                if remove_error is not None:
+                    messages.append(f"failed to remove program: {remove_error}")
+                raise RuntimeError(f"SESSION_CLOSE_FAILED: {'; '.join(messages)}")
+            if save_error is not None:
+                messages = [f"failed to save program before close: {save_error}"]
+                if remove_error is not None:
+                    messages.append(f"failed to remove program: {remove_error}")
+                raise RuntimeError(f"SAVE_FAILED: {'; '.join(messages)}")
             if remove_error is not None:
-                raise remove_error
+                raise RuntimeError(f"REMOVE_PROGRAM_FAILED: {remove_error}")
 
     def list_programs(self):
         with self._lock:
@@ -392,6 +420,16 @@ class ProjectHandle:
             domain_file.delete()
         except Exception as exc:
             raise RuntimeError(f"Failed to remove program: {domain_path}: {exc}")
+
+    @staticmethod
+    def _program_needs_save(program) -> bool:
+        is_changed = getattr(program, "isChanged", None)
+        if is_changed is None:
+            return True
+        try:
+            return bool(is_changed())
+        except Exception:
+            return True
 
     def _get_domain_file_locked(self, domain_path: str):
         if not domain_path:

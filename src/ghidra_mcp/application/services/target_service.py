@@ -27,7 +27,7 @@ class TargetService:
             )
 
         return DomainError(
-            code=ErrorCode.SYNC_OPERATION_FAILED,
+            code=ErrorCode.OPERATION_FAILED,
             message=str(exc),
             hint="Check target/session state for this operation",
             retryable=False,

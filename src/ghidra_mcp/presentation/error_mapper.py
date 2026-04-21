@@ -7,10 +7,15 @@ from typing import Any
 from ghidra_mcp.domain import DomainError, ErrorCode
 
 _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
+    ErrorCode.OPERATION_FAILED: "OPERATION_FAILED: operation failed",
     ErrorCode.CHECKOUT_REQUIRED: "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects",
     ErrorCode.NOT_SHARED_PROJECT: "NOT_SHARED_PROJECT: target program is not under shared-project version control",
     ErrorCode.NOT_CHECKED_OUT: "NOT_CHECKED_OUT: program is not checked out",
     ErrorCode.LOCAL_CHANGES_EXIST: "LOCAL_CHANGES_EXIST: operation aborted due to local changes",
+    ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE: (
+        "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: active checkout cannot be terminated; "
+        "use undo_checkout_project_program instead"
+    ),
     ErrorCode.MERGE_REQUIRED: "MERGE_REQUIRED: automatic merge is disabled; reopen the latest version or re-checkout before retrying",
     ErrorCode.LOCK_TIMEOUT: "LOCK_TIMEOUT: failed to acquire lock",
     ErrorCode.TARGET_ALREADY_LOADED: "TARGET_ALREADY_LOADED: program is already loaded; use the existing target",

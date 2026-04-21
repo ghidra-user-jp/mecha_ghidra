@@ -31,6 +31,10 @@ class RuntimeCoreExecution:
             with lock:
                 self._ensure_checkout_for_mutating_command_locked(command, target)
                 result = self._store.core_accessor().execute(command, params or {}, key=target)
+                if command in self._checkout_required_commands:
+                    session = self._store.sessions.get(target)
+                    if session is not None:
+                        self._store.mark_dirty_program(target, self._store.session_domain_path(session))
                 return self._normalize_result(result)
 
     def _ensure_checkout_for_mutating_command_locked(self, command: str, target: str) -> None:
