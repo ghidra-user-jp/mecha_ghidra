@@ -109,6 +109,11 @@ class _FakeProjectHandle:
         self._programs = [{"path": "/main"}]
         self.analyze_calls: list[str] = []
         self.import_calls: list[dict[str, object]] = []
+        self.sync_status = {
+            "is_versioned": False,
+            "version": None,
+            "latest_version": None,
+        }
 
     @staticmethod
     def resolve_project_location_and_file(project_location: str, project_name: str | None) -> tuple[str, str]:
@@ -144,6 +149,9 @@ class _FakeProjectHandle:
 
     def list_programs(self):
         return list(self._programs)
+
+    def get_sync_status(self, domain_path: str):  # noqa: ARG002
+        return dict(self.sync_status)
 
     def is_closed(self) -> bool:
         return self._closed
@@ -266,6 +274,36 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     assert "fw" not in store.locks
     assert "fw" not in store.target_projects
     assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_refuses_to_remove_versioned_program(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle_locked("fw")
+    handle.sync_status.update(
+        {
+            "is_versioned": True,
+            "version": 3,
+            "latest_version": 3,
+        }
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        lifecycle.close_session("fw", remove_program=True)
+
+    err = exc_info.value
+    assert err.code == ErrorCode.UNSAFE_PROGRAM_REMOVE
+    assert err.details == {
+        "operation": "close_session",
+        "target": "fw",
+        "domain_path": "/main",
+        "version": 3,
+        "latest_version": 3,
+    }
+    assert "fw" in store.sessions
+    assert store.sessions["fw"].closed_with == []
+    assert core.removed == []
 
 
 def test_target_lifecycle_list_programs_uses_metadata_when_no_session(monkeypatch: pytest.MonkeyPatch):

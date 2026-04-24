@@ -192,6 +192,385 @@ def test_sync_status_raises_when_required_call_fails():
         session.sync_utils._sync_status_from_domain_file(BrokenDomainFile())
 
 
+def test_sync_status_normalizes_unversioned_version_fields():
+    class UnversionedDomainFile:
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _):
+            return None
+
+        def isVersioned(self):
+            return False
+
+        def isCheckedOut(self):
+            return False
+
+        def isCheckedOutExclusive(self):
+            return False
+
+        def modifiedSinceCheckout(self):
+            return False
+
+        def canAddToRepository(self):
+            return True
+
+        def canCheckout(self):
+            return False
+
+        def canCheckin(self):
+            return False
+
+        def canMerge(self):
+            return False
+
+        def isHijacked(self):
+            return False
+
+        def isLatestVersion(self):
+            pytest.fail("isLatestVersion should not be read for unversioned files")
+
+        def getVersion(self):
+            pytest.fail("getVersion should not be read for unversioned files")
+
+        def getLatestVersion(self):
+            pytest.fail("getLatestVersion should not be read for unversioned files")
+
+    result = session.sync_utils._sync_status_from_domain_file(UnversionedDomainFile())
+
+    assert result["is_versioned"] is False
+    assert result["version"] is None
+    assert result["latest_version"] is None
+    assert result["is_latest_version"] is None
+    assert result["can_add_to_repository"] is True
+
+
+def test_get_sync_status_auto_connects_shared_repository(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class DummyRepository:
+        def __init__(self) -> None:
+            self.connected = False
+            self.connect_calls = 0
+
+        def isConnected(self):
+            return self.connected
+
+        def connect(self):
+            self.connect_calls += 1
+            self.connected = True
+
+    repository = DummyRepository()
+
+    class SharedDomainFile:
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _consumer):
+            if repository.connected:
+                return "ghidra://127.0.0.1:13100/shared"
+            return None
+
+        def isVersioned(self):
+            return False
+
+        def isCheckedOut(self):
+            return False
+
+        def isCheckedOutExclusive(self):
+            return False
+
+        def isLatestVersion(self):
+            return True
+
+        def modifiedSinceCheckout(self):
+            return False
+
+        def canAddToRepository(self):
+            return repository.connected
+
+        def canCheckout(self):
+            return False
+
+        def canCheckin(self):
+            return False
+
+        def canMerge(self):
+            return False
+
+        def isHijacked(self):
+            return False
+
+        def getVersion(self):
+            return 1
+
+        def getLatestVersion(self):
+            return 0
+
+    class SharedProjectData:
+        def getFile(self, _domain_path):
+            return SharedDomainFile()
+
+        def getRepository(self):
+            return repository
+
+    class SharedProject(DummyProject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._project_data = SharedProjectData()
+            self._project_ref = types.SimpleNamespace(getName=lambda: "DummyProject", getRepository=lambda: repository)
+
+        def getProjectData(self):
+            return self._project_data
+
+    handle.project = SharedProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: True),
+    )
+
+    result = handle.get_sync_status("/folder/app")
+
+    assert repository.connect_calls == 1
+    assert result["is_versioned"] is False
+    assert result["version"] is None
+    assert result["latest_version"] is None
+    assert result["is_latest_version"] is None
+    assert result["can_add_to_repository"] is True
+    assert result["shared_project_url"] == "ghidra://127.0.0.1:13100/shared"
+
+
+def test_add_program_to_version_control_auto_connects_shared_repository(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class DummyRepository:
+        def __init__(self) -> None:
+            self.connected = False
+            self.connect_calls = 0
+
+        def isConnected(self):
+            return self.connected
+
+        def connect(self):
+            self.connect_calls += 1
+            self.connected = True
+
+    repository = DummyRepository()
+    calls: list[tuple[str, bool, object]] = []
+
+    class SharedDomainFile:
+        def canAddToRepository(self):
+            return repository.connected
+
+        def addToVersionControl(self, comment, keep_checked_out, monitor):
+            calls.append((comment, bool(keep_checked_out), monitor))
+
+    class SharedProjectData:
+        def getFile(self, _domain_path):
+            return SharedDomainFile()
+
+        def getRepository(self):
+            return repository
+
+    class SharedProject(DummyProject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._project_data = SharedProjectData()
+            self._project_ref = types.SimpleNamespace(getName=lambda: "DummyProject", getRepository=lambda: repository)
+
+        def getProjectData(self):
+            return self._project_data
+
+    handle.project = SharedProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: True),
+    )
+    monkeypatch.setattr(session.java_bindings, "_console_monitor", lambda: "monitor")
+
+    handle.add_program_to_version_control("/folder/app", "Initial import", keep_checked_out=True)
+
+    assert repository.connect_calls == 1
+    assert calls == [("Initial import", True, "monitor")]
+
+
+def test_list_programs_includes_sync_summary(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class ListedDomainFile:
+        def __init__(self, path: str, *, versioned: bool) -> None:
+            self._path = path
+            self._versioned = versioned
+
+        def getContentType(self):
+            return "Program"
+
+        def getPathname(self):
+            return self._path
+
+        def getName(self):
+            return pathlib.PurePosixPath(self._path).name
+
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _):
+            return None
+
+        def isVersioned(self):
+            return self._versioned
+
+        def isCheckedOut(self):
+            return False
+
+        def isCheckedOutExclusive(self):
+            return False
+
+        def isLatestVersion(self):
+            return True
+
+        def modifiedSinceCheckout(self):
+            return False
+
+        def canAddToRepository(self):
+            return not self._versioned
+
+        def canCheckout(self):
+            return self._versioned
+
+        def canCheckin(self):
+            return False
+
+        def canMerge(self):
+            return False
+
+        def isHijacked(self):
+            return False
+
+        def getVersion(self):
+            return 3
+
+        def getLatestVersion(self):
+            return 4
+
+    class ListedFolder:
+        def getFiles(self):
+            return [
+                ListedDomainFile("/versioned.bin", versioned=True),
+                ListedDomainFile("/new.bin", versioned=False),
+            ]
+
+        def getFolders(self):
+            return []
+
+    class ListedProjectData:
+        def getRootFolder(self):
+            return ListedFolder()
+
+    class ListedProject(DummyProject):
+        def getProjectData(self):
+            return ListedProjectData()
+
+    handle.project = ListedProject()
+
+    result = handle.list_programs()
+
+    assert result == [
+        {
+            "domain_path": "/versioned.bin",
+            "domain_name": "versioned.bin",
+            "contentType": "Program",
+            "is_versioned": True,
+            "version": 3,
+            "latest_version": 4,
+            "is_latest_version": True,
+            "can_add_to_repository": False,
+            "sync_status_error": None,
+        },
+        {
+            "domain_path": "/new.bin",
+            "domain_name": "new.bin",
+            "contentType": "Program",
+            "is_versioned": False,
+            "version": None,
+            "latest_version": None,
+            "is_latest_version": None,
+            "can_add_to_repository": True,
+            "sync_status_error": None,
+        },
+    ]
+
+
+def test_list_programs_reports_sync_status_error(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class BrokenDomainFile:
+        def getContentType(self):
+            return "Program"
+
+        def getPathname(self):
+            return "/broken.bin"
+
+        def getName(self):
+            return "broken.bin"
+
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _):
+            return None
+
+        def isVersioned(self):
+            raise RuntimeError("backend unavailable")
+
+    class ListedFolder:
+        def getFiles(self):
+            return [BrokenDomainFile()]
+
+        def getFolders(self):
+            return []
+
+    class ListedProjectData:
+        def getRootFolder(self):
+            return ListedFolder()
+
+    class ListedProject(DummyProject):
+        def getProjectData(self):
+            return ListedProjectData()
+
+    handle.project = ListedProject()
+
+    result = handle.list_programs()
+
+    assert result == [
+        {
+            "domain_path": "/broken.bin",
+            "domain_name": "broken.bin",
+            "contentType": "Program",
+            "is_versioned": None,
+            "version": None,
+            "latest_version": None,
+            "is_latest_version": None,
+            "can_add_to_repository": None,
+            "sync_status_error": "SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.isVersioned: backend unavailable",
+        }
+    ]
+
+
 def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
     handle = build_handle(monkeypatch)
 

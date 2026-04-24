@@ -147,6 +147,19 @@ class RuntimeSyncOperations:
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
 
                 status = handle.get_sync_status(resolved_domain_path)
+                if not status.get("is_versioned") and status.get("can_add_to_repository"):
+                    return {
+                        "status": "noop",
+                        "reason": "not_versioned",
+                        "target": name,
+                        "program": resolved_domain_path,
+                        "required_action": "add_project_program_to_version_control",
+                        "can_add_to_repository": True,
+                        "message": (
+                            "Program is not under version control; "
+                            "run add_project_program_to_version_control before commit_project_program."
+                        ),
+                    }
                 self._ensure_versioned_project(status)
                 status = self._overlay_active_program_sync_status_locked(
                     active_target,
@@ -478,6 +491,7 @@ class RuntimeSyncOperations:
             lock = self._store.ensure_lock(name)
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                self._ensure_versioned_project(handle.get_sync_status(resolved_domain_path))
                 history = handle.get_version_history(resolved_domain_path, limit=limit)
                 return {
                     "target": name,
@@ -498,6 +512,7 @@ class RuntimeSyncOperations:
             lock = self._store.ensure_lock(name)
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+                self._ensure_versioned_project(handle.get_sync_status(resolved_domain_path))
                 diff = handle.get_version_diff(
                     resolved_domain_path,
                     from_version=from_version,
@@ -862,6 +877,20 @@ class RuntimeSyncOperations:
     @staticmethod
     def _ensure_versioned_project(status: Dict[str, Any]) -> None:
         if not status.get("is_versioned"):
+            if status.get("can_add_to_repository"):
+                raise DomainError(
+                    code=ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED,
+                    message=(
+                        "ADD_TO_VERSION_CONTROL_REQUIRED: target program is not under shared-project "
+                        "version control; run add_project_program_to_version_control first"
+                    ),
+                    hint="Run add_project_program_to_version_control before shared-project sync operations",
+                    retryable=False,
+                    details={
+                        "required_action": "add_project_program_to_version_control",
+                        "can_add_to_repository": True,
+                    },
+                )
             raise RuntimeError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
 
 

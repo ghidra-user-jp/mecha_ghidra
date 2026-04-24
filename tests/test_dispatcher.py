@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 import ghidra_mcp.presentation.tool_dispatcher as tool_dispatcher_module
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, ToolSpec
 from ghidra_mcp.contracts.tool_models import create_typed_input_model
+from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
 
@@ -60,43 +61,132 @@ class DummyRegistry:
 
     def get_project_sync_status(self, target, **kwargs):
         self.registry_calls.append(("get_project_sync_status", {"target": target, **kwargs}))
-        return {"target": target, "program": kwargs.get("domain_path")}
+        return {
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "is_versioned": True,
+            "is_checked_out": False,
+            "is_checked_out_exclusive": False,
+            "is_latest_version": True,
+            "modified_since_checkout": False,
+            "can_add_to_repository": False,
+            "can_checkout": True,
+            "can_checkin": False,
+            "can_merge": False,
+            "is_hijacked": False,
+            "version": 1,
+            "latest_version": 1,
+            "checkout_status": None,
+            "checkouts": [],
+            "shared_project_url": "ghidra://127.0.0.1/shared/main",
+        }
 
     def checkout_project_program(self, target, **kwargs):
         self.registry_calls.append(("checkout_project_program", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "checked_out": True,
+            "already_checked_out": False,
+            "exclusive": bool(kwargs.get("exclusive", False)),
+        }
 
     def add_project_program_to_version_control(self, target, **kwargs):
         self.registry_calls.append(("add_project_program_to_version_control", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "is_versioned": True,
+            "version": 1,
+            "latest_version": 1,
+            "checked_out": bool(kwargs.get("keep_checked_out", False)),
+            "effective_keep_checked_out": bool(kwargs.get("keep_checked_out", False)),
+        }
 
     def commit_project_program(self, target, **kwargs):
         self.registry_calls.append(("commit_project_program", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "new_version": 2,
+            "checked_out": bool(kwargs.get("keep_checked_out", False)),
+            "effective_keep_checked_out": bool(kwargs.get("keep_checked_out", False)),
+            "is_latest_version": True,
+        }
 
     def pull_project_program(self, target, **kwargs):
         self.registry_calls.append(("pull_project_program", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "updated": False,
+            "merged": False,
+            "discarded_local_changes": False,
+            "followed_latest": False,
+            "version": 1,
+            "latest_version": 1,
+            "is_latest_version": True,
+        }
 
     def undo_checkout_project_program(self, target, **kwargs):
         self.registry_calls.append(("undo_checkout_project_program", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "checked_out": False,
+            "version": 1,
+            "is_latest_version": True,
+        }
 
     def terminate_project_program_checkout(self, target, **kwargs):
         self.registry_calls.append(("terminate_project_program_checkout", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "checkout_id": int(kwargs.get("checkout_id", 1)),
+            "active_checkouts": [],
+        }
 
     def reload_project_program(self, target, **kwargs):
         self.registry_calls.append(("reload_project_program", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "reloaded": True,
+        }
 
     def get_version_history(self, target, **kwargs):
         self.registry_calls.append(("get_version_history", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "current_version": 1,
+            "latest_version": 1,
+            "total_versions": 1,
+            "versions": [],
+        }
 
     def get_version_diff(self, target, **kwargs):
         self.registry_calls.append(("get_version_diff", {"target": target, **kwargs}))
-        return {"status": "ok", "target": target}
+        return {
+            "target": target,
+            "program": kwargs.get("domain_path") or "/main",
+            "from_version": int(kwargs.get("from_version", 1)),
+            "to_version": int(kwargs.get("to_version", 2)),
+            "total_diff_addresses": 0,
+            "total_diff_ranges": 0,
+            "diff_types": [],
+            "ranges": [],
+            "ranges_truncated": False,
+            "warnings": None,
+        }
 
 
 def test_dispatch_tool_raises_for_unknown_spec():
@@ -386,6 +476,28 @@ def test_dispatch_tool_applies_error_adapter_for_close_remove():
             "fw",
             registry=FailingRegistry(),
         )
+
+
+def test_dispatch_tool_exposes_unsafe_program_remove_for_close_remove():
+    class FailingRegistry(DummyRegistry):
+        def close_session(self, target, **kwargs):  # noqa: ARG002
+            assert kwargs == {"remove_program": True}
+            raise DomainError(
+                code=ErrorCode.UNSAFE_PROGRAM_REMOVE,
+                message="UNSAFE_PROGRAM_REMOVE: refusing to remove versioned program",
+                details={"target": target, "domain_path": "/main"},
+            )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dispatch_tool(
+            "close_session_and_remove_program",
+            {},
+            "fw",
+            registry=FailingRegistry(),
+        )
+
+    assert str(exc_info.value) == "UNSAFE_PROGRAM_REMOVE: refusing to remove a versioned shared-project program"
+    assert getattr(exc_info.value, "domain_error")["code"] == ErrorCode.UNSAFE_PROGRAM_REMOVE.value
 
 
 def test_dispatch_tool_raises_when_registry_has_no_core_call():

@@ -53,6 +53,38 @@ def test_to_domain_error_maps_unsafe_active_checkout_terminate_prefix():
     }
 
 
+def test_to_domain_error_maps_unsafe_program_remove_prefix():
+    err = to_domain_error(
+        RuntimeError("UNSAFE_PROGRAM_REMOVE: refusing to remove versioned program"),
+        operation="close_session",
+        target="fw",
+        domain_path="/main",
+    )
+
+    assert err.code == ErrorCode.UNSAFE_PROGRAM_REMOVE
+    assert err.details == {
+        "operation": "close_session",
+        "target": "fw",
+        "domain_path": "/main",
+    }
+
+
+def test_to_domain_error_maps_add_to_version_control_required_prefix():
+    err = to_domain_error(
+        RuntimeError("ADD_TO_VERSION_CONTROL_REQUIRED: run add first"),
+        operation="checkout_project_program",
+        target="fw",
+        domain_path="/main",
+    )
+
+    assert err.code == ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED
+    assert err.details == {
+        "operation": "checkout_project_program",
+        "target": "fw",
+        "domain_path": "/main",
+    }
+
+
 def test_to_domain_error_maps_save_failed_prefix():
     err = to_domain_error(
         RuntimeError("SAVE_FAILED: failed to save program before close: disk full"),

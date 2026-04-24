@@ -799,6 +799,74 @@ def test_commit_operation_failure_after_reopen_preserves_reopened_target(monkeyp
     assert core.removed == []
 
 
+def test_commit_unversioned_addable_program_returns_required_action(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_versioned": False,
+            "can_add_to_repository": True,
+            "can_checkout": False,
+            "can_checkin": False,
+            "version": None,
+            "latest_version": None,
+            "is_latest_version": None,
+        }
+    )
+
+    result = sync.commit_project_program("fw", "rename functions", auto_checkout=False, domain_path="/main")
+
+    assert result == {
+        "status": "noop",
+        "reason": "not_versioned",
+        "target": "fw",
+        "program": "/main",
+        "required_action": "add_project_program_to_version_control",
+        "can_add_to_repository": True,
+        "message": (
+            "Program is not under version control; "
+            "run add_project_program_to_version_control before commit_project_program."
+        ),
+    }
+    assert handle.project.saved == 0
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda sync: sync.checkout_project_program("fw", domain_path="/main"),
+        lambda sync: sync.pull_project_program("fw", domain_path="/main"),
+        lambda sync: sync.get_version_history("fw", domain_path="/main"),
+        lambda sync: sync.get_version_diff("fw", from_version=1, to_version=2, domain_path="/main"),
+    ],
+)
+def test_unversioned_addable_sync_operations_report_required_action(
+    monkeypatch: pytest.MonkeyPatch,
+    operation,
+):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_versioned": False,
+            "can_add_to_repository": True,
+            "can_checkout": False,
+            "can_checkin": False,
+            "version": None,
+            "latest_version": None,
+            "is_latest_version": None,
+        }
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        operation(sync)
+
+    err = exc_info.value
+    assert err.code == ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED
+    assert err.details == {
+        "required_action": "add_project_program_to_version_control",
+        "can_add_to_repository": True,
+    }
+
+
 def test_terminate_checkout_rejects_active_own_checkout(monkeypatch: pytest.MonkeyPatch):
     sync, store, core, handle = _build_sync_runtime(monkeypatch, handle_cls=_TerminateCheckoutHandle)
     assert isinstance(handle, _TerminateCheckoutHandle)

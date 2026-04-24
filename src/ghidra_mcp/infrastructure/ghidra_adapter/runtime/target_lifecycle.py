@@ -257,6 +257,8 @@ class RuntimeTargetLifecycle:
         if session is None:
             raise RuntimeError(f"Session '{name}' does not exist")
         handle = session.get_project_handle()
+        if remove_program:
+            self._ensure_program_removal_allowed_locked(name, session, handle)
         close_error = None
         try:
             self._store.cleanup_session(
@@ -280,6 +282,44 @@ class RuntimeTargetLifecycle:
 
         if close_error is not None:
             raise close_error
+
+    def _ensure_program_removal_allowed_locked(self, name: str, session, handle) -> None:
+        domain_path = self._store.session_domain_path(session)
+        try:
+            status = handle.get_sync_status(domain_path)
+        except Exception as exc:
+            raise DomainError(
+                code=ErrorCode.UNSAFE_PROGRAM_REMOVE,
+                message=(
+                    "UNSAFE_PROGRAM_REMOVE: failed to verify whether the program is under "
+                    "shared-project version control"
+                ),
+                hint="Close the session without remove_program, then inspect get_project_sync_status",
+                retryable=False,
+                details={
+                    "operation": "close_session",
+                    "target": name,
+                    "domain_path": domain_path,
+                },
+            ) from exc
+
+        if status.get("is_versioned"):
+            raise DomainError(
+                code=ErrorCode.UNSAFE_PROGRAM_REMOVE,
+                message=(
+                    "UNSAFE_PROGRAM_REMOVE: refusing to remove a versioned shared-project program; "
+                    "undo checkout or close the session without removing the program"
+                ),
+                hint="Use close_session for versioned programs; do not use close_session_and_remove_program",
+                retryable=False,
+                details={
+                    "operation": "close_session",
+                    "target": name,
+                    "domain_path": domain_path,
+                    "version": status.get("version"),
+                    "latest_version": status.get("latest_version"),
+                },
+            )
 
     def _initialize_opened_session_locked(
         self,

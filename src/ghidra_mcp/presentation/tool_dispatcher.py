@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_tool_spec
+from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.error_mapper import map_exception
 
 
@@ -33,7 +34,9 @@ def _close_session_error(_exc: Exception, target: str) -> RuntimeError:
     return RuntimeError(f"Failed to close session '{target}'")
 
 
-def _close_remove_error(_exc: Exception, target: str) -> RuntimeError:
+def _close_remove_error(_exc: Exception, target: str) -> Exception:
+    if isinstance(_exc, DomainError) and _exc.code == ErrorCode.UNSAFE_PROGRAM_REMOVE:
+        return map_exception(_exc)
     return RuntimeError(f"Failed to close/remove session '{target}'")
 
 

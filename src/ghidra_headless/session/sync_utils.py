@@ -54,20 +54,30 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
             if converted is not None:
                 checkouts_list.append(converted)
     shared_url = _safe_call(domain_file, "getSharedProjectURL", None)
+    is_versioned = bool(_required_call(domain_file, "isVersioned"))
+
+    if is_versioned:
+        is_latest_version: bool | None = bool(_required_call(domain_file, "isLatestVersion"))
+        version = _required_call(domain_file, "getVersion")
+        latest_version = _required_call(domain_file, "getLatestVersion")
+    else:
+        is_latest_version = None
+        version = None
+        latest_version = None
 
     return {
-        "is_versioned": bool(_required_call(domain_file, "isVersioned")),
+        "is_versioned": is_versioned,
         "is_checked_out": bool(_required_call(domain_file, "isCheckedOut")),
         "is_checked_out_exclusive": bool(_required_call(domain_file, "isCheckedOutExclusive")),
-        "is_latest_version": bool(_required_call(domain_file, "isLatestVersion")),
+        "is_latest_version": is_latest_version,
         "modified_since_checkout": bool(_required_call(domain_file, "modifiedSinceCheckout")),
         "can_add_to_repository": bool(_safe_call(domain_file, "canAddToRepository")),
         "can_checkout": bool(_required_call(domain_file, "canCheckout")),
         "can_checkin": bool(_required_call(domain_file, "canCheckin")),
         "can_merge": bool(_required_call(domain_file, "canMerge")),
         "is_hijacked": bool(_required_call(domain_file, "isHijacked")),
-        "version": _required_call(domain_file, "getVersion"),
-        "latest_version": _required_call(domain_file, "getLatestVersion"),
+        "version": version,
+        "latest_version": latest_version,
         "checkout_status": checkout_status,
         "checkouts": checkouts_list,
         "shared_project_url": None if shared_url is None else str(shared_url),

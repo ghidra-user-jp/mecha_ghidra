@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import ghidra_mcp.contracts.tool_models as tool_models
+import ghidra_mcp.contracts.tool_spec as tool_spec_module
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_tool_specs
 from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
 from ghidra_mcp.presentation import cli as presentation_cli
@@ -594,24 +595,7 @@ def test_all_output_models_are_strict_and_typed():
         "load_project_program": str,
         "import_program": str,
     }
-    direct_output_fields = {
-        "create_session": {
-            "target": (str, ...),
-            "project_location": (str, ...),
-            "project_name": (str | None, None),
-            "domain_path": (str | None, None),
-        },
-        "close_session": {
-            "closed": (bool, ...),
-            "target": (str, ...),
-            "remove_program": (bool, ...),
-        },
-        "close_session_and_remove_program": {
-            "closed": (bool, ...),
-            "target": (str, ...),
-            "remove_program": (bool, ...),
-        },
-    }
+    direct_output_fields = tool_spec_module._DIRECT_OUTPUT_FIELDS  # noqa: SLF001
 
     categorized = set(list_output_tools) | set(scalar_output_tools) | set(direct_output_fields)
     assert categorized <= set(specs)

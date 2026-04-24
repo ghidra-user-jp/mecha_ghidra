@@ -157,6 +157,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=False)
             domain_file = self._get_domain_file_locked(domain_path)
             return sync_utils._sync_status_from_domain_file(domain_file)
 
@@ -164,6 +165,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             normalized_limit = int(limit)
             if normalized_limit < 1:
                 raise ValueError("limit must be >= 1")
@@ -193,6 +195,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             source_version = int(from_version)
             target_version = int(to_version)
             if source_version < 1 or target_version < 1:
@@ -267,6 +270,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             domain_file = self._get_domain_file_locked(domain_path)
             monitor = java_bindings._console_monitor()
             return bool(domain_file.checkout(bool(exclusive), monitor))
@@ -281,6 +285,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             text = (comment or "").strip()
             if not text:
                 raise ValueError("comment is required")
@@ -302,6 +307,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             text = (message or "").strip()
             if not text:
                 raise ValueError("message is required")
@@ -314,6 +320,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             domain_file = self._get_domain_file_locked(domain_path)
             monitor = java_bindings._console_monitor()
             domain_file.merge(bool(ok_to_upgrade), monitor)
@@ -322,6 +329,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             domain_file = self._get_domain_file_locked(domain_path)
             domain_file.undoCheckout(bool(keep))
 
@@ -329,6 +337,7 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=True)
             domain_file = self._get_domain_file_locked(domain_path)
             domain_file.terminateCheckout(int(checkout_id))
 
@@ -384,9 +393,10 @@ class ProjectHandle:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=False)
             results = []
             root = self.project.getProjectData().getRootFolder()
-            path_utils._collect_program_files(root, results)
+            self._collect_program_files_with_sync_locked(root, results)
             return results
 
     def is_closed(self) -> bool:
@@ -430,6 +440,120 @@ class ProjectHandle:
             return bool(is_changed())
         except Exception:
             return True
+
+    def _ensure_repository_connected_locked(self, *, required: bool) -> bool:
+        if not self.is_repository_project_from_metadata(self.project_location, self.project_name):
+            return False
+        repository = self._get_repository_adapter_locked()
+        if repository is None:
+            message = (
+                "SHARED_PROJECT_UNAVAILABLE: shared project metadata exists, "
+                "but no repository adapter is attached"
+            )
+            if required:
+                raise RuntimeError(message)
+            logger.debug(message)
+            return False
+
+        is_connected = getattr(repository, "isConnected", None)
+        if is_connected is None:
+            return True
+        try:
+            if bool(is_connected()):
+                return True
+        except Exception as exc:
+            raise RuntimeError(
+                f"REPOSITORY_CONNECT_FAILED: failed to query repository connection state: {exc}"
+            ) from exc
+
+        connect = getattr(repository, "connect", None)
+        if connect is None:
+            raise RuntimeError("SHARED_PROJECT_UNAVAILABLE: repository adapter does not support connect()")
+        try:
+            connect()
+        except Exception as exc:
+            raise RuntimeError(f"REPOSITORY_CONNECT_FAILED: failed to connect to repository: {exc}") from exc
+        try:
+            connected = bool(is_connected())
+        except Exception as exc:
+            raise RuntimeError(
+                f"REPOSITORY_CONNECT_FAILED: failed to re-check repository connection state: {exc}"
+            ) from exc
+        if not connected:
+            raise RuntimeError("REPOSITORY_CONNECT_FAILED: repository is not connected after connect()")
+        return True
+
+    def _get_repository_adapter_locked(self):
+        project = None
+        get_project = getattr(self.project, "getProject", None)
+        if get_project is not None:
+            try:
+                project = get_project()
+            except Exception as exc:
+                logger.debug("failed to resolve wrapped project for repository lookup: %s", exc)
+        if project is not None:
+            get_repository = getattr(project, "getRepository", None)
+            if get_repository is not None:
+                try:
+                    repository = get_repository()
+                    if repository is not None:
+                        return repository
+                except Exception as exc:
+                    logger.debug("failed to resolve project repository adapter: %s", exc)
+
+        project_data = self.project.getProjectData()
+        get_repository = getattr(project_data, "getRepository", None)
+        if get_repository is None:
+            return None
+        try:
+            return get_repository()
+        except Exception as exc:
+            logger.debug("failed to resolve project data repository adapter: %s", exc)
+            return None
+
+    def _collect_program_files_with_sync_locked(self, folder, results: list[Dict[str, Any]]) -> None:
+        for domain_file in list(folder.getFiles()):
+            if domain_file.getContentType() != "Program":
+                continue
+            item: Dict[str, Any] = {
+                "domain_path": domain_file.getPathname(),
+                "domain_name": domain_file.getName(),
+                "contentType": domain_file.getContentType(),
+            }
+            item.update(self._program_sync_summary(domain_file))
+            results.append(item)
+        for sub in list(folder.getFolders()):
+            self._collect_program_files_with_sync_locked(sub, results)
+
+    @staticmethod
+    def _program_sync_summary(domain_file) -> Dict[str, Any]:
+        try:
+            status = sync_utils._sync_status_from_domain_file(domain_file)
+        except Exception as exc:
+            logger.debug("failed to read sync status while listing project program: %s", exc)
+            return {
+                "is_versioned": None,
+                "version": None,
+                "latest_version": None,
+                "is_latest_version": None,
+                "can_add_to_repository": None,
+                "sync_status_error": ProjectHandle._short_error(exc),
+            }
+        return {
+            "is_versioned": status.get("is_versioned"),
+            "version": status.get("version"),
+            "latest_version": status.get("latest_version"),
+            "is_latest_version": status.get("is_latest_version"),
+            "can_add_to_repository": status.get("can_add_to_repository"),
+            "sync_status_error": None,
+        }
+
+    @staticmethod
+    def _short_error(exc: Exception) -> str:
+        message = str(exc).strip() or exc.__class__.__name__
+        if len(message) > 200:
+            return message[:197] + "..."
+        return message
 
     def _get_domain_file_locked(self, domain_path: str):
         if not domain_path:

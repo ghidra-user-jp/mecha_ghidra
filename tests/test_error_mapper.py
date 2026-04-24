@@ -73,6 +73,34 @@ def test_map_exception_exposes_active_checkout_terminate_guidance():
     assert getattr(mapped, "domain_error")["details"] == {"target": "fw", "domain_path": "/main"}
 
 
+def test_map_exception_exposes_program_remove_guard():
+    exc = DomainError(
+        code=ErrorCode.UNSAFE_PROGRAM_REMOVE,
+        message="UNSAFE_PROGRAM_REMOVE: refusing to remove versioned program",
+        details={"target": "fw", "domain_path": "/main"},
+    )
+
+    mapped = map_exception(exc)
+
+    assert isinstance(mapped, RuntimeError)
+    assert str(mapped) == "UNSAFE_PROGRAM_REMOVE: refusing to remove a versioned shared-project program"
+    assert getattr(mapped, "domain_error")["code"] == ErrorCode.UNSAFE_PROGRAM_REMOVE.value
+
+
+def test_map_exception_exposes_add_to_version_control_guidance():
+    exc = DomainError(
+        code=ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED,
+        message="ADD_TO_VERSION_CONTROL_REQUIRED: run add first",
+        details={"target": "fw", "domain_path": "/main", "required_action": "add_project_program_to_version_control"},
+    )
+
+    mapped = map_exception(exc)
+
+    assert isinstance(mapped, RuntimeError)
+    assert str(mapped) == "ADD_TO_VERSION_CONTROL_REQUIRED: run add_project_program_to_version_control first"
+    assert getattr(mapped, "domain_error")["code"] == ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED.value
+
+
 def test_map_exception_masks_internal_details_for_target_already_loaded():
     exc = DomainError(
         code=ErrorCode.TARGET_ALREADY_LOADED,

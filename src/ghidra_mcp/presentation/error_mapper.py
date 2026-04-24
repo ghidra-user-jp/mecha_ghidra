@@ -16,7 +16,13 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
         "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: active checkout cannot be terminated; "
         "use undo_checkout_project_program instead"
     ),
+    ErrorCode.UNSAFE_PROGRAM_REMOVE: (
+        "UNSAFE_PROGRAM_REMOVE: refusing to remove a versioned shared-project program"
+    ),
     ErrorCode.MERGE_REQUIRED: "MERGE_REQUIRED: automatic merge is disabled; reopen the latest version or re-checkout before retrying",
+    ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED: (
+        "ADD_TO_VERSION_CONTROL_REQUIRED: run add_project_program_to_version_control first"
+    ),
     ErrorCode.LOCK_TIMEOUT: "LOCK_TIMEOUT: failed to acquire lock",
     ErrorCode.TARGET_ALREADY_LOADED: "TARGET_ALREADY_LOADED: program is already loaded; use the existing target",
     ErrorCode.PROGRAM_ALREADY_IMPORTED: "PROGRAM_ALREADY_IMPORTED: program already exists in project; use load_project_program",
