@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import pyghidra
+import pyghidra.core as pycore
 import pytest
 from mcp.types import CallToolResult
 
@@ -18,6 +19,8 @@ pytestmark = pytest.mark.skipif(
     not RUNTIME_VALIDATION_ENABLED,
     reason="Run only when GHIDRA_RUNTIME_VALIDATION=1",
 )
+
+_GHIDRA_SERVER_AUTH_CONFIGURED = False
 
 
 def _require_env(name: str) -> str:
@@ -35,12 +38,42 @@ def _require_existing_path(value: str, env_name: str) -> Path:
 
 
 def _start_pyghidra() -> None:
-    if pyghidra.started():
+    if not pyghidra.started():
+        if shutil.which("java") is None:
+            pytest.fail("java command not found (required for runtime registry/shared-sync validation)")
+        install_dir = _require_existing_path(_require_env("GHIDRA_INSTALL_DIR"), "GHIDRA_INSTALL_DIR")
+        pyghidra.start(install_dir=str(install_dir))
+    _configure_ghidra_server_auth_from_env()
+
+
+def _configure_ghidra_server_auth_from_env() -> None:
+    global _GHIDRA_SERVER_AUTH_CONFIGURED
+    if _GHIDRA_SERVER_AUTH_CONFIGURED:
         return
-    if shutil.which("java") is None:
-        pytest.fail("java command not found (required for runtime registry/shared-sync validation)")
-    install_dir = _require_existing_path(_require_env("GHIDRA_INSTALL_DIR"), "GHIDRA_INSTALL_DIR")
-    pyghidra.start(install_dir=str(install_dir))
+
+    username = (
+        os.environ.get("GHIDRA_RUNTIME_SHARED_SERVER_USER")
+        or os.environ.get("GHIDRA_SERVER_USER")
+        or ""
+    ).strip()
+    password = os.environ.get("GHIDRA_SERVER_PASSWORD")
+    if not username and password is None:
+        return
+    if not username or password is None or password == "":
+        pytest.fail(
+            "GHIDRA_RUNTIME_SHARED_SERVER_USER/GHIDRA_SERVER_USER and "
+            "GHIDRA_SERVER_PASSWORD must be set together for authenticated shared-project tests"
+        )
+
+    try:
+        authenticator = pycore.JClass("ghidra.framework.client.PasswordClientAuthenticator")(
+            username,
+            password,
+        )
+        pycore.JClass("ghidra.framework.client.ClientUtil").setClientAuthenticator(authenticator)
+    except Exception as exc:  # noqa: BLE001
+        pytest.fail(f"Failed to configure Ghidra server authentication: {exc}")
+    _GHIDRA_SERVER_AUTH_CONFIGURED = True
 
 
 def _unwrap_runtime_result(result):
@@ -83,6 +116,21 @@ def _copy_runtime_binary(tmp_path: Path, source_binary: Path) -> Path:
     copied = tmp_path / f"{source_binary.stem}_{uuid.uuid4().hex[:8]}{suffix}"
     shutil.copy2(source_binary, copied)
     return copied
+
+
+def _copy_shared_project_cache(tmp_path: Path, project_location: str, project_name: str) -> str:
+    source_path = Path(project_location).expanduser().resolve()
+    source_dir = source_path.parent if source_path.suffix.lower() == ".gpr" else source_path
+    source_name = source_path.stem if source_path.suffix.lower() == ".gpr" else project_name
+    dest_dir = tmp_path / f"shared_project_{uuid.uuid4().hex[:8]}"
+    dest_dir.mkdir()
+    shutil.copy2(source_dir / f"{source_name}.gpr", dest_dir / f"{project_name}.gpr")
+    shutil.copytree(
+        source_dir / f"{source_name}.rep",
+        dest_dir / f"{project_name}.rep",
+        ignore=shutil.ignore_patterns("*.lock", "*.lock~"),
+    )
+    return str(dest_dir / f"{project_name}.gpr")
 
 
 def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
@@ -149,10 +197,24 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
             cli.close_session_and_remove_program(remove_target)
         )
 
+        terminate_status_before_checkout = _unwrap_runtime_result(
+            cli.get_project_sync_status(target=target, domain_path=terminate_domain_path)
+        )
+        if not bool(terminate_status_before_checkout.get("is_versioned")):
+            _unwrap_runtime_result(
+                cli.add_project_program_to_version_control(
+                    target=target,
+                    comment="runtime stale checkout preparation",
+                    keep_checked_out=False,
+                    domain_path=terminate_domain_path,
+                )
+            )
+
+        stale_project_location = _copy_shared_project_cache(tmp_path, project_location, project_name)
         _unwrap_runtime_result(
             cli.register_target(
                 target=stale_target,
-                project_location=project_location,
+                project_location=stale_project_location,
                 project_name=project_name,
             )
         )
@@ -160,18 +222,6 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         _unwrap_runtime_result(
             cli.load_project_program(target=stale_target, domain_path=terminate_domain_path)
         )
-        stale_status_before_checkout = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=stale_target, domain_path=terminate_domain_path)
-        )
-        if not bool(stale_status_before_checkout.get("is_versioned")):
-            _unwrap_runtime_result(
-                cli.add_project_program_to_version_control(
-                    target=stale_target,
-                    comment="runtime stale checkout preparation",
-                    keep_checked_out=False,
-                    domain_path=terminate_domain_path,
-                )
-            )
         _unwrap_runtime_result(
             cli.checkout_project_program(
                 target=stale_target,

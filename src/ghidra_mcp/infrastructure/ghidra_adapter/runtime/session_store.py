@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_headless.session import ProgramSession, ProjectHandle

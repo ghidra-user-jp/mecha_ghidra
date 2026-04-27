@@ -65,9 +65,19 @@ class _FakeProjectData:
 class _FakeProject:
     def __init__(self) -> None:
         self._data = _FakeProjectData()
+        self.saved_programs: list[str] = []
 
     def getProjectData(self):
         return self._data
+
+    def save(self, program) -> None:  # noqa: ANN001
+        self.saved_programs.append(program.getDomainFile().getPathname())
+
+
+class _FailingSaveProject(_FakeProject):
+    def save(self, program) -> None:  # noqa: ANN001
+        super().save(program)
+        raise RuntimeError("disk full")
 
 
 class _FakeSession:
@@ -92,6 +102,24 @@ class _FakeSession:
             "project_name": self._handle.get_project_name(),
             "domain_path": self._path,
         }
+
+
+class _ClosingFakeSession(_FakeSession):
+    def get_project_handle(self):
+        if self._handle is None:
+            raise RuntimeError("Session is already closed")
+        return self._handle
+
+    def get_program(self):
+        if self._handle is None:
+            raise RuntimeError("Session is already closed")
+        return super().get_program()
+
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+        if self._handle is None:
+            raise RuntimeError("Session is already closed")
+        self.closed_with.append((save, remove_program))
+        self._handle = None
 
 
 class _FakeProjectHandle:
@@ -187,14 +215,73 @@ class _FailingRollbackCloseSession(_FakeSession):
         raise RuntimeError("rollback close failed")
 
 
-def _build_target_lifecycle(monkeypatch: pytest.MonkeyPatch, *, core: _DummyCore | None = None):
+class _ExternallyVersionedOnReopenProjectHandle(_FakeProjectHandle):
+    def __init__(self, project_location: str, project_name: str | None) -> None:
+        super().__init__(project_location, project_name)
+        self.refresh_calls = 0
+        self.open_program_calls = 0
+        self.sync_status["can_add_to_repository"] = True
+
+    def refresh_project_data(self, *, force: bool = True) -> None:  # noqa: ARG002
+        self.refresh_calls += 1
+
+    def open_program(self, domain_path: str | None = None):
+        self.open_program_calls += 1
+        if self.open_program_calls > 1:
+            self.sync_status.update(
+                {
+                    "is_versioned": True,
+                    "version": 1,
+                    "latest_version": 1,
+                    "can_add_to_repository": False,
+                }
+            )
+        return super().open_program(domain_path)
+
+
+class _NeverVersionedOnReopenProjectHandle(_FakeProjectHandle):
+    def __init__(self, project_location: str, project_name: str | None) -> None:
+        super().__init__(project_location, project_name)
+        self.refresh_calls = 0
+        self.open_program_calls = 0
+        self.opened_sessions: list[_ClosingFakeSession] = []
+        self.sync_status["can_add_to_repository"] = True
+
+    def refresh_project_data(self, *, force: bool = True) -> None:  # noqa: ARG002
+        self.refresh_calls += 1
+
+    def open_program(self, domain_path: str | None = None):
+        self.open_program_calls += 1
+        base_session = super().open_program(domain_path)
+        session = _ClosingFakeSession(self, domain_path or "/main", base_session.flat_api)
+        self.opened_sessions.append(session)
+        return session
+
+
+class _FailingAnalysisSaveProjectHandle(_FakeProjectHandle):
+    def __init__(self, project_location: str, project_name: str | None) -> None:
+        super().__init__(project_location, project_name)
+        self.project = _FailingSaveProject()
+
+
+class _ProjectLockingFakeProjectHandle(_FakeProjectHandle):
+    def __init__(self, project_location: str, project_name: str | None) -> None:
+        raise RuntimeError(f"Unable to lock project! {project_location}/{project_name}")
+
+
+def _build_target_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    core: _DummyCore | None = None,
+    handle_cls: type[_FakeProjectHandle] = _FakeProjectHandle,
+):
     import ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store as store_module
     import ghidra_mcp.infrastructure.ghidra_adapter.runtime.target_lifecycle as lifecycle_module
 
     _FakeProjectHandle.metadata_programs = None
     _FakeProjectHandle.repository_backed = False
-    monkeypatch.setattr(store_module, "ProjectHandle", _FakeProjectHandle)
-    monkeypatch.setattr(lifecycle_module, "ProjectHandle", _FakeProjectHandle)
+    monkeypatch.setattr(store_module, "ProjectHandle", handle_cls)
+    monkeypatch.setattr(lifecycle_module, "ProjectHandle", handle_cls)
 
     class _FakeUtilities:
         def shouldAskToAnalyze(self, _program) -> bool:  # noqa: ANN001
@@ -250,6 +337,7 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     assert loaded == "/next"
     handle = store.get_target_handle_locked("fw")
     assert handle.analyze_calls == ["/main", "/next"]
+    assert handle.project.saved_programs == ["/main", "/next"]
 
     imported = lifecycle.import_program(
         "fw",
@@ -306,6 +394,96 @@ def test_target_lifecycle_refuses_to_remove_versioned_program(monkeypatch: pytes
     assert core.removed == []
 
 
+def test_target_lifecycle_remove_guard_reopens_stale_versioned_program(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, store, core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_ExternallyVersionedOnReopenProjectHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle_locked("fw")
+
+    with pytest.raises(DomainError) as exc_info:
+        lifecycle.close_session("fw", remove_program=True)
+
+    err = exc_info.value
+    assert err.code == ErrorCode.UNSAFE_PROGRAM_REMOVE
+    assert err.details == {
+        "operation": "close_session",
+        "target": "fw",
+        "domain_path": "/main",
+        "version": 1,
+        "latest_version": 1,
+    }
+    assert handle.refresh_calls == 1
+    assert handle.open_program_calls == 2
+    assert "fw" in store.sessions
+    assert core.removed == []
+
+
+def test_target_lifecycle_remove_uses_reopened_session_for_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, store, core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_NeverVersionedOnReopenProjectHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle_locked("fw")
+    original_session = store.sessions["fw"]
+
+    lifecycle.close_session("fw", remove_program=True)
+
+    assert handle.refresh_calls == 1
+    assert handle.open_program_calls == 2
+    assert original_session.closed_with == [(False, False)]
+    assert handle.opened_sessions[-1].closed_with == [(True, True)]
+    assert "fw" not in store.sessions
+    assert "fw" not in store.locks
+    assert "fw" not in store.target_projects
+    assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_close_session_preserves_registered_target(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    lifecycle.close_session("fw")
+
+    assert "fw" not in store.sessions
+    assert "fw" in store.locks
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
+    assert core.removed == ["fw"]
+    assert lifecycle.list_targets() == [
+        {
+            "target": "fw",
+            "project_location": "/tmp/prj",
+            "project_name": "sample",
+            "domain_path": None,
+        }
+    ]
+
+    assert lifecycle.load_program("fw", "/main") == "/main"
+    assert "fw" in store.sessions
+
+
+def test_target_lifecycle_close_registered_target_without_loaded_session_is_noop(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    lifecycle.close_session("fw")
+
+    assert "fw" not in store.sessions
+    assert "fw" in store.locks
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
+    assert core.removed == []
+
+
 def test_target_lifecycle_list_programs_uses_metadata_when_no_session(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
@@ -336,12 +514,57 @@ def test_target_lifecycle_list_programs_ignores_metadata_for_repository_projects
     assert store.get_target_handle_locked("fw").list_programs() == [{"path": "/main"}]
 
 
+def test_target_lifecycle_list_programs_falls_back_to_metadata_when_repository_project_is_locked(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, _store, _core = _build_target_lifecycle(monkeypatch, handle_cls=_ProjectLockingFakeProjectHandle)
+    _FakeProjectHandle.repository_backed = True
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    _FakeProjectHandle.metadata_programs = [{"path": "/meta.bin"}]
+    try:
+        programs = lifecycle.list_programs("fw")
+    finally:
+        _FakeProjectHandle.metadata_programs = None
+        _FakeProjectHandle.repository_backed = False
+    assert programs == [
+        {
+            "path": "/meta.bin",
+            "is_versioned": None,
+            "version": None,
+            "latest_version": None,
+            "is_latest_version": None,
+            "can_add_to_repository": None,
+            "sync_status_error": "PROJECT_LOCKED: returned metadata snapshot because the project is locked",
+        }
+    ]
+
+
 def test_target_lifecycle_create_session_rolls_back_on_analysis_failure(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = True
     lifecycle, store, core = _build_target_lifecycle(monkeypatch)
 
     with pytest.raises(RuntimeError, match="analyze failed"):
+        lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    assert "fw" not in store.sessions
+    assert "fw" not in store.locks
+    assert "fw" not in store.target_projects
+    assert not store.analyzed_loads
+    assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_create_session_rolls_back_on_analysis_save_failure(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_FailingAnalysisSaveProjectHandle,
+    )
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save analysis results"):
         lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
 
     assert "fw" not in store.sessions
@@ -536,8 +759,8 @@ def test_target_lifecycle_close_session_preserves_save_failed_and_cleans_closed_
         lifecycle.close_session("fw")
 
     assert "fw" not in store.sessions
-    assert "fw" not in store.locks
-    assert "fw" not in store.target_projects
+    assert "fw" in store.locks
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
     assert core.removed == ["fw"]
 
 

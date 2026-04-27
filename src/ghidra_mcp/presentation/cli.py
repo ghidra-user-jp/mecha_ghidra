@@ -22,7 +22,7 @@ import pyghidra.core as pycore
 from mcp.server.transport_security import TransportSecuritySettings
 
 from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
-from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter, create_cli_runtime
+from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter as ServiceRegistryAdapter, create_cli_runtime
 from ghidra_mcp.presentation.transport import (
     configure_mcp_for_sse as _configure_mcp_for_sse,
     configure_mcp_for_streamable_http as _configure_mcp_for_streamable_http,
@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
                 if domain_path:
                     _registry.create_session(
                         config["name"],
-                        project_location=config.get("project_location"),
+                        project_location=config["project_location"],
                         project_name=config.get("project_name"),
                         domain_path=domain_path,
                     )
@@ -285,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     _registry.register_target(
                         config["name"],
-                        project_location=config.get("project_location"),
+                        project_location=config["project_location"],
                         project_name=config.get("project_name"),
                     )
                     logger.info("Registered target '%s' with project metadata only", config["name"])

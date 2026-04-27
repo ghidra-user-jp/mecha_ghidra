@@ -33,6 +33,7 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.REOPEN_FAILED: "REOPEN_FAILED: failed to reopen program",
     ErrorCode.SAVE_FAILED: "SAVE_FAILED: save operation failed",
     ErrorCode.SYNC_OPERATION_FAILED: "SYNC_OPERATION_FAILED: operation failed",
+    ErrorCode.PROJECT_LOCKED: "PROJECT_LOCKED: project is locked by another process",
     ErrorCode.CORE_EXECUTOR_UNAVAILABLE: "CORE_EXECUTOR_UNAVAILABLE: core command dispatcher is unavailable",
 }
 
@@ -47,11 +48,29 @@ def map_exception(exc: Exception, *, fallback_message: str | None = None, detail
         if details:
             payload.update(details)
         public_message = fallback_message if fallback_message is not None else _PUBLIC_MESSAGES.get(exc.code, exc.code.value)
+        public_message = _with_safe_cause(public_message, exc)
         mapped = RuntimeError(public_message)
         setattr(mapped, "domain_error", payload)
         mapped.__cause__ = exc
         return mapped
     return exc
+
+
+def _with_safe_cause(message: str, exc: DomainError) -> str:
+    if exc.code not in {ErrorCode.OPERATION_FAILED, ErrorCode.SYNC_OPERATION_FAILED, ErrorCode.PROJECT_LOCKED}:
+        return message
+    details = exc.details or {}
+    cause_type = str(details.get("cause_type") or "").strip()
+    cause_message = str(details.get("cause_message") or "").strip()
+    if not cause_type and not cause_message:
+        return message
+    if not cause_type:
+        return f"{message} ({cause_message})"
+    if not cause_message:
+        return f"{message} ({cause_type})"
+    if cause_message.startswith(f"{cause_type}:"):
+        return f"{message} ({cause_message})"
+    return f"{message} ({cause_type}: {cause_message})"
 
 
 __all__ = ["map_exception"]

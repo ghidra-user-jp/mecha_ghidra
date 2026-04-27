@@ -34,6 +34,61 @@ def test_map_exception_masks_internal_domain_message_for_sync_operation_failed()
     assert getattr(mapped, "domain_error")["details"]["target"] == "fw"
 
 
+def test_map_exception_appends_safe_generic_cause_summary():
+    exc = DomainError(
+        code=ErrorCode.SYNC_OPERATION_FAILED,
+        message="internal failure: /tmp/secret/path/app.gpr",
+        details={
+            "target": "fw",
+            "cause_type": "RuntimeError",
+            "cause_message": "internal failure: <path>",
+        },
+    )
+
+    mapped = map_exception(exc)
+
+    assert isinstance(mapped, RuntimeError)
+    assert str(mapped) == "SYNC_OPERATION_FAILED: operation failed (RuntimeError: internal failure: <path>)"
+    assert getattr(mapped, "domain_error")["details"]["cause_message"] == "internal failure: <path>"
+
+
+def test_map_exception_does_not_duplicate_cause_type_prefix():
+    exc = DomainError(
+        code=ErrorCode.OPERATION_FAILED,
+        message="project lock failed",
+        details={
+            "cause_type": "ghidra.framework.store.LockException",
+            "cause_message": "ghidra.framework.store.LockException: Unable to lock project! <path>",
+        },
+    )
+
+    mapped = map_exception(exc)
+
+    assert (
+        str(mapped)
+        == "OPERATION_FAILED: operation failed "
+        "(ghidra.framework.store.LockException: Unable to lock project! <path>)"
+    )
+
+
+def test_map_exception_exposes_project_locked_with_safe_cause():
+    exc = DomainError(
+        code=ErrorCode.PROJECT_LOCKED,
+        message="Unable to lock project! /tmp/private/project",
+        retryable=True,
+        details={
+            "cause_type": "RuntimeError",
+            "cause_message": "Unable to lock project! <path>",
+        },
+    )
+
+    mapped = map_exception(exc)
+
+    assert isinstance(mapped, RuntimeError)
+    assert str(mapped) == "PROJECT_LOCKED: project is locked by another process (RuntimeError: Unable to lock project! <path>)"
+    assert getattr(mapped, "domain_error")["code"] == ErrorCode.PROJECT_LOCKED.value
+
+
 def test_map_exception_exposes_merge_required_guidance():
     exc = DomainError(
         code=ErrorCode.MERGE_REQUIRED,

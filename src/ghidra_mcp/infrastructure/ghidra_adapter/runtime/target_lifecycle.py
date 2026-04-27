@@ -8,6 +8,7 @@ import threading
 from typing import Dict, List, Optional
 
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_utils import is_project_lock_error
 from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings, path_utils
 
 from .session_store import RuntimeSessionStore
@@ -124,13 +125,26 @@ class RuntimeTargetLifecycle:
                 return handle.list_programs()
 
             key = self._store.get_target_project_key_locked(name)
-            if not ProjectHandle.is_repository_project_from_metadata(key[0], key[1]):
-                metadata_programs = ProjectHandle.list_programs_from_metadata(key[0], key[1])
+            is_repository_project = ProjectHandle.is_repository_project_from_metadata(key[0], key[1])
+            if not is_repository_project:
+                metadata_programs = self._list_programs_from_metadata_locked(key)
                 if metadata_programs is not None:
                     return metadata_programs
 
-            handle = self._store.get_or_create_project_handle(key[0], key[1])
-            return handle.list_programs()
+            try:
+                handle = self._store.get_or_create_project_handle(key[0], key[1])
+                return handle.list_programs()
+            except Exception as exc:
+                if is_repository_project and is_project_lock_error(exc):
+                    metadata_programs = self._list_programs_from_metadata_locked(key)
+                    if metadata_programs is not None:
+                        logger.info(
+                            "project is locked while listing programs for target '%s'; "
+                            "returning project metadata snapshot",
+                            name,
+                        )
+                        return self._mark_metadata_programs_as_lock_snapshot(metadata_programs)
+                raise
 
     def load_program(
         self,
@@ -187,6 +201,7 @@ class RuntimeTargetLifecycle:
                 if old_session is not None:
                     old_session.close()
             except Exception:
+                assert old_session is not None
                 self._rollback_failed_session_replacement_locked(
                     name=name,
                     handle=handle,
@@ -255,10 +270,17 @@ class RuntimeTargetLifecycle:
     def _close_session_locked(self, name: str, *, remove_program: bool) -> None:
         session = self._store.sessions.get(name)
         if session is None:
+            if not remove_program and name in self._store.target_projects:
+                return
             raise RuntimeError(f"Session '{name}' does not exist")
         handle = session.get_project_handle()
         if remove_program:
             self._ensure_program_removal_allowed_locked(name, session, handle)
+            session = self._store.sessions.get(name)
+            if session is None:
+                raise RuntimeError(f"Session '{name}' was closed during remove safety verification")
+            handle = session.get_project_handle()
+        project_key = handle.get_key()
         close_error = None
         try:
             self._store.cleanup_session(
@@ -274,10 +296,14 @@ class RuntimeTargetLifecycle:
 
         if close_error is None or self._session_is_closed(session):
             self._store.sessions.pop(name, None)
-            self._store.locks.pop(name, None)
-            self._store.target_projects.pop(name, None)
-            self._store.clear_analyzed_loads_for_target(name)
-            self._store.clear_dirty_programs_for_target(name)
+            if remove_program:
+                self._store.locks.pop(name, None)
+                self._store.target_projects.pop(name, None)
+                self._store.clear_analyzed_loads_for_target(name)
+                self._store.clear_dirty_programs_for_target(name)
+            else:
+                self._store.target_projects[name] = project_key
+                self._store.locks.setdefault(name, threading.RLock())
             self._store.core_accessor().remove_context(name)
 
         if close_error is not None:
@@ -286,7 +312,18 @@ class RuntimeTargetLifecycle:
     def _ensure_program_removal_allowed_locked(self, name: str, session, handle) -> None:
         domain_path = self._store.session_domain_path(session)
         try:
+            refresh_project_data = getattr(handle, "refresh_project_data", None)
+            if refresh_project_data is not None:
+                refresh_project_data(force=True)
             status = handle.get_sync_status(domain_path)
+            if not status.get("is_versioned"):
+                status = self._refresh_active_program_sync_status_for_remove_locked(
+                    name,
+                    session,
+                    handle,
+                    domain_path,
+                    status=status,
+                )
         except Exception as exc:
             raise DomainError(
                 code=ErrorCode.UNSAFE_PROGRAM_REMOVE,
@@ -321,6 +358,106 @@ class RuntimeTargetLifecycle:
                 },
             )
 
+    def _refresh_active_program_sync_status_for_remove_locked(
+        self,
+        name: str,
+        session,
+        handle,
+        domain_path: str,
+        *,
+        status: dict,
+    ) -> dict:
+        if status.get("is_versioned"):
+            return status
+        if not status.get("can_add_to_repository"):
+            return status
+        if self._active_program_is_changed_locked(name, session, domain_path):
+            raise RuntimeError("LOCAL_CHANGES_EXIST: remove aborted due to local changes")
+        reopened_session = self._reopen_session_for_sync_status_refresh_locked(
+            name,
+            session,
+            handle,
+            domain_path,
+        )
+        refreshed_handle = reopened_session.get_project_handle()
+        return refreshed_handle.get_sync_status(domain_path)
+
+    def _reopen_session_for_sync_status_refresh_locked(
+        self,
+        name: str,
+        session,
+        handle,
+        domain_path: str,
+    ):
+        project_location = handle.get_project_location()
+        project_name = handle.get_project_name()
+        active_handle = None
+        reopened_session_bound = False
+        try:
+            session.close(save=False)
+            if handle.is_closed():
+                self._store.project_handles.pop(handle.get_key(), None)
+            if not handle.is_closed():
+                active_handle = handle
+            else:
+                active_handle = self._store.get_or_create_project_handle(project_location, project_name)
+            reopened = active_handle.open_program(domain_path)
+            try:
+                self._initialize_opened_session_locked(name=name, session=reopened)
+                self._store.sessions[name] = reopened
+                reopened_session_bound = True
+            except Exception:
+                try:
+                    reopened.close(save=False)
+                except Exception as close_exc:  # noqa: BLE001
+                    logger.warning(
+                        "failed to close reopened session during remove guard rollback for target '%s': %s",
+                        name,
+                        close_exc,
+                    )
+                raise
+            finally:
+                if active_handle is not None and active_handle.is_closed():
+                    self._store.project_handles.pop(active_handle.get_key(), None)
+            self._store.clear_dirty_program(name, domain_path)
+            return reopened
+        except Exception:
+            if not reopened_session_bound and self._session_is_closed(session):
+                self._store.sessions.pop(name, None)
+                self._store.clear_analyzed_loads_for_target(name)
+                self._store.clear_dirty_programs_for_target(name)
+                try:
+                    self._store.core_accessor().remove_context(name)
+                except Exception as remove_exc:  # noqa: BLE001
+                    logger.warning("failed to remove context while cleaning target '%s': %s", name, remove_exc)
+            raise
+
+    def _active_program_is_changed_locked(self, name: str, session, domain_path: str) -> bool:
+        if self._store.is_dirty_program(name, domain_path):
+            return True
+        try:
+            return bool(session.get_program().isChanged())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _list_programs_from_metadata_locked(key: tuple[str, str]):
+        return ProjectHandle.list_programs_from_metadata(key[0], key[1])
+
+    @staticmethod
+    def _mark_metadata_programs_as_lock_snapshot(programs):
+        marked = []
+        for item in programs:
+            updated = dict(item)
+            updated.setdefault("is_versioned", None)
+            updated.setdefault("version", None)
+            updated.setdefault("latest_version", None)
+            updated.setdefault("is_latest_version", None)
+            updated.setdefault("can_add_to_repository", None)
+            updated["sync_status_error"] = "PROJECT_LOCKED: returned metadata snapshot because the project is locked"
+            marked.append(updated)
+        return marked
+
     def _initialize_opened_session_locked(
         self,
         *,
@@ -352,9 +489,21 @@ class RuntimeTargetLifecycle:
             try:
                 session.flat_api.analyzeAll(program)
                 utilities.markProgramAnalyzed(program)
+                self._save_analyzed_program_locked(session, program)
             finally:
                 script_util.releaseBundleHostReference()
         self._store.mark_analyzed_load(name, domain_path)
+
+    @staticmethod
+    def _save_analyzed_program_locked(session: ProgramSession, program) -> None:  # noqa: ANN001
+        handle = session.get_project_handle()
+        save = getattr(handle.project, "save", None)
+        if save is None:
+            return
+        try:
+            save(program)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"SAVE_FAILED: failed to save analysis results after initial load: {exc}") from exc
 
     def _rollback_failed_load_initialization_locked(
         self,
