@@ -73,15 +73,37 @@ def test_shared_sync_specs_match_registration_function():
     )
 
     registered: list[str] = []
+    annotations_by_name: dict[str, Any] = {}
 
     class DummyMCP:
-        def add_tool(self, fn, description=None):  # noqa: ARG002
+        def add_tool(self, fn, description=None, annotations=None):  # noqa: ARG002
             registered.append(fn.__name__)
+            annotations_by_name[fn.__name__] = annotations
 
     register_shared_sync_tools(DummyMCP(), tools=tools)
 
     shared_sync_names = [name for name, spec in specs.items() if spec.exposure == ToolExposure.SHARED_SYNC]
     assert registered == shared_sync_names
+    assert {
+        name
+        for name, annotations in annotations_by_name.items()
+        if annotations.readOnlyHint is True
+    } == {
+        "get_project_sync_status",
+        "get_version_history",
+        "get_version_diff",
+    }
+    assert {
+        name
+        for name, annotations in annotations_by_name.items()
+        if annotations.destructiveHint is True
+    } == {
+        "commit_project_program",
+        "pull_project_program",
+        "undo_checkout_project_program",
+        "terminate_project_program_checkout",
+        "delete_shared_project_file",
+    }
 
 
 def test_typed_input_models_for_function_listing_slice():

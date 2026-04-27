@@ -130,6 +130,24 @@ _SHARED_SYNC_DESCRIPTIONS: dict[str, str] = {
     "reload_project_program": "Reload the target program by closing and reopening the current domain path",
 }
 
+_SHARED_SYNC_ANNOTATIONS: dict[str, ToolAnnotations] = {
+    "get_project_sync_status": ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    "get_version_history": ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    "get_version_diff": ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    "checkout_project_program": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+    "add_project_program_to_version_control": ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    ),
+    "commit_project_program": ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+    "pull_project_program": ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+    "undo_checkout_project_program": ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+    "terminate_project_program_checkout": ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+    "delete_shared_project_file": ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False),
+    "reload_project_program": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
+}
+
 
 def _public_name(spec_name: str, raw_key: str) -> str:
     return _RAW_TO_PUBLIC_NAME.get(spec_name, {}).get(raw_key, raw_key)
@@ -246,7 +264,11 @@ def build_tool_functions(
 
 def register_shared_sync_tools(mcp, *, tools: dict[str, Callable[..., Any]]) -> None:
     for name in _SHARED_SYNC_TOOL_ORDER:
-        mcp.add_tool(tools[name], description=_SHARED_SYNC_DESCRIPTIONS[name])
+        mcp.add_tool(
+            tools[name],
+            description=_SHARED_SYNC_DESCRIPTIONS[name],
+            annotations=_SHARED_SYNC_ANNOTATIONS[name],
+        )
 
 
 class ToolRegistry:
