@@ -131,7 +131,7 @@ docker compose build
 - http接続時の推奨は `--transport http` です。FastMCP の Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
 - `--mcp-host 0.0.0.0`（または `::`）で起動する場合、ローカル限定時とは保護設定が異なります。外部公開時は必ずリバースプロキシ/TLS/アクセス制御を併用してください。
-- `commit/pull/checkout` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
+- `commit/pull/checkout/delete` など shared project 同期ツールを公開したい場合のみ `--enable-shared-project-sync` を付けて起動してください。
 - shared project の認証が必要な場合は `--ghidra-server-user` と、`--ghidra-server-password` または `--ghidra-server-password-env` のどちらか片方をセットで指定してください。片方だけ指定した場合や、両方のパスワード指定を同時に行った場合は起動エラーになります。
 - `--ghidra-server-password` が空文字の場合、または `--ghidra-server-password-env` で指定した環境変数が未設定/空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。プロセス引数へ秘密情報を出したくない場合は `--ghidra-server-password-env` を推奨します。
 - Linux ARM64 では `Ghidra/Features/Decompiler/os/linux_arm_64` が不足していると、起動時または decompiler 初期化時に専用メッセージ付きで失敗します。
@@ -140,12 +140,13 @@ docker compose build
 - `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
 - shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
+- `delete_shared_project_file` は明示的な `domain_path` と、正規化後パスに一致する `confirm` が必須です。ロード中ファイル、active checkout があるファイル、`allow_private=true` でない private file は削除しません。
 - shared project で `rename_*` / `set_*` など更新系ツールを使う場合は、先に `checkout_project_program` が必要です（未checkout時は `CHECKOUT_REQUIRED` エラー）。
-- shared project 同期ツールの `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
+- shared project 同期ツールの `add_project_program_to_version_control` / `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
 - Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
 - `pull_project_program(on_local_changes="discard")` はローカル変更に対して `undoCheckout(keep=False)` を使用し、さらに checked-out 状態で `can_merge=true` の場合は `DomainFile.merge()` を呼ばず、古い checkout を破棄して最新サーバー状態へ追従します。
 - `can_merge=true` でも破棄できる checkout が無い場合、`pull_project_program` は Ghidra の PropertyList merge 経路を踏まずに `UNSAFE_MERGE_REQUIRED` で停止します。
-- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでローカル変更を破棄して最新状態へ追従し、`status=noop` / `reason=conflict_discarded` を返します（人間側の更新を優先）。
+- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでは `UNSAFE_MERGE_REQUIRED` で停止します。ローカル checkout を破棄して最新サーバー状態へ追従したい場合のみ `on_conflict="discard"` を明示してください（`status=noop` / `reason=conflict_discarded`）。
 - Docker 構成では `./samples:/samples:ro` と `ghidra-projects:/data/projects` を既定で使います。入力ファイルは `/samples/<filename>` として指定してください。
 - Docker で初回起動する server は project のみを登録した状態で立ち上がるため、まず `import_program` で取り込み、続けて `load_project_program` で program を開いてください。
 

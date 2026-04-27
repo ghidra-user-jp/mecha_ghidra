@@ -169,17 +169,18 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 
 #### Shared Project Sync (only with `--enable-shared-project-sync`)
 
-`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` support optional `domain_path` (if omitted, the currently loaded program is used).
+`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `add_to_version_control` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `delete_shared_project_file` / `reload` support optional `domain_path` where documented (if omitted, the currently loaded program is used; deletion always requires an explicit `domain_path`).
 
 - `get_project_sync_status` - Get sync state against shared project
 - `get_version_history` - Get version history (version/user/comment/time)
 - `get_version_diff` - Get summarized differences between two versions (count/type/address range)
 - `checkout_project_program` - Checkout program (exclusive optional)
 - `add_project_program_to_version_control` - Add private program to shared version control
-- `commit_project_program` - Check in checked-out changes
+- `commit_project_program` - Check in checked-out changes (`on_conflict="discard"` is required to drop a conflicted checkout)
 - `pull_project_program` - Pull latest state (with optional discard/follow behavior)
 - `undo_checkout_project_program` - Undo checkout (optional local change discard)
 - `terminate_project_program_checkout` - Force-close an existing checkout by checkout ID
+- `delete_shared_project_file` - Delete an unloaded shared-project file after `confirm` matches `domain_path`
 - `reload_project_program` - Reload currently opened program
 
 See the [Usage Guide](docs/usage.md) for detailed workflows and constraints.

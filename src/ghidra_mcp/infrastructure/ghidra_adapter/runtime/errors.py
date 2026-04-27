@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_utils import is_project_lock_error, safe_cause_details
 
 
 _SYNC_OPERATIONS = frozenset(
@@ -16,6 +17,7 @@ _SYNC_OPERATIONS = frozenset(
         "pull_project_program",
         "undo_checkout_project_program",
         "terminate_project_program_checkout",
+        "delete_shared_project_file",
         "reload_project_program",
         "get_version_history",
         "get_version_diff",
@@ -49,7 +51,10 @@ def to_domain_error(
     code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else ErrorCode.OPERATION_FAILED
     retryable = False
 
-    if message.startswith("OPERATION_FAILED"):
+    if is_project_lock_error(exc):
+        code = ErrorCode.PROJECT_LOCKED
+        retryable = True
+    elif message.startswith("OPERATION_FAILED"):
         code = ErrorCode.OPERATION_FAILED
     elif message.startswith("SYNC_OPERATION_FAILED"):
         code = ErrorCode.SYNC_OPERATION_FAILED
@@ -97,6 +102,8 @@ def to_domain_error(
         details["target"] = target
     if domain_path is not None:
         details["domain_path"] = domain_path
+    if code in {ErrorCode.OPERATION_FAILED, ErrorCode.SYNC_OPERATION_FAILED, ErrorCode.PROJECT_LOCKED}:
+        details.update(safe_cause_details(exc))
 
     return DomainError(
         code=code,
@@ -105,6 +112,5 @@ def to_domain_error(
         retryable=retryable,
         details=details,
     )
-
 
 __all__ = ["to_domain_error"]

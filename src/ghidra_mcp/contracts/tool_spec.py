@@ -206,7 +206,7 @@ _SHARED_SYNC_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     "commit_project_program": (
         "commit_project_program",
-        ("message", "keep_checked_out", "auto_checkout", "domain_path"),
+        ("message", "keep_checked_out", "auto_checkout", "on_conflict", "domain_path"),
     ),
     "pull_project_program": ("pull_project_program", ("on_local_changes", "domain_path")),
     "undo_checkout_project_program": (
@@ -216,6 +216,10 @@ _SHARED_SYNC_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     "terminate_project_program_checkout": (
         "terminate_project_program_checkout",
         ("checkout_id", "domain_path"),
+    ),
+    "delete_shared_project_file": (
+        "delete_shared_project_file",
+        ("domain_path", "confirm", "expected_latest_version", "allow_private"),
     ),
     "reload_project_program": ("reload_project_program", ("domain_path",)),
 }
@@ -386,6 +390,17 @@ _DIRECT_OUTPUT_FIELDS: dict[str, dict[str, tuple[type[Any], Any]]] = {
         "checkout_id": (int, ...),
         "active_checkouts": (list[object], ...),
     },
+    "delete_shared_project_file": {
+        "status": (str, ...),
+        "target": (str, ...),
+        "program": (str, ...),
+        "domain_path": (str, ...),
+        "deleted": (bool, ...),
+        "content_type": (str | None, ...),
+        "was_versioned": (bool, ...),
+        "version": (int | None, ...),
+        "latest_version": (int | None, ...),
+    },
     "reload_project_program": {
         "status": (str, ...),
         "target": (str, ...),
@@ -447,6 +462,7 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
             "message": (str, ...),
             "keep_checked_out": (bool, False),
             "auto_checkout": (bool, True),
+            "on_conflict": (str, "abort"),
             "domain_path": (str | None, None),
         },
         "pull_project_program": {
@@ -460,6 +476,12 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
         "terminate_project_program_checkout": {
             "checkout_id": (int, ...),
             "domain_path": (str | None, None),
+        },
+        "delete_shared_project_file": {
+            "domain_path": (str, ...),
+            "confirm": (str, ...),
+            "expected_latest_version": (int | None, None),
+            "allow_private": (bool, False),
         },
         "reload_project_program": {
             "domain_path": (str | None, None),

@@ -82,6 +82,7 @@ from ghidra_mcp import cli
                 "message": "checkin",
                 "keep_checked_out": True,
                 "auto_checkout": False,
+                "on_conflict": "abort",
                 "domain_path": "/folder/app",
             },
             "fw",
@@ -102,6 +103,16 @@ from ghidra_mcp import cli
             "terminate_project_program_checkout",
             lambda: cli.terminate_project_program_checkout("fw", checkout_id=7, domain_path="/folder/app"),
             {"checkout_id": 7, "domain_path": "/folder/app"},
+            "fw",
+        ),
+        (
+            "delete_shared_project_file",
+            lambda: cli.delete_shared_project_file("fw", domain_path="/folder/app", confirm="/folder/app"),
+            {
+                "domain_path": "/folder/app",
+                "confirm": "/folder/app",
+                "allow_private": False,
+            },
             "fw",
         ),
         (

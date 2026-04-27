@@ -266,6 +266,23 @@ class ProjectHandle:
                 sync_utils._release_domain_object(from_program, from_consumer)
                 sync_utils._release_domain_object(to_program, to_consumer)
 
+    def refresh_project_data(self, *, force: bool = True) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Project is closed")
+            self._ensure_repository_connected_locked(required=False)
+            self._refresh_project_data_locked(force=force)
+
+    def _refresh_project_data_locked(self, *, force: bool = True) -> None:
+        data = self.project.getProjectData()
+        refresh = getattr(data, "refresh", None)
+        if refresh is None:
+            return
+        try:
+            refresh(bool(force))
+        except Exception as exc:
+            raise RuntimeError(f"PROJECT_DATA_REFRESH_FAILED: failed to refresh project data: {exc}") from exc
+
     def checkout_program(self, domain_path: str, *, exclusive: bool = False) -> bool:
         with self._lock:
             if self._closed:
@@ -341,6 +358,12 @@ class ProjectHandle:
             domain_file = self._get_domain_file_locked(domain_path)
             domain_file.terminateCheckout(int(checkout_id))
 
+    def delete_domain_file(self, domain_path: str) -> Dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Project is closed")
+            return self._delete_domain_file_locked(domain_path)
+
     def release_program(self, program, *, save: bool = True, remove_program: bool = False) -> None:
         with self._lock:
             if self._closed:
@@ -394,6 +417,10 @@ class ProjectHandle:
             if self._closed:
                 raise RuntimeError("Project is closed")
             self._ensure_repository_connected_locked(required=False)
+            try:
+                self._refresh_project_data_locked(force=True)
+            except Exception as exc:
+                logger.debug("failed to refresh project data before listing programs: %s", exc)
             results = []
             root = self.project.getProjectData().getRootFolder()
             self._collect_program_files_with_sync_locked(root, results)
@@ -419,17 +446,36 @@ class ProjectHandle:
         self._open_programs.clear()
         self._closed = True
 
-    def _delete_program_locked(self, domain_path: str) -> None:
+    def _delete_domain_file_locked(self, domain_path: str) -> Dict[str, Any]:
         if self._closed:
-            return
+            raise RuntimeError("Project is closed")
         data = self.project.getProjectData()
         domain_file = data.getFile(domain_path)
         if domain_file is None:
-            raise RuntimeError(f"Program to remove not found: {domain_path}")
+            raise RuntimeError(f"Domain file not found: {domain_path}")
+        content_type = None
+        try:
+            content_type = domain_file.getContentType()
+        except Exception as exc:
+            logger.debug("failed to read content type before domain file delete: %s", exc)
         try:
             domain_file.delete()
         except Exception as exc:
-            raise RuntimeError(f"Failed to remove program: {domain_path}: {exc}")
+            raise RuntimeError(f"Failed to delete domain file: {domain_path}: {exc}") from exc
+        try:
+            self._refresh_project_data_locked(force=True)
+        except Exception as exc:
+            logger.debug("failed to refresh project data after domain file delete: %s", exc)
+        return {
+            "domain_path": domain_path,
+            "content_type": None if content_type is None else str(content_type),
+        }
+
+    def _delete_program_locked(self, domain_path: str) -> None:
+        try:
+            self._delete_domain_file_locked(domain_path)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to remove program: {domain_path}: {exc}") from exc
 
     @staticmethod
     def _program_needs_save(program) -> bool:

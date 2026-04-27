@@ -53,6 +53,21 @@ def normalize_empty_list_result(result: Any) -> Any:
     return result
 
 
+def _empty_list_payload_from_call_tool_result(result: Any) -> list[Any] | None:
+    if not isinstance(result, CallToolResult):
+        return None
+    if result.isError:
+        return None
+    if len(result.content) != 1:
+        return None
+    item = result.content[0]
+    if not isinstance(item, TextContent):
+        return None
+    if item.text != "[]":
+        return None
+    return []
+
+
 def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | None) -> dict[str, Any]:
     try:
         parsed = model_cls.model_validate(raw_args or {})
@@ -64,6 +79,13 @@ def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | Non
 def _validate_output(spec_name: str, model_cls, result: Any) -> Any:
     if model_cls is None:
         return result
+    empty_list_payload = _empty_list_payload_from_call_tool_result(result)
+    if empty_list_payload is not None:
+        try:
+            model_cls.model_validate({"payload": empty_list_payload})
+            return result
+        except ValidationError:
+            pass
     try:
         model_cls.model_validate(result)
     except ValidationError:

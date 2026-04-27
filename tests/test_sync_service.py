@@ -58,6 +58,7 @@ class DummyRuntime:
         *,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ):
         self.calls.append(
@@ -67,6 +68,7 @@ class DummyRuntime:
                 {
                     "keep_checked_out": keep_checked_out,
                     "auto_checkout": auto_checkout,
+                    "on_conflict": on_conflict,
                     "domain_path": domain_path,
                 },
             )
@@ -95,6 +97,29 @@ class DummyRuntime:
 
     def terminate_project_program_checkout(self, name: str, *, checkout_id: int, domain_path: str | None = None):
         self.calls.append(("terminate_project_program_checkout", (name,), {"checkout_id": checkout_id, "domain_path": domain_path}))
+        return {"status": "ok"}
+
+    def delete_shared_project_file(
+        self,
+        name: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
+    ):
+        self.calls.append(
+            (
+                "delete_shared_project_file",
+                (name,),
+                {
+                    "domain_path": domain_path,
+                    "confirm": confirm,
+                    "expected_latest_version": expected_latest_version,
+                    "allow_private": allow_private,
+                },
+            )
+        )
         return {"status": "ok"}
 
     def reload_project_program(self, name: str, *, domain_path: str | None = None):
@@ -141,11 +166,12 @@ def test_sync_service_lifecycle_and_lock_routing():
     assert service.pull_project_program("fw", on_local_changes="discard") == {"status": "ok"}
     assert service.undo_checkout_project_program("fw", discard_local_changes=False) == {"status": "ok"}
     assert service.terminate_project_program_checkout("fw", checkout_id=1) == {"status": "ok"}
+    assert service.delete_shared_project_file("fw", domain_path="/main", confirm="/main") == {"status": "ok"}
     assert service.reload_project_program("fw") == {"status": "ok"}
     assert service.get_version_history("fw", limit=10) == {"history": []}
     assert service.get_version_diff("fw", from_version=1, to_version=2) == {"diffs": []}
 
-    assert lock_manager.calls == [("fw", "/tmp/prj::sample")] * 10
+    assert lock_manager.calls == [("fw", "/tmp/prj::sample")] * 11
 
 
 def test_sync_service_preserves_runtime_domain_error_code():
@@ -194,6 +220,7 @@ def test_sync_service_preserves_runtime_domain_error_codes(expected: ErrorCode):
             *,
             keep_checked_out: bool = False,  # noqa: ARG002
             auto_checkout: bool = True,  # noqa: ARG002
+            on_conflict: str = "abort",  # noqa: ARG002
             domain_path: str | None = None,  # noqa: ARG002
         ):
             raise DomainError(
@@ -227,6 +254,7 @@ def test_sync_service_fallback_non_domain_error_is_sync_operation_failed():
             *,
             keep_checked_out: bool = False,  # noqa: ARG002
             auto_checkout: bool = True,  # noqa: ARG002
+            on_conflict: str = "abort",  # noqa: ARG002
             domain_path: str | None = None,  # noqa: ARG002
         ):
             raise RuntimeError("unexpected failure")
@@ -241,4 +269,36 @@ def test_sync_service_fallback_non_domain_error_is_sync_operation_failed():
         "operation": "commit_project_program",
         "target": "fw",
         "domain_path": None,
+        "cause_type": "RuntimeError",
+        "cause_message": "unexpected failure",
+    }
+
+
+def test_sync_service_fallback_non_domain_lock_error_is_project_locked():
+    class Runtime(DummyRuntime):
+        def commit_project_program(
+            self,
+            name: str,  # noqa: ARG002
+            message: str,  # noqa: ARG002
+            *,
+            keep_checked_out: bool = False,  # noqa: ARG002
+            auto_checkout: bool = True,  # noqa: ARG002
+            on_conflict: str = "abort",  # noqa: ARG002
+            domain_path: str | None = None,  # noqa: ARG002
+        ):
+            raise RuntimeError("Unable to lock project! /home/ghidra/shared_ai")
+
+    service = SyncService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.commit_project_program("fw", "msg")
+
+    assert exc_info.value.code == ErrorCode.PROJECT_LOCKED
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details == {
+        "operation": "commit_project_program",
+        "target": "fw",
+        "domain_path": None,
+        "cause_type": "RuntimeError",
+        "cause_message": "Unable to lock project! <path>",
     }

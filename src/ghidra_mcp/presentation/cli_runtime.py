@@ -119,6 +119,7 @@ class ServiceRegistryAdapter:
         message: str,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ):
         return self._sync_service.commit_project_program(
@@ -126,6 +127,7 @@ class ServiceRegistryAdapter:
             message,
             keep_checked_out=keep_checked_out,
             auto_checkout=auto_checkout,
+            on_conflict=on_conflict,
             domain_path=domain_path,
         )
 
@@ -166,6 +168,23 @@ class ServiceRegistryAdapter:
             target,
             checkout_id=checkout_id,
             domain_path=domain_path,
+        )
+
+    def delete_shared_project_file(
+        self,
+        target: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
+    ):
+        return self._sync_service.delete_shared_project_file(
+            target,
+            domain_path=domain_path,
+            confirm=confirm,
+            expected_latest_version=expected_latest_version,
+            allow_private=allow_private,
         )
 
     def reload_project_program(self, target: str, *, domain_path: str | None = None):

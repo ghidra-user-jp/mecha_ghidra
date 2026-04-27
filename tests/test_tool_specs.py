@@ -59,6 +59,7 @@ def test_shared_sync_specs_are_gated_by_exposure():
         "pull_project_program",
         "undo_checkout_project_program",
         "terminate_project_program_checkout",
+        "delete_shared_project_file",
         "reload_project_program",
     }
 
@@ -492,6 +493,7 @@ def test_typed_input_models_for_function_listing_slice():
             "message": (str, ...),
             "keep_checked_out": (bool, False),
             "auto_checkout": (bool, True),
+            "on_conflict": (str, "abort"),
             "domain_path": (str | None, None),
         },
     )
@@ -514,6 +516,15 @@ def test_typed_input_models_for_function_listing_slice():
         {
             "checkout_id": (int, ...),
             "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "delete_shared_project_file",
+        {
+            "domain_path": (str, ...),
+            "confirm": (str, ...),
+            "expected_latest_version": (int | None, None),
+            "allow_private": (bool, False),
         },
     )
     _assert_fields(

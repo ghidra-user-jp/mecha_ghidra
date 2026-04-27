@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ghidra_mcp.application.services.ports import SyncRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_utils import is_project_lock_error, safe_cause_details
 from ghidra_mcp.infrastructure.locks import LockManager
 
 
@@ -33,12 +34,18 @@ class SyncService:
                 details=details,
             )
 
+        code = ErrorCode.PROJECT_LOCKED if is_project_lock_error(exc) else ErrorCode.SYNC_OPERATION_FAILED
         return DomainError(
-            code=ErrorCode.SYNC_OPERATION_FAILED,
+            code=code,
             message=str(exc),
             hint="Check shared-project and checkout state",
-            retryable=False,
-            details={"operation": operation, "target": target, "domain_path": domain_path},
+            retryable=code == ErrorCode.PROJECT_LOCKED,
+            details={
+                "operation": operation,
+                "target": target,
+                "domain_path": domain_path,
+                **safe_cause_details(exc),
+            },
         )
 
     def _project_key(self, target: str) -> str | None:
@@ -105,6 +112,7 @@ class SyncService:
         *,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ):
         try:
@@ -114,6 +122,7 @@ class SyncService:
                     message,
                     keep_checked_out=keep_checked_out,
                     auto_checkout=auto_checkout,
+                    on_conflict=on_conflict,
                     domain_path=domain_path,
                 )
         except Exception as exc:
@@ -186,6 +195,32 @@ class SyncService:
             raise self._raise_domain_error(
                 exc,
                 operation="terminate_project_program_checkout",
+                target=name,
+                domain_path=domain_path,
+            ) from exc
+
+    def delete_shared_project_file(
+        self,
+        name: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
+    ):
+        try:
+            with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
+                return self._runtime.delete_shared_project_file(
+                    name,
+                    domain_path=domain_path,
+                    confirm=confirm,
+                    expected_latest_version=expected_latest_version,
+                    allow_private=allow_private,
+                )
+        except Exception as exc:
+            raise self._raise_domain_error(
+                exc,
+                operation="delete_shared_project_file",
                 target=name,
                 domain_path=domain_path,
             ) from exc

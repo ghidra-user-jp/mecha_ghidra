@@ -131,7 +131,7 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - `--transport http` is recommended for HTTP connectivity. This starts FastMCP in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
 - `--transport sse` is still available for compatibility (`/sse`).
 - If you bind to `--mcp-host 0.0.0.0` (or `::`), protection assumptions differ from local-only mode. Use reverse proxy, TLS, and access controls for external exposure.
-- Enable shared-project sync tools with `--enable-shared-project-sync` only when you need to expose `commit/pull/checkout` operations.
+- Enable shared-project sync tools with `--enable-shared-project-sync` only when you need to expose `commit/pull/checkout/delete` operations.
 - If shared-project authentication is required, specify `--ghidra-server-user` together with exactly one of `--ghidra-server-password` or `--ghidra-server-password-env`. Supplying only one side, or supplying both password options together, causes startup failure.
 - Startup also fails when `--ghidra-server-password` is empty or when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged. If you want to avoid exposing secrets in process arguments, prefer `--ghidra-server-password-env`.
 - On Linux ARM64, startup/decompiler initialization now fails with a specific message when `Ghidra/Features/Decompiler/os/linux_arm_64` is missing or not executable.
@@ -140,12 +140,13 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis.
 - Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
 - Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
+- `delete_shared_project_file` always requires an explicit `domain_path` plus `confirm` equal to the normalized path; it refuses loaded files, active checkouts, and private files unless `allow_private=true`.
 - In shared projects, mutating tools like `rename_*` and `set_*` require `checkout_project_program` beforehand (`CHECKOUT_REQUIRED` error if not checked out).
-- `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints.
+- `add_project_program_to_version_control`, `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints.
 - Due to Ghidra limitations, merge conflict resolution is not supported in headless mode (`checkin/merge` return `requires merge ... not supported in headless mode`).
 - `pull_project_program(on_local_changes="discard")` uses `undoCheckout(keep=False)` for local changes, and if `can_merge=true` on a checked-out program it follows the latest server state by dropping the stale checkout instead of calling `DomainFile.merge()`.
 - When `can_merge=true` but there is no disposable checkout to drop, `pull_project_program` fails with `UNSAFE_MERGE_REQUIRED` instead of invoking Ghidra's PropertyList merge path.
-- `commit_project_program` detects merge conflicts (`can_merge=true`) and, by default, discards local changes to follow the latest state, returning `status=noop` / `reason=conflict_discarded` (human-side updates are prioritized).
+- `commit_project_program` detects merge conflicts (`can_merge=true`) and now aborts by default with `UNSAFE_MERGE_REQUIRED`; pass `on_conflict="discard"` only when you explicitly want to drop the local checkout and follow the latest server state (`status=noop` / `reason=conflict_discarded`).
 - In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
 - The Docker server starts with project metadata only, so import first with `import_program` and then open the imported program with `load_project_program`.
 

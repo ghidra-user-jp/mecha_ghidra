@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import types
 from typing import Any, get_args, get_origin
 
 import pytest
@@ -167,6 +166,19 @@ class RecordingService:
                     "program": kwargs.get("domain_path") or "/main",
                     "checkout_id": int(kwargs.get("checkout_id", 1)),
                     "active_checkouts": [],
+                }
+            if name == "delete_shared_project_file":
+                target = args[0]
+                return {
+                    "status": "ok",
+                    "target": target,
+                    "program": kwargs["domain_path"],
+                    "domain_path": kwargs["domain_path"],
+                    "deleted": True,
+                    "content_type": "Program",
+                    "was_versioned": True,
+                    "version": 1,
+                    "latest_version": 1,
                 }
             if name == "reload_project_program":
                 target = args[0]

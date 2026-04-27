@@ -112,6 +112,7 @@ _SHARED_SYNC_TOOL_ORDER: tuple[str, ...] = (
     "pull_project_program",
     "undo_checkout_project_program",
     "terminate_project_program_checkout",
+    "delete_shared_project_file",
     "reload_project_program",
 )
 
@@ -121,10 +122,11 @@ _SHARED_SYNC_DESCRIPTIONS: dict[str, str] = {
     "get_version_diff": "Get a summary of differences between two shared-project versions of the target program",
     "checkout_project_program": "Checkout the target program in a shared project",
     "add_project_program_to_version_control": "Add the target program to shared-project version control",
-    "commit_project_program": "Check-in changes of the target program to the shared project server",
+    "commit_project_program": "Check-in changes of the target program to the shared project server; on_conflict controls stale checkout handling",
     "pull_project_program": "Pull/merge latest remote changes for the target program",
     "undo_checkout_project_program": "Undo checkout for the target program (optionally discard local changes)",
     "terminate_project_program_checkout": "Terminate a stale checkout by checkout id for the target program",
+    "delete_shared_project_file": "Delete a shared-project file after confirmation and checkout safety checks",
     "reload_project_program": "Reload the target program by closing and reopening the current domain path",
 }
 

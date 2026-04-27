@@ -153,6 +153,20 @@ class DummyRegistry:
             "active_checkouts": [],
         }
 
+    def delete_shared_project_file(self, target, **kwargs):
+        self.registry_calls.append(("delete_shared_project_file", {"target": target, **kwargs}))
+        return {
+            "status": "ok",
+            "target": target,
+            "program": kwargs["domain_path"],
+            "domain_path": kwargs["domain_path"],
+            "deleted": True,
+            "content_type": "Program",
+            "was_versioned": True,
+            "version": 1,
+            "latest_version": 1,
+        }
+
     def reload_project_program(self, target, **kwargs):
         self.registry_calls.append(("reload_project_program", {"target": target, **kwargs}))
         return {
@@ -247,8 +261,9 @@ def test_dispatch_tool_validation_error():
         ("import_program", {"binary_path": "/tmp/a.bin", "import_mode": "raw_binary"}),
         ("create_session", {"project_location": "/tmp/sample.gpr"}),
         ("add_project_program_to_version_control", {"keep_checked_out": False}),
-        ("commit_project_program", {"keep_checked_out": False, "auto_checkout": True}),
+        ("commit_project_program", {"keep_checked_out": False, "auto_checkout": True, "on_conflict": "abort"}),
         ("terminate_project_program_checkout", {"domain_path": "/sample"}),
+        ("delete_shared_project_file", {"domain_path": "/sample"}),
         ("get_version_diff", {"to_version": 2}),
     ],
 )
@@ -313,10 +328,14 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("get_project_sync_status", {"domain_path": 1}),
         ("checkout_project_program", {"exclusive": "yes", "domain_path": None}),
         ("add_project_program_to_version_control", {"comment": 1, "keep_checked_out": False}),
-        ("commit_project_program", {"message": 1, "keep_checked_out": False, "auto_checkout": True}),
+        ("commit_project_program", {"message": 1, "keep_checked_out": False, "auto_checkout": True, "on_conflict": "abort"}),
         ("pull_project_program", {"on_local_changes": 1, "domain_path": None}),
         ("undo_checkout_project_program", {"discard_local_changes": "x", "domain_path": None}),
         ("terminate_project_program_checkout", {"checkout_id": "x", "domain_path": None}),
+        ("delete_shared_project_file", {"domain_path": 1, "confirm": "/main"}),
+        ("delete_shared_project_file", {"domain_path": "/main", "confirm": 1}),
+        ("delete_shared_project_file", {"domain_path": "/main", "confirm": "/main", "expected_latest_version": "x"}),
+        ("delete_shared_project_file", {"domain_path": "/main", "confirm": "/main", "allow_private": "x"}),
         ("reload_project_program", {"domain_path": 1}),
         ("get_version_history", {"limit": "x", "domain_path": None}),
         ("get_version_diff", {"from_version": "x", "to_version": 2, "range_limit": 1}),
@@ -333,6 +352,22 @@ def test_dispatch_tool_normalizes_empty_list_result():
     registry = DummyRegistry()
 
     result = dispatch_tool("list_targets", {}, "ignored", registry=registry)
+
+    assert isinstance(result, CallToolResult)
+    assert result.content[0].text == "[]"
+
+
+def test_dispatch_tool_accepts_pre_normalized_empty_list_result():
+    class Registry(DummyRegistry):
+        def call(self, command, params, target):  # noqa: ARG002
+            return tool_dispatcher_module.normalize_empty_list_result([])
+
+    result = dispatch_tool(
+        "search_functions_by_name",
+        {"query": "missing", "offset": 0, "limit": 5},
+        "fw",
+        registry=Registry(),
+    )
 
     assert isinstance(result, CallToolResult)
     assert result.content[0].text == "[]"

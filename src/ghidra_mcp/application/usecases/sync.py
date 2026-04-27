@@ -15,6 +15,7 @@ SYNC_COMMANDS: tuple[str, ...] = (
     "pull_project_program",
     "undo_checkout_project_program",
     "terminate_project_program_checkout",
+    "delete_shared_project_file",
     "reload_project_program",
     "get_version_history",
     "get_version_diff",
@@ -50,6 +51,7 @@ class SyncUseCases:
                 message=params["message"],
                 keep_checked_out=bool(params.get("keep_checked_out", False)),
                 auto_checkout=bool(params.get("auto_checkout", True)),
+                on_conflict=params.get("on_conflict", "abort"),
                 domain_path=params.get("domain_path"),
             )
         if command == "pull_project_program":
@@ -69,6 +71,14 @@ class SyncUseCases:
                 target,
                 checkout_id=int(params["checkout_id"]),
                 domain_path=params.get("domain_path"),
+            )
+        if command == "delete_shared_project_file":
+            return self._sync_gateway.delete_shared_project_file(
+                target,
+                domain_path=params["domain_path"],
+                confirm=params["confirm"],
+                expected_latest_version=params.get("expected_latest_version"),
+                allow_private=bool(params.get("allow_private", False)),
             )
         if command == "reload_project_program":
             return self._sync_gateway.reload_project_program(target, domain_path=params.get("domain_path"))

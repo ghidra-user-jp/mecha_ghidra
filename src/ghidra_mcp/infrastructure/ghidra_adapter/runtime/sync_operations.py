@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from collections.abc import Callable
 from typing import Any, Dict
 
 from ghidra_mcp.domain import DomainError, ErrorCode
@@ -25,7 +26,7 @@ class RuntimeSyncOperations:
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = handle.get_sync_status(resolved_domain_path)
+                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path)
                 status = self._overlay_active_program_sync_status_locked(
                     active_target,
                     resolved_domain_path,
@@ -45,7 +46,15 @@ class RuntimeSyncOperations:
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = handle.get_sync_status(resolved_domain_path)
+                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+                if active_target is not None and not status.get("is_versioned"):
+                    self._refresh_loaded_target_sync_state_locked(
+                        handle=handle,
+                        domain_path=resolved_domain_path,
+                    )
+                    handle = self._store.get_target_handle_locked(name)
+                    active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+                    status = handle.get_sync_status(resolved_domain_path)
                 self._ensure_versioned_project(status)
                 if status.get("is_checked_out"):
                     if active_target is not None and not self._active_program_is_changed_locked(
@@ -94,7 +103,7 @@ class RuntimeSyncOperations:
             lock = self._store.ensure_lock(name)
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                status = handle.get_sync_status(resolved_domain_path)
+                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
                 if status.get("is_versioned"):
                     return {
                         "status": "noop",
@@ -135,18 +144,30 @@ class RuntimeSyncOperations:
         *,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ) -> Dict[str, Any]:
         text = (message or "").strip()
         if not text:
             raise ValueError("message is required")
+        conflict_action = (on_conflict or "abort").strip().lower()
+        if conflict_action not in {"abort", "discard"}:
+            raise ValueError("on_conflict must be either 'abort' or 'discard'")
         with self._store.registry_lock.write_lock():
             lock = self._store.ensure_lock(name)
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
 
-                status = handle.get_sync_status(resolved_domain_path)
+                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+                if active_target is not None and not status.get("is_versioned"):
+                    self._refresh_loaded_target_sync_state_locked(
+                        handle=handle,
+                        domain_path=resolved_domain_path,
+                    )
+                    handle = self._store.get_target_handle_locked(name)
+                    active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+                    status = handle.get_sync_status(resolved_domain_path)
                 if not status.get("is_versioned") and status.get("can_add_to_repository"):
                     return {
                         "status": "noop",
@@ -193,6 +214,16 @@ class RuntimeSyncOperations:
                     else:
                         raise RuntimeError("NOT_CHECKED_OUT: program is not checked out")
 
+                conflict_result = self._handle_commit_conflict_locked(
+                    name,
+                    resolved_domain_path,
+                    active_target=active_target,
+                    status=status,
+                    conflict_action=conflict_action,
+                )
+                if conflict_result is not None:
+                    return conflict_result
+
                 saved_active_program = False
                 if active_target is not None:
                     saved_active_program = self._save_active_program_if_needed_locked(
@@ -214,29 +245,15 @@ class RuntimeSyncOperations:
                     resolved_domain_path,
                     status=status,
                 )
-                if status.get("can_merge"):
-                    action = self._run_sync_operation_for_domain_locked(
-                        name,
-                        resolved_domain_path,
-                        operation=lambda active_handle, active_domain_path: self._discard_conflict_checkout_operation(
-                            active_handle,
-                            active_domain_path,
-                        ),
-                        save_before_close=False,
-                    )
-                    updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
-                    return {
-                        "status": "noop",
-                        "reason": "conflict_discarded",
-                        "target": name,
-                        "program": resolved_domain_path,
-                        "discarded_local_changes": bool(action["discarded_local_changes"]),
-                        "merged": bool(action["merged"]),
-                        "version": updated.get("version"),
-                        "latest_version": updated.get("latest_version"),
-                        "is_latest_version": bool(updated.get("is_latest_version")),
-                        "checked_out": bool(updated.get("is_checked_out")),
-                    }
+                conflict_result = self._handle_commit_conflict_locked(
+                    name,
+                    resolved_domain_path,
+                    active_target=active_target,
+                    status=status,
+                    conflict_action=conflict_action,
+                )
+                if conflict_result is not None:
+                    return conflict_result
                 if not status.get("can_checkin"):
                     if not status.get("modified_since_checkout"):
                         return {
@@ -285,7 +302,7 @@ class RuntimeSyncOperations:
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = handle.get_sync_status(resolved_domain_path)
+                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
                 self._ensure_versioned_project(status)
                 status = self._overlay_active_program_sync_status_locked(
                     active_target,
@@ -349,7 +366,7 @@ class RuntimeSyncOperations:
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = handle.get_sync_status(resolved_domain_path)
+                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
                 self._ensure_versioned_project(status)
                 status = self._overlay_active_program_sync_status_locked(
                     active_target,
@@ -366,18 +383,23 @@ class RuntimeSyncOperations:
 
                 keep = not bool(discard_local_changes)
                 was_active = active_target is not None
-                keep_path_resolver = None
+                keep_path_resolver: Callable[[ProjectHandle, str], str] | None = None
                 if keep and was_active and (
                     bool(status.get("modified_since_checkout"))
                     or self._active_program_is_changed_locked(active_target, resolved_domain_path)
                 ):
                     # Ghidra only creates a .keep file when there are local changes to preserve.
                     existing_program_paths = self._list_program_paths_locked(handle)
-                    keep_path_resolver = lambda active_handle, active_domain_path: self._resolve_new_keep_domain_path(
-                        active_handle,
-                        active_domain_path,
-                        existing_program_paths,
-                    )
+
+                    def resolve_keep_path(active_handle, active_domain_path):  # noqa: ANN001
+                        return self._resolve_new_keep_domain_path(
+                            active_handle,
+                            active_domain_path,
+                            existing_program_paths,
+                        )
+
+                    keep_path_resolver = resolve_keep_path
+
                 self._run_sync_operation_for_domain_locked(
                     name,
                     resolved_domain_path,
@@ -417,17 +439,12 @@ class RuntimeSyncOperations:
             lock = self._store.ensure_lock(name)
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                status = handle.get_sync_status(resolved_domain_path)
+                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
                 self._ensure_versioned_project(status)
                 active_checkout_status = status.get("checkout_status") or {}
                 active_checkout_id = active_checkout_status.get("checkout_id")
-                loaded_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                is_loaded_checkout_in_use = (
-                    loaded_target is not None
-                    and active_checkout_id is not None
-                    and int(active_checkout_id) == int(checkout_id)
-                )
-                if is_loaded_checkout_in_use:
+                is_local_checkout = active_checkout_id is not None and int(active_checkout_id) == int(checkout_id)
+                if is_local_checkout:
                     raise RuntimeError(
                         "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: terminating the active checkout would hijack the local file; "
                         "use undo_checkout_project_program instead"
@@ -440,6 +457,82 @@ class RuntimeSyncOperations:
                     "program": resolved_domain_path,
                     "checkout_id": int(checkout_id),
                     "active_checkouts": updated.get("checkouts"),
+                }
+
+    def delete_shared_project_file(
+        self,
+        name: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
+    ) -> Dict[str, Any]:
+        if not (domain_path or "").strip():
+            raise ValueError("domain_path is required")
+        with self._store.registry_lock.write_lock():
+            lock = self._store.ensure_lock(name)
+            with lock:
+                handle = self._store.get_target_handle_locked(name)
+                resolved_domain_path = self._normalize_domain_path_locked(handle, domain_path)
+                confirmation = (confirm or "").strip()
+                if confirmation != resolved_domain_path:
+                    raise ValueError(
+                        "confirm must exactly match the normalized domain_path "
+                        f"({resolved_domain_path})"
+                    )
+
+                active_target = self._find_loaded_target_locked(
+                    handle=handle,
+                    domain_path=resolved_domain_path,
+                )
+                if active_target is not None:
+                    details = {
+                        "operation": "delete_shared_project_file",
+                        "target": name,
+                        "domain_path": resolved_domain_path,
+                    }
+                    if active_target != name:
+                        details["owner_target"] = active_target
+                    raise DomainError(
+                        code=ErrorCode.TARGET_ALREADY_LOADED,
+                        message=f"TARGET_ALREADY_LOADED: program already loaded: {resolved_domain_path}",
+                        hint="Close the loaded target before deleting the shared project file",
+                        retryable=False,
+                        details=details,
+                    )
+
+                status = self._get_refreshed_sync_status_locked(
+                    handle,
+                    resolved_domain_path,
+                    require_refresh=True,
+                )
+                was_versioned = bool(status.get("is_versioned"))
+                latest_version = status.get("latest_version")
+                version = status.get("version")
+                if expected_latest_version is not None:
+                    expected = int(expected_latest_version)
+                    if expected < 1:
+                        raise ValueError("expected_latest_version must be >= 1")
+                    if latest_version is None or int(latest_version) != expected:
+                        raise RuntimeError(
+                            "LATEST_VERSION_MISMATCH: delete aborted because latest_version "
+                            f"is {latest_version}, expected {expected}"
+                        )
+
+                self._ensure_delete_allowed(status, allow_private=allow_private)
+                delete_result = handle.delete_domain_file(resolved_domain_path)
+                self._store.clear_dirty_program(name, resolved_domain_path)
+                return {
+                    "status": "ok",
+                    "target": name,
+                    "program": resolved_domain_path,
+                    "domain_path": resolved_domain_path,
+                    "deleted": True,
+                    "content_type": delete_result.get("content_type"),
+                    "was_versioned": was_versioned,
+                    "version": version,
+                    "latest_version": latest_version,
                 }
 
     def reload_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
@@ -491,7 +584,7 @@ class RuntimeSyncOperations:
             lock = self._store.ensure_lock(name)
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                self._ensure_versioned_project(handle.get_sync_status(resolved_domain_path))
+                self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
                 history = handle.get_version_history(resolved_domain_path, limit=limit)
                 return {
                     "target": name,
@@ -512,7 +605,7 @@ class RuntimeSyncOperations:
             lock = self._store.ensure_lock(name)
             with lock:
                 handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                self._ensure_versioned_project(handle.get_sync_status(resolved_domain_path))
+                self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
                 diff = handle.get_version_diff(
                     resolved_domain_path,
                     from_version=from_version,
@@ -528,6 +621,16 @@ class RuntimeSyncOperations:
     def _current_sync_status_locked(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
         return handle.get_sync_status(resolved_domain_path)
+
+    def _get_refreshed_sync_status_locked(
+        self,
+        handle: ProjectHandle,
+        domain_path: str,
+        *,
+        require_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        self._refresh_project_sync_state_locked(handle, required=require_refresh)
+        return handle.get_sync_status(domain_path)
 
     def _overlay_active_program_sync_status_locked(
         self,
@@ -608,6 +711,82 @@ class RuntimeSyncOperations:
             if self._find_loaded_target_locked(handle=handle, domain_path=domain_path) != loaded_target:
                 return
             self._reload_active_program_after_checkout_locked(loaded_target, domain_path)
+
+    @staticmethod
+    def _refresh_project_sync_state_locked(handle: ProjectHandle, *, required: bool = False) -> bool:
+        refresh_project_data = getattr(handle, "refresh_project_data", None)
+        if refresh_project_data is None:
+            return False
+        try:
+            refresh_project_data(force=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("failed to refresh project sync state: %s", exc)
+            if required:
+                raise RuntimeError(f"SYNC_REFRESH_FAILED: failed to refresh project sync state: {exc}") from exc
+            return False
+        return True
+
+    def _refresh_loaded_target_sync_state_locked(self, *, handle: ProjectHandle, domain_path: str) -> bool:
+        loaded_target = self._find_loaded_target_locked(handle=handle, domain_path=domain_path)
+        if loaded_target is None:
+            return False
+        lock = self._store.ensure_lock(loaded_target)
+        with lock:
+            if self._find_loaded_target_locked(handle=handle, domain_path=domain_path) != loaded_target:
+                return False
+            if self._active_program_is_changed_locked(loaded_target, domain_path):
+                raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
+            self._run_with_reopened_program_locked(
+                loaded_target,
+                operation=lambda _active_handle, _active_domain_path: None,
+                save_before_close=False,
+            )
+            return True
+
+    def _handle_commit_conflict_locked(
+        self,
+        name: str,
+        domain_path: str,
+        *,
+        active_target: str | None,
+        status: Dict[str, Any],
+        conflict_action: str,
+    ) -> Dict[str, Any] | None:
+        if not status.get("can_merge"):
+            return None
+        if conflict_action == "abort":
+            raise RuntimeError(
+                "UNSAFE_MERGE_REQUIRED: remote changes require a merge before check-in; "
+                "pass on_conflict='discard' to drop this checkout and follow the latest server state"
+            )
+        discarded_unsaved_active_changes = (
+            active_target is not None
+            and self._active_program_is_changed_locked(active_target, domain_path)
+        )
+        action = self._run_sync_operation_for_domain_locked(
+            name,
+            domain_path,
+            operation=lambda active_handle, active_domain_path: self._discard_conflict_checkout_operation(
+                active_handle,
+                active_domain_path,
+            ),
+            save_before_close=False,
+        )
+        if discarded_unsaved_active_changes:
+            action["discarded_local_changes"] = True
+        updated = self._current_sync_status_locked(name, domain_path=domain_path)
+        return {
+            "status": "noop",
+            "reason": "conflict_discarded",
+            "target": name,
+            "program": domain_path,
+            "discarded_local_changes": bool(action["discarded_local_changes"]),
+            "merged": bool(action["merged"]),
+            "version": updated.get("version"),
+            "latest_version": updated.get("latest_version"),
+            "is_latest_version": bool(updated.get("is_latest_version")),
+            "checked_out": bool(updated.get("is_checked_out")),
+        }
 
     def _resolve_sync_target_locked(
         self,
@@ -696,11 +875,21 @@ class RuntimeSyncOperations:
             if str(item.get("domain_path") or "")
         }
         new_keep_paths = sorted(
-            path for path in current_paths if path.startswith(keep_prefix) and path not in existing_program_paths
+            (path for path in current_paths if path.startswith(keep_prefix) and path not in existing_program_paths),
+            key=lambda path: RuntimeSyncOperations._keep_path_sort_key(path, keep_prefix),
         )
         if new_keep_paths:
             return new_keep_paths[-1]
         raise RuntimeError(f"KEEP_FILE_NOT_FOUND: no new keep file was created for {domain_path}")
+
+    @staticmethod
+    def _keep_path_sort_key(path: str, keep_prefix: str) -> tuple[int, int, str]:
+        suffix = path[len(keep_prefix) :]
+        if suffix == "":
+            return (1, 0, path)
+        if suffix.startswith(".") and suffix[1:].isdigit():
+            return (1, int(suffix[1:]), path)
+        return (0, 0, path)
 
     def _run_sync_operation_for_domain_locked(
         self,
@@ -873,6 +1062,26 @@ class RuntimeSyncOperations:
             "merged": merged,
             "followed_latest": followed_latest,
         }
+
+    @staticmethod
+    def _ensure_delete_allowed(status: Dict[str, Any], *, allow_private: bool) -> None:
+        if not status.get("is_versioned"):
+            if not allow_private:
+                raise RuntimeError(
+                    "PRIVATE_FILE_DELETE_NOT_ALLOWED: target file is not under shared-project "
+                    "version control; pass allow_private=true only when deleting a private project file"
+                )
+            return
+
+        checkouts = status.get("checkouts") or []
+        if status.get("is_checked_out") or status.get("checkout_status") or checkouts:
+            raise RuntimeError(
+                "SHARED_FILE_DELETE_BLOCKED: delete aborted because the file has an active checkout"
+            )
+        if status.get("can_merge"):
+            raise RuntimeError(
+                "SHARED_FILE_DELETE_BLOCKED: delete aborted because the file requires merge handling"
+            )
 
     @staticmethod
     def _ensure_versioned_project(status: Dict[str, Any]) -> None:

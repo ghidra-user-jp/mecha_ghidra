@@ -402,6 +402,140 @@ def test_add_program_to_version_control_auto_connects_shared_repository(monkeypa
     assert calls == [("Initial import", True, "monitor")]
 
 
+def test_refresh_project_data_invokes_project_data_refresh(monkeypatch):
+    handle = build_handle(monkeypatch)
+    calls: list[bool] = []
+
+    class RefreshProjectData:
+        def refresh(self, force):
+            calls.append(bool(force))
+
+    class RefreshProject(DummyProject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._project_data = RefreshProjectData()
+
+        def getProjectData(self):
+            return self._project_data
+
+    handle.project = RefreshProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: False),
+    )
+
+    handle.refresh_project_data(force=True)
+
+    assert calls == [True]
+
+
+def test_list_programs_refreshes_project_data_before_sync_summary(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class RefreshingDomainFile:
+        def __init__(self, project_data) -> None:  # noqa: ANN001
+            self._project_data = project_data
+
+        def getContentType(self):
+            return "Program"
+
+        def getPathname(self):
+            return "/external.bin"
+
+        def getName(self):
+            return "external.bin"
+
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _):
+            return None
+
+        def isVersioned(self):
+            return self._project_data.versioned
+
+        def isCheckedOut(self):
+            return False
+
+        def isCheckedOutExclusive(self):
+            return False
+
+        def isLatestVersion(self):
+            return True
+
+        def modifiedSinceCheckout(self):
+            return False
+
+        def canAddToRepository(self):
+            return not self._project_data.versioned
+
+        def canCheckout(self):
+            return self._project_data.versioned
+
+        def canCheckin(self):
+            return False
+
+        def canMerge(self):
+            return False
+
+        def isHijacked(self):
+            return False
+
+        def getVersion(self):
+            return 1
+
+        def getLatestVersion(self):
+            return 1
+
+    class RefreshingFolder:
+        def __init__(self, project_data) -> None:  # noqa: ANN001
+            self._project_data = project_data
+
+        def getFiles(self):
+            return [RefreshingDomainFile(self._project_data)]
+
+        def getFolders(self):
+            return []
+
+    class RefreshingProjectData:
+        def __init__(self) -> None:
+            self.refresh_calls: list[bool] = []
+            self.versioned = False
+
+        def refresh(self, force):
+            self.refresh_calls.append(bool(force))
+            self.versioned = True
+
+        def getRootFolder(self):
+            return RefreshingFolder(self)
+
+    class RefreshingProject(DummyProject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._project_data = RefreshingProjectData()
+
+        def getProjectData(self):
+            return self._project_data
+
+    project = RefreshingProject()
+    handle.project = project
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: False),
+    )
+
+    result = handle.list_programs()
+
+    assert project._project_data.refresh_calls == [True]
+    assert result[0]["is_versioned"] is True
+    assert result[0]["can_add_to_repository"] is False
+
+
 def test_list_programs_includes_sync_summary(monkeypatch):
     handle = build_handle(monkeypatch)
 

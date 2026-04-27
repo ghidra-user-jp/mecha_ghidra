@@ -173,17 +173,18 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 #### Shared Project Sync (`--enable-shared-project-sync` 指定時のみ)
 
-`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` は `domain_path` を任意指定できます（未指定時は現在ロード中のprogram）。
+`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `add_to_version_control` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `delete_shared_project_file` / `reload` は記載のある箇所で `domain_path` を指定できます（未指定時は現在ロード中のprogram。削除は明示的な `domain_path` が必須）。
 
 - `get_project_sync_status` - shared project 上の同期状態を取得
 - `get_version_history` - バージョン履歴（version/user/comment/time）を取得
 - `get_version_diff` - 2バージョン間の差分要約（件数/タイプ別/アドレスレンジ）を取得
 - `checkout_project_program` - プログラムを checkout（排他指定可）
 - `add_project_program_to_version_control` - private プログラムを shared 管理へ追加
-- `commit_project_program` - checkout 中の変更を check-in
+- `commit_project_program` - checkout 中の変更を check-in（競合 checkout を破棄する場合は `on_conflict="discard"` を明示）
 - `pull_project_program` - 最新状態を取得（必要に応じて破棄/追従）
 - `undo_checkout_project_program` - checkout を取り消し（ローカル変更破棄可）
 - `terminate_project_program_checkout` - 既存 checkout を checkout ID で強制終了
+- `delete_shared_project_file` - `confirm` が `domain_path` と一致した未ロードの shared project file を削除
 - `reload_project_program` - 現在プログラムを再ロード
 
 詳細な運用フローや制約事項は [利用ガイド](docs/usage.ja.md) を参照してください。
