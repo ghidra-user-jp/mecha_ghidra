@@ -321,6 +321,36 @@ def test_sync_status_normalizes_unversioned_version_fields():
     assert result["can_add_to_repository"] is True
 
 
+def test_sync_status_raises_when_can_add_to_repository_fails():
+    class BrokenCanAddDomainFile:
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getSharedProjectURL(self, _):
+            return None
+
+        def isVersioned(self):
+            return False
+
+        def isCheckedOut(self):
+            return False
+
+        def isCheckedOutExclusive(self):
+            return False
+
+        def modifiedSinceCheckout(self):
+            return False
+
+        def canAddToRepository(self):
+            raise RuntimeError("backend unavailable")
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.canAddToRepository"):
+        session.sync_utils._sync_status_from_domain_file(BrokenCanAddDomainFile())
+
+
 def test_get_sync_status_auto_connects_shared_repository(monkeypatch):
     handle = build_handle(monkeypatch)
 
@@ -815,6 +845,8 @@ def test_release_program_clears_tracking_when_delete_fails(monkeypatch):
 
     assert handle._open_programs == set()
     assert handle._refcount == 0
+    assert handle.is_closed() is False
+    assert handle.project.closed == [program]
 
 
 def test_get_version_history(monkeypatch):
@@ -1112,6 +1144,46 @@ def test_import_program_auto_uses_legacy_import_path(monkeypatch, tmp_path):
     assert domain_file.getPathname() == "/sample.bin"
     assert handle.project.imported == [str(binary_path)]
     assert handle.project.saved_as == (imported_program, "/", "sample.bin", True)
+    assert handle.project.closed == [imported_program]
+
+
+def test_import_program_rolls_back_when_post_processing_fails(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "sample.bin"
+    binary_path.write_bytes(b"\x90")
+    imported_program = DummyProgram("/sample.bin")
+    deleted_paths: list[str] = []
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class ImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+        def importProgram(self, java_file):  # noqa: ARG002
+            return imported_program
+
+        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
+            return None
+
+    def fail_post_process(*_args, **_kwargs):
+        raise RuntimeError("analysis failed")
+
+    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
+    monkeypatch.setattr(handle, "_post_process_imported_program_locked", fail_post_process)
+    monkeypatch.setattr(
+        handle,
+        "_delete_domain_file_locked",
+        lambda path: deleted_paths.append(path) or {"domain_path": path},
+    )
+    handle.project = ImportProject()
+
+    with pytest.raises(RuntimeError, match="IMPORT_POST_PROCESS_FAILED: rolled back imported program /sample.bin"):
+        handle.import_program(str(binary_path), entry_offset=0)
+
+    assert deleted_paths == ["/sample.bin"]
     assert handle.project.closed == [imported_program]
 
 

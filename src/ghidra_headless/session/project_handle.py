@@ -144,12 +144,27 @@ class ProjectHandle:
                 raise RuntimeError(f"Failed to add program: {binary_path}")
             should_analyze = analyze_imported if analyze_imported is not None else (import_mode == "raw_binary")
             if should_analyze or entry_address is not None or entry_offset is not None:
-                self._post_process_imported_program_locked(
-                    domain_file.getPathname(),
-                    entry_address=entry_address,
-                    entry_offset=entry_offset,
-                    analyze_imported=bool(should_analyze),
-                )
+                imported_domain_path = domain_file.getPathname()
+                try:
+                    self._post_process_imported_program_locked(
+                        imported_domain_path,
+                        entry_address=entry_address,
+                        entry_offset=entry_offset,
+                        analyze_imported=bool(should_analyze),
+                    )
+                except Exception as exc:
+                    try:
+                        self._delete_domain_file_locked(imported_domain_path)
+                    except Exception as cleanup_exc:
+                        raise RuntimeError(
+                            "IMPORT_POST_PROCESS_FAILED: imported program "
+                            f"{imported_domain_path} but post-processing failed: {exc}; "
+                            f"rollback delete failed: {cleanup_exc}"
+                        ) from exc
+                    raise RuntimeError(
+                        "IMPORT_POST_PROCESS_FAILED: rolled back imported program "
+                        f"{imported_domain_path} after post-processing failed: {exc}"
+                    ) from exc
 
             return domain_file
 
@@ -391,13 +406,13 @@ class ProjectHandle:
                     remove_error = exc
             self._open_programs.discard(domain_key)
             self._refcount = max(0, self._refcount - 1)
+            if remove_error is not None:
+                raise RuntimeError(f"REMOVE_PROGRAM_FAILED: {remove_error}")
             if self._refcount == 0:
                 try:
                     self._close_project_locked()
                 except Exception as exc:
                     project_close_error = exc
-            if remove_error is not None:
-                raise RuntimeError(f"REMOVE_PROGRAM_FAILED: {remove_error}")
             if project_close_error is not None:
                 raise RuntimeError(
                     "SESSION_CLOSE_FAILED: failed to close project: "
@@ -727,6 +742,7 @@ class ProjectHandle:
         if program is None:
             raise RuntimeError(f"Failed to reopen imported program: {domain_path}")
         flat_api = java_bindings._flat_program_api_class()(program, monitor)
+        operation_error = None
         try:
             entry = self._resolve_entry_address_locked(
                 program,
@@ -738,8 +754,23 @@ class ProjectHandle:
             if analyze_imported:
                 self._analyze_program_locked(program, flat_api)
             self.project.save(program)
+        except Exception as exc:
+            operation_error = exc
+            raise
         finally:
-            self.project.close(program)
+            try:
+                self.project.close(program)
+            except Exception as close_exc:
+                if operation_error is not None:
+                    logger.warning(
+                        "failed to close imported program after post-processing failure for '%s': %s",
+                        domain_path,
+                        close_exc,
+                    )
+                else:
+                    raise RuntimeError(
+                        f"PROGRAM_CLOSE_FAILED: failed to close imported program {domain_path}: {close_exc}"
+                    ) from close_exc
 
     def _resolve_entry_address_locked(
         self,

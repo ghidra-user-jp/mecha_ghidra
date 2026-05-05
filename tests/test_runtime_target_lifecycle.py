@@ -244,6 +244,18 @@ class _FailingProgramCloseSession(_FakeSession):
         raise RuntimeError("PROGRAM_CLOSE_FAILED: failed to close program: close failed")
 
 
+class _RemoveFailedClosedSession(_FakeSession):
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+        self.closed_with.append((save, remove_program))
+        self._handle = None
+        raise RuntimeError("REMOVE_PROGRAM_FAILED: delete failed")
+
+    def get_project_handle(self):
+        if self._handle is None:
+            raise RuntimeError("Session is already closed")
+        return self._handle
+
+
 class _FailingRollbackCloseSession(_FakeSession):
     def close(self, *, save: bool = True, remove_program: bool = False) -> None:
         self.closed_with.append((save, remove_program))
@@ -418,6 +430,30 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     assert "fw" not in store.locks
     assert "fw" not in store.target_projects
     assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_remove_failure_restores_session_for_retry(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    created = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = created.get_project_handle()
+    failing = _RemoveFailedClosedSession(handle, "/main", created.flat_api)
+    store.sessions["fw"] = failing
+
+    with pytest.raises(RuntimeError, match="REMOVE_PROGRAM_FAILED: delete failed"):
+        lifecycle.close_session("fw", remove_program=True)
+
+    restored = store.sessions["fw"]
+    assert restored is not failing
+    assert store.session_domain_path(restored) == "/main"
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
+    assert "fw" in store.locks
+    assert core.contexts == {"fw": "/main"}
+    assert core.removed == []
+    assert failing.closed_with == [(True, True)]
 
 
 def test_target_lifecycle_refuses_to_remove_versioned_program(monkeypatch: pytest.MonkeyPatch):
@@ -727,7 +763,7 @@ def test_target_lifecycle_create_session_closes_leaked_handle_when_rollback_clos
 
     monkeypatch.setattr(_FakeProjectHandle, "open_program", patched_open)
 
-    with pytest.raises(RuntimeError, match="analyze failed"):
+    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED: rollback close failed"):
         lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
 
     assert not store.project_handles

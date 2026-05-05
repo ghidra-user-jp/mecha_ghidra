@@ -49,7 +49,7 @@ class RuntimeTargetLifecycle:
                 self._store.locks.setdefault(name, threading.RLock())
                 self._store.sessions[name] = session
                 return session
-            except Exception:  # noqa: BLE001
+            except Exception as operation_error:  # noqa: BLE001
                 self._store.sessions.pop(name, None)
                 rollback_error = None
                 if handle is not None:
@@ -70,6 +70,8 @@ class RuntimeTargetLifecycle:
                     self._store.target_projects.pop(name, None)
                 if not had_lock:
                     self._store.locks.pop(name, None)
+                if rollback_error is not None:
+                    raise rollback_error from operation_error
                 raise
 
     def register_target(
@@ -319,12 +321,14 @@ class RuntimeTargetLifecycle:
                 return
             raise RuntimeError(f"Session '{name}' does not exist")
         handle = session.get_project_handle()
+        domain_path = self._store.session_domain_path(session)
         if remove_program:
             self._ensure_program_removal_allowed_locked(name, session, handle)
             session = self._store.sessions.get(name)
             if session is None:
                 raise RuntimeError(f"Session '{name}' was closed during remove safety verification")
             handle = session.get_project_handle()
+            domain_path = self._store.session_domain_path(session)
         project_key = handle.get_key()
         close_error = None
         try:
@@ -338,6 +342,28 @@ class RuntimeTargetLifecycle:
             )
         except Exception as exc:
             close_error = exc
+
+        remove_failed = (
+            remove_program
+            and close_error is not None
+            and str(close_error).startswith("REMOVE_PROGRAM_FAILED:")
+        )
+        if remove_failed:
+            restore_error = self._restore_session_after_remove_failure_locked(
+                name,
+                project_key=project_key,
+                domain_path=domain_path,
+            )
+            if restore_error is not None:
+                self._store.sessions.pop(name, None)
+                self._store.target_projects[name] = project_key
+                self._store.locks.setdefault(name, threading.RLock())
+                try:
+                    self._store.core_accessor().remove_context(name)
+                except Exception as remove_exc:  # noqa: BLE001
+                    logger.warning("failed to remove context while preserving target '%s': %s", name, remove_exc)
+                raise RuntimeError(f"{close_error}; REOPEN_FAILED: failed to restore session: {restore_error}") from close_error
+            raise close_error
 
         if close_error is None or self._session_is_closed(session):
             self._store.sessions.pop(name, None)
@@ -353,6 +379,35 @@ class RuntimeTargetLifecycle:
 
         if close_error is not None:
             raise close_error
+
+    def _restore_session_after_remove_failure_locked(
+        self,
+        name: str,
+        *,
+        project_key: tuple[str, str],
+        domain_path: str,
+    ) -> Exception | None:
+        self._store.target_projects[name] = project_key
+        self._store.locks.setdefault(name, threading.RLock())
+        try:
+            handle = self._store.get_or_create_project_handle(project_key[0], project_key[1])
+            restored = handle.open_program(domain_path)
+            try:
+                self._initialize_opened_session_locked(name=name, session=restored)
+            except Exception:
+                try:
+                    restored.close(save=False)
+                except Exception as close_exc:  # noqa: BLE001
+                    logger.warning(
+                        "failed to close restored session during remove-failure recovery for target '%s': %s",
+                        name,
+                        close_exc,
+                    )
+                raise
+            self._store.sessions[name] = restored
+            return None
+        except Exception as exc:  # noqa: BLE001
+            return exc
 
     def _ensure_program_removal_allowed_locked(self, name: str, session, handle) -> None:
         domain_path = self._store.session_domain_path(session)

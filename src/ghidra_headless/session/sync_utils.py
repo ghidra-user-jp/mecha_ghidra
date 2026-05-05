@@ -71,7 +71,7 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
         "is_checked_out_exclusive": bool(_required_call(domain_file, "isCheckedOutExclusive")),
         "is_latest_version": is_latest_version,
         "modified_since_checkout": bool(_required_call(domain_file, "modifiedSinceCheckout")),
-        "can_add_to_repository": bool(_safe_call(domain_file, "canAddToRepository")),
+        "can_add_to_repository": bool(_required_call(domain_file, "canAddToRepository")),
         "can_checkout": bool(_required_call(domain_file, "canCheckout")),
         "can_checkin": bool(_required_call(domain_file, "canCheckin")),
         "can_merge": bool(_required_call(domain_file, "canMerge")),
