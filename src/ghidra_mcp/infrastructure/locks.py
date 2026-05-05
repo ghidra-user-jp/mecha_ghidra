@@ -42,23 +42,23 @@ class LockManager:
         project_key: str | None = None,
         timeout: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
     ) -> Iterator[None]:
-        target_lock = self._get_target_lock(target) if target else None
-        project_lock = self._get_project_lock(project_key) if project_key else None
+        with self._registry_lock.write_lock():
+            target_lock = self._get_target_lock(target) if target else None
+            project_lock = self._get_project_lock(project_key) if project_key else None
 
         stack: list[threading.RLock] = []
 
-        with self._registry_lock.write_lock():
-            try:
-                if target_lock is not None:
-                    self._acquire_lock(target_lock, timeout=timeout, lock_name="target", order=LOCK_ORDER)
-                    stack.append(target_lock)
-                if project_lock is not None:
-                    self._acquire_lock(project_lock, timeout=timeout, lock_name="project", order=LOCK_ORDER)
-                    stack.append(project_lock)
-                yield
-            finally:
-                while stack:
-                    stack.pop().release()
+        try:
+            if target_lock is not None:
+                self._acquire_lock(target_lock, timeout=timeout, lock_name="target", order=LOCK_ORDER)
+                stack.append(target_lock)
+            if project_lock is not None:
+                self._acquire_lock(project_lock, timeout=timeout, lock_name="project", order=LOCK_ORDER)
+                stack.append(project_lock)
+            yield
+        finally:
+            while stack:
+                stack.pop().release()
 
     def _acquire_lock(
         self,

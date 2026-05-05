@@ -84,9 +84,19 @@ class _DirtyAwareFakeProgram(_FakeProgram):
         return bool(getattr(self._handle, "program_reports_changed", False))
 
 
+class _FailingChangedFakeProgram(_FakeProgram):
+    def isChanged(self) -> bool:
+        raise RuntimeError("dirty state unavailable")
+
+
 class _DirtyAwareFakeSession(_FakeSession):
     def get_program(self):
         return _DirtyAwareFakeProgram(self._path, self._handle)
+
+
+class _FailingChangedFakeSession(_FakeSession):
+    def get_program(self):
+        return _FailingChangedFakeProgram(self._path)
 
 
 class _ClosingSession(_FakeSession):
@@ -567,6 +577,22 @@ def test_pull_abort_refreshes_active_checked_out_changes(monkeypatch: pytest.Mon
         monkeypatch,
         handle_cls=_StaleStatusHandle,
         session_cls=_DirtyAwareFakeSession,
+    )
+    assert isinstance(handle, _StaleStatusHandle)
+    handle.mark_active_change()
+
+    with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
+        sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+    assert handle.project.saved == 0
+    assert core.initialized == []
+
+
+def test_pull_abort_fails_closed_when_dirty_state_unavailable(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_StaleStatusHandle,
+        session_cls=_FailingChangedFakeSession,
     )
     assert isinstance(handle, _StaleStatusHandle)
     handle.mark_active_change()

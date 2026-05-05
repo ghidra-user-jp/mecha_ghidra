@@ -266,23 +266,34 @@ _SCALAR_OUTPUT_TYPES: dict[str, type[Any]] = {
     "decompile_function": str,
     "decompile_function_by_address": str,
     "get_bytes": str,
-    "load_project_program": str,
-    "import_program": str,
 }
 
 _DIRECT_OUTPUT_FIELDS: dict[str, dict[str, tuple[type[Any], Any]]] = {
+    "load_project_program": {
+        "status": (str, ...),
+        "target": (str, ...),
+        "program": (str, ...),
+    },
+    "import_program": {
+        "status": (str, ...),
+        "target": (str, ...),
+        "program": (str, ...),
+    },
     "create_session": {
+        "status": (str, ...),
         "target": (str, ...),
         "project_location": (str, ...),
         "project_name": (str | None, None),
         "domain_path": (str | None, None),
     },
     "close_session": {
+        "status": (str, ...),
         "closed": (bool, ...),
         "target": (str, ...),
         "remove_program": (bool, ...),
     },
     "close_session_and_remove_program": {
+        "status": (str, ...),
         "closed": (bool, ...),
         "target": (str, ...),
         "remove_program": (bool, ...),

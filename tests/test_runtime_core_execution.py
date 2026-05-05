@@ -32,27 +32,31 @@ class _DomainFile:
 
 
 class _Program:
-    def __init__(self, *, changed: bool = False) -> None:
+    def __init__(self, *, changed: bool = False, fail_changed: bool = False) -> None:
         self._changed = changed
+        self._fail_changed = fail_changed
 
     def getDomainFile(self):
         return _DomainFile()
 
     def isChanged(self) -> bool:
+        if self._fail_changed:
+            raise RuntimeError("dirty state unavailable")
         return self._changed
 
 
 class _Session:
-    def __init__(self, handle, *, changed: bool = False) -> None:  # noqa: ANN001
+    def __init__(self, handle, *, changed: bool = False, fail_changed: bool = False) -> None:  # noqa: ANN001
         self._handle = handle
         self._changed = changed
+        self._fail_changed = fail_changed
         self.closed_with: list[bool] = []
 
     def get_project_handle(self):
         return self._handle
 
     def get_program(self):
-        return _Program(changed=self._changed)
+        return _Program(changed=self._changed, fail_changed=self._fail_changed)
 
     def close(self, *, save: bool = True) -> None:
         self.closed_with.append(save)
@@ -140,6 +144,7 @@ def _build_core_execution(
     handle,  # noqa: ANN001
     *,
     changed: bool = False,
+    fail_changed: bool = False,
 ) -> tuple[RuntimeCoreExecution, RuntimeSessionStore, _Core]:
     core = _Core()
     state = RuntimeState(
@@ -148,7 +153,7 @@ def _build_core_execution(
         normalize_result=lambda value: value,
     )
     store = RuntimeSessionStore(state=state, core_accessor=lambda: core)
-    store.sessions["fw"] = _Session(handle, changed=changed)
+    store.sessions["fw"] = _Session(handle, changed=changed, fail_changed=fail_changed)
     store.locks["fw"] = threading.RLock()
     return (
         RuntimeCoreExecution(
@@ -210,6 +215,18 @@ def test_mutating_checkout_guard_reopens_stale_unversioned_active_program():
 def test_mutating_checkout_guard_rejects_dirty_stale_unversioned_active_program():
     handle = _ReopenVersionedHandle()
     execution, _store, core = _build_core_execution(handle, changed=True)
+
+    with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert handle.refresh_calls == 1
+    assert handle.open_program_calls == 0
+    assert core.calls == []
+
+
+def test_mutating_checkout_guard_fails_closed_when_dirty_state_unavailable():
+    handle = _ReopenVersionedHandle()
+    execution, _store, core = _build_core_execution(handle, fail_changed=True)
 
     with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")

@@ -100,15 +100,25 @@ class RuntimeSessionStore:
         if remove_context:
             self.core_accessor().remove_context(name)
 
+        session_closed = False
+        if session is not None:
+            try:
+                session_closed = session.get_project_handle() is None
+            except Exception:
+                session_closed = True
+
         if handle is not None and handle.is_closed():
             self.project_handles.pop(handle.get_key(), None)
-        if session_domain_path is not None:
+        if session_domain_path is not None and (close_error is None or session_closed):
             self.clear_dirty_program(name, session_domain_path)
 
         if close_error is not None:
             message = str(close_error)
-            if message.startswith("SAVE_FAILED:") or message.startswith("SESSION_CLOSE_FAILED:") or message.startswith(
-                "REMOVE_PROGRAM_FAILED:"
+            if (
+                message.startswith("SAVE_FAILED:")
+                or message.startswith("PROGRAM_CLOSE_FAILED:")
+                or message.startswith("SESSION_CLOSE_FAILED:")
+                or message.startswith("REMOVE_PROGRAM_FAILED:")
             ):
                 raise RuntimeError(message) from close_error
             raise RuntimeError(f"SESSION_CLOSE_FAILED: {close_error}")

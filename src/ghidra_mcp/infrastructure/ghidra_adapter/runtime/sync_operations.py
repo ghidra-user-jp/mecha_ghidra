@@ -665,8 +665,13 @@ class RuntimeSyncOperations:
         program = session.get_program()
         try:
             return bool(program.isChanged())
-        except Exception:
-            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to determine active program dirty state for target '%s'; assuming changed: %s",
+                name,
+                exc,
+            )
+            return True
 
     def _refresh_active_versioned_program_state_locked(
         self,

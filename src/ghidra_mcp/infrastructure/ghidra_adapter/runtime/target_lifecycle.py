@@ -273,21 +273,42 @@ class RuntimeTargetLifecycle:
     def close_all(self) -> None:
         with self._store.registry_lock.write_lock():
             names = list(self._store.sessions.keys())
+            close_errors: list[tuple[str, Exception]] = []
+            handle_errors: list[tuple[tuple[str, str], Exception]] = []
             for name in names:
                 try:
                     self._close_session_locked(name, remove_program=False)
                 except Exception as close_exc:  # noqa: BLE001
                     logger.warning("failed to close session during close_all for target '%s': %s", name, close_exc)
+                    close_errors.append((name, close_exc))
+                if name not in self._store.sessions:
+                    self._store.locks.pop(name, None)
+                    self._store.target_projects.pop(name, None)
+                    self._store.clear_analyzed_loads_for_target(name)
+                    self._store.clear_dirty_programs_for_target(name)
+
+            for handle in list(self._store.project_handles.values()):
+                if close_errors and self._handle_has_live_sessions_locked(handle):
+                    continue
+                try:
+                    handle.close()
+                except Exception as handle_exc:
+                    logger.warning("failed to close project handle during close_all: %s", handle_exc)
+                    handle_errors.append((handle.get_key(), handle_exc))
+                if handle.is_closed():
+                    self._store.project_handles.pop(handle.get_key(), None)
+
+            if close_errors or handle_errors:
+                parts = [f"{name}: {error}" for name, error in close_errors]
+                parts.extend(f"{key[0]}::{key[1]}: {error}" for key, error in handle_errors)
+                summary = "; ".join(parts)
+                raise RuntimeError(f"CLOSE_ALL_FAILED: failed to close runtime resource(s): {summary}")
+
             self._store.sessions.clear()
             self._store.locks.clear()
             self._store.target_projects.clear()
             self._store.clear_analyzed_loads()
             self._store.clear_dirty_programs()
-            for handle in list(self._store.project_handles.values()):
-                try:
-                    handle.close()
-                except Exception as handle_exc:
-                    logger.warning("failed to close project handle during close_all: %s", handle_exc)
             self._store.project_handles.clear()
             self._store.core_accessor().clear_contexts()
 
@@ -335,6 +356,7 @@ class RuntimeTargetLifecycle:
 
     def _ensure_program_removal_allowed_locked(self, name: str, session, handle) -> None:
         domain_path = self._store.session_domain_path(session)
+        status: dict = {}
         try:
             refresh_project_data = getattr(handle, "refresh_project_data", None)
             if refresh_project_data is not None:
@@ -348,7 +370,25 @@ class RuntimeTargetLifecycle:
                     domain_path,
                     status=status,
                 )
+        except DomainError as exc:
+            details = dict(exc.details or {})
+            details.setdefault("operation", "close_session")
+            details.setdefault("target", name)
+            details.setdefault("domain_path", domain_path)
+            raise DomainError(
+                code=exc.code,
+                message=exc.message,
+                hint=exc.hint,
+                retryable=exc.retryable,
+                details=details,
+            ) from exc
         except Exception as exc:
+            details = {
+                "operation": "close_session",
+                "target": name,
+                "domain_path": domain_path,
+            }
+            details.update(self._sync_status_version_details(status))
             raise DomainError(
                 code=ErrorCode.UNSAFE_PROGRAM_REMOVE,
                 message=(
@@ -357,11 +397,7 @@ class RuntimeTargetLifecycle:
                 ),
                 hint="Close the session without remove_program, then inspect get_project_sync_status",
                 retryable=False,
-                details={
-                    "operation": "close_session",
-                    "target": name,
-                    "domain_path": domain_path,
-                },
+                details=details,
             ) from exc
 
         if status.get("is_versioned"):
@@ -395,13 +431,13 @@ class RuntimeTargetLifecycle:
             return status
         if not status.get("can_add_to_repository"):
             return status
-        if self._active_program_is_changed_locked(name, session, domain_path):
-            raise RuntimeError("LOCAL_CHANGES_EXIST: remove aborted due to local changes")
+        save_before_reopen = self._active_program_is_changed_locked(name, session, domain_path)
         reopened_session = self._reopen_session_for_sync_status_refresh_locked(
             name,
             session,
             handle,
             domain_path,
+            save=save_before_reopen,
         )
         refreshed_handle = reopened_session.get_project_handle()
         return refreshed_handle.get_sync_status(domain_path)
@@ -412,13 +448,15 @@ class RuntimeTargetLifecycle:
         session,
         handle,
         domain_path: str,
+        *,
+        save: bool,
     ):
         project_location = handle.get_project_location()
         project_name = handle.get_project_name()
         active_handle = None
         reopened_session_bound = False
         try:
-            session.close(save=False)
+            session.close(save=save)
             if handle.is_closed():
                 self._store.project_handles.pop(handle.get_key(), None)
             if not handle.is_closed():
@@ -461,8 +499,21 @@ class RuntimeTargetLifecycle:
             return True
         try:
             return bool(session.get_program().isChanged())
-        except Exception:
-            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to determine active program dirty state for target '%s'; assuming changed: %s",
+                name,
+                exc,
+            )
+            return True
+
+    @staticmethod
+    def _sync_status_version_details(status: dict) -> dict[str, object]:
+        details: dict[str, object] = {}
+        for key in ("is_versioned", "version", "latest_version"):
+            if key in status:
+                details[key] = status.get(key)
+        return details
 
     @staticmethod
     def _list_programs_from_metadata_locked(key: tuple[str, str]):

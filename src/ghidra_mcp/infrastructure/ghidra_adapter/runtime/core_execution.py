@@ -142,8 +142,13 @@ class RuntimeCoreExecution:
             return False
         try:
             return bool(session.get_program().isChanged())
-        except Exception:
-            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to determine active program dirty state for target '%s'; assuming changed: %s",
+                target,
+                exc,
+            )
+            return True
 
     def _cleanup_reopenable_target_state_locked(self, target: str, *, handle=None) -> None:  # noqa: ANN001
         self._store.sessions.pop(target, None)

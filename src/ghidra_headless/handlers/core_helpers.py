@@ -75,6 +75,16 @@ def _safe_call(obj, name, *args):
         return None
 
 
+def _required_domain_file_call(domain_file, name):
+    method = getattr(domain_file, name, None)
+    if method is None:
+        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: DomainFile.%s is unavailable" % name)
+    try:
+        return method()
+    except Exception as exc:
+        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.%s: %s" % (name, exc)) from exc
+
+
 def _iter_items(items):
     if items is None:
         return
@@ -212,14 +222,17 @@ def _ensure_checkout_for_versioned_program(ctx):
     program = getattr(ctx, "program", None)
     if program is None:
         return
-    domain_file = _safe_call(program, "getDomainFile")
+    try:
+        domain_file = program.getDomainFile()
+    except Exception as exc:
+        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: failed to resolve DomainFile: %s" % exc)
     if domain_file is None:
         return
 
-    is_versioned = _safe_call(domain_file, "isVersioned")
+    is_versioned = _required_domain_file_call(domain_file, "isVersioned")
     if not bool(is_versioned):
         return
-    is_checked_out = _safe_call(domain_file, "isCheckedOut")
+    is_checked_out = _required_domain_file_call(domain_file, "isCheckedOut")
     if bool(is_checked_out):
         return
     raise RuntimeError(

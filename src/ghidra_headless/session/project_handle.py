@@ -372,21 +372,18 @@ class ProjectHandle:
             if domain_path is None:
                 raise RuntimeError("Failed to resolve path of program to remove")
             domain_key = path_utils._parse_domain_path(self.project, domain_path)
-            save_error = None
-            close_error = None
             remove_error = None
+            project_close_error = None
             try:
                 if save and program is not None:
                     self.save_program(program)
             except Exception as exc:
-                save_error = exc
-                logger.warning("program save failed before close: %s", exc)
+                raise RuntimeError(f"SAVE_FAILED: failed to save program before close: {self._save_error_text(exc)}") from exc
             try:
                 if program is not None:
                     self.project.close(program)
             except Exception as exc:
-                close_error = exc
-                logger.warning("program close failed: %s", exc)
+                raise RuntimeError(f"PROGRAM_CLOSE_FAILED: failed to close program: {exc}") from exc
             if remove_program:
                 try:
                     self._delete_program_locked(domain_path)
@@ -395,22 +392,17 @@ class ProjectHandle:
             self._open_programs.discard(domain_key)
             self._refcount = max(0, self._refcount - 1)
             if self._refcount == 0:
-                self._close_project_locked()
-            if close_error is not None:
-                messages = []
-                if save_error is not None:
-                    messages.append(f"failed to save program before close: {self._save_error_text(save_error)}")
-                messages.append(f"failed to close program: {close_error}")
-                if remove_error is not None:
-                    messages.append(f"failed to remove program: {remove_error}")
-                raise RuntimeError(f"SESSION_CLOSE_FAILED: {'; '.join(messages)}")
-            if save_error is not None:
-                messages = [f"failed to save program before close: {self._save_error_text(save_error)}"]
-                if remove_error is not None:
-                    messages.append(f"failed to remove program: {remove_error}")
-                raise RuntimeError(f"SAVE_FAILED: {'; '.join(messages)}")
+                try:
+                    self._close_project_locked()
+                except Exception as exc:
+                    project_close_error = exc
             if remove_error is not None:
                 raise RuntimeError(f"REMOVE_PROGRAM_FAILED: {remove_error}")
+            if project_close_error is not None:
+                raise RuntimeError(
+                    "SESSION_CLOSE_FAILED: failed to close project: "
+                    f"{self._project_close_error_text(project_close_error)}"
+                ) from project_close_error
 
     def save_program(self, program) -> bool:
         with self._lock:
@@ -457,6 +449,7 @@ class ProjectHandle:
             self.project.close()
         except Exception as exc:
             logger.warning("project close failed: %s", exc)
+            raise RuntimeError(f"PROJECT_CLOSE_FAILED: failed to close project: {exc}") from exc
         self._open_programs.clear()
         self._closed = True
 
@@ -505,6 +498,14 @@ class ProjectHandle:
     def _save_error_text(exc: Exception) -> str:
         text = str(exc)
         prefix = "SAVE_FAILED: failed to save program: "
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+        return text
+
+    @staticmethod
+    def _project_close_error_text(exc: Exception) -> str:
+        text = str(exc)
+        prefix = "PROJECT_CLOSE_FAILED: failed to close project: "
         if text.startswith(prefix):
             return text[len(prefix) :]
         return text
@@ -677,25 +678,31 @@ class ProjectHandle:
         if compiler_spec_id is not None:
             builder = builder.compiler(compiler_spec_id)
 
-        loader_option_args = self._resolve_binary_loader_args_locked(builder)
         loader_args = {
             "Base Address": base_address,
             "File Offset": file_offset,
             "Length": length,
             "Block Name": block_name,
         }
+        requested_loader_options = {option_name for option_name, value in loader_args.items() if value is not None}
+        if overlay:
+            requested_loader_options.add("Overlay")
+        loader_option_args = self._resolve_binary_loader_args_locked(
+            builder,
+            required_options=requested_loader_options,
+        )
         for option_name, value in loader_args.items():
             if value is None:
                 continue
             option_arg = loader_option_args.get(option_name)
             if option_arg is None:
-                logger.debug("binary loader option is unavailable in this environment: %s", option_name)
-                continue
+                raise RuntimeError(f"RAW_LOADER_OPTION_UNAVAILABLE: {option_name}")
             builder = builder.addLoaderArg(option_arg, str(value))
         if overlay:
             option_arg = loader_option_args.get("Overlay")
-            if option_arg is not None:
-                builder = builder.addLoaderArg(option_arg, "true")
+            if option_arg is None:
+                raise RuntimeError("RAW_LOADER_OPTION_UNAVAILABLE: Overlay")
+            builder = builder.addLoaderArg(option_arg, "true")
 
         load_results = builder.load()
         try:
@@ -804,7 +811,13 @@ class ProjectHandle:
             raise RuntimeError("Program has no default address space")
         return address_space.getAddress(int(value))
 
-    def _resolve_binary_loader_args_locked(self, builder) -> dict[str, str]:
+    def _resolve_binary_loader_args_locked(
+        self,
+        builder,
+        *,
+        required_options: set[str] | None = None,
+    ) -> dict[str, str]:
+        required_options = required_options or set()
         fallback = {
             "Base Address": "Base Address",
             "File Offset": "File Offset",
@@ -834,9 +847,12 @@ class ProjectHandle:
                 close = getattr(provider, "close", None)
                 if close is not None:
                     close()
-            resolved = dict(fallback)
             if options is None:
-                return resolved
+                if required_options:
+                    requested = ", ".join(sorted(required_options))
+                    raise RuntimeError(f"failed to resolve BinaryLoader option metadata for: {requested}")
+                return dict(fallback)
+            resolved = {} if required_options else dict(fallback)
             for option in options:
                 option_name = option.getName()
                 option_arg = option.getArg()
@@ -845,6 +861,8 @@ class ProjectHandle:
                 resolved[str(option_name)] = str(option_arg)
             return resolved
         except Exception as exc:
+            if required_options:
+                raise RuntimeError(f"RAW_LOADER_OPTION_UNAVAILABLE: failed to resolve BinaryLoader options: {exc}") from exc
             logger.debug("failed to resolve binary loader option args; using fallback names: %s", exc)
             return fallback
 

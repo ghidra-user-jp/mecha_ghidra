@@ -631,8 +631,6 @@ def test_all_output_models_are_strict_and_typed():
         "decompile_function": str,
         "decompile_function_by_address": str,
         "get_bytes": str,
-        "load_project_program": str,
-        "import_program": str,
     }
     direct_output_fields = tool_spec_module._DIRECT_OUTPUT_FIELDS  # noqa: SLF001
 

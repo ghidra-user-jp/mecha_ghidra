@@ -142,7 +142,7 @@ def test_save_program_surfaces_save_failed(monkeypatch):
         handle.save_program(program)
 
 
-def test_close_surfaces_save_failed_after_closing_program(monkeypatch):
+def test_close_surfaces_save_failed_without_closing_program(monkeypatch):
     handle = build_handle(monkeypatch)
 
     class FailingSaveProject(DummyProject):
@@ -156,15 +156,15 @@ def test_close_surfaces_save_failed_after_closing_program(monkeypatch):
     with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save program before close: disk full"):
         opened.close()
 
-    with pytest.raises(RuntimeError, match="Session is already closed"):
-        opened.get_program()
+    assert opened.get_program() is program
     assert handle.project.saved == []
-    assert handle.project.closed == [program, None]
-    assert handle._open_programs == set()
-    assert handle._refcount == 0
+    assert handle.project.closed == []
+    assert handle._open_programs == {("/folder", "app")}
+    assert handle._refcount == 1
+    assert handle.is_closed() is False
 
 
-def test_close_surfaces_close_failed_and_marks_session_closed(monkeypatch):
+def test_close_surfaces_close_failed_without_closing_session(monkeypatch):
     handle = build_handle(monkeypatch)
 
     class FailingCloseProject(DummyProject):
@@ -177,15 +177,56 @@ def test_close_surfaces_close_failed_and_marks_session_closed(monkeypatch):
     opened = handle.open_program("/folder/app")
     program = opened.get_program()
 
-    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED: failed to close program: close failed"):
+    with pytest.raises(RuntimeError, match="PROGRAM_CLOSE_FAILED: failed to close program: close failed"):
+        opened.close()
+
+    assert opened.get_program() is program
+    assert handle.is_closed() is False
+    assert handle.project.closed == [program]
+    assert handle._open_programs == {("/folder", "app")}
+    assert handle._refcount == 1
+
+
+def test_close_surfaces_project_close_failed_after_closing_session(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class FailingProjectClose(DummyProject):
+        def close(self, program=None):
+            super().close(program)
+            if program is None:
+                raise RuntimeError("project close failed")
+
+    handle.project = FailingProjectClose()
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+
+    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED: failed to close project: project close failed"):
         opened.close()
 
     with pytest.raises(RuntimeError, match="Session is already closed"):
         opened.get_program()
-    assert handle.is_closed() is True
+    assert handle.is_closed() is False
     assert handle.project.closed == [program, None]
     assert handle._open_programs == set()
     assert handle._refcount == 0
+
+
+def test_project_close_failure_keeps_handle_open(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class FailingProjectClose(DummyProject):
+        def close(self, program=None):
+            super().close(program)
+            if program is None:
+                raise RuntimeError("project close failed")
+
+    handle.project = FailingProjectClose()
+
+    with pytest.raises(RuntimeError, match="PROJECT_CLOSE_FAILED: failed to close project: project close failed"):
+        handle.close()
+
+    assert handle.is_closed() is False
+    assert handle.project.closed == [None]
 
 
 def test_close_skips_save_for_clean_program(monkeypatch):
@@ -1144,6 +1185,17 @@ def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
 
     fake_builder = FakeBuilder()
     monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", lambda: fake_builder, raising=False)
+    monkeypatch.setattr(
+        handle,
+        "_resolve_binary_loader_args_locked",
+        lambda _builder, *, required_options=None: {
+            "Base Address": "Base Address",
+            "File Offset": "File Offset",
+            "Length": "Length",
+            "Block Name": "Block Name",
+            "Overlay": "Overlay",
+        },
+    )
     handle.project = RawImportProject()
 
     domain_file = handle.import_program(
@@ -1176,6 +1228,115 @@ def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
         ("load", None),
     ]
     assert fake_builder.load_results.closed is True
+
+
+def test_import_program_raw_binary_rejects_unavailable_loader_option(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "shellcode.bin"
+    binary_path.write_bytes(b"\x90\xc3")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class RawImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+    class FakeBuilder:
+        def project(self, _value):
+            return self
+
+        def projectFolderPath(self, _value):
+            return self
+
+        def source(self, _value):
+            return self
+
+        def name(self, _value):
+            return self
+
+        def loaders(self, _value):
+            return self
+
+        def language(self, _value):
+            return self
+
+        def addLoaderArg(self, _key, _value):
+            return self
+
+        def load(self):
+            pytest.fail("raw import should fail before load when requested option is unavailable")
+
+    monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", FakeBuilder, raising=False)
+    monkeypatch.setattr(
+        handle,
+        "_resolve_binary_loader_args_locked",
+        lambda _builder, *, required_options=None: {
+            "File Offset": "File Offset",
+            "Length": "Length",
+            "Block Name": "Block Name",
+            "Overlay": "Overlay",
+        },
+    )
+    handle.project = RawImportProject()
+
+    with pytest.raises(RuntimeError, match="RAW_LOADER_OPTION_UNAVAILABLE: Base Address"):
+        handle.import_program(
+            str(binary_path),
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            base_address="0x401000",
+            analyze_imported=False,
+        )
+
+
+def test_import_program_raw_binary_rejects_unresolved_loader_options(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "shellcode.bin"
+    binary_path.write_bytes(b"\x90\xc3")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class RawImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+    class FakeBuilder:
+        def project(self, _value):
+            return self
+
+        def projectFolderPath(self, _value):
+            return self
+
+        def source(self, _value):
+            return self
+
+        def name(self, _value):
+            return self
+
+        def loaders(self, _value):
+            return self
+
+        def language(self, _value):
+            return self
+
+        def load(self):
+            pytest.fail("raw import should fail before load when loader option metadata is unavailable")
+
+    monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", FakeBuilder, raising=False)
+    handle.project = RawImportProject()
+
+    with pytest.raises(RuntimeError, match="RAW_LOADER_OPTION_UNAVAILABLE: failed to resolve BinaryLoader options"):
+        handle.import_program(
+            str(binary_path),
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            base_address="0x401000",
+            analyze_imported=False,
+        )
 
 
 def test_post_process_imported_program_bootstraps_entry_and_analysis(monkeypatch):
