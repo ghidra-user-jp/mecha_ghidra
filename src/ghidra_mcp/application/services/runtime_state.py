@@ -16,6 +16,7 @@ class RuntimeState:
     normalize_result: Callable[[Any], Any]
     sessions: dict[str, Any] = field(default_factory=dict)
     locks: dict[str, threading.RLock] = field(default_factory=dict)
+    project_locks: dict[tuple[str, str], threading.RLock] = field(default_factory=dict)
     target_projects: dict[str, tuple[str, str]] = field(default_factory=dict)
     project_handles: dict[tuple[str, str], Any] = field(default_factory=dict)
     analyzed_loads: set[tuple[str, str]] = field(default_factory=set)

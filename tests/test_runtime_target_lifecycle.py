@@ -362,6 +362,14 @@ class _ImportCloseFailureHandle(_FakeProjectHandle):
         )
 
 
+class _ImportFailureCleanupCloseHandle(_FakeProjectHandle):
+    def import_program(self, binary_path: str, **kwargs):  # noqa: ARG002
+        raise RuntimeError(
+            "PROGRAM_CLOSE_FAILED: failed to close raw import results after import failure "
+            "for /tmp/sample.bin: close failed; original error: import failed"
+        )
+
+
 def _build_target_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -480,6 +488,44 @@ def test_target_lifecycle_import_close_failure_exposes_imported_domain_path(
         "partial_import": True,
         "imported_domain_path": "/sample.bin",
     }
+
+
+def test_target_lifecycle_import_failure_cleanup_close_is_not_partial_import(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, _store, _core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_ImportFailureCleanupCloseHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+
+    with pytest.raises(DomainError) as exc_info:
+        lifecycle.import_program("fw", "/tmp/sample.bin")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.OPERATION_FAILED
+    assert err.details == {
+        "operation": "import_program",
+        "target": "fw",
+        "binary_path": "/tmp/sample.bin",
+        "partial_import": False,
+        "cleanup_error": True,
+    }
+
+
+def test_target_lifecycle_create_session_does_not_use_registry_bound_handle_open(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+
+    def fail_registry_bound_open(*_args, **_kwargs):
+        raise AssertionError("create_session must open ProjectHandle outside the registry lock")
+
+    monkeypatch.setattr(store, "get_or_create_project_handle", fail_registry_bound_open)
+
+    session = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    assert session is store.sessions["fw"]
 
 
 def test_target_lifecycle_remove_failure_restores_session_for_retry(monkeypatch: pytest.MonkeyPatch):

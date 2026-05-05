@@ -1212,6 +1212,32 @@ def test_checkout_already_checked_out_does_not_reload_dirty_loaded_owner(monkeyp
     assert core.initialized == []
 
 
+def test_cross_target_sync_uses_project_lock_without_nested_active_target_lock(monkeypatch: pytest.MonkeyPatch):
+    sync, store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_UnversionedAddableHandle)
+    assert isinstance(handle, _UnversionedAddableHandle)
+    store.locks["fw-shadow"] = threading.RLock()
+    store.target_projects["fw-shadow"] = handle.get_key()
+
+    original_ensure_lock = store.ensure_lock
+
+    def ensure_lock(name: str):
+        if name == "fw":
+            raise AssertionError("cross-target sync must not take the active target lock after caller lock")
+        return original_ensure_lock(name)
+
+    monkeypatch.setattr(store, "ensure_lock", ensure_lock)
+
+    result = sync.add_project_program_to_version_control(
+        "fw-shadow",
+        "initial import",
+        domain_path="/main",
+    )
+
+    assert result["status"] == "ok"
+    assert handle.add_calls == 1
+    assert handle.get_key() in store.project_locks
+
+
 def test_reload_reopen_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatch):
     sync, store, core, handle = _build_sync_runtime(monkeypatch)
     handle.fail_reopen = True

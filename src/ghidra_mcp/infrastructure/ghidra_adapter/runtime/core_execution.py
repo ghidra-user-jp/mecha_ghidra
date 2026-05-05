@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any, Dict
 
@@ -28,15 +29,20 @@ class RuntimeCoreExecution:
         params: Dict[str, Any] | None = None,
         target: str = "default",
     ) -> Any:
-        registry_lock = (
-            self._store.registry_lock.write_lock()
-            if command in self._checkout_required_commands
-            else self._store.registry_lock.read_lock()
-        )
-        with registry_lock:
-            self._store.ensure_session(target)
+        with self._store.registry_lock.write_lock():
+            session = self._store.ensure_session(target)
             lock = self._store.ensure_lock(target)
-            with lock:
+            project_key = self._store.target_projects.get(target)
+            if project_key is None:
+                get_key = getattr(session.get_project_handle(), "get_key", None)
+                if get_key is not None:
+                    project_key = get_key()
+                    self._store.target_projects[target] = project_key
+            project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
+
+        with lock:
+            lock_context = project_lock if project_lock is not None else contextlib.nullcontext()
+            with lock_context:
                 self._ensure_checkout_for_mutating_command_locked(command, target)
                 result = self._store.core_accessor().execute(command, params or {}, key=target)
                 if command in self._checkout_required_commands:

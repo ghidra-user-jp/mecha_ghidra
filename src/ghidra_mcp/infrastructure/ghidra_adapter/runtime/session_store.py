@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Optional
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
@@ -18,6 +19,7 @@ class RuntimeSessionStore:
         self.core_accessor = core_accessor
         self.sessions = state.sessions
         self.locks = state.locks
+        self.project_locks = state.project_locks
         self.target_projects = state.target_projects
         self.project_handles = state.project_handles
         self.analyzed_loads = state.analyzed_loads
@@ -40,6 +42,13 @@ class RuntimeSessionStore:
             return self.locks[name]
         except KeyError:
             raise RuntimeError(f"Session '{name}' is not initialized")
+
+    def ensure_project_lock(self, key: tuple[str, str]) -> threading.RLock:
+        lock = self.project_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            self.project_locks[key] = lock
+        return lock
 
     def get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
         key = ProjectHandle.make_key(project_location, project_name)

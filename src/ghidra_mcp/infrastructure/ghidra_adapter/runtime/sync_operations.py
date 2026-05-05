@@ -25,8 +25,11 @@ class RuntimeSyncOperations:
     def _target_operation(self, name: str) -> Iterator[None]:
         with self._store.registry_lock.write_lock():
             lock = self._store.ensure_lock(name)
+            project_key = self._store.get_target_project_key_locked(name)
+            project_lock = self._store.ensure_project_lock(project_key)
         with lock:
-            yield
+            with project_lock:
+                yield
 
     def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         with self._target_operation(name):
@@ -682,24 +685,33 @@ class RuntimeSyncOperations:
         )
         return True
 
-    def _reload_active_program_after_checkout_locked(self, name: str, domain_path: str) -> None:
+    def _reload_active_program_after_checkout_locked(
+        self,
+        name: str,
+        domain_path: str,
+        *,
+        remove_target_lock_on_cleanup: bool = True,
+    ) -> None:
         if not self._is_active_domain_path_locked(name, domain_path):
             return
         self._run_with_reopened_program_locked(
             name,
             operation=lambda _active_handle, _active_domain_path: None,
             save_before_close=False,
+            remove_target_lock_on_cleanup=remove_target_lock_on_cleanup,
         )
 
     def _reload_loaded_target_after_checkout_locked(self, *, handle: ProjectHandle, domain_path: str) -> None:
         loaded_target = self._find_loaded_target_locked(handle=handle, domain_path=domain_path)
         if loaded_target is None:
             return
-        lock = self._store.ensure_lock(loaded_target)
-        with lock:
-            if self._find_loaded_target_locked(handle=handle, domain_path=domain_path) != loaded_target:
-                return
-            self._reload_active_program_after_checkout_locked(loaded_target, domain_path)
+        if self._find_loaded_target_locked(handle=handle, domain_path=domain_path) != loaded_target:
+            return
+        self._reload_active_program_after_checkout_locked(
+            loaded_target,
+            domain_path,
+            remove_target_lock_on_cleanup=False,
+        )
 
     @staticmethod
     def _refresh_project_sync_state_locked(handle: ProjectHandle, *, required: bool = False) -> bool:
@@ -719,18 +731,17 @@ class RuntimeSyncOperations:
         loaded_target = self._find_loaded_target_locked(handle=handle, domain_path=domain_path)
         if loaded_target is None:
             return False
-        lock = self._store.ensure_lock(loaded_target)
-        with lock:
-            if self._find_loaded_target_locked(handle=handle, domain_path=domain_path) != loaded_target:
-                return False
-            if self._active_program_is_changed_locked(loaded_target, domain_path):
-                raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
-            self._run_with_reopened_program_locked(
-                loaded_target,
-                operation=lambda _active_handle, _active_domain_path: None,
-                save_before_close=False,
-            )
-            return True
+        if self._find_loaded_target_locked(handle=handle, domain_path=domain_path) != loaded_target:
+            return False
+        if self._active_program_is_changed_locked(loaded_target, domain_path):
+            raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
+        self._run_with_reopened_program_locked(
+            loaded_target,
+            operation=lambda _active_handle, _active_domain_path: None,
+            save_before_close=False,
+            remove_target_lock_on_cleanup=False,
+        )
+        return True
 
     def _handle_commit_conflict_locked(
         self,
@@ -807,7 +818,9 @@ class RuntimeSyncOperations:
 
     def _find_loaded_target_locked(self, *, handle: ProjectHandle, domain_path: str) -> str | None:
         requested_key = handle.get_key()
-        for target_name, session in self._store.sessions.items():
+        with self._store.registry_lock.read_lock():
+            sessions = list(self._store.sessions.items())
+        for target_name, session in sessions:
             try:
                 session_handle = session.get_project_handle()
                 session_domain_path = self._store.session_domain_path(session)
@@ -898,15 +911,14 @@ class RuntimeSyncOperations:
         active_target = self._find_loaded_target_locked(handle=handle, domain_path=domain_path)
         if active_target is None:
             return operation(handle, domain_path)
-        lock = self._store.ensure_lock(active_target)
-        with lock:
-            return self._run_with_reopened_program_locked(
-                active_target,
-                operation=operation,
-                save_before_close=save_before_close,
-                reopen_domain_path_resolver=reopen_domain_path_resolver,
-                preserve_none_operation_completion=True,
-            )
+        return self._run_with_reopened_program_locked(
+            active_target,
+            operation=operation,
+            save_before_close=save_before_close,
+            reopen_domain_path_resolver=reopen_domain_path_resolver,
+            preserve_none_operation_completion=True,
+            remove_target_lock_on_cleanup=active_target == name,
+        )
 
     def _run_with_reopened_program_locked(
         self,
@@ -916,6 +928,7 @@ class RuntimeSyncOperations:
         save_before_close: bool,
         reopen_domain_path_resolver=None,
         preserve_none_operation_completion: bool = False,
+        remove_target_lock_on_cleanup: bool = True,
     ):
         session = self._store.ensure_session(name)
         handle = session.get_project_handle()
@@ -983,7 +996,11 @@ class RuntimeSyncOperations:
 
             if exc.code == ErrorCode.REOPEN_FAILED:
                 if not reopened_session_bound:
-                    self._cleanup_reopenable_target_state_locked(name, handle=handle)
+                    self._cleanup_reopenable_target_state_locked(
+                        name,
+                        handle=handle,
+                        remove_target_lock=remove_target_lock_on_cleanup,
+                    )
                 details = exc.details or {}
                 operation_error = details.get("operation_error")
                 if operation_error:
@@ -999,12 +1016,23 @@ class RuntimeSyncOperations:
             raise RuntimeError(str(exc)) from exc
         except Exception:
             if not reopened_session_bound and self._session_is_closed(session):
-                self._cleanup_reopenable_target_state_locked(name, handle=handle)
+                self._cleanup_reopenable_target_state_locked(
+                    name,
+                    handle=handle,
+                    remove_target_lock=remove_target_lock_on_cleanup,
+                )
             raise
 
-    def _cleanup_reopenable_target_state_locked(self, name: str, *, handle: ProjectHandle | None = None) -> None:
+    def _cleanup_reopenable_target_state_locked(
+        self,
+        name: str,
+        *,
+        handle: ProjectHandle | None = None,
+        remove_target_lock: bool = True,
+    ) -> None:
         self._store.sessions.pop(name, None)
-        self._store.locks.pop(name, None)
+        if remove_target_lock:
+            self._store.locks.pop(name, None)
         self._store.target_projects.pop(name, None)
         self._store.clear_analyzed_loads_for_target(name)
         self._store.clear_dirty_programs_for_target(name)

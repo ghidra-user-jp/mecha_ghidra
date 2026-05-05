@@ -35,8 +35,35 @@ class RuntimeTargetLifecycle:
     def _target_operation(self, name: str, *, create: bool = False) -> Iterator[None]:
         with self._store.registry_lock.write_lock():
             lock = self._store.locks.setdefault(name, threading.RLock()) if create else self._store.ensure_lock(name)
+            project_key = self._store.target_projects.get(name)
+            if project_key is None and name in self._store.sessions:
+                project_key = self._store.sessions[name].get_project_handle().get_key()
+                self._store.target_projects[name] = project_key
+            project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
         with lock:
-            yield
+            if project_lock is None:
+                yield
+            else:
+                with project_lock:
+                    yield
+
+    def _get_or_create_project_handle_outside_registry(self, key: tuple[str, str]) -> ProjectHandle:
+        with self._store.registry_lock.write_lock():
+            handle = self._store.project_handles.get(key)
+            if handle is not None and not handle.is_closed():
+                return handle
+
+        handle = ProjectHandle(key[0], key[1])
+        with self._store.registry_lock.write_lock():
+            current = self._store.project_handles.get(key)
+            if current is None or current.is_closed():
+                self._store.project_handles[key] = handle
+                return handle
+        try:
+            handle.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("failed to close duplicate project handle for %s::%s: %s", key[0], key[1], exc)
+        return current
 
     def create_session(
         self,
@@ -46,6 +73,7 @@ class RuntimeTargetLifecycle:
         project_name: str | None = None,
         domain_path: str | None = None,
     ) -> ProgramSession:
+        project_key = ProjectHandle.make_key(project_location, project_name)
         handle: ProjectHandle | None = None
         session: ProgramSession | None = None
         with self._store.registry_lock.write_lock():
@@ -55,59 +83,56 @@ class RuntimeTargetLifecycle:
             previous_target_key = self._store.target_projects.get(name)
             had_lock = name in self._store.locks
             lock = self._store.locks.setdefault(name, threading.RLock())
-            try:
-                handle = self._store.get_or_create_project_handle(project_location, project_name)
-            except Exception:
-                if not had_lock:
-                    self._store.locks.pop(name, None)
-                raise
-            self._store.target_projects[name] = handle.get_key()
+            project_lock = self._store.ensure_project_lock(project_key)
+            self._store.target_projects[name] = project_key
 
         with lock:
-            with self._store.registry_lock.write_lock():
-                if name in self._store.sessions:
-                    if had_target and previous_target_key is not None:
-                        self._store.target_projects[name] = previous_target_key
-                    else:
-                        self._store.target_projects.pop(name, None)
-                    if not had_lock:
-                        self._store.locks.pop(name, None)
-                    raise ValueError(f"Session '{name}' already exists")
-            try:
-                session = handle.open_program(domain_path)
-                self._initialize_opened_session_locked(
-                    name=name,
-                    session=session,
-                )
+            with project_lock:
                 with self._store.registry_lock.write_lock():
-                    self._store.sessions[name] = session
-                return session
-            except Exception as operation_error:  # noqa: BLE001
-                with self._store.registry_lock.write_lock():
-                    self._store.sessions.pop(name, None)
-                rollback_error = None
-                if handle is not None:
-                    rollback_error = self._cleanup_failed_create_session_locked(
+                    if name in self._store.sessions:
+                        if had_target and previous_target_key is not None:
+                            self._store.target_projects[name] = previous_target_key
+                        else:
+                            self._store.target_projects.pop(name, None)
+                        if not had_lock:
+                            self._store.locks.pop(name, None)
+                        raise ValueError(f"Session '{name}' already exists")
+                try:
+                    handle = self._get_or_create_project_handle_outside_registry(project_key)
+                    session = handle.open_program(domain_path)
+                    self._initialize_opened_session_locked(
                         name=name,
                         session=session,
-                        handle=handle,
                     )
-                if rollback_error is not None:
-                    logger.warning(
-                        "failed to rollback session close during create_session for target '%s': %s",
-                        name,
-                        rollback_error,
-                    )
-                with self._store.registry_lock.write_lock():
-                    if had_target and previous_target_key is not None:
-                        self._store.target_projects[name] = previous_target_key
-                    else:
-                        self._store.target_projects.pop(name, None)
-                    if not had_lock:
-                        self._store.locks.pop(name, None)
-                if rollback_error is not None:
-                    raise rollback_error from operation_error
-                raise
+                    with self._store.registry_lock.write_lock():
+                        self._store.sessions[name] = session
+                    return session
+                except Exception as operation_error:  # noqa: BLE001
+                    with self._store.registry_lock.write_lock():
+                        self._store.sessions.pop(name, None)
+                    rollback_error = None
+                    if handle is not None:
+                        rollback_error = self._cleanup_failed_create_session_locked(
+                            name=name,
+                            session=session,
+                            handle=handle,
+                        )
+                    if rollback_error is not None:
+                        logger.warning(
+                            "failed to rollback session close during create_session for target '%s': %s",
+                            name,
+                            rollback_error,
+                        )
+                    with self._store.registry_lock.write_lock():
+                        if had_target and previous_target_key is not None:
+                            self._store.target_projects[name] = previous_target_key
+                        else:
+                            self._store.target_projects.pop(name, None)
+                        if not had_lock:
+                            self._store.locks.pop(name, None)
+                    if rollback_error is not None:
+                        raise rollback_error from operation_error
+                    raise
 
     def register_target(
         self,
@@ -360,6 +385,7 @@ class RuntimeTargetLifecycle:
 
             self._store.sessions.clear()
             self._store.locks.clear()
+            self._store.project_locks.clear()
             self._store.target_projects.clear()
             self._store.clear_analyzed_loads()
             self._store.clear_dirty_programs()
@@ -925,7 +951,8 @@ class RuntimeTargetLifecycle:
                 imported_domain_path = match.group("path")
                 break
 
-        partial_import = not message.startswith("IMPORT_POST_PROCESS_FAILED: rolled back imported program")
+        rollback_deleted = message.startswith("IMPORT_POST_PROCESS_FAILED: rolled back imported program")
+        partial_import = imported_domain_path is not None and not rollback_deleted
         details: dict[str, object] = {
             "operation": "import_program",
             "target": target,
@@ -934,8 +961,10 @@ class RuntimeTargetLifecycle:
         }
         if imported_domain_path is not None:
             details["imported_domain_path"] = imported_domain_path
-        if not partial_import:
+        if rollback_deleted:
             details["rollback_deleted"] = True
+        elif not partial_import:
+            details["cleanup_error"] = True
 
         return DomainError(
             code=ErrorCode.OPERATION_FAILED,
