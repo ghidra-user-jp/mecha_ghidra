@@ -705,6 +705,24 @@ def test_pull_discard_reopen_failure_exposes_completed_operation_result(monkeypa
     assert core.removed == ["fw"]
 
 
+def test_add_to_version_control_reopen_failure_exposes_none_result_completion(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_UnversionedAddableHandle,
+        session_cls=_ClosingSession,
+    )
+    handle.fail_reopen = True
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.add_project_program_to_version_control("fw", "initial import", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.details == {"operation_completed": True, "partial_success": True}
+    assert "fw" not in store.sessions
+    assert core.removed == ["fw"]
+
+
 def test_pull_abort_unsaved_active_changes_does_not_try_to_save(monkeypatch: pytest.MonkeyPatch):
     sync, _store, _core, handle = _build_sync_runtime(
         monkeypatch,

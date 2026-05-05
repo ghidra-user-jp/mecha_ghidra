@@ -355,6 +355,13 @@ class _OpenFailsAndProjectCloseFailsHandle(_FailingProjectCloseHandle):
         raise RuntimeError("open failed after partial resource")
 
 
+class _ImportCloseFailureHandle(_FakeProjectHandle):
+    def import_program(self, binary_path: str, **kwargs):  # noqa: ARG002
+        raise RuntimeError(
+            "IMPORT_CLOSE_FAILED: imported program /sample.bin but failed to close after post-processing: close failed"
+        )
+
+
 def _build_target_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -452,6 +459,29 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     assert core.removed == ["fw"]
 
 
+def test_target_lifecycle_import_close_failure_exposes_imported_domain_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, _store, _core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_ImportCloseFailureHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+
+    with pytest.raises(DomainError) as exc_info:
+        lifecycle.import_program("fw", "/tmp/sample.bin")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.OPERATION_FAILED
+    assert err.details == {
+        "operation": "import_program",
+        "target": "fw",
+        "binary_path": "/tmp/sample.bin",
+        "partial_import": True,
+        "imported_domain_path": "/sample.bin",
+    }
+
+
 def test_target_lifecycle_remove_failure_restores_session_for_retry(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
@@ -474,6 +504,39 @@ def test_target_lifecycle_remove_failure_restores_session_for_retry(monkeypatch:
     assert core.contexts == {"fw": "/main"}
     assert core.removed == []
     assert failing.closed_with == [(True, True)]
+
+
+def test_target_lifecycle_remove_restore_close_failure_preserves_restored_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(
+        monkeypatch,
+        core=core,
+        handle_cls=_NeverVersionedFailingCloseOnReopenProjectHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    created = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = created.get_project_handle()
+    handle.sync_status["can_add_to_repository"] = False
+    failing = _RemoveFailedClosedSession(handle, "/main", created.flat_api)
+    store.sessions["fw"] = failing
+
+    def fail_initialize(_program, key):  # noqa: ANN001, ARG001
+        raise RuntimeError("initialize failed")
+
+    core.initialize = fail_initialize
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROGRAM_CLOSE_FAILED: failed to close restored session during remove-failure recovery",
+    ):
+        lifecycle.close_session("fw", remove_program=True)
+
+    assert store.sessions["fw"] is handle.opened_sessions[-1]
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
+    assert "fw" in store.locks
+    assert core.contexts == {"fw": "/main"}
 
 
 def test_target_lifecycle_refuses_to_remove_versioned_program(monkeypatch: pytest.MonkeyPatch):

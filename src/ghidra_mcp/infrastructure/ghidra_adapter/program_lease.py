@@ -47,9 +47,8 @@ class ProgramLease:
             if operation_error is not None:
                 details = {"operation_error": str(operation_error)}
             elif operation_completed:
-                details = {"operation_completed": True}
+                details = {"operation_completed": True, "partial_success": True}
                 if result is not None:
-                    details["partial_success"] = True
                     details["operation_result"] = result
             raise DomainError(
                 code=ErrorCode.REOPEN_FAILED,

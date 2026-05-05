@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import pathlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, Dict
 
 from ghidra_mcp.domain import DomainError, ErrorCode
@@ -20,19 +21,24 @@ class RuntimeSyncOperations:
     def __init__(self, *, store: RuntimeSessionStore) -> None:
         self._store = store
 
-    def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
+    @contextlib.contextmanager
+    def _target_operation(self, name: str) -> Iterator[None]:
         with self._store.registry_lock.write_lock():
             lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path)
-                status = self._overlay_active_program_sync_status_locked(
-                    active_target,
-                    resolved_domain_path,
-                    status=status,
-                )
-                return {"target": name, "program": resolved_domain_path, **status}
+        with lock:
+            yield
+
+    def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path)
+            status = self._overlay_active_program_sync_status_locked(
+                active_target,
+                resolved_domain_path,
+                status=status,
+            )
+            return {"target": name, "program": resolved_domain_path, **status}
 
     def checkout_project_program(
         self,
@@ -41,52 +47,50 @@ class RuntimeSyncOperations:
         exclusive: bool = False,
         domain_path: str | None = None,
     ) -> Dict[str, Any]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+            if active_target is not None and not status.get("is_versioned"):
+                self._refresh_loaded_target_sync_state_locked(
+                    handle=handle,
+                    domain_path=resolved_domain_path,
+                )
+                handle = self._store.get_target_handle_locked(name)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
-                if active_target is not None and not status.get("is_versioned"):
-                    self._refresh_loaded_target_sync_state_locked(
+                status = handle.get_sync_status(resolved_domain_path)
+            self._ensure_versioned_project(status)
+            if status.get("is_checked_out"):
+                if active_target is not None and not self._active_program_is_changed_locked(
+                    active_target,
+                    resolved_domain_path,
+                ):
+                    self._reload_loaded_target_after_checkout_locked(
                         handle=handle,
                         domain_path=resolved_domain_path,
                     )
-                    handle = self._store.get_target_handle_locked(name)
-                    active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                    status = handle.get_sync_status(resolved_domain_path)
-                self._ensure_versioned_project(status)
-                if status.get("is_checked_out"):
-                    if active_target is not None and not self._active_program_is_changed_locked(
-                        active_target,
-                        resolved_domain_path,
-                    ):
-                        self._reload_loaded_target_after_checkout_locked(
-                            handle=handle,
-                            domain_path=resolved_domain_path,
-                        )
-                    return {
-                        "status": "ok",
-                        "target": name,
-                        "program": resolved_domain_path,
-                        "checked_out": True,
-                        "already_checked_out": True,
-                        "exclusive": bool(status.get("is_checked_out_exclusive")),
-                    }
-                if active_target is not None and self._active_program_is_changed_locked(active_target, resolved_domain_path):
-                    raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
-                checked_out = handle.checkout_program(resolved_domain_path, exclusive=exclusive)
-                if checked_out:
-                    self._store.clear_dirty_program(name, resolved_domain_path)
-                    self._reload_loaded_target_after_checkout_locked(handle=handle, domain_path=resolved_domain_path)
                 return {
                     "status": "ok",
                     "target": name,
                     "program": resolved_domain_path,
-                    "checked_out": bool(checked_out),
-                    "already_checked_out": False,
-                    "exclusive": bool(exclusive),
+                    "checked_out": True,
+                    "already_checked_out": True,
+                    "exclusive": bool(status.get("is_checked_out_exclusive")),
                 }
+            if active_target is not None and self._active_program_is_changed_locked(active_target, resolved_domain_path):
+                raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
+            checked_out = handle.checkout_program(resolved_domain_path, exclusive=exclusive)
+            if checked_out:
+                self._store.clear_dirty_program(name, resolved_domain_path)
+                self._reload_loaded_target_after_checkout_locked(handle=handle, domain_path=resolved_domain_path)
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "checked_out": bool(checked_out),
+                "already_checked_out": False,
+                "exclusive": bool(exclusive),
+            }
 
     def add_project_program_to_version_control(
         self,
@@ -99,43 +103,41 @@ class RuntimeSyncOperations:
         text = (comment or "").strip()
         if not text:
             raise ValueError("comment is required")
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
-                if status.get("is_versioned"):
-                    return {
-                        "status": "noop",
-                        "reason": "already_versioned",
-                        "target": name,
-                        "program": resolved_domain_path,
-                        "version": status.get("version"),
-                    }
-                if not status.get("can_add_to_repository"):
-                    raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControl is not allowed")
-
-                self._run_sync_operation_for_domain_locked(
-                    name,
-                    resolved_domain_path,
-                    operation=lambda active_handle, active_domain_path: active_handle.add_program_to_version_control(
-                        active_domain_path,
-                        text,
-                        keep_checked_out=keep_checked_out,
-                    ),
-                    save_before_close=True,
-                )
-                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+            if status.get("is_versioned"):
                 return {
-                    "status": "ok",
+                    "status": "noop",
+                    "reason": "already_versioned",
                     "target": name,
                     "program": resolved_domain_path,
-                    "is_versioned": bool(updated.get("is_versioned")),
-                    "version": updated.get("version"),
-                    "latest_version": updated.get("latest_version"),
-                    "checked_out": bool(updated.get("is_checked_out")),
-                    "effective_keep_checked_out": bool(updated.get("is_checked_out")),
+                    "version": status.get("version"),
                 }
+            if not status.get("can_add_to_repository"):
+                raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControl is not allowed")
+
+            self._run_sync_operation_for_domain_locked(
+                name,
+                resolved_domain_path,
+                operation=lambda active_handle, active_domain_path: active_handle.add_program_to_version_control(
+                    active_domain_path,
+                    text,
+                    keep_checked_out=keep_checked_out,
+                ),
+                save_before_close=True,
+            )
+            updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "is_versioned": bool(updated.get("is_versioned")),
+                "version": updated.get("version"),
+                "latest_version": updated.get("latest_version"),
+                "checked_out": bool(updated.get("is_checked_out")),
+                "effective_keep_checked_out": bool(updated.get("is_checked_out")),
+            }
 
     def commit_project_program(
         self,
@@ -153,139 +155,137 @@ class RuntimeSyncOperations:
         conflict_action = (on_conflict or "abort").strip().lower()
         if conflict_action not in {"abort", "discard"}:
             raise ValueError("on_conflict must be either 'abort' or 'discard'")
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+
+            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+            if active_target is not None and not status.get("is_versioned"):
+                self._refresh_loaded_target_sync_state_locked(
+                    handle=handle,
+                    domain_path=resolved_domain_path,
+                )
+                handle = self._store.get_target_handle_locked(name)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-
-                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
-                if active_target is not None and not status.get("is_versioned"):
-                    self._refresh_loaded_target_sync_state_locked(
-                        handle=handle,
-                        domain_path=resolved_domain_path,
-                    )
-                    handle = self._store.get_target_handle_locked(name)
-                    active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                    status = handle.get_sync_status(resolved_domain_path)
-                if not status.get("is_versioned") and status.get("can_add_to_repository"):
-                    return {
-                        "status": "noop",
-                        "reason": "not_versioned",
-                        "target": name,
-                        "program": resolved_domain_path,
-                        "required_action": "add_project_program_to_version_control",
-                        "can_add_to_repository": True,
-                        "message": (
-                            "Program is not under version control; "
-                            "run add_project_program_to_version_control before commit_project_program."
-                        ),
-                    }
-                self._ensure_versioned_project(status)
-                status = self._overlay_active_program_sync_status_locked(
-                    active_target,
-                    resolved_domain_path,
-                    status=status,
-                )
-                if not status.get("is_checked_out"):
-                    if auto_checkout and status.get("can_checkout"):
-                        if active_target is not None and self._active_program_is_changed_locked(
-                            active_target,
-                            resolved_domain_path,
-                        ):
-                            raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
-                        checked_out = handle.checkout_program(resolved_domain_path, exclusive=False)
-                        if checked_out:
-                            self._reload_loaded_target_after_checkout_locked(
-                                handle=handle,
-                                domain_path=resolved_domain_path,
-                            )
-                            handle = self._store.get_target_handle_locked(name)
-                        status = handle.get_sync_status(resolved_domain_path)
-                        status = self._overlay_active_program_sync_status_locked(
-                            active_target,
-                            resolved_domain_path,
-                            status=status,
-                        )
-                        if not status.get("is_checked_out"):
-                            if not checked_out:
-                                raise RuntimeError("AUTO_CHECKOUT_FAILED: checkout failed")
-                            raise RuntimeError("AUTO_CHECKOUT_FAILED: post-checkout state verification failed")
-                    else:
-                        raise RuntimeError("NOT_CHECKED_OUT: program is not checked out")
-
-                conflict_result = self._handle_commit_conflict_locked(
-                    name,
-                    resolved_domain_path,
-                    active_target=active_target,
-                    status=status,
-                    conflict_action=conflict_action,
-                )
-                if conflict_result is not None:
-                    return conflict_result
-
-                saved_active_program = False
-                if active_target is not None:
-                    saved_active_program = self._save_active_program_if_needed_locked(
+                status = handle.get_sync_status(resolved_domain_path)
+            if not status.get("is_versioned") and status.get("can_add_to_repository"):
+                return {
+                    "status": "noop",
+                    "reason": "not_versioned",
+                    "target": name,
+                    "program": resolved_domain_path,
+                    "required_action": "add_project_program_to_version_control",
+                    "can_add_to_repository": True,
+                    "message": (
+                        "Program is not under version control; "
+                        "run add_project_program_to_version_control before commit_project_program."
+                    ),
+                }
+            self._ensure_versioned_project(status)
+            status = self._overlay_active_program_sync_status_locked(
+                active_target,
+                resolved_domain_path,
+                status=status,
+            )
+            if not status.get("is_checked_out"):
+                if auto_checkout and status.get("can_checkout"):
+                    if active_target is not None and self._active_program_is_changed_locked(
                         active_target,
                         resolved_domain_path,
-                        handle=handle,
-                    )
-                    if self._refresh_active_versioned_program_state_locked(
+                    ):
+                        raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
+                    checked_out = handle.checkout_program(resolved_domain_path, exclusive=False)
+                    if checked_out:
+                        self._reload_loaded_target_after_checkout_locked(
+                            handle=handle,
+                            domain_path=resolved_domain_path,
+                        )
+                        handle = self._store.get_target_handle_locked(name)
+                    status = handle.get_sync_status(resolved_domain_path)
+                    status = self._overlay_active_program_sync_status_locked(
                         active_target,
                         resolved_domain_path,
                         status=status,
-                        save_before_close=False,
-                        force=saved_active_program,
-                    ):
-                        handle = self._store.get_target_handle_locked(name)
-                status = handle.get_sync_status(resolved_domain_path)
-                status = self._overlay_active_program_sync_status_locked(
+                    )
+                    if not status.get("is_checked_out"):
+                        if not checked_out:
+                            raise RuntimeError("AUTO_CHECKOUT_FAILED: checkout failed")
+                        raise RuntimeError("AUTO_CHECKOUT_FAILED: post-checkout state verification failed")
+                else:
+                    raise RuntimeError("NOT_CHECKED_OUT: program is not checked out")
+
+            conflict_result = self._handle_commit_conflict_locked(
+                name,
+                resolved_domain_path,
+                active_target=active_target,
+                status=status,
+                conflict_action=conflict_action,
+            )
+            if conflict_result is not None:
+                return conflict_result
+
+            saved_active_program = False
+            if active_target is not None:
+                saved_active_program = self._save_active_program_if_needed_locked(
+                    active_target,
+                    resolved_domain_path,
+                    handle=handle,
+                )
+                if self._refresh_active_versioned_program_state_locked(
                     active_target,
                     resolved_domain_path,
                     status=status,
-                )
-                conflict_result = self._handle_commit_conflict_locked(
-                    name,
-                    resolved_domain_path,
-                    active_target=active_target,
-                    status=status,
-                    conflict_action=conflict_action,
-                )
-                if conflict_result is not None:
-                    return conflict_result
-                if not status.get("can_checkin"):
-                    if not status.get("modified_since_checkout"):
-                        return {
-                            "status": "noop",
-                            "reason": "not_modified",
-                            "target": name,
-                            "program": resolved_domain_path,
-                            "checked_out": bool(status.get("is_checked_out")),
-                            "version": status.get("version"),
-                        }
-                    raise RuntimeError("CHECKIN_NOT_ALLOWED: checkin is not allowed")
+                    save_before_close=False,
+                    force=saved_active_program,
+                ):
+                    handle = self._store.get_target_handle_locked(name)
+            status = handle.get_sync_status(resolved_domain_path)
+            status = self._overlay_active_program_sync_status_locked(
+                active_target,
+                resolved_domain_path,
+                status=status,
+            )
+            conflict_result = self._handle_commit_conflict_locked(
+                name,
+                resolved_domain_path,
+                active_target=active_target,
+                status=status,
+                conflict_action=conflict_action,
+            )
+            if conflict_result is not None:
+                return conflict_result
+            if not status.get("can_checkin"):
+                if not status.get("modified_since_checkout"):
+                    return {
+                        "status": "noop",
+                        "reason": "not_modified",
+                        "target": name,
+                        "program": resolved_domain_path,
+                        "checked_out": bool(status.get("is_checked_out")),
+                        "version": status.get("version"),
+                    }
+                raise RuntimeError("CHECKIN_NOT_ALLOWED: checkin is not allowed")
 
-                self._run_sync_operation_for_domain_locked(
-                    name,
-                    resolved_domain_path,
-                    operation=lambda active_handle, active_domain_path: active_handle.commit_program(
-                        active_domain_path,
-                        text,
-                        keep_checked_out=keep_checked_out,
-                    ),
-                    save_before_close=True,
-                )
-                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
-                return {
-                    "status": "ok",
-                    "target": name,
-                    "program": resolved_domain_path,
-                    "new_version": updated.get("version"),
-                    "checked_out": bool(updated.get("is_checked_out")),
-                    "effective_keep_checked_out": bool(updated.get("is_checked_out")),
-                    "is_latest_version": bool(updated.get("is_latest_version")),
-                }
+            self._run_sync_operation_for_domain_locked(
+                name,
+                resolved_domain_path,
+                operation=lambda active_handle, active_domain_path: active_handle.commit_program(
+                    active_domain_path,
+                    text,
+                    keep_checked_out=keep_checked_out,
+                ),
+                save_before_close=True,
+            )
+            updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "new_version": updated.get("version"),
+                "checked_out": bool(updated.get("is_checked_out")),
+                "effective_keep_checked_out": bool(updated.get("is_checked_out")),
+                "is_latest_version": bool(updated.get("is_latest_version")),
+            }
 
     def pull_project_program(
         self,
@@ -297,62 +297,58 @@ class RuntimeSyncOperations:
         normalized = (on_local_changes or "abort").strip().lower()
         if normalized not in {"abort", "discard"}:
             raise ValueError("on_local_changes must be either 'abort' or 'discard'")
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
-                self._ensure_versioned_project(status)
-                status = self._overlay_active_program_sync_status_locked(
-                    active_target,
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+            self._ensure_versioned_project(status)
+            status = self._overlay_active_program_sync_status_locked(
+                active_target,
+                resolved_domain_path,
+                status=status,
+            )
+
+            if status.get("modified_since_checkout") and normalized == "abort":
+                raise RuntimeError("LOCAL_CHANGES_EXIST: pull aborted due to local changes")
+
+            needs_operation = bool(status.get("modified_since_checkout")) or bool(status.get("can_merge"))
+            discarded_unsaved_active_changes = (
+                normalized == "discard"
+                and active_target is not None
+                and self._active_program_is_changed_locked(active_target, resolved_domain_path)
+            )
+            action = {
+                "discarded_local_changes": False,
+                "merged": False,
+                "followed_latest": False,
+            }
+            if needs_operation:
+                action = self._run_sync_operation_for_domain_locked(
+                    name,
                     resolved_domain_path,
-                    status=status,
-                )
-
-                if status.get("modified_since_checkout") and normalized == "abort":
-                    raise RuntimeError("LOCAL_CHANGES_EXIST: pull aborted due to local changes")
-
-                needs_operation = bool(status.get("modified_since_checkout")) or bool(status.get("can_merge"))
-                discarded_unsaved_active_changes = (
-                    normalized == "discard"
-                    and active_target is not None
-                    and self._active_program_is_changed_locked(active_target, resolved_domain_path)
-                )
-                action = {
-                    "discarded_local_changes": False,
-                    "merged": False,
-                    "followed_latest": False,
-                }
-                if needs_operation:
-                    action = self._run_sync_operation_for_domain_locked(
-                        name,
-                        resolved_domain_path,
-                        operation=lambda active_handle, active_domain_path: self._pull_operation(
-                            active_handle,
-                            active_domain_path,
-                            on_local_changes=normalized,
-                        ),
-                        save_before_close=False,
-                    )
-                    if discarded_unsaved_active_changes:
-                        action["discarded_local_changes"] = True
-
-                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
-                return {
-                    "status": "ok",
-                    "target": name,
-                    "program": resolved_domain_path,
-                    "updated": bool(
-                        action["merged"] or action["discarded_local_changes"] or action["followed_latest"]
+                    operation=lambda active_handle, active_domain_path: self._pull_operation(
+                        active_handle,
+                        active_domain_path,
+                        on_local_changes=normalized,
                     ),
-                    "merged": bool(action["merged"]),
-                    "discarded_local_changes": bool(action["discarded_local_changes"]),
-                    "followed_latest": bool(action["followed_latest"]),
-                    "version": updated.get("version"),
-                    "latest_version": updated.get("latest_version"),
-                    "is_latest_version": bool(updated.get("is_latest_version")),
-                }
+                    save_before_close=False,
+                )
+                if discarded_unsaved_active_changes:
+                    action["discarded_local_changes"] = True
+
+            updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "updated": bool(action["merged"] or action["discarded_local_changes"] or action["followed_latest"]),
+                "merged": bool(action["merged"]),
+                "discarded_local_changes": bool(action["discarded_local_changes"]),
+                "followed_latest": bool(action["followed_latest"]),
+                "version": updated.get("version"),
+                "latest_version": updated.get("latest_version"),
+                "is_latest_version": bool(updated.get("is_latest_version")),
+            }
 
     def undo_checkout_project_program(
         self,
@@ -361,72 +357,70 @@ class RuntimeSyncOperations:
         discard_local_changes: bool = True,
         domain_path: str | None = None,
     ) -> Dict[str, Any]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
-                self._ensure_versioned_project(status)
-                status = self._overlay_active_program_sync_status_locked(
-                    active_target,
-                    resolved_domain_path,
-                    status=status,
-                )
-                if not status.get("is_checked_out"):
-                    return {
-                        "status": "noop",
-                        "reason": "not_checked_out",
-                        "target": name,
-                        "program": resolved_domain_path,
-                    }
-
-                keep = not bool(discard_local_changes)
-                was_active = active_target is not None
-                keep_path_resolver: Callable[[ProjectHandle, str], str] | None = None
-                if keep and was_active and (
-                    bool(status.get("modified_since_checkout"))
-                    or self._active_program_is_changed_locked(active_target, resolved_domain_path)
-                ):
-                    # Ghidra only creates a .keep file when there are local changes to preserve.
-                    existing_program_paths = self._list_program_paths_locked(handle)
-
-                    def resolve_keep_path(active_handle, active_domain_path):  # noqa: ANN001
-                        return self._resolve_new_keep_domain_path(
-                            active_handle,
-                            active_domain_path,
-                            existing_program_paths,
-                        )
-
-                    keep_path_resolver = resolve_keep_path
-
-                self._run_sync_operation_for_domain_locked(
-                    name,
-                    resolved_domain_path,
-                    operation=lambda active_handle, active_domain_path: active_handle.undo_checkout_program(
-                        active_domain_path,
-                        keep=keep,
-                    ),
-                    save_before_close=keep,
-                    reopen_domain_path_resolver=keep_path_resolver,
-                )
-                self._store.clear_dirty_program(name, resolved_domain_path)
-                updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
-                result = {
-                    "status": "ok",
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+            self._ensure_versioned_project(status)
+            status = self._overlay_active_program_sync_status_locked(
+                active_target,
+                resolved_domain_path,
+                status=status,
+            )
+            if not status.get("is_checked_out"):
+                return {
+                    "status": "noop",
+                    "reason": "not_checked_out",
                     "target": name,
                     "program": resolved_domain_path,
-                    "checked_out": bool(updated.get("is_checked_out")),
-                    "version": updated.get("version"),
-                    "is_latest_version": bool(updated.get("is_latest_version")),
                 }
-                if keep and was_active:
-                    session = self._store.sessions.get(active_target)
-                    if session is not None:
-                        active_domain_path = self._store.session_domain_path(session)
-                        if active_domain_path != resolved_domain_path:
-                            result["kept_program"] = active_domain_path
-                return result
+
+            keep = not bool(discard_local_changes)
+            was_active = active_target is not None
+            keep_path_resolver: Callable[[ProjectHandle, str], str] | None = None
+            if keep and was_active and (
+                bool(status.get("modified_since_checkout"))
+                or self._active_program_is_changed_locked(active_target, resolved_domain_path)
+            ):
+                # Ghidra only creates a .keep file when there are local changes to preserve.
+                existing_program_paths = self._list_program_paths_locked(handle)
+
+                def resolve_keep_path(active_handle, active_domain_path):  # noqa: ANN001
+                    return self._resolve_new_keep_domain_path(
+                        active_handle,
+                        active_domain_path,
+                        existing_program_paths,
+                    )
+
+                keep_path_resolver = resolve_keep_path
+
+            self._run_sync_operation_for_domain_locked(
+                name,
+                resolved_domain_path,
+                operation=lambda active_handle, active_domain_path: active_handle.undo_checkout_program(
+                    active_domain_path,
+                    keep=keep,
+                ),
+                save_before_close=keep,
+                reopen_domain_path_resolver=keep_path_resolver,
+            )
+            self._store.clear_dirty_program(name, resolved_domain_path)
+            updated = self._current_sync_status_locked(name, domain_path=resolved_domain_path)
+            result = {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "checked_out": bool(updated.get("is_checked_out")),
+                "version": updated.get("version"),
+                "is_latest_version": bool(updated.get("is_latest_version")),
+            }
+            if keep and was_active:
+                session = self._store.sessions.get(active_target)
+                if session is not None:
+                    active_domain_path = self._store.session_domain_path(session)
+                    if active_domain_path != resolved_domain_path:
+                        result["kept_program"] = active_domain_path
+            return result
 
     def terminate_project_program_checkout(
         self,
@@ -435,29 +429,27 @@ class RuntimeSyncOperations:
         *,
         domain_path: str | None = None,
     ) -> Dict[str, Any]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
-                self._ensure_versioned_project(status)
-                active_checkout_status = status.get("checkout_status") or {}
-                active_checkout_id = active_checkout_status.get("checkout_id")
-                is_local_checkout = active_checkout_id is not None and int(active_checkout_id) == int(checkout_id)
-                if is_local_checkout:
-                    raise RuntimeError(
-                        "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: terminating the active checkout would hijack the local file; "
-                        "use undo_checkout_project_program instead"
-                    )
-                handle.terminate_checkout_program(resolved_domain_path, checkout_id)
-                updated = handle.get_sync_status(resolved_domain_path)
-                return {
-                    "status": "ok",
-                    "target": name,
-                    "program": resolved_domain_path,
-                    "checkout_id": int(checkout_id),
-                    "active_checkouts": updated.get("checkouts"),
-                }
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
+            self._ensure_versioned_project(status)
+            active_checkout_status = status.get("checkout_status") or {}
+            active_checkout_id = active_checkout_status.get("checkout_id")
+            is_local_checkout = active_checkout_id is not None and int(active_checkout_id) == int(checkout_id)
+            if is_local_checkout:
+                raise RuntimeError(
+                    "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: terminating the active checkout would hijack the local file; "
+                    "use undo_checkout_project_program instead"
+                )
+            handle.terminate_checkout_program(resolved_domain_path, checkout_id)
+            updated = handle.get_sync_status(resolved_domain_path)
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "checkout_id": int(checkout_id),
+                "active_checkouts": updated.get("checkouts"),
+            }
 
     def delete_shared_project_file(
         self,
@@ -470,108 +462,104 @@ class RuntimeSyncOperations:
     ) -> Dict[str, Any]:
         if not (domain_path or "").strip():
             raise ValueError("domain_path is required")
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle = self._store.get_target_handle_locked(name)
-                resolved_domain_path = self._normalize_domain_path_locked(handle, domain_path)
-                confirmation = (confirm or "").strip()
-                if confirmation != resolved_domain_path:
-                    raise ValueError(
-                        "confirm must exactly match the normalized domain_path "
-                        f"({resolved_domain_path})"
+        with self._target_operation(name):
+            handle = self._store.get_target_handle_locked(name)
+            resolved_domain_path = self._normalize_domain_path_locked(handle, domain_path)
+            confirmation = (confirm or "").strip()
+            if confirmation != resolved_domain_path:
+                raise ValueError(
+                    "confirm must exactly match the normalized domain_path "
+                    f"({resolved_domain_path})"
+                )
+
+            active_target = self._find_loaded_target_locked(
+                handle=handle,
+                domain_path=resolved_domain_path,
+            )
+            if active_target is not None:
+                details = {
+                    "operation": "delete_shared_project_file",
+                    "target": name,
+                    "domain_path": resolved_domain_path,
+                }
+                if active_target != name:
+                    details["owner_target"] = active_target
+                raise DomainError(
+                    code=ErrorCode.TARGET_ALREADY_LOADED,
+                    message=f"TARGET_ALREADY_LOADED: program already loaded: {resolved_domain_path}",
+                    hint="Close the loaded target before deleting the shared project file",
+                    retryable=False,
+                    details=details,
+                )
+
+            status = self._get_refreshed_sync_status_locked(
+                handle,
+                resolved_domain_path,
+                require_refresh=True,
+            )
+            was_versioned = bool(status.get("is_versioned"))
+            latest_version = status.get("latest_version")
+            version = status.get("version")
+            if expected_latest_version is not None:
+                expected = int(expected_latest_version)
+                if expected < 1:
+                    raise ValueError("expected_latest_version must be >= 1")
+                if latest_version is None or int(latest_version) != expected:
+                    raise RuntimeError(
+                        "LATEST_VERSION_MISMATCH: delete aborted because latest_version "
+                        f"is {latest_version}, expected {expected}"
                     )
 
-                active_target = self._find_loaded_target_locked(
-                    handle=handle,
-                    domain_path=resolved_domain_path,
+            self._ensure_delete_allowed(status, allow_private=allow_private)
+            delete_result = handle.delete_domain_file(resolved_domain_path)
+            self._store.clear_dirty_program(name, resolved_domain_path)
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "domain_path": resolved_domain_path,
+                "deleted": True,
+                "content_type": delete_result.get("content_type"),
+                "was_versioned": was_versioned,
+                "version": version,
+                "latest_version": latest_version,
+            }
+
+    def reload_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            if self._is_active_domain_path_locked(name, resolved_domain_path):
+                save_before_close = self._active_program_is_changed_locked(name, resolved_domain_path)
+                self._run_with_reopened_program_locked(
+                    name,
+                    operation=lambda _active_handle, _active_domain_path: None,
+                    save_before_close=save_before_close,
                 )
-                if active_target is not None:
+            else:
+                owner_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
+                if owner_target is not None:
                     details = {
-                        "operation": "delete_shared_project_file",
+                        "operation": "reload_project_program",
                         "target": name,
                         "domain_path": resolved_domain_path,
                     }
-                    if active_target != name:
-                        details["owner_target"] = active_target
+                    if owner_target != name:
+                        details["owner_target"] = owner_target
                     raise DomainError(
                         code=ErrorCode.TARGET_ALREADY_LOADED,
                         message=f"TARGET_ALREADY_LOADED: program already loaded: {resolved_domain_path}",
-                        hint="Close the loaded target before deleting the shared project file",
+                        hint="Use the existing target directly instead of reloading the same program",
                         retryable=False,
                         details=details,
                     )
-
-                status = self._get_refreshed_sync_status_locked(
-                    handle,
-                    resolved_domain_path,
-                    require_refresh=True,
-                )
-                was_versioned = bool(status.get("is_versioned"))
-                latest_version = status.get("latest_version")
-                version = status.get("version")
-                if expected_latest_version is not None:
-                    expected = int(expected_latest_version)
-                    if expected < 1:
-                        raise ValueError("expected_latest_version must be >= 1")
-                    if latest_version is None or int(latest_version) != expected:
-                        raise RuntimeError(
-                            "LATEST_VERSION_MISMATCH: delete aborted because latest_version "
-                            f"is {latest_version}, expected {expected}"
-                        )
-
-                self._ensure_delete_allowed(status, allow_private=allow_private)
-                delete_result = handle.delete_domain_file(resolved_domain_path)
-                self._store.clear_dirty_program(name, resolved_domain_path)
-                return {
-                    "status": "ok",
-                    "target": name,
-                    "program": resolved_domain_path,
-                    "domain_path": resolved_domain_path,
-                    "deleted": True,
-                    "content_type": delete_result.get("content_type"),
-                    "was_versioned": was_versioned,
-                    "version": version,
-                    "latest_version": latest_version,
-                }
-
-    def reload_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                if self._is_active_domain_path_locked(name, resolved_domain_path):
-                    save_before_close = self._active_program_is_changed_locked(name, resolved_domain_path)
-                    self._run_with_reopened_program_locked(
-                        name,
-                        operation=lambda _active_handle, _active_domain_path: None,
-                        save_before_close=save_before_close,
-                    )
-                else:
-                    owner_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-                    if owner_target is not None:
-                        details = {
-                            "operation": "reload_project_program",
-                            "target": name,
-                            "domain_path": resolved_domain_path,
-                        }
-                        if owner_target != name:
-                            details["owner_target"] = owner_target
-                        raise DomainError(
-                            code=ErrorCode.TARGET_ALREADY_LOADED,
-                            message=f"TARGET_ALREADY_LOADED: program already loaded: {resolved_domain_path}",
-                            hint="Use the existing target directly instead of reloading the same program",
-                            retryable=False,
-                            details=details,
-                        )
-                    temporary_session = handle.open_program(resolved_domain_path)
-                    temporary_session.close()
-                return {
-                    "status": "ok",
-                    "target": name,
-                    "program": resolved_domain_path,
-                    "reloaded": True,
-                }
+                temporary_session = handle.open_program(resolved_domain_path)
+                temporary_session.close()
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "reloaded": True,
+            }
 
     def get_version_history(
         self,
@@ -580,17 +568,15 @@ class RuntimeSyncOperations:
         domain_path: str | None = None,
         limit: int = 50,
     ) -> Dict[str, Any]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
-                history = handle.get_version_history(resolved_domain_path, limit=limit)
-                return {
-                    "target": name,
-                    "program": resolved_domain_path,
-                    **history,
-                }
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
+            history = handle.get_version_history(resolved_domain_path, limit=limit)
+            return {
+                "target": name,
+                "program": resolved_domain_path,
+                **history,
+            }
 
     def get_version_diff(
         self,
@@ -601,22 +587,20 @@ class RuntimeSyncOperations:
         domain_path: str | None = None,
         range_limit: int = 200,
     ) -> Dict[str, Any]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            with lock:
-                handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-                self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
-                diff = handle.get_version_diff(
-                    resolved_domain_path,
-                    from_version=from_version,
-                    to_version=to_version,
-                    range_limit=range_limit,
-                )
-                return {
-                    "target": name,
-                    "program": resolved_domain_path,
-                    **diff,
-                }
+        with self._target_operation(name):
+            handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
+            self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
+            diff = handle.get_version_diff(
+                resolved_domain_path,
+                from_version=from_version,
+                to_version=to_version,
+                range_limit=range_limit,
+            )
+            return {
+                "target": name,
+                "program": resolved_domain_path,
+                **diff,
+            }
 
     def _current_sync_status_locked(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
@@ -921,6 +905,7 @@ class RuntimeSyncOperations:
                 operation=operation,
                 save_before_close=save_before_close,
                 reopen_domain_path_resolver=reopen_domain_path_resolver,
+                preserve_none_operation_completion=True,
             )
 
     def _run_with_reopened_program_locked(
@@ -930,6 +915,7 @@ class RuntimeSyncOperations:
         *,
         save_before_close: bool,
         reopen_domain_path_resolver=None,
+        preserve_none_operation_completion: bool = False,
     ):
         session = self._store.ensure_session(name)
         handle = session.get_project_handle()
@@ -1004,7 +990,9 @@ class RuntimeSyncOperations:
                     raise RuntimeError(
                         f"SYNC_OPERATION_FAILED: {operation_error}; REOPEN_FAILED: {exc.message}"
                     ) from exc
-                if "operation_result" in details:
+                if "operation_result" in details or (
+                    preserve_none_operation_completion and details.get("operation_completed")
+                ):
                     raise exc
                 raise RuntimeError(f"REOPEN_FAILED: {exc.message}") from exc
 

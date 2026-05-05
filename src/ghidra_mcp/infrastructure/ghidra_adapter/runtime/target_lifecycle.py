@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import pathlib
+import re
 import threading
+from collections.abc import Iterator
 from typing import Dict, List, Optional
 
 from ghidra_mcp.domain import DomainError, ErrorCode
@@ -15,10 +18,25 @@ from .session_store import RuntimeSessionStore
 
 logger = logging.getLogger(__name__)
 
+_IMPORT_DOMAIN_PATH_PATTERNS = (
+    re.compile(r"IMPORT_CLOSE_FAILED: imported program (?P<path>/.*?) but "),
+    re.compile(r"IMPORT_POST_PROCESS_FAILED: imported program (?P<path>/.*?) but "),
+    re.compile(r"IMPORT_POST_PROCESS_FAILED: rolled back imported program (?P<path>/.*?) after "),
+    re.compile(r"PROGRAM_CLOSE_FAILED: failed to close imported program (?P<path>/.*?): "),
+    re.compile(r"PROGRAM_CLOSE_FAILED: failed to close raw import results for imported program (?P<path>/.*?): "),
+)
+
 
 class RuntimeTargetLifecycle:
     def __init__(self, *, store: RuntimeSessionStore) -> None:
         self._store = store
+
+    @contextlib.contextmanager
+    def _target_operation(self, name: str, *, create: bool = False) -> Iterator[None]:
+        with self._store.registry_lock.write_lock():
+            lock = self._store.locks.setdefault(name, threading.RLock()) if create else self._store.ensure_lock(name)
+        with lock:
+            yield
 
     def create_session(
         self,
@@ -33,24 +51,40 @@ class RuntimeTargetLifecycle:
         with self._store.registry_lock.write_lock():
             if name in self._store.sessions:
                 raise ValueError(f"Session '{name}' already exists")
-
-            handle = self._store.get_or_create_project_handle(project_location, project_name)
             had_target = name in self._store.target_projects
             previous_target_key = self._store.target_projects.get(name)
             had_lock = name in self._store.locks
+            lock = self._store.locks.setdefault(name, threading.RLock())
+            try:
+                handle = self._store.get_or_create_project_handle(project_location, project_name)
+            except Exception:
+                if not had_lock:
+                    self._store.locks.pop(name, None)
+                raise
             self._store.target_projects[name] = handle.get_key()
 
+        with lock:
+            with self._store.registry_lock.write_lock():
+                if name in self._store.sessions:
+                    if had_target and previous_target_key is not None:
+                        self._store.target_projects[name] = previous_target_key
+                    else:
+                        self._store.target_projects.pop(name, None)
+                    if not had_lock:
+                        self._store.locks.pop(name, None)
+                    raise ValueError(f"Session '{name}' already exists")
             try:
                 session = handle.open_program(domain_path)
                 self._initialize_opened_session_locked(
                     name=name,
                     session=session,
                 )
-                self._store.locks.setdefault(name, threading.RLock())
-                self._store.sessions[name] = session
+                with self._store.registry_lock.write_lock():
+                    self._store.sessions[name] = session
                 return session
             except Exception as operation_error:  # noqa: BLE001
-                self._store.sessions.pop(name, None)
+                with self._store.registry_lock.write_lock():
+                    self._store.sessions.pop(name, None)
                 rollback_error = None
                 if handle is not None:
                     rollback_error = self._cleanup_failed_create_session_locked(
@@ -64,12 +98,13 @@ class RuntimeTargetLifecycle:
                         name,
                         rollback_error,
                     )
-                if had_target and previous_target_key is not None:
-                    self._store.target_projects[name] = previous_target_key
-                else:
-                    self._store.target_projects.pop(name, None)
-                if not had_lock:
-                    self._store.locks.pop(name, None)
+                with self._store.registry_lock.write_lock():
+                    if had_target and previous_target_key is not None:
+                        self._store.target_projects[name] = previous_target_key
+                    else:
+                        self._store.target_projects.pop(name, None)
+                    if not had_lock:
+                        self._store.locks.pop(name, None)
                 if rollback_error is not None:
                     raise rollback_error from operation_error
                 raise
@@ -153,35 +188,36 @@ class RuntimeTargetLifecycle:
         name: str,
         domain_path: str,
     ) -> str:
-        with self._store.registry_lock.write_lock():
-            if not domain_path:
-                raise ValueError("domain_path is required")
-            handle = self._store.get_target_handle_locked(name)
-            normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
-            owner_target = self._find_loaded_target_locked(handle=handle, domain_path=normalized_domain_path)
-            if owner_target is not None:
-                details = {
-                    "operation": "load_program",
-                    "target": name,
-                    "domain_path": normalized_domain_path,
-                }
-                if owner_target != name:
-                    details["owner_target"] = owner_target
-                raise DomainError(
-                    code=ErrorCode.TARGET_ALREADY_LOADED,
-                    message=f"TARGET_ALREADY_LOADED: program already loaded: {normalized_domain_path}",
-                    hint="Use the existing target directly instead of reloading the same program",
-                    retryable=False,
-                    details=details,
-                )
+        if not domain_path:
+            raise ValueError("domain_path is required")
+        with self._target_operation(name):
+            with self._store.registry_lock.write_lock():
+                handle = self._store.get_target_handle_locked(name)
+                normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
+                owner_target = self._find_loaded_target_locked(handle=handle, domain_path=normalized_domain_path)
+                if owner_target is not None:
+                    details = {
+                        "operation": "load_program",
+                        "target": name,
+                        "domain_path": normalized_domain_path,
+                    }
+                    if owner_target != name:
+                        details["owner_target"] = owner_target
+                    raise DomainError(
+                        code=ErrorCode.TARGET_ALREADY_LOADED,
+                        message=f"TARGET_ALREADY_LOADED: program already loaded: {normalized_domain_path}",
+                        hint="Use the existing target directly instead of reloading the same program",
+                        retryable=False,
+                        details=details,
+                    )
 
-            old_session = self._store.sessions.get(name)
-            old_domain_path = None
-            if old_session is not None:
-                try:
-                    old_domain_path = self._store.session_domain_path(old_session)
-                except Exception:
-                    old_domain_path = None
+                old_session = self._store.sessions.get(name)
+                old_domain_path = None
+                if old_session is not None:
+                    try:
+                        old_domain_path = self._store.session_domain_path(old_session)
+                    except Exception:
+                        old_domain_path = None
             new_session = handle.open_program(normalized_domain_path)
             try:
                 loaded_domain_path = self._initialize_opened_session_locked(
@@ -197,8 +233,9 @@ class RuntimeTargetLifecycle:
                 )
                 raise
 
-            self._store.locks.setdefault(name, threading.RLock())
-            self._store.target_projects[name] = handle.get_key()
+            with self._store.registry_lock.write_lock():
+                self._store.locks.setdefault(name, threading.RLock())
+                self._store.target_projects[name] = handle.get_key()
             try:
                 if old_session is not None:
                     old_session.close()
@@ -213,18 +250,20 @@ class RuntimeTargetLifecycle:
                 )
                 raise
 
-            self._store.sessions[name] = new_session
-            if old_domain_path is not None:
-                self._store.clear_dirty_program(name, old_domain_path)
-            if handle.is_closed():
-                self._store.project_handles.pop(handle.get_key(), None)
+            with self._store.registry_lock.write_lock():
+                self._store.sessions[name] = new_session
+                if old_domain_path is not None:
+                    self._store.clear_dirty_program(name, old_domain_path)
+                if handle.is_closed():
+                    self._store.project_handles.pop(handle.get_key(), None)
             return loaded_domain_path
 
     def import_program(self, name: str, binary_path: str, **kwargs) -> str:
-        with self._store.registry_lock.write_lock():
-            if not binary_path:
-                raise ValueError("binary_path is required")
-            handle = self._store.get_target_handle_locked(name)
+        if not binary_path:
+            raise ValueError("binary_path is required")
+        with self._target_operation(name):
+            with self._store.registry_lock.write_lock():
+                handle = self._store.get_target_handle_locked(name)
             binary = pathlib.Path(binary_path)
             existing_domain_path = self._existing_imported_program_path_locked(handle, binary)
             if existing_domain_path is not None:
@@ -240,15 +279,27 @@ class RuntimeTargetLifecycle:
                         "existing_domain_path": existing_domain_path,
                     },
                 )
-            domain_file = handle.import_program(binary_path, **kwargs)
-            self._store.target_projects[name] = handle.get_key()
+            try:
+                domain_file = handle.import_program(binary_path, **kwargs)
+            except Exception as exc:
+                mapped = self._partial_import_error(
+                    exc,
+                    target=name,
+                    binary_path=binary_path,
+                )
+                if mapped is not None:
+                    raise mapped from exc
+                raise
+            with self._store.registry_lock.write_lock():
+                self._store.target_projects[name] = handle.get_key()
             return domain_file.getPathname()
 
     def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, object]:
-        with self._store.registry_lock.write_lock():
-            session = self._store.ensure_session(name)
-            handle = session.get_project_handle()
-            active_domain_path = self._store.session_domain_path(session)
+        with self._target_operation(name):
+            with self._store.registry_lock.write_lock():
+                session = self._store.ensure_session(name)
+                handle = session.get_project_handle()
+                active_domain_path = self._store.session_domain_path(session)
             requested_domain_path = (domain_path or "").strip()
             resolved_domain_path = active_domain_path
             if requested_domain_path:
@@ -260,7 +311,8 @@ class RuntimeTargetLifecycle:
                     )
 
             saved = handle.save_program(session.get_program())
-            self._store.clear_dirty_program(name, resolved_domain_path)
+            with self._store.registry_lock.write_lock():
+                self._store.clear_dirty_program(name, resolved_domain_path)
             return {
                 "status": "ok",
                 "target": name,
@@ -269,7 +321,7 @@ class RuntimeTargetLifecycle:
             }
 
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
-        with self._store.registry_lock.write_lock():
+        with self._target_operation(name):
             self._close_session_locked(name, remove_program=remove_program)
 
     def close_all(self) -> None:
@@ -355,13 +407,14 @@ class RuntimeTargetLifecycle:
                 domain_path=domain_path,
             )
             if restore_error is not None:
-                self._store.sessions.pop(name, None)
+                restored_session = self._store.sessions.get(name)
                 self._store.target_projects[name] = project_key
                 self._store.locks.setdefault(name, threading.RLock())
-                try:
-                    self._store.core_accessor().remove_context(name)
-                except Exception as remove_exc:  # noqa: BLE001
-                    logger.warning("failed to remove context while preserving target '%s': %s", name, remove_exc)
+                if restored_session is None:
+                    try:
+                        self._store.core_accessor().remove_context(name)
+                    except Exception as remove_exc:  # noqa: BLE001
+                        logger.warning("failed to remove context while preserving target '%s': %s", name, remove_exc)
                 raise RuntimeError(f"{close_error}; REOPEN_FAILED: failed to restore session: {restore_error}") from close_error
             raise close_error
 
@@ -394,15 +447,16 @@ class RuntimeTargetLifecycle:
             restored = handle.open_program(domain_path)
             try:
                 self._initialize_opened_session_locked(name=name, session=restored)
-            except Exception:
+            except Exception as init_error:
                 try:
                     restored.close(save=False)
                 except Exception as close_exc:  # noqa: BLE001
-                    logger.warning(
-                        "failed to close restored session during remove-failure recovery for target '%s': %s",
-                        name,
-                        close_exc,
-                    )
+                    self._store.sessions[name] = restored
+                    raise RuntimeError(
+                        "PROGRAM_CLOSE_FAILED: failed to close restored session during "
+                        f"remove-failure recovery for target '{name}': {close_exc}; "
+                        f"original error: {init_error}"
+                    ) from init_error
                 raise
             self._store.sessions[name] = restored
             return None
@@ -847,6 +901,52 @@ class RuntimeTargetLifecycle:
         if domain_file is None:
             return None
         return domain_file.getPathname()
+
+    @staticmethod
+    def _partial_import_error(
+        exc: Exception,
+        *,
+        target: str,
+        binary_path: str,
+    ) -> DomainError | None:
+        message = str(exc)
+        if not (
+            message.startswith("IMPORT_CLOSE_FAILED:")
+            or message.startswith("IMPORT_POST_PROCESS_FAILED:")
+            or message.startswith("PROGRAM_CLOSE_FAILED: failed to close imported program")
+            or message.startswith("PROGRAM_CLOSE_FAILED: failed to close raw import results")
+        ):
+            return None
+
+        imported_domain_path = None
+        for pattern in _IMPORT_DOMAIN_PATH_PATTERNS:
+            match = pattern.search(message)
+            if match is not None:
+                imported_domain_path = match.group("path")
+                break
+
+        partial_import = not message.startswith("IMPORT_POST_PROCESS_FAILED: rolled back imported program")
+        details: dict[str, object] = {
+            "operation": "import_program",
+            "target": target,
+            "binary_path": binary_path,
+            "partial_import": partial_import,
+        }
+        if imported_domain_path is not None:
+            details["imported_domain_path"] = imported_domain_path
+        if not partial_import:
+            details["rollback_deleted"] = True
+
+        return DomainError(
+            code=ErrorCode.OPERATION_FAILED,
+            message=message,
+            hint=(
+                "Use load_project_program with imported_domain_path if partial_import is true; "
+                "otherwise retry the import after checking the project state"
+            ),
+            retryable=False,
+            details=details,
+        )
 
     @staticmethod
     def _session_is_closed(session: ProgramSession) -> bool:
