@@ -24,6 +24,7 @@ class RuntimeSessionStore:
         self.project_handles = state.project_handles
         self.analyzed_loads = state.analyzed_loads
         self.dirty_programs = state.dirty_programs
+        self.operation_lock = state.operation_lock
         self.registry_lock = state.registry_lock
 
     def ensure_session(self, name: str) -> ProgramSession:

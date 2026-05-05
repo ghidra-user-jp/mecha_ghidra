@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
@@ -526,6 +528,35 @@ def test_target_lifecycle_create_session_does_not_use_registry_bound_handle_open
     session = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
 
     assert session is store.sessions["fw"]
+
+
+def test_target_lifecycle_register_target_uses_target_lock(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    lock = store.locks["fw"]
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def register_other_project() -> None:
+        started.set()
+        try:
+            lifecycle.register_target("fw", "/tmp/other", project_name="other")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    with lock:
+        thread = threading.Thread(target=register_other_project)
+        thread.start()
+        assert started.wait(1)
+        assert not finished.wait(0.05)
+
+    thread.join(1)
+    assert finished.is_set()
+    assert errors == []
+    assert store.target_projects["fw"] == ("/tmp/other", "other")
 
 
 def test_target_lifecycle_remove_failure_restores_session_for_retry(monkeypatch: pytest.MonkeyPatch):
@@ -1248,6 +1279,40 @@ def test_target_lifecycle_close_all_preserves_handle_on_project_close_failure(mo
     assert core.removed == ["fw"]
 
 
+def test_target_lifecycle_close_all_waits_for_active_runtime_operation(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def close_all() -> None:
+        started.set()
+        try:
+            lifecycle.close_all()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    with store.operation_lock.read_lock():
+        thread = threading.Thread(target=close_all)
+        thread.start()
+        assert started.wait(1)
+        assert not finished.wait(0.05)
+        assert "fw" in store.sessions
+
+    thread.join(1)
+    assert finished.is_set()
+    assert errors == []
+    assert "fw" not in store.sessions
+    assert "fw" not in store.locks
+    assert "fw" not in store.target_projects
+    assert core.cleared == 1
+
+
 def test_target_lifecycle_duplicate_load_same_target_raises_specific_error(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
@@ -1309,6 +1374,18 @@ def test_target_lifecycle_duplicate_import_raises_specific_error(monkeypatch: py
         "existing_domain_path": "/binary.exe",
     }
     assert handle.import_calls == []
+
+
+def test_target_lifecycle_list_programs_opens_handle_outside_registry_helper(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+
+    def fail_registry_bound_open(*_args, **_kwargs):
+        raise AssertionError("list_programs must not open ProjectHandle via registry-bound helper")
+
+    monkeypatch.setattr(store, "get_or_create_project_handle", fail_registry_bound_open)
+
+    assert lifecycle.list_programs("fw") == [{"path": "/main"}]
 
 
 def test_target_lifecycle_save_project_program_saves_active_and_clears_dirty(monkeypatch: pytest.MonkeyPatch):

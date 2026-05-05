@@ -21,6 +21,7 @@ class RuntimeState:
     project_handles: dict[tuple[str, str], Any] = field(default_factory=dict)
     analyzed_loads: set[tuple[str, str]] = field(default_factory=set)
     dirty_programs: set[tuple[str, str]] = field(default_factory=set)
+    operation_lock: fasteners.ReaderWriterLock = field(default_factory=fasteners.ReaderWriterLock)
     registry_lock: fasteners.ReaderWriterLock = field(default_factory=fasteners.ReaderWriterLock)
 
 

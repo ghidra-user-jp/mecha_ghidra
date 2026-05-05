@@ -33,19 +33,20 @@ class RuntimeTargetLifecycle:
 
     @contextlib.contextmanager
     def _target_operation(self, name: str, *, create: bool = False) -> Iterator[None]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.locks.setdefault(name, threading.RLock()) if create else self._store.ensure_lock(name)
-            project_key = self._store.target_projects.get(name)
-            if project_key is None and name in self._store.sessions:
-                project_key = self._store.sessions[name].get_project_handle().get_key()
-                self._store.target_projects[name] = project_key
-            project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
-        with lock:
-            if project_lock is None:
-                yield
-            else:
-                with project_lock:
+        with self._store.operation_lock.read_lock():
+            with self._store.registry_lock.write_lock():
+                lock = self._store.locks.setdefault(name, threading.RLock()) if create else self._store.ensure_lock(name)
+                project_key = self._store.target_projects.get(name)
+                if project_key is None and name in self._store.sessions:
+                    project_key = self._store.sessions[name].get_project_handle().get_key()
+                    self._store.target_projects[name] = project_key
+                project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
+            with lock:
+                if project_lock is None:
                     yield
+                else:
+                    with project_lock:
+                        yield
 
     def _get_or_create_project_handle_outside_registry(self, key: tuple[str, str]) -> ProjectHandle:
         with self._store.registry_lock.write_lock():
@@ -72,6 +73,22 @@ class RuntimeTargetLifecycle:
         *,
         project_name: str | None = None,
         domain_path: str | None = None,
+    ) -> ProgramSession:
+        with self._store.operation_lock.read_lock():
+            return self._create_session_locked(
+                name,
+                project_location,
+                project_name=project_name,
+                domain_path=domain_path,
+            )
+
+    def _create_session_locked(
+        self,
+        name: str,
+        project_location: str,
+        *,
+        project_name: str | None,
+        domain_path: str | None,
     ) -> ProgramSession:
         project_key = ProjectHandle.make_key(project_location, project_name)
         handle: ProjectHandle | None = None
@@ -141,22 +158,28 @@ class RuntimeTargetLifecycle:
         *,
         project_name: str | None = None,
     ) -> Dict[str, Optional[str]]:
-        with self._store.registry_lock.write_lock():
-            key = ProjectHandle.make_key(project_location, project_name)
-            if name in self._store.sessions:
-                active_key = self._store.sessions[name].get_project_handle().get_key()
-                if active_key != key:
-                    raise ValueError(
-                        f"Target '{name}' already has an open session in another project: {active_key}"
-                    )
-            self._store.target_projects[name] = key
-            self._store.locks.setdefault(name, threading.RLock())
-            return {
-                "target": name,
-                "project_location": key[0],
-                "project_name": key[1],
-                "domain_path": None,
-            }
+        key = ProjectHandle.make_key(project_location, project_name)
+        with self._store.operation_lock.read_lock():
+            with self._store.registry_lock.write_lock():
+                lock = self._store.locks.setdefault(name, threading.RLock())
+                project_lock = self._store.ensure_project_lock(key)
+            with lock:
+                with project_lock:
+                    with self._store.registry_lock.write_lock():
+                        if name in self._store.sessions:
+                            active_key = self._store.sessions[name].get_project_handle().get_key()
+                            if active_key != key:
+                                raise ValueError(
+                                    f"Target '{name}' already has an open session in another project: {active_key}"
+                                )
+                        self._store.target_projects[name] = key
+                        self._store.locks.setdefault(name, lock)
+                    return {
+                        "target": name,
+                        "project_location": key[0],
+                        "project_name": key[1],
+                        "domain_path": None,
+                    }
 
     def list_targets(self) -> List[Dict[str, Optional[str]]]:
         with self._store.registry_lock.read_lock():
@@ -179,34 +202,44 @@ class RuntimeTargetLifecycle:
             return results
 
     def list_programs(self, name: str):
-        with self._store.registry_lock.write_lock():
-            session = self._store.sessions.get(name)
-            if session is not None:
-                handle = session.get_project_handle()
-                self._store.target_projects[name] = handle.get_key()
-                return handle.list_programs()
+        with self._store.operation_lock.read_lock():
+            with self._store.registry_lock.write_lock():
+                lock = self._store.ensure_lock(name)
+                key = self._store.get_target_project_key_locked(name)
+                project_lock = self._store.ensure_project_lock(key)
+            with lock:
+                with project_lock:
+                    with self._store.registry_lock.write_lock():
+                        session = self._store.sessions.get(name)
+                        if session is not None:
+                            handle = session.get_project_handle()
+                            self._store.target_projects[name] = handle.get_key()
+                        else:
+                            handle = None
+                            key = self._store.get_target_project_key_locked(name)
+                    if handle is not None:
+                        return handle.list_programs()
 
-            key = self._store.get_target_project_key_locked(name)
-            is_repository_project = ProjectHandle.is_repository_project_from_metadata(key[0], key[1])
-            if not is_repository_project:
-                metadata_programs = self._list_programs_from_metadata_locked(key)
-                if metadata_programs is not None:
-                    return metadata_programs
+                    is_repository_project = ProjectHandle.is_repository_project_from_metadata(key[0], key[1])
+                    if not is_repository_project:
+                        metadata_programs = self._list_programs_from_metadata_locked(key)
+                        if metadata_programs is not None:
+                            return metadata_programs
 
-            try:
-                handle = self._store.get_or_create_project_handle(key[0], key[1])
-                return handle.list_programs()
-            except Exception as exc:
-                if is_repository_project and is_project_lock_error(exc):
-                    metadata_programs = self._list_programs_from_metadata_locked(key)
-                    if metadata_programs is not None:
-                        logger.info(
-                            "project is locked while listing programs for target '%s'; "
-                            "returning project metadata snapshot",
-                            name,
-                        )
-                        return self._mark_metadata_programs_as_lock_snapshot(metadata_programs)
-                raise
+                    try:
+                        handle = self._get_or_create_project_handle_outside_registry(key)
+                        return handle.list_programs()
+                    except Exception as exc:
+                        if is_repository_project and is_project_lock_error(exc):
+                            metadata_programs = self._list_programs_from_metadata_locked(key)
+                            if metadata_programs is not None:
+                                logger.info(
+                                    "project is locked while listing programs for target '%s'; "
+                                    "returning project metadata snapshot",
+                                    name,
+                                )
+                                return self._mark_metadata_programs_as_lock_snapshot(metadata_programs)
+                        raise
 
     def load_program(
         self,
@@ -350,6 +383,10 @@ class RuntimeTargetLifecycle:
             self._close_session_locked(name, remove_program=remove_program)
 
     def close_all(self) -> None:
+        with self._store.operation_lock.write_lock():
+            self._close_all_locked()
+
+    def _close_all_locked(self) -> None:
         with self._store.registry_lock.write_lock():
             names = list(self._store.sessions.keys())
             close_errors: list[tuple[str, Exception]] = []

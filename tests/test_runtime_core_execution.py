@@ -225,6 +225,27 @@ def test_mutating_checkout_guard_aborts_when_refresh_fails():
     assert core.calls == []
 
 
+def test_core_call_rechecks_session_after_target_lock_acquisition(monkeypatch: pytest.MonkeyPatch):
+    handle = _CheckedOutAfterRefreshHandle()
+    execution, store, core = _build_core_execution(handle)
+    original_ensure_lock = store.ensure_lock
+
+    def ensure_lock(name: str):
+        lock = original_ensure_lock(name)
+        store.sessions.pop(name, None)
+        store.locks.pop(name, None)
+        store.target_projects.pop(name, None)
+        return lock
+
+    monkeypatch.setattr(store, "ensure_lock", ensure_lock)
+
+    with pytest.raises(RuntimeError, match="Session 'fw' is not initialized"):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert handle.refresh_calls == 0
+    assert core.calls == []
+
+
 def test_mutating_checkout_guard_reopens_stale_unversioned_active_program():
     handle = _ReopenVersionedHandle()
     execution, _store, core = _build_core_execution(handle)

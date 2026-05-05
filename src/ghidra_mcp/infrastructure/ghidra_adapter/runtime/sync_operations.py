@@ -23,13 +23,14 @@ class RuntimeSyncOperations:
 
     @contextlib.contextmanager
     def _target_operation(self, name: str) -> Iterator[None]:
-        with self._store.registry_lock.write_lock():
-            lock = self._store.ensure_lock(name)
-            project_key = self._store.get_target_project_key_locked(name)
-            project_lock = self._store.ensure_project_lock(project_key)
-        with lock:
-            with project_lock:
-                yield
+        with self._store.operation_lock.read_lock():
+            with self._store.registry_lock.write_lock():
+                lock = self._store.ensure_lock(name)
+                project_key = self._store.get_target_project_key_locked(name)
+                project_lock = self._store.ensure_project_lock(project_key)
+            with lock:
+                with project_lock:
+                    yield
 
     def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         with self._target_operation(name):

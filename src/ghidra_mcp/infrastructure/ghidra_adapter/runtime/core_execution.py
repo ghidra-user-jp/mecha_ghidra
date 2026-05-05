@@ -29,27 +29,45 @@ class RuntimeCoreExecution:
         params: Dict[str, Any] | None = None,
         target: str = "default",
     ) -> Any:
-        with self._store.registry_lock.write_lock():
-            session = self._store.ensure_session(target)
-            lock = self._store.ensure_lock(target)
-            project_key = self._store.target_projects.get(target)
-            if project_key is None:
-                get_key = getattr(session.get_project_handle(), "get_key", None)
-                if get_key is not None:
-                    project_key = get_key()
-                    self._store.target_projects[target] = project_key
-            project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
+        with self._store.operation_lock.read_lock():
+            with self._store.registry_lock.write_lock():
+                session = self._store.ensure_session(target)
+                lock = self._store.ensure_lock(target)
+                project_key = self._store.target_projects.get(target)
+                if project_key is None:
+                    get_key = getattr(session.get_project_handle(), "get_key", None)
+                    if get_key is not None:
+                        project_key = get_key()
+                        self._store.target_projects[target] = project_key
+                project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
 
-        with lock:
-            lock_context = project_lock if project_lock is not None else contextlib.nullcontext()
-            with lock_context:
-                self._ensure_checkout_for_mutating_command_locked(command, target)
-                result = self._store.core_accessor().execute(command, params or {}, key=target)
-                if command in self._checkout_required_commands:
-                    session = self._store.sessions.get(target)
-                    if session is not None:
-                        self._store.mark_dirty_program(target, self._store.session_domain_path(session))
-                return self._normalize_result(result)
+            with lock:
+                lock_context = project_lock if project_lock is not None else contextlib.nullcontext()
+                with lock_context:
+                    with self._store.registry_lock.write_lock():
+                        current_session = self._store.sessions.get(target)
+                        if current_session is None:
+                            raise RuntimeError(f"Session '{target}' is not initialized")
+                        if current_session is not session:
+                            raise RuntimeError(
+                                f"SESSION_CHANGED: target '{target}' session changed before core command execution"
+                            )
+                        current_project_key = self._store.target_projects.get(target)
+                        if (
+                            project_key is not None
+                            and current_project_key is not None
+                            and current_project_key != project_key
+                        ):
+                            raise RuntimeError(
+                                f"SESSION_CHANGED: target '{target}' project changed before core command execution"
+                            )
+                    self._ensure_checkout_for_mutating_command_locked(command, target)
+                    result = self._store.core_accessor().execute(command, params or {}, key=target)
+                    if command in self._checkout_required_commands:
+                        session = self._store.sessions.get(target)
+                        if session is not None:
+                            self._store.mark_dirty_program(target, self._store.session_domain_path(session))
+                    return self._normalize_result(result)
 
     def _ensure_checkout_for_mutating_command_locked(self, command: str, target: str) -> None:
         if command not in self._checkout_required_commands:
