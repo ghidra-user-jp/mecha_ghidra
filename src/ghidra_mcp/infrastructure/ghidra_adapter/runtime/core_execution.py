@@ -114,15 +114,17 @@ class RuntimeCoreExecution:
                 self._store.core_accessor().initialize(reopened.get_program(), key=target)
                 self._store.sessions[target] = reopened
                 reopened_session_bound = True
-            except Exception:
+            except Exception as init_error:  # noqa: BLE001
                 try:
                     reopened.close(save=False)
                 except Exception as close_exc:  # noqa: BLE001
-                    logger.warning(
-                        "failed to close reopened session during checkout guard rollback for target '%s': %s",
-                        target,
-                        close_exc,
-                    )
+                    self._store.sessions[target] = reopened
+                    reopened_session_bound = True
+                    raise RuntimeError(
+                        "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
+                        f"checkout guard rollback for target '{target}': {close_exc}; "
+                        f"original error: {init_error}"
+                    ) from init_error
                 raise
             finally:
                 if active_handle is not None and self._handle_is_closed(active_handle):

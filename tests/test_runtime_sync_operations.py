@@ -139,6 +139,12 @@ class _FailingCloseSession(_FakeSession):
         return super().get_program()
 
 
+class _FailingCloseReopenedSession(_FakeSession):
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:  # noqa: ARG002
+        self.close_saves.append(bool(save))
+        raise RuntimeError("reopened close failed")
+
+
 class _FakeHandle:
     def __init__(self, project_location: str, project_name: str) -> None:
         self._location = project_location
@@ -537,6 +543,17 @@ class _ExplodingCommitHandle(_FakeHandle):
         raise RuntimeError("commit exploded")
 
 
+class _FailingCloseReopenHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.reopened_sessions: list[_FailingCloseReopenedSession] = []
+
+    def open_program(self, domain_path: str):
+        reopened = _FailingCloseReopenedSession(self, domain_path)
+        self.reopened_sessions.append(reopened)
+        return reopened
+
+
 class _PatchedProjectHandle:
     @staticmethod
     def make_key(project_location: str, project_name: str | None) -> tuple[str, str]:
@@ -663,6 +680,29 @@ def test_pull_discard_on_runtime_marked_dirty_changes(monkeypatch: pytest.Monkey
     assert handle.project.saved == 0
     assert handle.undo_checkout_calls == 0
     assert core.initialized and core.initialized[-1][1] == "fw"
+
+
+def test_pull_discard_reopen_failure_exposes_completed_operation_result(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_ClosingSession)
+    handle._status["modified_since_checkout"] = True  # noqa: SLF001
+    handle.fail_reopen = True
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.details == {
+        "operation_completed": True,
+        "partial_success": True,
+        "operation_result": {
+            "discarded_local_changes": True,
+            "merged": False,
+            "followed_latest": False,
+        },
+    }
+    assert "fw" not in store.sessions
+    assert core.removed == ["fw"]
 
 
 def test_pull_abort_unsaved_active_changes_does_not_try_to_save(monkeypatch: pytest.MonkeyPatch):
@@ -1176,6 +1216,28 @@ def test_reload_close_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatc
     assert "fw" not in store.sessions
     assert "fw" not in store.locks
     assert core.removed == ["fw"]
+
+
+def test_sync_reopen_init_failure_preserves_reopened_session_when_close_fails(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_FailingCloseReopenHandle,
+        session_cls=_ClosingSession,
+    )
+    assert isinstance(handle, _FailingCloseReopenHandle)
+
+    def fail_initialize(_program, _key):  # noqa: ANN001
+        raise RuntimeError("initialize failed")
+
+    core.initialize = fail_initialize
+
+    with pytest.raises(RuntimeError, match="REOPEN_FAILED"):
+        sync.checkout_project_program("fw", exclusive=False, domain_path="/main")
+
+    assert store.sessions["fw"] is handle.reopened_sessions[-1]
+    assert "fw" in store.locks
+    assert store.target_projects["fw"] == handle.get_key()
+    assert core.removed == []
 
 
 def test_reload_registered_only_target_reports_target_already_loaded(monkeypatch: pytest.MonkeyPatch):

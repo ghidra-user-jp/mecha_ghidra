@@ -1406,7 +1406,7 @@ def test_import_program_auto_close_failure_reports_imported_path_without_rollbac
     assert handle.project.closed == [imported_program]
 
 
-def test_import_program_auto_preserves_import_failure_when_close_also_fails(monkeypatch, tmp_path):
+def test_import_program_auto_reports_cleanup_close_failure_after_import_failure(monkeypatch, tmp_path):
     handle = build_handle(monkeypatch)
     binary_path = tmp_path / "sample.bin"
     binary_path.write_bytes(b"\x90")
@@ -1433,10 +1433,13 @@ def test_import_program_auto_preserves_import_failure_when_close_also_fails(monk
     monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
     handle.project = FailingSaveAndCloseProject()
 
-    with pytest.raises(RuntimeError, match="saveAs failed") as exc_info:
+    with pytest.raises(
+        RuntimeError,
+        match="PROGRAM_CLOSE_FAILED: failed to close imported program after auto import failure",
+    ) as exc_info:
         handle.import_program(str(binary_path))
 
-    assert "PROGRAM_CLOSE_FAILED" not in str(exc_info.value)
+    assert "saveAs failed" in str(exc_info.value)
     assert handle.project.closed == [imported_program]
 
 
@@ -1625,7 +1628,7 @@ def test_import_program_raw_binary_close_failure_reports_imported_path(monkeypat
     assert deleted_paths == []
 
 
-def test_import_program_raw_binary_preserves_save_failure_when_close_also_fails(monkeypatch, tmp_path):
+def test_import_program_raw_binary_reports_cleanup_close_failure_after_save_failure(monkeypatch, tmp_path):
     handle = build_handle(monkeypatch)
     binary_path = tmp_path / "shellcode.bin"
     binary_path.write_bytes(b"\x90\xc3")
@@ -1675,7 +1678,10 @@ def test_import_program_raw_binary_preserves_save_failure_when_close_also_fails(
     monkeypatch.setattr(handle, "_resolve_binary_loader_args_locked", lambda _builder, *, required_options=None: {})
     handle.project = RawImportProject()
 
-    with pytest.raises(RuntimeError, match="save failed") as exc_info:
+    with pytest.raises(
+        RuntimeError,
+        match="PROGRAM_CLOSE_FAILED: failed to close raw import results after import failure",
+    ) as exc_info:
         handle.import_program(
             str(binary_path),
             import_mode="raw_binary",
@@ -1683,7 +1689,7 @@ def test_import_program_raw_binary_preserves_save_failure_when_close_also_fails(
             analyze_imported=False,
         )
 
-    assert "PROGRAM_CLOSE_FAILED" not in str(exc_info.value)
+    assert "save failed" in str(exc_info.value)
 
 
 def test_import_program_raw_binary_rejects_unavailable_loader_option(monkeypatch, tmp_path):

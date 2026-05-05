@@ -62,6 +62,12 @@ class _Session:
         self.closed_with.append(save)
 
 
+class _FailingCloseSession(_Session):
+    def close(self, *, save: bool = True) -> None:
+        self.closed_with.append(save)
+        raise RuntimeError("reopened close failed")
+
+
 class _Handle:
     def __init__(self) -> None:
         self.refresh_calls = 0
@@ -140,6 +146,25 @@ class _UnversionedAddableHandle(_ReopenVersionedHandle):
         return _Session(self)
 
 
+class _FailingCloseReopenHandle(_ReopenVersionedHandle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reopened_sessions: list[_FailingCloseSession] = []
+
+    def open_program(self, domain_path: str):
+        self.open_program_calls += 1
+        self._status.update(
+            {
+                "is_versioned": True,
+                "is_checked_out": False,
+                "can_add_to_repository": False,
+            }
+        )
+        reopened = _FailingCloseSession(self)
+        self.reopened_sessions.append(reopened)
+        return reopened
+
+
 def _build_core_execution(
     handle,  # noqa: ANN001
     *,
@@ -210,6 +235,29 @@ def test_mutating_checkout_guard_reopens_stale_unversioned_active_program():
     assert handle.refresh_calls == 1
     assert handle.open_program_calls == 1
     assert core.calls == []
+
+
+def test_mutating_checkout_guard_preserves_reopened_session_when_rollback_close_fails():
+    handle = _FailingCloseReopenHandle()
+    execution, store, core = _build_core_execution(handle)
+    original_initialize = core.initialize
+
+    def fail_initialize(_program, _key):  # noqa: ANN001
+        raise RuntimeError("initialize failed")
+
+    core.initialize = fail_initialize
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROGRAM_CLOSE_FAILED: failed to close reopened session during checkout guard rollback",
+    ):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert store.sessions["fw"] is handle.reopened_sessions[-1]
+    assert "fw" in store.locks
+    assert core.calls == []
+    assert core.removed == []
+    core.initialize = original_initialize
 
 
 def test_mutating_checkout_guard_rejects_dirty_stale_unversioned_active_program():

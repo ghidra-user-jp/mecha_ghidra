@@ -438,6 +438,8 @@ class RuntimeTargetLifecycle:
                 details=details,
             ) from exc
         except Exception as exc:
+            if self._remove_guard_error_should_surface(exc):
+                raise
             details = {
                 "operation": "close_session",
                 "target": name,
@@ -523,15 +525,17 @@ class RuntimeTargetLifecycle:
                 self._initialize_opened_session_locked(name=name, session=reopened)
                 self._store.sessions[name] = reopened
                 reopened_session_bound = True
-            except Exception:
+            except Exception as init_error:  # noqa: BLE001
                 try:
                     reopened.close(save=False)
                 except Exception as close_exc:  # noqa: BLE001
-                    logger.warning(
-                        "failed to close reopened session during remove guard rollback for target '%s': %s",
-                        name,
-                        close_exc,
-                    )
+                    self._store.sessions[name] = reopened
+                    reopened_session_bound = True
+                    raise RuntimeError(
+                        "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
+                        f"remove guard rollback for target '{name}': {close_exc}; "
+                        f"original error: {init_error}"
+                    ) from init_error
                 raise
             finally:
                 if active_handle is not None and active_handle.is_closed():
@@ -561,6 +565,19 @@ class RuntimeTargetLifecycle:
                 exc,
             )
             return True
+
+    @staticmethod
+    def _remove_guard_error_should_surface(exc: Exception) -> bool:
+        message = str(exc)
+        return message.startswith(
+            (
+                "SAVE_FAILED:",
+                "PROGRAM_CLOSE_FAILED:",
+                "SESSION_CLOSE_FAILED:",
+                "REOPEN_FAILED:",
+                "PROJECT_CLOSE_FAILED:",
+            )
+        )
 
     @staticmethod
     def _sync_status_version_details(status: dict) -> dict[str, object]:
@@ -749,7 +766,14 @@ class RuntimeTargetLifecycle:
             try:
                 handle.close()
             except Exception as handle_exc:  # noqa: BLE001
-                logger.warning("failed to close leaked project handle during rollback for target '%s': %s", name, handle_exc)
+                handle_close_error = RuntimeError(
+                    "PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback "
+                    f"for target '{name}': {handle_exc}"
+                )
+                if cleanup_error is not None:
+                    cleanup_error = RuntimeError(f"{cleanup_error}; {handle_close_error}")
+                else:
+                    cleanup_error = handle_close_error
         if handle.is_closed():
             self._store.project_handles.pop(handle.get_key(), None)
         return cleanup_error

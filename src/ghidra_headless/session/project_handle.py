@@ -693,22 +693,21 @@ class ProjectHandle:
                     self.project.close(program)
                 except Exception as close_exc:
                     if operation_error is not None:
-                        logger.warning(
-                            "failed to close imported program after auto import failure for '%s': %s",
-                            path,
-                            close_exc,
-                        )
-                    else:
-                        domain_path = None
-                        if domain_file is not None:
-                            try:
-                                domain_path = domain_file.getPathname()
-                            except Exception:
-                                domain_path = None
-                        imported_name = domain_path or program_name
                         raise _ImportedProgramCloseError(
-                            f"PROGRAM_CLOSE_FAILED: failed to close imported program {imported_name}: {close_exc}"
-                        ) from close_exc
+                            "PROGRAM_CLOSE_FAILED: failed to close imported program after "
+                            f"auto import failure for {path}: {close_exc}; "
+                            f"original error: {operation_error}"
+                        ) from operation_error
+                    domain_path = None
+                    if domain_file is not None:
+                        try:
+                            domain_path = domain_file.getPathname()
+                        except Exception:
+                            domain_path = None
+                    imported_name = domain_path or program_name
+                    raise _ImportedProgramCloseError(
+                        f"PROGRAM_CLOSE_FAILED: failed to close imported program {imported_name}: {close_exc}"
+                    ) from close_exc
 
     def _import_program_raw_locked(
         self,
@@ -787,23 +786,22 @@ class ProjectHandle:
                 load_results.close()
             except Exception as close_exc:
                 if operation_error is not None:
-                    logger.warning(
-                        "failed to close raw import load results after import failure for '%s': %s",
-                        path,
-                        close_exc,
-                    )
-                else:
-                    domain_path = None
-                    if domain_file is not None:
-                        try:
-                            domain_path = domain_file.getPathname()
-                        except Exception:
-                            domain_path = None
-                    imported_name = domain_path or program_name
                     raise _ImportedProgramCloseError(
-                        "PROGRAM_CLOSE_FAILED: failed to close raw import results for imported program "
-                        f"{imported_name}: {close_exc}"
-                    ) from close_exc
+                        "PROGRAM_CLOSE_FAILED: failed to close raw import results after "
+                        f"import failure for {path}: {close_exc}; "
+                        f"original error: {operation_error}"
+                    ) from operation_error
+                domain_path = None
+                if domain_file is not None:
+                    try:
+                        domain_path = domain_file.getPathname()
+                    except Exception:
+                        domain_path = None
+                imported_name = domain_path or program_name
+                raise _ImportedProgramCloseError(
+                    "PROGRAM_CLOSE_FAILED: failed to close raw import results for imported program "
+                    f"{imported_name}: {close_exc}"
+                ) from close_exc
 
     def _post_process_imported_program_locked(
         self,

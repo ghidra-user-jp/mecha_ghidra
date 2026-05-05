@@ -966,11 +966,17 @@ class RuntimeSyncOperations:
                 self._store.core_accessor().initialize(reopened.get_program(), key=name)
                 self._store.sessions[name] = reopened
                 reopened_session_bound = True
-            except Exception:
+            except Exception as init_error:  # noqa: BLE001
                 try:
                     reopened.close()
                 except Exception as close_exc:
-                    logger.warning("failed to close reopened session during rollback for target '%s': %s", name, close_exc)
+                    self._store.sessions[name] = reopened
+                    reopened_session_bound = True
+                    raise RuntimeError(
+                        "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
+                        f"sync rollback for target '{name}': {close_exc}; "
+                        f"original error: {init_error}"
+                    ) from init_error
                 raise
             finally:
                 if active_handle is not None and active_handle.is_closed():
@@ -990,12 +996,16 @@ class RuntimeSyncOperations:
                 raise RuntimeError(f"SAVE_FAILED: {exc.message}") from exc
 
             if exc.code == ErrorCode.REOPEN_FAILED:
-                self._cleanup_reopenable_target_state_locked(name, handle=handle)
-                operation_error = (exc.details or {}).get("operation_error")
+                if not reopened_session_bound:
+                    self._cleanup_reopenable_target_state_locked(name, handle=handle)
+                details = exc.details or {}
+                operation_error = details.get("operation_error")
                 if operation_error:
                     raise RuntimeError(
                         f"SYNC_OPERATION_FAILED: {operation_error}; REOPEN_FAILED: {exc.message}"
                     ) from exc
+                if "operation_result" in details:
+                    raise exc
                 raise RuntimeError(f"REOPEN_FAILED: {exc.message}") from exc
 
             raise RuntimeError(str(exc)) from exc

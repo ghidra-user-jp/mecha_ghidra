@@ -262,6 +262,12 @@ class _FailingRollbackCloseSession(_FakeSession):
         raise RuntimeError("rollback close failed")
 
 
+class _FailingReopenedCloseSession(_ClosingFakeSession):
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+        self.closed_with.append((save, remove_program))
+        raise RuntimeError("reopened close failed")
+
+
 class _ExternallyVersionedOnReopenProjectHandle(_FakeProjectHandle):
     def __init__(self, project_location: str, project_name: str | None) -> None:
         super().__init__(project_location, project_name)
@@ -302,6 +308,15 @@ class _NeverVersionedOnReopenProjectHandle(_FakeProjectHandle):
         base_session = super().open_program(domain_path)
         session = _ClosingFakeSession(self, domain_path or "/main", base_session.flat_api)
         self.opened_sessions.append(session)
+        return session
+
+
+class _NeverVersionedFailingCloseOnReopenProjectHandle(_NeverVersionedOnReopenProjectHandle):
+    def open_program(self, domain_path: str | None = None):
+        session = super().open_program(domain_path)
+        if self.open_program_calls > 1:
+            session = _FailingReopenedCloseSession(self, domain_path or "/main", session.flat_api)
+            self.opened_sessions[-1] = session
         return session
 
 
@@ -594,6 +609,56 @@ def test_target_lifecycle_remove_saves_when_dirty_state_unavailable(
     assert core.removed == ["fw"]
 
 
+def test_target_lifecycle_remove_guard_surfaces_save_failure(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_NeverVersionedOnReopenProjectHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    created = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    failing = _FailingOpenSaveCloseSession(created.get_project_handle(), "/main", created.flat_api)
+    store.sessions["fw"] = failing
+    store.mark_dirty_program("fw", "/main")
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save program before close: disk full"):
+        lifecycle.close_session("fw", remove_program=True)
+
+    assert store.sessions["fw"] is failing
+    assert "fw" in store.locks
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
+    assert core.removed == []
+
+
+def test_target_lifecycle_remove_guard_preserves_reopened_session_when_rollback_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(
+        monkeypatch,
+        core=core,
+        handle_cls=_NeverVersionedFailingCloseOnReopenProjectHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle_locked("fw")
+
+    def fail_initialize(_program, _key):  # noqa: ANN001
+        raise RuntimeError("initialize failed")
+
+    core.initialize = fail_initialize
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROGRAM_CLOSE_FAILED: failed to close reopened session during remove guard rollback",
+    ):
+        lifecycle.close_session("fw", remove_program=True)
+
+    assert store.sessions["fw"] is handle.opened_sessions[-1]
+    assert "fw" in store.locks
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
+    assert core.contexts == {"fw": "/main"}
+
+
 def test_target_lifecycle_remove_preserves_domain_error_from_verification(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -799,6 +864,30 @@ def test_target_lifecycle_create_session_closes_leaked_handle_when_rollback_clos
 
     assert not store.project_handles
     assert core.contexts == {}
+
+
+def test_target_lifecycle_create_session_surfaces_handle_close_failure_after_session_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = True
+    lifecycle, store, core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_FailingProjectCloseHandle,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback",
+    ):
+        lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    handle_key = ("/tmp/prj", "sample")
+    assert handle_key in store.project_handles
+    assert store.project_handles[handle_key].is_closed() is False
+    assert "fw" not in store.sessions
+    assert "fw" not in store.target_projects
+    assert core.removed == ["fw"]
 
 
 def test_target_lifecycle_create_session_failure_does_not_close_shared_handle(monkeypatch: pytest.MonkeyPatch):
