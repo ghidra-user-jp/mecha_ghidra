@@ -334,6 +334,9 @@ def test_sync_status_raises_when_required_call_fails():
 
 def test_sync_status_raises_when_checkout_status_lookup_fails():
     class BrokenCheckoutStatusDomainFile:
+        def isVersioned(self):
+            return True
+
         def getCheckoutStatus(self):
             raise RuntimeError("checkout status unavailable")
 
@@ -347,6 +350,9 @@ def test_sync_status_raises_when_remote_checkout_id_unavailable():
             raise RuntimeError("checkout id unavailable")
 
     class BrokenCheckoutDomainFile:
+        def isVersioned(self):
+            return True
+
         def getCheckoutStatus(self):
             return None
 
@@ -360,10 +366,10 @@ def test_sync_status_raises_when_remote_checkout_id_unavailable():
 def test_sync_status_normalizes_unversioned_version_fields():
     class UnversionedDomainFile:
         def getCheckoutStatus(self):
-            return None
+            raise RuntimeError("checkout status should not be read")
 
         def getCheckouts(self):
-            return []
+            raise RuntimeError("checkouts should not be read")
 
         def getSharedProjectURL(self, _):
             return None
@@ -372,28 +378,28 @@ def test_sync_status_normalizes_unversioned_version_fields():
             return False
 
         def isCheckedOut(self):
-            return False
+            pytest.fail("isCheckedOut should not be read for unversioned files")
 
         def isCheckedOutExclusive(self):
-            return False
+            pytest.fail("isCheckedOutExclusive should not be read for unversioned files")
 
         def modifiedSinceCheckout(self):
-            return False
+            pytest.fail("modifiedSinceCheckout should not be read for unversioned files")
 
         def canAddToRepository(self):
             return True
 
         def canCheckout(self):
-            return False
+            pytest.fail("canCheckout should not be read for unversioned files")
 
         def canCheckin(self):
-            return False
+            pytest.fail("canCheckin should not be read for unversioned files")
 
         def canMerge(self):
-            return False
+            pytest.fail("canMerge should not be read for unversioned files")
 
         def isHijacked(self):
-            return False
+            pytest.fail("isHijacked should not be read for unversioned files")
 
         def isLatestVersion(self):
             pytest.fail("isLatestVersion should not be read for unversioned files")
@@ -410,6 +416,15 @@ def test_sync_status_normalizes_unversioned_version_fields():
     assert result["version"] is None
     assert result["latest_version"] is None
     assert result["is_latest_version"] is None
+    assert result["checkout_status"] is None
+    assert result["checkouts"] == []
+    assert result["is_checked_out"] is False
+    assert result["is_checked_out_exclusive"] is False
+    assert result["modified_since_checkout"] is False
+    assert result["can_checkout"] is False
+    assert result["can_checkin"] is False
+    assert result["can_merge"] is False
+    assert result["is_hijacked"] is False
     assert result["can_add_to_repository"] is True
 
 
