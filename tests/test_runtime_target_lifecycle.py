@@ -335,6 +335,11 @@ class _FailingProjectCloseHandle(_FakeProjectHandle):
         raise RuntimeError("project close failed")
 
 
+class _OpenFailsAndProjectCloseFailsHandle(_FailingProjectCloseHandle):
+    def open_program(self, domain_path: str | None = None):  # noqa: ARG002
+        raise RuntimeError("open failed after partial resource")
+
+
 def _build_target_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -851,6 +856,31 @@ def test_target_lifecycle_create_session_open_failure_restores_registered_target
     assert "fw" in store.locks
     assert "fw" not in store.sessions
     assert ("/tmp/new", "new") not in store.project_handles
+
+
+def test_target_lifecycle_create_session_open_failure_surfaces_handle_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, core = _build_target_lifecycle(
+        monkeypatch,
+        handle_cls=_OpenFailsAndProjectCloseFailsHandle,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback",
+    ):
+        lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    handle_key = ("/tmp/prj", "sample")
+    assert handle_key in store.project_handles
+    assert store.project_handles[handle_key].is_closed() is False
+    assert "fw" not in store.sessions
+    assert "fw" not in store.target_projects
+    assert "fw" not in store.locks
+    assert core.removed == []
 
 
 def test_target_lifecycle_load_program_restores_existing_context_on_analysis_failure(monkeypatch: pytest.MonkeyPatch):

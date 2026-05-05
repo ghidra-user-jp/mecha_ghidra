@@ -92,7 +92,21 @@ class ProjectHandle:
             program = self.project.openProgram(domain_dir, domain_name, False)
             if program is None:
                 raise RuntimeError(f"Failed to open program: {domain_path}")
-            flat_api = java_bindings._flat_program_api_class()(program, monitor)
+            try:
+                flat_api = java_bindings._flat_program_api_class()(program, monitor)
+            except Exception as exc:  # noqa: BLE001
+                domain_path_text = (pathlib.PurePosixPath(domain_dir) / domain_name).as_posix()
+                try:
+                    self.project.close(program)
+                except Exception as close_exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        "PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for "
+                        f"{domain_path_text}: {exc}; cleanup close failed: {close_exc}"
+                    ) from exc
+                raise RuntimeError(
+                    "PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for "
+                    f"{domain_path_text}: {exc}"
+                ) from exc
             self._refcount += 1
             self._open_programs.add(domain_path_key)
             return ProgramSession(flat_api, program, project_handle=self)
@@ -804,9 +818,9 @@ class ProjectHandle:
         program = self.project.openProgram(domain_dir, domain_name, False)
         if program is None:
             raise RuntimeError(f"Failed to reopen imported program: {domain_path}")
-        flat_api = java_bindings._flat_program_api_class()(program, monitor)
         operation_error = None
         try:
+            flat_api = java_bindings._flat_program_api_class()(program, monitor)
             entry = self._resolve_entry_address_locked(
                 program,
                 entry_address=entry_address,
@@ -825,15 +839,14 @@ class ProjectHandle:
                 self.project.close(program)
             except Exception as close_exc:
                 if operation_error is not None:
-                    logger.warning(
-                        "failed to close imported program after post-processing failure for '%s': %s",
-                        domain_path,
-                        close_exc,
-                    )
-                else:
                     raise _ImportedProgramCloseError(
-                        f"PROGRAM_CLOSE_FAILED: failed to close imported program {domain_path}: {close_exc}"
-                    ) from close_exc
+                        "PROGRAM_CLOSE_FAILED: failed to close imported program "
+                        f"{domain_path} after post-processing failure: {close_exc}; "
+                        f"original error: {operation_error}"
+                    ) from operation_error
+                raise _ImportedProgramCloseError(
+                    f"PROGRAM_CLOSE_FAILED: failed to close imported program {domain_path}: {close_exc}"
+                ) from close_exc
 
     def _resolve_entry_address_locked(
         self,

@@ -770,14 +770,18 @@ class RuntimeTargetLifecycle:
                 allow_handle_close=True,
             )
 
+        cleanup_error = None
         if not handle.is_closed() and not self._handle_has_live_sessions_locked(handle):
             try:
                 handle.close()
             except Exception as handle_exc:  # noqa: BLE001
-                logger.warning("failed to close leaked project handle during rollback for target '%s': %s", name, handle_exc)
+                cleanup_error = RuntimeError(
+                    "PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback "
+                    f"for target '{name}': {handle_exc}"
+                )
         if handle.is_closed():
             self._store.project_handles.pop(handle.get_key(), None)
-        return None
+        return cleanup_error
 
     def _handle_has_live_sessions_locked(self, handle: ProjectHandle) -> bool:
         handle_key = handle.get_key()

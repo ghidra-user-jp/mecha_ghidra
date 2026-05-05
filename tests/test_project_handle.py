@@ -110,6 +110,60 @@ def test_open_program_normalizes_relative_domain_path_for_duplicate_guard(monkey
     assert handle._open_programs == set()
 
 
+def test_open_program_closes_program_when_flat_api_init_fails(monkeypatch):
+    handle = build_handle(monkeypatch)
+    opened_programs = []
+
+    class TrackingProject(DummyProject):
+        def openProgram(self, domain_dir, domain_name, flag):  # noqa: ARG002
+            program = super().openProgram(domain_dir, domain_name, flag)
+            opened_programs.append(program)
+            return program
+
+    class FailingFlatAPI:
+        def __init__(self, _program, _monitor) -> None:
+            raise RuntimeError("flat api unavailable")
+
+    handle.project = TrackingProject()
+    monkeypatch.setattr(session.java_bindings, "_flat_program_api_class", lambda: FailingFlatAPI)
+
+    with pytest.raises(RuntimeError, match="PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI"):
+        handle.open_program("/folder/app")
+
+    assert handle.project.closed == [opened_programs[0]]
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
+
+
+def test_open_program_reports_cleanup_failure_after_flat_api_init_fails(monkeypatch):
+    handle = build_handle(monkeypatch)
+    opened_programs = []
+
+    class FailingCloseProject(DummyProject):
+        def openProgram(self, domain_dir, domain_name, flag):  # noqa: ARG002
+            program = super().openProgram(domain_dir, domain_name, flag)
+            opened_programs.append(program)
+            return program
+
+        def close(self, program=None):
+            super().close(program)
+            raise RuntimeError("close failed")
+
+    class FailingFlatAPI:
+        def __init__(self, _program, _monitor) -> None:
+            raise RuntimeError("flat api unavailable")
+
+    handle.project = FailingCloseProject()
+    monkeypatch.setattr(session.java_bindings, "_flat_program_api_class", lambda: FailingFlatAPI)
+
+    with pytest.raises(RuntimeError, match="cleanup close failed: close failed"):
+        handle.open_program("/folder/app")
+
+    assert handle.project.closed == [opened_programs[0]]
+    assert handle._open_programs == set()
+    assert handle._refcount == 0
+
+
 def test_close_can_skip_save(monkeypatch):
     handle = build_handle(monkeypatch)
 
@@ -1893,4 +1947,32 @@ def test_post_process_imported_program_bootstraps_entry_and_analysis(monkeypatch
     assert script_util.calls == ["acquire", "release"]
     assert imported_program.transactions == [(1, True)]
     assert handle.project.saved == [imported_program]
+    assert handle.project.closed == [imported_program]
+
+
+def test_post_process_imported_program_closes_when_flat_api_init_fails(monkeypatch):
+    handle = build_handle(monkeypatch)
+    imported_program = DummyProgram("/shellcode.bin")
+
+    class PostProcessProject(DummyProject):
+        def openProgram(self, domain_dir, domain_name, flag):  # noqa: ARG002
+            assert (domain_dir, domain_name) == ("/", "shellcode.bin")
+            return imported_program
+
+    class FailingFlatAPI:
+        def __init__(self, _program, _monitor) -> None:
+            raise RuntimeError("flat api unavailable")
+
+    handle.project = PostProcessProject()
+    monkeypatch.setattr(session.java_bindings, "_flat_program_api_class", lambda: FailingFlatAPI)
+
+    with pytest.raises(RuntimeError, match="flat api unavailable"):
+        handle._post_process_imported_program_locked(
+            "/shellcode.bin",
+            entry_address=None,
+            entry_offset=None,
+            analyze_imported=False,
+        )
+
+    assert handle.project.saved == []
     assert handle.project.closed == [imported_program]
