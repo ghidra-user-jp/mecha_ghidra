@@ -114,6 +114,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `list_project_programs` - ターゲットが開いているプロジェクト内プログラム一覧を取得
 - `import_program` - バイナリまたは `.gzf` をプロジェクトへインポート
 - `load_project_program` - 既存プログラムを指定 `domain_path` でロード
+- `save_project_program` - 編集後の現在ロード中 program を Ghidra project に保存
 
 #### Function Analysis
 
@@ -155,6 +156,8 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `set_decompiler_comment` - デコンパイラコメントを設定
 - `set_disassembly_comment` - 逆アセンブリコメントを設定
 - `add_bookmark` - ブックマークを追加
+
+`rename_function_by_address` などの更新系 tool を使った後は、`save_project_program(target="default")` を呼ぶと変更が Ghidra project に保存されます。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードしてください。
 
 #### Data Type Operations
 

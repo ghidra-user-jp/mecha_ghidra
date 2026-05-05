@@ -101,6 +101,13 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="import_program", target=name)
 
+    def save_project_program(self, name: str, *, domain_path: str | None = None):
+        try:
+            with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
+                return self._runtime.save_project_program(name, domain_path=domain_path)
+        except Exception as exc:
+            self._raise_domain_error(exc, operation="save_project_program", target=name)
+
     def close_session(self, name: str, *, remove_program: bool = False):
         try:
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):

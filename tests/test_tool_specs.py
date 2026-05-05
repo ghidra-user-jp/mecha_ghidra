@@ -505,6 +505,12 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
+        "save_project_program",
+        {
+            "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
         "import_program",
         {
             "binary_path": (str, ...),
@@ -723,6 +729,12 @@ def test_all_output_models_are_strict_and_typed():
             "closed": (bool, ...),
             "target": (str, ...),
             "remove_program": (bool, ...),
+        },
+        "save_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "saved": (bool, ...),
         },
         "get_project_sync_status": {
             "target": (str, ...),

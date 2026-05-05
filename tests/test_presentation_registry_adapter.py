@@ -64,6 +64,14 @@ class RecordingService:
                 return []
             if name in {"load_program", "import_program"}:
                 return "/program"
+            if name == "save_project_program":
+                target = args[0]
+                return {
+                    "status": "ok",
+                    "target": target,
+                    "program": kwargs.get("domain_path") or "/program",
+                    "saved": True,
+                }
             if name == "create_session":
                 target = args[0]
                 project_location = args[1]

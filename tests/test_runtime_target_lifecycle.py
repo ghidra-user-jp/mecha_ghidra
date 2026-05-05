@@ -47,11 +47,15 @@ class _FakeDomainFile:
 
 
 class _FakeProgram:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, *, changed: bool = False) -> None:
         self._path = path
+        self._changed = changed
 
     def getDomainFile(self):
         return _FakeDomainFile(self._path)
+
+    def isChanged(self) -> bool:
+        return self._changed
 
 
 class _FakeProjectData:
@@ -127,6 +131,8 @@ class _FakeProjectHandle:
     repository_backed = False
     should_analyze = True
     fail_analyze = False
+    save_result = True
+    fail_save = False
 
     def __init__(self, project_location: str, project_name: str | None) -> None:
         self._location = project_location
@@ -137,6 +143,7 @@ class _FakeProjectHandle:
         self._programs = [{"path": "/main"}]
         self.analyze_calls: list[str] = []
         self.import_calls: list[dict[str, object]] = []
+        self.save_calls: list[str] = []
         self.sync_status = {
             "is_versioned": False,
             "version": None,
@@ -180,6 +187,12 @@ class _FakeProjectHandle:
 
     def get_sync_status(self, domain_path: str):  # noqa: ARG002
         return dict(self.sync_status)
+
+    def save_program(self, program) -> bool:  # noqa: ANN001
+        if _FakeProjectHandle.fail_save:
+            raise RuntimeError("SAVE_FAILED: failed to save program: disk full")
+        self.save_calls.append(program.getDomainFile().getPathname())
+        return bool(_FakeProjectHandle.save_result)
 
     def is_closed(self) -> bool:
         return self._closed
@@ -280,6 +293,8 @@ def _build_target_lifecycle(
 
     _FakeProjectHandle.metadata_programs = None
     _FakeProjectHandle.repository_backed = False
+    _FakeProjectHandle.save_result = True
+    _FakeProjectHandle.fail_save = False
     monkeypatch.setattr(store_module, "ProjectHandle", handle_cls)
     monkeypatch.setattr(lifecycle_module, "ProjectHandle", handle_cls)
 
@@ -825,3 +840,52 @@ def test_target_lifecycle_duplicate_import_raises_specific_error(monkeypatch: py
         "existing_domain_path": "/binary.exe",
     }
     assert handle.import_calls == []
+
+
+def test_target_lifecycle_save_project_program_saves_active_and_clears_dirty(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    store.mark_dirty_program("fw", "/main")
+
+    result = lifecycle.save_project_program("fw")
+
+    handle = store.get_target_handle_locked("fw")
+    assert result == {"status": "ok", "target": "fw", "program": "/main", "saved": True}
+    assert handle.save_calls == ["/main"]
+    assert not store.is_dirty_program("fw", "/main")
+
+
+def test_target_lifecycle_save_project_program_clean_noop_clears_dirty(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.save_result = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    _FakeProjectHandle.save_result = False
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    store.mark_dirty_program("fw", "/main")
+
+    result = lifecycle.save_project_program("fw", domain_path="/main")
+
+    assert result == {"status": "ok", "target": "fw", "program": "/main", "saved": False}
+    assert not store.is_dirty_program("fw", "/main")
+
+
+def test_target_lifecycle_save_project_program_failure_keeps_dirty(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    store.mark_dirty_program("fw", "/main")
+    _FakeProjectHandle.fail_save = True
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save program: disk full"):
+        lifecycle.save_project_program("fw")
+
+    assert store.is_dirty_program("fw", "/main")
+
+
+def test_target_lifecycle_save_project_program_rejects_non_active_domain_path(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle_locked("fw")
+
+    with pytest.raises(ValueError, match="domain_path must match"):
+        lifecycle.save_project_program("fw", domain_path="/other")
+
+    assert handle.save_calls == []

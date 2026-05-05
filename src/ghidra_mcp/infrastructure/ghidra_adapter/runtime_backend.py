@@ -109,6 +109,14 @@ class RuntimeBackend:
             func=lambda: self._target_lifecycle.import_program(name, binary_path, **kwargs),
         )
 
+    def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
+        return self._invoke(
+            operation="save_project_program",
+            target=name,
+            domain_path=domain_path,
+            func=lambda: self._target_lifecycle.save_project_program(name, domain_path=domain_path),
+        )
+
     def execute_core_command(
         self,
         command: str,

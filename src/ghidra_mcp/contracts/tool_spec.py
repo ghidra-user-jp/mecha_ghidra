@@ -97,6 +97,12 @@ _OFFSET_LIMIT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("limit", int, 100),
 )
 _DOMAIN_PATH_FIELD: ToolFieldSpec = ("domain_path", str | None, None)
+_SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("saved", bool, ...),
+)
 _CREATE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("target", str, ...),
     ("project_location", str, ...),
@@ -652,6 +658,23 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         read_only_hint=False,
         idempotent_hint=False,
+    ),
+    _registry_tool(
+        "save_project_program",
+        method_name="save_project_program",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(_DOMAIN_PATH_FIELD,),
+        output_fields=_SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS,
+        include_none_keys=("domain_path",),
+        description=(
+            "Persist the currently loaded program for a target into its Ghidra project. "
+            "Use this after mutating tools such as rename_function_by_address when changes "
+            "must remain visible after reopening the project."
+        ),
+        read_only_hint=False,
+        idempotent_hint=True,
     ),
     # function_analysis
     _core_tool(
@@ -1315,7 +1338,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         idempotent_hint=True,
     ),
 )
-
 _TOOL_SPECS: dict[str, ToolSpec] = {spec.name: spec for spec in _TOOL_SPEC_LIST}
 
 _DEFAULT_PROFILE_CATEGORIES = frozenset(

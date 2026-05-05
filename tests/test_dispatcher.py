@@ -48,6 +48,10 @@ class DummyRegistry:
         self.registry_calls.append(("import_program", {"target": target, **kwargs}))
         return "/imported.bin"
 
+    def save_project_program(self, target, **kwargs):
+        self.registry_calls.append(("save_project_program", {"target": target, **kwargs}))
+        return {"status": "ok", "target": target, "program": kwargs.get("domain_path") or "/main", "saved": True}
+
     def create_session(self, target, **kwargs):
         self.registry_calls.append(("create_session", {"target": target, **kwargs}))
         return {
@@ -331,6 +335,7 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("import_program", {"binary_path": "/tmp/a.bin", "base_address": "nope"}),
         ("import_program", {"binary_path": "/tmp/a.bin", "entry_address": "0x401000", "entry_offset": 0}),
         ("create_session", {"project_location": "/tmp/sample.gpr", "domain_path": 1}),
+        ("save_project_program", {"domain_path": 1}),
         ("get_project_sync_status", {"domain_path": 1}),
         ("checkout_project_program", {"exclusive": "yes", "domain_path": None}),
         ("add_project_program_to_version_control", {"comment": 1, "keep_checked_out": False}),
@@ -461,6 +466,28 @@ def test_dispatch_tool_applies_status_program_result_adapter():
     )
 
     assert result == {"status": "ok", "target": "fw", "program": "/folder/app"}
+
+
+def test_dispatch_tool_routes_save_project_program_to_registry_method():
+    registry = DummyRegistry()
+
+    result = dispatch_tool(
+        "save_project_program",
+        {"domain_path": "/folder/app"},
+        "fw",
+        registry=registry,
+    )
+
+    assert result == {"status": "ok", "target": "fw", "program": "/folder/app", "saved": True}
+    assert registry.registry_calls == [
+        (
+            "save_project_program",
+            {
+                "target": "fw",
+                "domain_path": "/folder/app",
+            },
+        )
+    ]
 
 
 def test_dispatch_tool_applies_status_target_result_adapter():
@@ -626,6 +653,13 @@ def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
             "load_project_program output validation failed",
         ),
         (
+            "save_project_program",
+            {"domain_path": "/folder/app"},
+            {"save_project_program_result": {"status": "ok", "target": "fw"}},
+            ValueError,
+            "save_project_program output validation failed",
+        ),
+        (
             "get_project_sync_status",
             {"domain_path": "/folder/app"},
             {"sync_status_result": "invalid"},
@@ -663,6 +697,11 @@ def test_dispatch_tool_raises_output_validation_error_for_incompatible_result(
             if "load_program_result" in override:
                 return override["load_program_result"]
             return super().load_program(target, **kwargs)
+
+        def save_project_program(self, target, **kwargs):
+            if "save_project_program_result" in override:
+                return override["save_project_program_result"]
+            return super().save_project_program(target, **kwargs)
 
         def get_project_sync_status(self, target, **kwargs):
             if "sync_status_result" in override:

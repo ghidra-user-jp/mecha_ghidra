@@ -48,6 +48,10 @@ class FakeTargetService:
         self.calls.append(("import_program", (target, binary_path), dict(kwargs)))
         return binary_path
 
+    def save_project_program(self, target: str, *, domain_path: str | None = None):
+        self.calls.append(("save_project_program", (target,), {"domain_path": domain_path}))
+        return {"status": "ok", "target": target, "program": domain_path or "/main", "saved": True}
+
     def create_session(
         self,
         target: str,
@@ -312,6 +316,10 @@ def test_parse_session_definition_invalid(text):
                 entry_offset=0,
             ),
             "/tmp/a.exe",
+        ),
+        (
+            lambda a: a.save_project_program("fw", domain_path="/app"),
+            {"status": "ok", "target": "fw", "program": "/app", "saved": True},
         ),
         (
             lambda a: a.create_session("fw", "/tmp/p.gpr", project_name="p", domain_path="/app"),

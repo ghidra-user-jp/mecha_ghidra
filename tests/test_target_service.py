@@ -51,6 +51,10 @@ class DummyRuntime:
         self.calls.append(("import_program", (name, binary_path), dict(kwargs)))
         return "/imported.bin"
 
+    def save_project_program(self, name: str, *, domain_path: str | None = None):
+        self.calls.append(("save_project_program", (name,), {"domain_path": domain_path}))
+        return {"status": "ok", "target": name, "program": domain_path or "/main", "saved": True}
+
     def close_session(self, name: str, *, remove_program: bool = False):
         self.calls.append(("close_session", (name,), {"remove_program": remove_program}))
 
@@ -90,6 +94,12 @@ def test_target_service_lifecycle_and_lock_routing():
         )
         == "/imported.bin"
     )
+    assert service.save_project_program("fw", domain_path="/next") == {
+        "status": "ok",
+        "target": "fw",
+        "program": "/next",
+        "saved": True,
+    }
     assert service.close_session("fw", remove_program=True) == {
         "closed": True,
         "target": "fw",
@@ -97,7 +107,7 @@ def test_target_service_lifecycle_and_lock_routing():
     }
 
     lock_targets = [target for target, _project in lock_manager.calls]
-    assert lock_targets == ["fw", "fw", "fw", "fw", "fw", "fw"]
+    assert lock_targets == ["fw", "fw", "fw", "fw", "fw", "fw", "fw"]
 
 
 def test_target_service_preserves_runtime_domain_error_code():
