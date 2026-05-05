@@ -783,6 +783,13 @@ class RuntimeTargetLifecycle:
                 name,
             )
             return False
+        if not status.get("is_versioned") and status.get("can_add_to_repository"):
+            logger.info(
+                "skipping initial auto-analysis for target '%s' because the shared-project program "
+                "has not been added to version control",
+                name,
+            )
+            return False
         return True
 
     @staticmethod

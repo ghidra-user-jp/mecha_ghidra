@@ -978,6 +978,32 @@ def test_target_lifecycle_skips_initial_analysis_for_unchecked_versioned_program
     assert core.initialized and core.initialized[-1][1] == "fw"
 
 
+def test_target_lifecycle_skips_initial_analysis_for_unversioned_shared_project_program(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    handle = store.get_target_handle_locked("fw")
+    handle.sync_status.update(
+        {
+            "is_versioned": False,
+            "can_add_to_repository": True,
+            "version": None,
+            "latest_version": None,
+        }
+    )
+
+    session = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+
+    assert session is store.sessions["fw"]
+    assert handle.analyze_calls == []
+    assert handle.project.saved_programs == []
+    assert store.analyzed_loads == set()
+    assert core.initialized and core.initialized[-1][1] == "fw"
+
+
 def test_target_lifecycle_create_session_closes_leaked_handle_when_rollback_close_fails(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
