@@ -70,6 +70,9 @@ class ServiceRegistryAdapter:
     def import_program(self, target: str, binary_path: str, **kwargs):
         return self._target_service.import_program(target, binary_path, **kwargs)
 
+    def save_project_program(self, target: str, *, domain_path: str | None = None):
+        return self._target_service.save_project_program(target, domain_path=domain_path)
+
     def create_session(
         self,
         target: str,

@@ -181,6 +181,7 @@ _REGISTRY_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...], bool, dict[str, An
     "register_target": ("register_target", ("project_location", "project_name"), True, {}),
     "load_project_program": ("load_program", ("domain_path",), True, {}),
     "import_program": ("import_program", _IMPORT_PROGRAM_FIELDS, True, {}),
+    "save_project_program": ("save_project_program", ("domain_path",), True, {}),
     "create_session": (
         "create_session",
         ("project_location", "domain_path", "project_name"),
@@ -285,6 +286,12 @@ _DIRECT_OUTPUT_FIELDS: dict[str, dict[str, tuple[type[Any], Any]]] = {
         "closed": (bool, ...),
         "target": (str, ...),
         "remove_program": (bool, ...),
+    },
+    "save_project_program": {
+        "status": (str, ...),
+        "target": (str, ...),
+        "program": (str, ...),
+        "saved": (bool, ...),
     },
     "get_project_sync_status": {
         "target": (str, ...),
@@ -438,6 +445,9 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
         },
         "load_project_program": {
             "domain_path": (str, ...),
+        },
+        "save_project_program": {
+            "domain_path": (str | None, None),
         },
         "create_session": {
             "project_location": (str, ...),

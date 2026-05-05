@@ -376,8 +376,8 @@ class ProjectHandle:
             close_error = None
             remove_error = None
             try:
-                if save and program is not None and self._program_needs_save(program):
-                    self.project.save(program)
+                if save and program is not None:
+                    self.save_program(program)
             except Exception as exc:
                 save_error = exc
                 logger.warning("program save failed before close: %s", exc)
@@ -399,18 +399,32 @@ class ProjectHandle:
             if close_error is not None:
                 messages = []
                 if save_error is not None:
-                    messages.append(f"failed to save program before close: {save_error}")
+                    messages.append(f"failed to save program before close: {self._save_error_text(save_error)}")
                 messages.append(f"failed to close program: {close_error}")
                 if remove_error is not None:
                     messages.append(f"failed to remove program: {remove_error}")
                 raise RuntimeError(f"SESSION_CLOSE_FAILED: {'; '.join(messages)}")
             if save_error is not None:
-                messages = [f"failed to save program before close: {save_error}"]
+                messages = [f"failed to save program before close: {self._save_error_text(save_error)}"]
                 if remove_error is not None:
                     messages.append(f"failed to remove program: {remove_error}")
                 raise RuntimeError(f"SAVE_FAILED: {'; '.join(messages)}")
             if remove_error is not None:
                 raise RuntimeError(f"REMOVE_PROGRAM_FAILED: {remove_error}")
+
+    def save_program(self, program) -> bool:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Project is closed")
+            if program is None:
+                raise ValueError("program is required")
+            if not self._program_needs_save(program):
+                return False
+            try:
+                self.project.save(program)
+            except Exception as exc:
+                raise RuntimeError(f"SAVE_FAILED: failed to save program: {exc}") from exc
+            return True
 
     def list_programs(self):
         with self._lock:
@@ -486,6 +500,14 @@ class ProjectHandle:
             return bool(is_changed())
         except Exception:
             return True
+
+    @staticmethod
+    def _save_error_text(exc: Exception) -> str:
+        text = str(exc)
+        prefix = "SAVE_FAILED: failed to save program: "
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+        return text
 
     def _ensure_repository_connected_locked(self, *, required: bool) -> bool:
         if not self.is_repository_project_from_metadata(self.project_location, self.project_name):

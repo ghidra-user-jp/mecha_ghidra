@@ -138,6 +138,7 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - If `--domain-path` is omitted, startup registers only the project target (works with empty projects). In this mode, import with `import_program` and open with `load_project_program`.
 - Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
 - In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis.
+- After mutating tools such as `rename_function_by_address`, call `save_project_program(target="default")` to persist changes into `.gpr/.rep`. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 - Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
 - Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
 - `delete_shared_project_file` always requires an explicit `domain_path` plus `confirm` equal to the normalized path; it refuses loaded files, active checkouts, and private files unless `allow_private=true`.

@@ -24,6 +24,7 @@ _RAW_TO_PUBLIC_NAME: dict[str, dict[str, str]] = {
 
 _ALWAYS_INCLUDE_NONE_KEYS: dict[str, set[str]] = {
     "register_target": {"project_name"},
+    "save_project_program": {"domain_path"},
     "create_session": {"project_name"},
     "get_project_sync_status": {"domain_path"},
     "checkout_project_program": {"domain_path"},
@@ -91,6 +92,14 @@ _TOOL_DECORATOR_OPTIONS: dict[str, dict[str, Any]] = {
             "target's project. Raw imports support BinaryLoader options such as language_id, "
             "base_address, entry bootstrap, and automatic analysis."
         ),
+    },
+    "save_project_program": {
+        "description": (
+            "Persist the currently loaded program for a target into its Ghidra project. "
+            "Use this after mutating tools such as rename_function_by_address when changes "
+            "must remain visible after reopening the project."
+        ),
+        "annotations": ToolAnnotations(readOnlyHint=False, idempotentHint=True),
     },
     "create_session": {
         "description": (

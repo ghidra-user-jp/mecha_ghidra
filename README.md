@@ -110,6 +110,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `list_project_programs` - List programs in the target's opened project
 - `import_program` - Import a binary or `.gzf` into the project
 - `load_project_program` - Load an existing program by `domain_path`
+- `save_project_program` - Persist the currently loaded program after edits
 
 #### Function Analysis
 
@@ -151,6 +152,8 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `set_decompiler_comment` - Set decompiler comment
 - `set_disassembly_comment` - Set disassembly comment
 - `add_bookmark` - Add bookmark
+
+After mutating tools such as `rename_function_by_address`, call `save_project_program(target="default")` to persist edits into the Ghidra project. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 
 #### Data Type Operations
 

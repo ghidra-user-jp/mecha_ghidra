@@ -242,6 +242,30 @@ class RuntimeTargetLifecycle:
             self._store.target_projects[name] = handle.get_key()
             return domain_file.getPathname()
 
+    def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, object]:
+        with self._store.registry_lock.write_lock():
+            session = self._store.ensure_session(name)
+            handle = session.get_project_handle()
+            active_domain_path = self._store.session_domain_path(session)
+            requested_domain_path = (domain_path or "").strip()
+            resolved_domain_path = active_domain_path
+            if requested_domain_path:
+                resolved_domain_path = self._normalize_domain_path_locked(handle, requested_domain_path)
+                if resolved_domain_path != active_domain_path:
+                    raise ValueError(
+                        "domain_path must match the currently loaded program: "
+                        f"requested={resolved_domain_path}, active={active_domain_path}"
+                    )
+
+            saved = handle.save_program(session.get_program())
+            self._store.clear_dirty_program(name, resolved_domain_path)
+            return {
+                "status": "ok",
+                "target": name,
+                "program": resolved_domain_path,
+                "saved": bool(saved),
+            }
+
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
         with self._store.registry_lock.write_lock():
             self._close_session_locked(name, remove_program=remove_program)

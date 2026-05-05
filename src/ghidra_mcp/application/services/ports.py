@@ -31,6 +31,9 @@ class TargetRuntimePort(Protocol):
     def import_program(self, name: str, binary_path: str, **kwargs: Any) -> str:
         ...
 
+    def save_project_program(self, name: str, *, domain_path: str | None = None) -> dict[str, Any]:
+        ...
+
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
         ...
 

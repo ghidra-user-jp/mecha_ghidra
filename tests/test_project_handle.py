@@ -110,6 +110,38 @@ def test_close_can_skip_save(monkeypatch):
     assert handle._refcount == 0
 
 
+def test_save_program_saves_changed_program(monkeypatch):
+    handle = build_handle(monkeypatch)
+    program = DummyProgram("/folder/app", changed=True)
+
+    assert handle.save_program(program) is True
+
+    assert handle.project.saved == [program]
+
+
+def test_save_program_skips_clean_program(monkeypatch):
+    handle = build_handle(monkeypatch)
+    program = DummyProgram("/folder/app", changed=False)
+
+    assert handle.save_program(program) is False
+
+    assert handle.project.saved == []
+
+
+def test_save_program_surfaces_save_failed(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class FailingSaveProject(DummyProject):
+        def save(self, _program):
+            raise RuntimeError("disk full")
+
+    handle.project = FailingSaveProject()
+    program = DummyProgram("/folder/app", changed=True)
+
+    with pytest.raises(RuntimeError, match="SAVE_FAILED: failed to save program: disk full"):
+        handle.save_program(program)
+
+
 def test_close_surfaces_save_failed_after_closing_program(monkeypatch):
     handle = build_handle(monkeypatch)
 
