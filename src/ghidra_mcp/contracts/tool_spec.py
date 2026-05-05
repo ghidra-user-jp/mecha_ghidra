@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 
 from .tool_models import (
+    ToolInputModel,
     create_list_output_model,
     create_map_output_model,
     create_scalar_output_model,
@@ -78,6 +79,7 @@ class ToolSpec:
     omit_falsey_keys: frozenset[str] = field(default_factory=frozenset)
     description: str | None = None
     read_only_hint: bool | None = None
+    destructive_hint: bool | None = None
     idempotent_hint: bool | None = None
     checkout_required: bool = False
 
@@ -106,6 +108,214 @@ _CLOSE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("target", str, ...),
     ("remove_program", bool, ...),
 )
+_IMPORT_PROGRAM_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("binary_path", str, ...),
+    ("import_mode", Literal["auto", "raw_binary"], "auto"),
+    ("language_id", str | None, None),
+    ("compiler_spec_id", str | None, None),
+    ("base_address", str | None, None),
+    ("file_offset", int | None, None),
+    ("length", int | None, None),
+    ("block_name", str | None, None),
+    ("overlay", bool, False),
+    ("entry_address", str | None, None),
+    ("entry_offset", int | None, None),
+    ("analyze_imported", bool | None, None),
+)
+
+_GET_PROJECT_SYNC_STATUS_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("target", str, ...),
+    ("program", str, ...),
+    ("is_versioned", bool, ...),
+    ("is_checked_out", bool, ...),
+    ("is_checked_out_exclusive", bool, ...),
+    ("is_latest_version", bool | None, ...),
+    ("modified_since_checkout", bool, ...),
+    ("can_add_to_repository", bool, ...),
+    ("can_checkout", bool, ...),
+    ("can_checkin", bool, ...),
+    ("can_merge", bool, ...),
+    ("is_hijacked", bool, ...),
+    ("version", int | None, ...),
+    ("latest_version", int | None, ...),
+    ("checkout_status", dict[str, object] | None, ...),
+    ("checkouts", list[object], ...),
+    ("shared_project_url", str | None, ...),
+)
+
+_GET_VERSION_HISTORY_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("target", str, ...),
+    ("program", str, ...),
+    ("current_version", int, ...),
+    ("latest_version", int, ...),
+    ("total_versions", int, ...),
+    ("versions", list[object], ...),
+)
+
+_GET_VERSION_DIFF_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("target", str, ...),
+    ("program", str, ...),
+    ("from_version", int, ...),
+    ("to_version", int, ...),
+    ("total_diff_addresses", int, ...),
+    ("total_diff_ranges", int, ...),
+    ("diff_types", list[object], ...),
+    ("ranges", list[object], ...),
+    ("ranges_truncated", bool, ...),
+    ("warnings", str | None, ...),
+)
+
+_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("checked_out", bool, ...),
+    ("already_checked_out", bool, ...),
+    ("exclusive", bool, ...),
+)
+
+_ADD_PROJECT_PROGRAM_TO_VERSION_CONTROL_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("reason", str | None, None),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("is_versioned", bool | None, None),
+    ("version", int | None, None),
+    ("latest_version", int | None, None),
+    ("checked_out", bool | None, None),
+    ("effective_keep_checked_out", bool | None, None),
+)
+
+_COMMIT_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("reason", str | None, None),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("required_action", str | None, None),
+    ("can_add_to_repository", bool | None, None),
+    ("message", str | None, None),
+    ("new_version", int | None, None),
+    ("version", int | None, None),
+    ("latest_version", int | None, None),
+    ("checked_out", bool | None, None),
+    ("effective_keep_checked_out", bool | None, None),
+    ("is_latest_version", bool | None, None),
+    ("discarded_local_changes", bool | None, None),
+    ("merged", bool | None, None),
+)
+
+_PULL_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("updated", bool, ...),
+    ("merged", bool, ...),
+    ("discarded_local_changes", bool, ...),
+    ("followed_latest", bool, ...),
+    ("version", int | None, ...),
+    ("latest_version", int | None, ...),
+    ("is_latest_version", bool | None, ...),
+)
+
+_UNDO_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("reason", str | None, None),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("checked_out", bool | None, None),
+    ("version", int | None, None),
+    ("is_latest_version", bool | None, None),
+    ("kept_program", str | None, None),
+)
+
+_TERMINATE_PROJECT_PROGRAM_CHECKOUT_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("checkout_id", int, ...),
+    ("active_checkouts", list[object], ...),
+)
+
+_DELETE_SHARED_PROJECT_FILE_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("domain_path", str, ...),
+    ("deleted", bool, ...),
+    ("content_type", str | None, ...),
+    ("was_versioned", bool, ...),
+    ("version", int | None, ...),
+    ("latest_version", int | None, ...),
+)
+
+_RELOAD_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("reloaded", bool, ...),
+)
+
+class ImportProgramInput(ToolInputModel):
+    binary_path: str
+    import_mode: Literal["auto", "raw_binary"] = "auto"
+    language_id: str | None = None
+    compiler_spec_id: str | None = None
+    base_address: str | None = None
+    file_offset: int | None = None
+    length: int | None = None
+    block_name: str | None = None
+    overlay: bool = False
+    entry_address: str | None = None
+    entry_offset: int | None = None
+    analyze_imported: bool | None = None
+
+    @field_validator("binary_path", "language_id", "compiler_spec_id", "block_name")
+    @classmethod
+    def _strip_non_empty_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+    @field_validator("base_address", "entry_address")
+    @classmethod
+    def _validate_address_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        try:
+            int(text, 0)
+        except ValueError as exc:
+            raise ValueError("must be a valid integer address such as 0x401000") from exc
+        return text
+
+    @field_validator("file_offset", "entry_offset")
+    @classmethod
+    def _validate_non_negative(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("must be >= 0")
+        return value
+
+    @field_validator("length")
+    @classmethod
+    def _validate_positive_length(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("must be > 0")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_import_options(self) -> "ImportProgramInput":
+        if self.import_mode == "raw_binary" and not self.language_id:
+            raise ValueError("language_id is required when import_mode='raw_binary'")
+        if self.entry_address is not None and self.entry_offset is not None:
+            raise ValueError("entry_address and entry_offset cannot both be set")
+        if self.analyze_imported is None:
+            self.analyze_imported = self.import_mode == "raw_binary"
+        return self
 
 
 def _pascal_case(name: str) -> str:
@@ -117,6 +327,8 @@ def _typed_fields(fields: tuple[ToolFieldSpec, ...]) -> dict[str, tuple[Any, Any
 
 
 def _build_input_model(tool_name: str, input_fields: tuple[ToolFieldSpec, ...]) -> type[BaseModel]:
+    if tool_name == "import_program":
+        return ImportProgramInput
     return create_typed_input_model(f"{_pascal_case(tool_name)}Input", _typed_fields(input_fields))
 
 
@@ -172,6 +384,7 @@ def _tool(
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     read_only_hint: bool | None = None,
+    destructive_hint: bool | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
 ) -> ToolSpec:
@@ -203,6 +416,7 @@ def _tool(
         omit_falsey_keys=frozenset(omit_falsey_keys),
         description=description,
         read_only_hint=read_only_hint,
+        destructive_hint=destructive_hint,
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -300,8 +514,12 @@ def _shared_sync_tool(
     safety_tag: ToolSafetyTag,
     operation_level: ToolOperationLevel,
     input_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
+    output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
     description: str | None = None,
     include_none_keys: Iterable[str] = (),
+    read_only_hint: bool | None = None,
+    destructive_hint: bool | None = None,
+    idempotent_hint: bool | None = None,
 ) -> ToolSpec:
     return _tool(
         name=name,
@@ -311,8 +529,12 @@ def _shared_sync_tool(
         executor_kind=ExecutorKind.SHARED_SYNC_METHOD,
         command_or_method=method_name,
         input_fields=input_fields,
+        output_fields=output_fields,
         include_none_keys=include_none_keys,
         description=description,
+        read_only_hint=read_only_hint,
+        destructive_hint=destructive_hint,
+        idempotent_hint=idempotent_hint,
     )
 
 
@@ -409,10 +631,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         category_tag=ToolCategoryTag.CORE,
         safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
         operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(("binary_path", str, ...),),
+        input_fields=_IMPORT_PROGRAM_FIELDS,
         scalar_output_type=str,
         result_adapter="status_program_ok",
-        description="Import a binary or Ghidra archive (.gzf) into the current target's project",
+        description="Import a binary, raw binary, or Ghidra archive (.gzf) into the current target's project",
     ),
     _registry_tool(
         "load_project_program",
@@ -918,8 +1140,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.SAFE_READONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(_DOMAIN_PATH_FIELD,),
+        output_fields=_GET_PROJECT_SYNC_STATUS_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Get shared-project version-control status for the target program",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
     ),
     _shared_sync_tool(
         "get_version_history",
@@ -930,8 +1156,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("limit", int, 50),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_GET_VERSION_HISTORY_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Get version history metadata for the target program in a shared project",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
     ),
     _shared_sync_tool(
         "get_version_diff",
@@ -944,8 +1174,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("range_limit", int, 200),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_GET_VERSION_DIFF_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Get a summary of differences between two shared-project versions of the target program",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
     ),
     _shared_sync_tool(
         "checkout_project_program",
@@ -956,8 +1190,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("exclusive", bool, False),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Checkout the target program in a shared project",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
     ),
     _shared_sync_tool(
         "add_project_program_to_version_control",
@@ -969,8 +1207,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("keep_checked_out", bool, False),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_ADD_PROJECT_PROGRAM_TO_VERSION_CONTROL_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Add the target program to shared-project version control",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
     ),
     _shared_sync_tool(
         "commit_project_program",
@@ -981,10 +1223,18 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("message", str, ...),
             ("keep_checked_out", bool, False),
             ("auto_checkout", bool, True),
+            ("on_conflict", str, "abort"),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_COMMIT_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
-        description="Check-in changes of the target program to the shared project server",
+        description=(
+            "Check-in changes of the target program to the shared project server; "
+            "on_conflict controls stale checkout handling"
+        ),
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
     ),
     _shared_sync_tool(
         "pull_project_program",
@@ -995,8 +1245,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("on_local_changes", str, "abort"),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_PULL_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Pull/merge latest remote changes for the target program",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
     ),
     _shared_sync_tool(
         "undo_checkout_project_program",
@@ -1007,8 +1261,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("discard_local_changes", bool, True),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_UNDO_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Undo checkout for the target program (optionally discard local changes)",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
     ),
     _shared_sync_tool(
         "terminate_project_program_checkout",
@@ -1019,8 +1277,29 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("checkout_id", int, ...),
             _DOMAIN_PATH_FIELD,
         ),
+        output_fields=_TERMINATE_PROJECT_PROGRAM_CHECKOUT_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Terminate a stale checkout by checkout id for the target program",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
+    ),
+    _shared_sync_tool(
+        "delete_shared_project_file",
+        method_name="delete_shared_project_file",
+        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("domain_path", str, ...),
+            ("confirm", str, ...),
+            ("expected_latest_version", int | None, None),
+            ("allow_private", bool, False),
+        ),
+        output_fields=_DELETE_SHARED_PROJECT_FILE_OUTPUT_FIELDS,
+        description="Delete a shared-project file after confirmation and checkout safety checks",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
     ),
     _shared_sync_tool(
         "reload_project_program",
@@ -1028,8 +1307,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(_DOMAIN_PATH_FIELD,),
+        output_fields=_RELOAD_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Reload the target program by closing and reopening the current domain path",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
     ),
 )
 

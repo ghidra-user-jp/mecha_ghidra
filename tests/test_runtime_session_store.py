@@ -40,10 +40,10 @@ class _FakeProjectHandle:
 
 class _FakeSession:
     def __init__(self) -> None:
-        self.closed_with: list[bool] = []
+        self.closed_with: list[tuple[bool, bool]] = []
 
-    def close(self, *, remove_program: bool = False) -> None:
-        self.closed_with.append(remove_program)
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+        self.closed_with.append((save, remove_program))
 
     def get_project_handle(self):  # noqa: ANN001
         return _FakeProjectHandle("/tmp/prj", "sample")
@@ -96,7 +96,7 @@ def test_cleanup_session_removes_entries_and_context():
     assert "fw" not in store.locks
     assert handle.get_key() not in store.project_handles
     assert core.removed == ["fw"]
-    assert session.closed_with == [True]
+    assert session.closed_with == [(True, True)]
 
 
 def test_ensure_session_reports_not_loaded_program():
@@ -125,3 +125,26 @@ def test_analyzed_load_tracking_by_target_and_domain():
 
     store.clear_analyzed_loads()
     assert not store.is_analyzed_load("b", "/x")
+
+
+def test_dirty_program_tracking_by_target_and_domain():
+    store, _core = _build_store()
+
+    assert not store.is_dirty_program("a", "/x")
+    store.mark_dirty_program("a", "/x")
+    store.mark_dirty_program("a", "/y")
+    store.mark_dirty_program("b", "/x")
+    assert store.is_dirty_program("a", "/x")
+    assert store.is_dirty_program("a", "/y")
+    assert store.is_dirty_program("b", "/x")
+
+    store.clear_dirty_program("a", "/x")
+    assert not store.is_dirty_program("a", "/x")
+    assert store.is_dirty_program("a", "/y")
+
+    store.clear_dirty_programs_for_target("a")
+    assert not store.is_dirty_program("a", "/y")
+    assert store.is_dirty_program("b", "/x")
+
+    store.clear_dirty_programs()
+    assert not store.is_dirty_program("b", "/x")

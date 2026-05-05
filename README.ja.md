@@ -1,4 +1,4 @@
-<img width="4096" height="700" alt="mecha_ghidra_one_line" src="https://github.com/user-attachments/assets/def48147-f8cf-4a6a-b4e6-cb3a43798d56" />
+<img src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" />
 
 [English](README.md) | [日本語](README.ja.md)
 
@@ -52,7 +52,7 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 4. MCP クライアントは `http://127.0.0.1:8081/mcp` に接続
 
 - `docker compose build` も引き続き利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、これは同梱 Linux decompiler を動かすために必要です。
-- `linux/arm64` を使う場合は、Docker build が既定で mecha_ghidra release `v0.1.0-rc.1` の patched Ghidra 配布物を自動選択します。upstream の公式 ZIP を ARM64 へ無理に指定した場合は、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
+- `linux/arm64` を使う場合は、Docker build が既定で同梱の mecha_ghidra patched Ghidra 配布物を自動選択します。upstream の公式 ZIP を ARM64 へ無理に指定した場合は、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
 - 独自の patched ZIP を使いたい場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定して上書きできます。
 - `./samples` はコンテナ内に `/samples` として read-only 共有されます。`import_program` では `/samples/<filename>` を指定してください。
 - Ghidra project は named volume `ghidra-projects` に永続化され、既定の project path は `/data/projects/default.gpr` です。初回利用前に一度その project を作成するか、既存の Ghidra project をそこへ mount してください。
@@ -83,8 +83,8 @@ DOCKER_PLATFORM=linux/arm64 docker compose up -d
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
@@ -173,17 +173,18 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 #### Shared Project Sync（`shared_sync` category）
 
-`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` は `domain_path` を任意指定できます（未指定時は現在ロード中のprogram）。
+`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `add_to_version_control` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `delete_shared_project_file` / `reload` は記載のある箇所で `domain_path` を指定できます（未指定時は現在ロード中のprogram。削除は明示的な `domain_path` が必須）。
 
 - `get_project_sync_status` - shared project 上の同期状態を取得
 - `get_version_history` - バージョン履歴（version/user/comment/time）を取得
 - `get_version_diff` - 2バージョン間の差分要約（件数/タイプ別/アドレスレンジ）を取得
 - `checkout_project_program` - プログラムを checkout（排他指定可）
 - `add_project_program_to_version_control` - private プログラムを shared 管理へ追加
-- `commit_project_program` - checkout 中の変更を check-in
+- `commit_project_program` - checkout 中の変更を check-in（競合 checkout を破棄する場合は `on_conflict="discard"` を明示）
 - `pull_project_program` - 最新状態を取得（必要に応じて破棄/追従）
 - `undo_checkout_project_program` - checkout を取り消し（ローカル変更破棄可）
 - `terminate_project_program_checkout` - 既存 checkout を checkout ID で強制終了
+- `delete_shared_project_file` - `confirm` が `domain_path` と一致した未ロードの shared project file を削除
 - `reload_project_program` - 現在プログラムを再ロード
 
 詳細な運用フローや制約事項は [利用ガイド](docs/usage.ja.md) を参照してください。

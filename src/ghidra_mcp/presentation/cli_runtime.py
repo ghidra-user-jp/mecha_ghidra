@@ -23,14 +23,14 @@ def _normalize_empty_list_result(result: Any) -> Any:
     return result
 
 
-class _LazyCoreExecutor:
-    """Resolve ghidra core module lazily to avoid import-time dependency on started JVM."""
+class _RuntimeBackendCoreExecutor:
+    """Delegate core commands through RuntimeBackend for consistent state tracking."""
 
-    def __init__(self, core_accessor: Callable[[], Any]) -> None:
-        self._core_accessor = core_accessor
+    def __init__(self, runtime_backend: RuntimeBackend) -> None:
+        self._runtime_backend = runtime_backend
 
     def execute(self, command: str, params: dict[str, Any], key: str) -> Any:
-        return self._core_accessor().execute(command, params, key=key)
+        return self._runtime_backend.execute_core_command(command, params, target=key)
 
 
 class ServiceRegistryAdapter:
@@ -68,8 +68,8 @@ class ServiceRegistryAdapter:
     def load_program(self, target: str, domain_path: str):
         return self._target_service.load_program(target, domain_path)
 
-    def import_program(self, target: str, binary_path: str):
-        return self._target_service.import_program(target, binary_path)
+    def import_program(self, target: str, binary_path: str, **kwargs):
+        return self._target_service.import_program(target, binary_path, **kwargs)
 
     def create_session(
         self,
@@ -120,6 +120,7 @@ class ServiceRegistryAdapter:
         message: str,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ):
         return self._sync_service.commit_project_program(
@@ -127,6 +128,7 @@ class ServiceRegistryAdapter:
             message,
             keep_checked_out=keep_checked_out,
             auto_checkout=auto_checkout,
+            on_conflict=on_conflict,
             domain_path=domain_path,
         )
 
@@ -167,6 +169,23 @@ class ServiceRegistryAdapter:
             target,
             checkout_id=checkout_id,
             domain_path=domain_path,
+        )
+
+    def delete_shared_project_file(
+        self,
+        target: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
+    ):
+        return self._sync_service.delete_shared_project_file(
+            target,
+            domain_path=domain_path,
+            confirm=confirm,
+            expected_latest_version=expected_latest_version,
+            allow_private=allow_private,
         )
 
     def reload_project_program(self, target: str, *, domain_path: str | None = None):
@@ -227,7 +246,7 @@ def create_cli_runtime(
     lock_manager = LockManager()
     target_service = TargetService(runtime_backend, lock_manager=lock_manager)
     sync_service = SyncService(runtime_backend, lock_manager=lock_manager)
-    core_gateway = CoreGateway(_LazyCoreExecutor(core_accessor))
+    core_gateway = CoreGateway(_RuntimeBackendCoreExecutor(runtime_backend))
     core_command_service = CoreCommandService(core_gateway)
     registry = ServiceRegistryAdapter(
         core_command_service=core_command_service,

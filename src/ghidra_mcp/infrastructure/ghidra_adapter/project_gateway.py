@@ -21,8 +21,8 @@ class ProjectGateway:
     def load_project_program(self, target: str, *, domain_path: str):
         return self._registry.load_program(target, domain_path)
 
-    def import_program(self, target: str, *, binary_path: str):
-        return self._registry.import_program(target, binary_path)
+    def import_program(self, target: str, *, binary_path: str, **kwargs):
+        return self._registry.import_program(target, binary_path, **kwargs)
 
     def create_session(
         self,

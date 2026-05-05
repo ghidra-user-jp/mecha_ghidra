@@ -47,8 +47,8 @@ class DummyRuntime:
         self.calls.append(("load_program", (name, domain_path), {}))
         return domain_path
 
-    def import_program(self, name: str, binary_path: str):
-        self.calls.append(("import_program", (name, binary_path), {}))
+    def import_program(self, name: str, binary_path: str, **kwargs):
+        self.calls.append(("import_program", (name, binary_path), dict(kwargs)))
         return "/imported.bin"
 
     def close_session(self, name: str, *, remove_program: bool = False):
@@ -80,7 +80,16 @@ def test_target_service_lifecycle_and_lock_routing():
     assert service.list_targets() == [{"target": "fw"}]
     assert service.list_programs("fw") == []
     assert service.load_program("fw", "/next") == "/next"
-    assert service.import_program("fw", "/tmp/a.exe") == "/imported.bin"
+    assert (
+        service.import_program(
+            "fw",
+            "/tmp/a.exe",
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            base_address="0x401000",
+        )
+        == "/imported.bin"
+    )
     assert service.close_session("fw", remove_program=True) == {
         "closed": True,
         "target": "fw",
@@ -132,7 +141,7 @@ def test_target_service_preserves_session_not_found_domain_error():
     assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
 
 
-def test_target_service_fallback_non_domain_error_is_sync_operation_failed():
+def test_target_service_fallback_non_domain_error_is_operation_failed():
     class Runtime(DummyRuntime):
         def list_programs(self, name: str):  # noqa: ARG002
             raise RuntimeError("unexpected failure")
@@ -142,13 +151,13 @@ def test_target_service_fallback_non_domain_error_is_sync_operation_failed():
     with pytest.raises(DomainError) as exc_info:
         service.list_programs("fw")
 
-    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.code == ErrorCode.OPERATION_FAILED
     assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
 
 
 def test_target_service_preserves_domain_error_and_merges_details():
     class Runtime(DummyRuntime):
-        def import_program(self, name: str, binary_path: str):  # noqa: ARG002
+        def import_program(self, name: str, binary_path: str, **kwargs):  # noqa: ARG002
             raise DomainError(
                 code=ErrorCode.PROGRAM_NOT_FOUND,
                 message="program not found",
@@ -166,6 +175,61 @@ def test_target_service_preserves_domain_error_and_merges_details():
     assert err.code == ErrorCode.PROGRAM_NOT_FOUND
     assert err.details == {
         "binary_path": "/tmp/missing.exe",
+        "operation": "import_program",
+        "target": "fw",
+    }
+
+
+def test_target_service_preserves_target_already_loaded_error_details():
+    class Runtime(DummyRuntime):
+        def load_program(self, name: str, domain_path: str):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.TARGET_ALREADY_LOADED,
+                message="TARGET_ALREADY_LOADED: program already loaded: /main",
+                hint="Use the existing target directly instead of reloading the same program",
+                retryable=False,
+                details={"domain_path": domain_path, "owner_target": "fw-primary"},
+            )
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.load_program("fw-shadow", "/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.TARGET_ALREADY_LOADED
+    assert err.details == {
+        "domain_path": "/main",
+        "owner_target": "fw-primary",
+        "operation": "load_program",
+        "target": "fw-shadow",
+    }
+
+
+def test_target_service_preserves_program_already_imported_error_details():
+    class Runtime(DummyRuntime):
+        def import_program(self, name: str, binary_path: str, **kwargs):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.PROGRAM_ALREADY_IMPORTED,
+                message="PROGRAM_ALREADY_IMPORTED: program already exists: /sample.exe",
+                hint="Use load_project_program with the existing domain path instead of importing again",
+                retryable=False,
+                details={
+                    "binary_path": binary_path,
+                    "existing_domain_path": "/sample.exe",
+                },
+            )
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.import_program("fw", "/tmp/sample.exe")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.PROGRAM_ALREADY_IMPORTED
+    assert err.details == {
+        "binary_path": "/tmp/sample.exe",
+        "existing_domain_path": "/sample.exe",
         "operation": "import_program",
         "target": "fw",
     }

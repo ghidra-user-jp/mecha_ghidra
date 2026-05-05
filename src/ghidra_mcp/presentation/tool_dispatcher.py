@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_tool_spec
+from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.error_mapper import map_exception
 
 
@@ -33,7 +34,9 @@ def _close_session_error(_exc: Exception, target: str) -> RuntimeError:
     return RuntimeError(f"Failed to close session '{target}'")
 
 
-def _close_remove_error(_exc: Exception, target: str) -> RuntimeError:
+def _close_remove_error(_exc: Exception, target: str) -> Exception:
+    if isinstance(_exc, DomainError) and _exc.code == ErrorCode.UNSAFE_PROGRAM_REMOVE:
+        return map_exception(_exc)
     return RuntimeError(f"Failed to close/remove session '{target}'")
 
 
@@ -50,6 +53,21 @@ def normalize_empty_list_result(result: Any) -> Any:
     return result
 
 
+def _empty_list_payload_from_call_tool_result(result: Any) -> list[Any] | None:
+    if not isinstance(result, CallToolResult):
+        return None
+    if result.isError:
+        return None
+    if len(result.content) != 1:
+        return None
+    item = result.content[0]
+    if not isinstance(item, TextContent):
+        return None
+    if item.text != "[]":
+        return None
+    return []
+
+
 def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | None) -> dict[str, Any]:
     try:
         parsed = model_cls.model_validate(raw_args or {})
@@ -61,6 +79,13 @@ def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | Non
 def _validate_output(spec_name: str, model_cls, result: Any) -> Any:
     if model_cls is None:
         return result
+    empty_list_payload = _empty_list_payload_from_call_tool_result(result)
+    if empty_list_payload is not None:
+        try:
+            model_cls.model_validate({"payload": empty_list_payload})
+            return result
+        except ValidationError:
+            pass
     try:
         model_cls.model_validate(result)
     except ValidationError:

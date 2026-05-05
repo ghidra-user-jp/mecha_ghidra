@@ -28,7 +28,7 @@ class TargetRuntimePort(Protocol):
     def load_program(self, name: str, domain_path: str) -> str:
         ...
 
-    def import_program(self, name: str, binary_path: str) -> str:
+    def import_program(self, name: str, binary_path: str, **kwargs: Any) -> str:
         ...
 
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
@@ -77,6 +77,7 @@ class SyncRuntimePort(Protocol):
         *,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ) -> dict[str, Any]:
         ...
@@ -105,6 +106,17 @@ class SyncRuntimePort(Protocol):
         *,
         checkout_id: int,
         domain_path: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    def delete_shared_project_file(
+        self,
+        name: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
     ) -> dict[str, Any]:
         ...
 

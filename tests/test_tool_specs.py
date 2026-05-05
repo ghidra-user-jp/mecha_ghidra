@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import ghidra_mcp.contracts.tool_models as tool_models
 from ghidra_mcp.contracts.tool_spec import (
@@ -98,6 +98,7 @@ def test_shared_sync_specs_are_tagged_as_shared_sync_category():
         "pull_project_program",
         "undo_checkout_project_program",
         "terminate_project_program_checkout",
+        "delete_shared_project_file",
         "reload_project_program",
     }
 
@@ -111,11 +112,13 @@ def test_shared_sync_specs_register_via_generic_tool_registration():
     )
 
     registered: list[str] = []
+    annotations_by_name: dict[str, Any] = {}
 
     class DummyMCP:
         def tool(self, **kwargs):  # noqa: ARG002
             def _decorator(fn):
                 registered.append(fn.__name__)
+                annotations_by_name[fn.__name__] = kwargs.get("annotations")
                 return fn
 
             return _decorator
@@ -124,6 +127,26 @@ def test_shared_sync_specs_register_via_generic_tool_registration():
 
     shared_sync_names = list(specs)
     assert registered == shared_sync_names
+    assert {
+        name
+        for name, annotations in annotations_by_name.items()
+        if annotations.readOnlyHint is True
+    } == {
+        "get_project_sync_status",
+        "get_version_history",
+        "get_version_diff",
+    }
+    assert {
+        name
+        for name, annotations in annotations_by_name.items()
+        if annotations.destructiveHint is True
+    } == {
+        "commit_project_program",
+        "pull_project_program",
+        "undo_checkout_project_program",
+        "terminate_project_program_checkout",
+        "delete_shared_project_file",
+    }
 
 
 def test_typed_input_models_for_function_listing_slice():
@@ -485,6 +508,17 @@ def test_typed_input_models_for_function_listing_slice():
         "import_program",
         {
             "binary_path": (str, ...),
+            "import_mode": (Literal["auto", "raw_binary"], "auto"),
+            "language_id": (str | None, None),
+            "compiler_spec_id": (str | None, None),
+            "base_address": (str | None, None),
+            "file_offset": (int | None, None),
+            "length": (int | None, None),
+            "block_name": (str | None, None),
+            "overlay": (bool, False),
+            "entry_address": (str | None, None),
+            "entry_offset": (int | None, None),
+            "analyze_imported": (bool | None, None),
         },
     )
     _assert_fields(
@@ -524,6 +558,7 @@ def test_typed_input_models_for_function_listing_slice():
             "message": (str, ...),
             "keep_checked_out": (bool, False),
             "auto_checkout": (bool, True),
+            "on_conflict": (str, "abort"),
             "domain_path": (str | None, None),
         },
     )
@@ -546,6 +581,15 @@ def test_typed_input_models_for_function_listing_slice():
         {
             "checkout_id": (int, ...),
             "domain_path": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "delete_shared_project_file",
+        {
+            "domain_path": (str, ...),
+            "confirm": (str, ...),
+            "expected_latest_version": (int | None, None),
+            "allow_private": (bool, False),
         },
     )
     _assert_fields(
@@ -662,7 +706,8 @@ def test_all_output_models_are_strict_and_typed():
         "load_project_program": str,
         "import_program": str,
     }
-    direct_output_fields = {
+
+    direct_output_fields: dict[str, dict[str, tuple[type[Any], Any]]] = {
         "create_session": {
             "target": (str, ...),
             "project_location": (str, ...),
@@ -678,6 +723,127 @@ def test_all_output_models_are_strict_and_typed():
             "closed": (bool, ...),
             "target": (str, ...),
             "remove_program": (bool, ...),
+        },
+        "get_project_sync_status": {
+            "target": (str, ...),
+            "program": (str, ...),
+            "is_versioned": (bool, ...),
+            "is_checked_out": (bool, ...),
+            "is_checked_out_exclusive": (bool, ...),
+            "is_latest_version": (bool | None, ...),
+            "modified_since_checkout": (bool, ...),
+            "can_add_to_repository": (bool, ...),
+            "can_checkout": (bool, ...),
+            "can_checkin": (bool, ...),
+            "can_merge": (bool, ...),
+            "is_hijacked": (bool, ...),
+            "version": (int | None, ...),
+            "latest_version": (int | None, ...),
+            "checkout_status": (dict[str, object] | None, ...),
+            "checkouts": (list[object], ...),
+            "shared_project_url": (str | None, ...),
+        },
+        "get_version_history": {
+            "target": (str, ...),
+            "program": (str, ...),
+            "current_version": (int, ...),
+            "latest_version": (int, ...),
+            "total_versions": (int, ...),
+            "versions": (list[object], ...),
+        },
+        "get_version_diff": {
+            "target": (str, ...),
+            "program": (str, ...),
+            "from_version": (int, ...),
+            "to_version": (int, ...),
+            "total_diff_addresses": (int, ...),
+            "total_diff_ranges": (int, ...),
+            "diff_types": (list[object], ...),
+            "ranges": (list[object], ...),
+            "ranges_truncated": (bool, ...),
+            "warnings": (str | None, ...),
+        },
+        "checkout_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "checked_out": (bool, ...),
+            "already_checked_out": (bool, ...),
+            "exclusive": (bool, ...),
+        },
+        "add_project_program_to_version_control": {
+            "status": (str, ...),
+            "reason": (str | None, None),
+            "target": (str, ...),
+            "program": (str, ...),
+            "is_versioned": (bool | None, None),
+            "version": (int | None, None),
+            "latest_version": (int | None, None),
+            "checked_out": (bool | None, None),
+            "effective_keep_checked_out": (bool | None, None),
+        },
+        "commit_project_program": {
+            "status": (str, ...),
+            "reason": (str | None, None),
+            "target": (str, ...),
+            "program": (str, ...),
+            "required_action": (str | None, None),
+            "can_add_to_repository": (bool | None, None),
+            "message": (str | None, None),
+            "new_version": (int | None, None),
+            "version": (int | None, None),
+            "latest_version": (int | None, None),
+            "checked_out": (bool | None, None),
+            "effective_keep_checked_out": (bool | None, None),
+            "is_latest_version": (bool | None, None),
+            "discarded_local_changes": (bool | None, None),
+            "merged": (bool | None, None),
+        },
+        "pull_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "updated": (bool, ...),
+            "merged": (bool, ...),
+            "discarded_local_changes": (bool, ...),
+            "followed_latest": (bool, ...),
+            "version": (int | None, ...),
+            "latest_version": (int | None, ...),
+            "is_latest_version": (bool | None, ...),
+        },
+        "undo_checkout_project_program": {
+            "status": (str, ...),
+            "reason": (str | None, None),
+            "target": (str, ...),
+            "program": (str, ...),
+            "checked_out": (bool | None, None),
+            "version": (int | None, None),
+            "is_latest_version": (bool | None, None),
+            "kept_program": (str | None, None),
+        },
+        "terminate_project_program_checkout": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "checkout_id": (int, ...),
+            "active_checkouts": (list[object], ...),
+        },
+        "delete_shared_project_file": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "domain_path": (str, ...),
+            "deleted": (bool, ...),
+            "content_type": (str | None, ...),
+            "was_versioned": (bool, ...),
+            "version": (int | None, ...),
+            "latest_version": (int | None, ...),
+        },
+        "reload_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "reloaded": (bool, ...),
         },
     }
 

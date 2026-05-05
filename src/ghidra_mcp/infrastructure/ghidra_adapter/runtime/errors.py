@@ -5,6 +5,24 @@ from __future__ import annotations
 from typing import Any
 
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_utils import is_project_lock_error, safe_cause_details
+
+
+_SYNC_OPERATIONS = frozenset(
+    {
+        "get_project_sync_status",
+        "checkout_project_program",
+        "add_project_program_to_version_control",
+        "commit_project_program",
+        "pull_project_program",
+        "undo_checkout_project_program",
+        "terminate_project_program_checkout",
+        "delete_shared_project_file",
+        "reload_project_program",
+        "get_version_history",
+        "get_version_diff",
+    }
+)
 
 
 def to_domain_error(
@@ -30,10 +48,17 @@ def to_domain_error(
         )
 
     message = str(exc)
-    code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else ErrorCode.SYNC_OPERATION_FAILED
+    code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else ErrorCode.OPERATION_FAILED
     retryable = False
 
-    if message.startswith("CHECKOUT_REQUIRED"):
+    if is_project_lock_error(exc):
+        code = ErrorCode.PROJECT_LOCKED
+        retryable = True
+    elif message.startswith("OPERATION_FAILED"):
+        code = ErrorCode.OPERATION_FAILED
+    elif message.startswith("SYNC_OPERATION_FAILED"):
+        code = ErrorCode.SYNC_OPERATION_FAILED
+    elif message.startswith("CHECKOUT_REQUIRED"):
         code = ErrorCode.CHECKOUT_REQUIRED
     elif message.startswith("NOT_SHARED_PROJECT"):
         code = ErrorCode.NOT_SHARED_PROJECT
@@ -41,11 +66,21 @@ def to_domain_error(
         code = ErrorCode.NOT_CHECKED_OUT
     elif message.startswith("LOCAL_CHANGES_EXIST"):
         code = ErrorCode.LOCAL_CHANGES_EXIST
+    elif message.startswith("UNSAFE_ACTIVE_CHECKOUT_TERMINATE"):
+        code = ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE
+    elif message.startswith("UNSAFE_PROGRAM_REMOVE"):
+        code = ErrorCode.UNSAFE_PROGRAM_REMOVE
     elif message.startswith("UNSAFE_MERGE_REQUIRED"):
         code = ErrorCode.MERGE_REQUIRED
+    elif message.startswith("ADD_TO_VERSION_CONTROL_REQUIRED"):
+        code = ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED
     elif message.startswith("LOCK_TIMEOUT"):
         code = ErrorCode.LOCK_TIMEOUT
         retryable = True
+    elif message.startswith("TARGET_ALREADY_LOADED"):
+        code = ErrorCode.TARGET_ALREADY_LOADED
+    elif message.startswith("PROGRAM_ALREADY_IMPORTED"):
+        code = ErrorCode.PROGRAM_ALREADY_IMPORTED
     elif "Session '" in message and ("does not exist" in message or "is not initialized" in message):
         code = ErrorCode.SESSION_NOT_FOUND
     elif "Target '" in message and "is not initialized" in message:
@@ -59,12 +94,16 @@ def to_domain_error(
         code = ErrorCode.SAVE_FAILED
     elif "CORE_EXECUTOR_UNAVAILABLE" in message:
         code = ErrorCode.CORE_EXECUTOR_UNAVAILABLE
+    elif code is ErrorCode.OPERATION_FAILED and operation in _SYNC_OPERATIONS:
+        code = ErrorCode.SYNC_OPERATION_FAILED
 
     details: dict[str, Any] = {"operation": operation}
     if target is not None:
         details["target"] = target
     if domain_path is not None:
         details["domain_path"] = domain_path
+    if code in {ErrorCode.OPERATION_FAILED, ErrorCode.SYNC_OPERATION_FAILED, ErrorCode.PROJECT_LOCKED}:
+        details.update(safe_cause_details(exc))
 
     return DomainError(
         code=code,
@@ -73,6 +112,5 @@ def to_domain_error(
         retryable=retryable,
         details=details,
     )
-
 
 __all__ = ["to_domain_error"]

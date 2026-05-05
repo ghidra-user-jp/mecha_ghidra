@@ -102,11 +102,24 @@ class RuntimeBackend:
             func=lambda: self._target_lifecycle.load_program(name, domain_path),
         )
 
-    def import_program(self, name: str, binary_path: str) -> str:
+    def import_program(self, name: str, binary_path: str, **kwargs) -> str:
         return self._invoke(
             operation="import_program",
             target=name,
-            func=lambda: self._target_lifecycle.import_program(name, binary_path),
+            func=lambda: self._target_lifecycle.import_program(name, binary_path, **kwargs),
+        )
+
+    def execute_core_command(
+        self,
+        command: str,
+        params: Dict[str, Any] | None = None,
+        *,
+        target: str = "default",
+    ) -> Any:
+        return self._invoke(
+            operation=command,
+            target=target,
+            func=lambda: self._core_execution.call(command, params or {}, target=target),
         )
 
     def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
@@ -162,6 +175,7 @@ class RuntimeBackend:
         *,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ) -> Dict[str, Any]:
         return self._invoke(
@@ -173,6 +187,7 @@ class RuntimeBackend:
                 message,
                 keep_checked_out=keep_checked_out,
                 auto_checkout=auto_checkout,
+                on_conflict=on_conflict,
                 domain_path=domain_path,
             ),
         )
@@ -228,6 +243,28 @@ class RuntimeBackend:
                 name,
                 checkout_id,
                 domain_path=domain_path,
+            ),
+        )
+
+    def delete_shared_project_file(
+        self,
+        name: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
+    ) -> Dict[str, Any]:
+        return self._invoke(
+            operation="delete_shared_project_file",
+            target=name,
+            domain_path=domain_path,
+            func=lambda: self._sync_operations.delete_shared_project_file(
+                name,
+                domain_path=domain_path,
+                confirm=confirm,
+                expected_latest_version=expected_latest_version,
+                allow_private=allow_private,
             ),
         )
 

@@ -7,6 +7,8 @@
 - Dependency updates: `uv add <package>` / `uv remove <package>`
 - Add formatting/type-check tools as needed and run them with `uv run <tool>`.
 - Test run: first install test dependencies (`pytest`, `pytest-mock`) with `uv sync --extra test`, then run unit tests with `uv run pytest`.
+- Runtime validation against a real Ghidra install only runs when `GHIDRA_RUNTIME_VALIDATION=1` is set. Set `GHIDRA_INSTALL_DIR` and `GHIDRA_RUNTIME_BINARY_PATH`; to validate shared-project sync, also set `GHIDRA_RUNTIME_SHARED_PROJECT_LOCATION`, `GHIDRA_RUNTIME_SHARED_PROJECT_NAME`, `GHIDRA_RUNTIME_SHARED_DOMAIN_PATH`, `GHIDRA_RUNTIME_SHARED_SERVER_USER` (or `GHIDRA_SERVER_USER`), and `GHIDRA_SERVER_PASSWORD`.
+- If a running MCP server already has the same Ghidra project open, use a separate local project cache for runtime tests. It may point at the same shared repository, but the local `.gpr` / `.rep` path must be different to avoid project-lock conflicts.
 
 ## Building Linux ARM64 Decompiler Artifacts
 

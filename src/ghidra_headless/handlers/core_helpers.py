@@ -484,7 +484,7 @@ def _decompile_function_object(ctx, function):
 
     try:
         return _run_decompile()
-    except RuntimeError as first_error:
+    except RuntimeError:
         analyzed = False
         try:
             analyzed = _analyze_program_if_needed(ctx)

@@ -49,7 +49,7 @@ This document explains installation and operations for `ghidra-mcp`. For the ful
 
 5. **Start the MCP server**
    ```bash
-   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport http --mcp-host 127.0.0.1 --mcp-port 8081 --mcp-path /mcp
+   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr  --transport http --mcp-host 127.0.0.1 --mcp-port 8081 
    ```
 
 ## Docker Setup
@@ -74,7 +74,7 @@ If you want to try the server without installing Ghidra on the host, use the bun
 In this compose setup, the server starts with `--project-location /data/projects --project-name default` and expects the project files to live at `/data/projects/default.gpr` and `/data/projects/default.rep`. Create that Ghidra project once before first use, then import a binary and load it. No program is loaded at startup, so the first workflow is `import_program` followed by `load_project_program`.
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, matching the bundled Linux decompiler.
-- You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build now auto-selects the mecha_ghidra `v0.1.0-rc.1` patched Ghidra distribution.
+- You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build now auto-selects the bundled mecha_ghidra patched Ghidra distribution.
 - If you explicitly force the upstream official ZIP on ARM64, Docker now fails fast during build instead of failing later inside `decompile_function`.
 - If you want a custom artifact, provide both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`.
 
@@ -91,8 +91,8 @@ To override the bundled ARM64 artifact:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
@@ -132,24 +132,24 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - `--transport sse` is still available for compatibility (`/sse`).
 - If you bind to `--mcp-host 0.0.0.0` (or `::`), protection assumptions differ from local-only mode. Use reverse proxy, TLS, and access controls for external exposure.
 - Tool exposure is controlled by `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, and `--disable-tool`.
-- `shared_sync` is now a regular category. Add it with `--add-category shared_sync` or use `--tool-profile full` when you need shared-project sync operations.
-- No tool flags is equivalent to `--tool-profile default`, which keeps the pre-existing default set and excludes `shared_sync`.
+- `shared_sync` is a regular tool category. Add it with `--add-category shared_sync` or use `--tool-profile full` when you need to expose shared-project sync tools for `commit/pull/checkout/delete` operations.
+- No tool flags is equivalent to `--tool-profile default`, which keeps the default tool set and excludes `shared_sync`.
 - `--allow-category` replaces the current category set, `--add-category` extends it, same-type allow flags are OR, and different allow types are AND.
-- `--enable-shared-project-sync` has been removed.
-- If shared-project authentication is required, specify both `--ghidra-server-user` and `--ghidra-server-password-env`. Supplying only one causes startup failure (direct plaintext password arg is not supported).
-- Startup also fails when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged.
+- If shared-project authentication is required, specify `--ghidra-server-user` together with exactly one of `--ghidra-server-password` or `--ghidra-server-password-env`. Supplying only one side, or supplying both password options together, causes startup failure.
+- Startup also fails when `--ghidra-server-password` is empty or when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged. If you want to avoid exposing secrets in process arguments, prefer `--ghidra-server-password-env`.
 - On Linux ARM64, startup/decompiler initialization now fails with a specific message when `Ghidra/Features/Decompiler/os/linux_arm_64` is missing or not executable.
 - If `--domain-path` is omitted, startup registers only the project target (works with empty projects). In this mode, import with `import_program` and open with `load_project_program`.
 - Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
 - In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis.
 - Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
 - Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
+- `delete_shared_project_file` always requires an explicit `domain_path` plus `confirm` equal to the normalized path; it refuses loaded files, active checkouts, and private files unless `allow_private=true`.
 - In shared projects, mutating tools like `rename_*` and `set_*` require `checkout_project_program` beforehand (`CHECKOUT_REQUIRED` error if not checked out).
-- `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints.
+- `add_project_program_to_version_control`, `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints.
 - Due to Ghidra limitations, merge conflict resolution is not supported in headless mode (`checkin/merge` return `requires merge ... not supported in headless mode`).
 - `pull_project_program(on_local_changes="discard")` uses `undoCheckout(keep=False)` for local changes, and if `can_merge=true` on a checked-out program it follows the latest server state by dropping the stale checkout instead of calling `DomainFile.merge()`.
 - When `can_merge=true` but there is no disposable checkout to drop, `pull_project_program` fails with `UNSAFE_MERGE_REQUIRED` instead of invoking Ghidra's PropertyList merge path.
-- `commit_project_program` detects merge conflicts (`can_merge=true`) and, by default, discards local changes to follow the latest state, returning `status=noop` / `reason=conflict_discarded` (human-side updates are prioritized).
+- `commit_project_program` detects merge conflicts (`can_merge=true`) and now aborts by default with `UNSAFE_MERGE_REQUIRED`; pass `on_conflict="discard"` only when you explicitly want to drop the local checkout and follow the latest server state (`status=noop` / `reason=conflict_discarded`).
 - In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
 - The Docker server starts with project metadata only, so import first with `import_program` and then open the imported program with `load_project_program`.
 
@@ -179,13 +179,25 @@ uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --
 export GHIDRA_SERVER_PASSWORD='your-password'
 uv run ghidra-mcp \
     --project-location /Users/samsepi0l/ghidra_project.gpr \
-    --domain-path /main \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
-    --mcp-path /mcp \
+    --add-category shared_sync \
     --ghidra-server-user your-user \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
+```
+
+You can also pass the password directly:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --transport http \
+    --mcp-host 127.0.0.1 \
+    --mcp-port 8081 \
+    --add-category shared_sync \
+    --ghidra-server-user your-user \
+    --ghidra-server-password 'your-password'
 ```
 
 ## Ghidra Server Setup
@@ -278,7 +290,7 @@ Recommended `streamable-http` example:
 claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
 ```
 
-If shared-project authentication is required on the server side, start `ghidra-mcp` with `--ghidra-server-user` and `--ghidra-server-password-env` (plaintext password passing from MCP client side is not used).
+If shared-project authentication is required on the server side, start `ghidra-mcp` with `--ghidra-server-user` and either `--ghidra-server-password` or `--ghidra-server-password-env`.
 
 ## MCP Configuration for Kilocode/Roocode
 

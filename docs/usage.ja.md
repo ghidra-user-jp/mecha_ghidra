@@ -49,7 +49,7 @@
 
 5. **MCP サーバーの起動**
    ```bash
-   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr --domain-path /main --transport http --mcp-host 127.0.0.1 --mcp-port 8081 --mcp-path /mcp
+   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr  --transport http --mcp-host 127.0.0.1 --mcp-port 8081 
    ```
 
 ## Docker でのセットアップ
@@ -74,7 +74,7 @@ Ghidra をホストへ個別インストールせずに試したい場合は、�
 この compose 構成では、`--project-location /data/projects --project-name default` を使い、project 実体は `/data/projects/default.gpr` / `/data/projects/default.rep` に置く前提です。初回利用前にその Ghidra project を一度作成し、そのあと binary を import して load してください。起動直後は program 未ロードなので、最初の導線は `import_program` と `load_project_program` です。
 
 - `docker compose build` も利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、同梱 Linux decompiler と一致させます。
-- `DOCKER_PLATFORM` は上書きできます。`linux/arm64` を使う場合、Docker build は既定で mecha_ghidra release `v0.1.0-rc.1` の patched Ghidra 配布物を自動選択します。
+- `DOCKER_PLATFORM` は上書きできます。`linux/arm64` を使う場合、Docker build は既定で同梱の mecha_ghidra patched Ghidra 配布物を自動選択します。
 - ARM64 で upstream 公式 ZIP を明示指定すると、`decompile_function` 実行時に遅れて壊れる代わりに Docker build 時点で fail-fast します。
 - 独自成果物を使う場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定してください。
 
@@ -91,8 +91,8 @@ DOCKER_PLATFORM=linux/arm64 docker compose up -d
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
@@ -132,24 +132,24 @@ docker compose build
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
 - `--mcp-host 0.0.0.0`（または `::`）で起動する場合、ローカル限定時とは保護設定が異なります。外部公開時は必ずリバースプロキシ/TLS/アクセス制御を併用してください。
 - ツール公開は `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, `--disable-tool` で制御します。
-- `shared_sync` は通常の category になりました。shared project 同期ツールが必要な場合は `--add-category shared_sync` を追加するか、`--tool-profile full` を使ってください。
-- ツール制御引数を何も付けない場合は `--tool-profile default` と同じで、従来どおり `shared_sync` は含みません。
+- `shared_sync` は通常の tool category です。shared project の `commit/pull/checkout/delete` operations を行う同期ツールを公開したい場合は、`--add-category shared_sync` を追加するか、`--tool-profile full` を使ってください。
+- ツール制御引数を何も付けない場合は `--tool-profile default` と同じで、default のツール集合を使い、`shared_sync` は含みません。
 - `--allow-category` は現在の category 集合を置き換え、`--add-category` は追加します。同じ種類の allow は OR、異なる種類は AND で評価されます。
-- `--enable-shared-project-sync` は廃止されました。
-- shared project の認証が必要な場合は `--ghidra-server-user` と `--ghidra-server-password-env` をセットで指定してください。片方のみ指定した場合は起動エラーになります（パスワードの直接引数は未対応）。
-- `--ghidra-server-password-env` で指定した環境変数が未設定または空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。
+- shared project の認証が必要な場合は `--ghidra-server-user` と、`--ghidra-server-password` または `--ghidra-server-password-env` のどちらか片方をセットで指定してください。片方だけ指定した場合や、両方のパスワード指定を同時に行った場合は起動エラーになります。
+- `--ghidra-server-password` が空文字の場合、または `--ghidra-server-password-env` で指定した環境変数が未設定/空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。プロセス引数へ秘密情報を出したくない場合は `--ghidra-server-password-env` を推奨します。
 - Linux ARM64 では `Ghidra/Features/Decompiler/os/linux_arm_64` が不足していると、起動時または decompiler 初期化時に専用メッセージ付きで失敗します。
 - `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
 - 既存ターゲットへ program をロード/切り替える操作は `load_project_program` を使い、新規ターゲット作成は `create_session` を使います。program 未指定で先にターゲットだけ作る場合は `register_target` を使ってください。
 - `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
 - shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
+- `delete_shared_project_file` は明示的な `domain_path` と、正規化後パスに一致する `confirm` が必須です。ロード中ファイル、active checkout があるファイル、`allow_private=true` でない private file は削除しません。
 - shared project で `rename_*` / `set_*` など更新系ツールを使う場合は、先に `checkout_project_program` が必要です（未checkout時は `CHECKOUT_REQUIRED` エラー）。
-- shared project 同期ツールの `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
+- shared project 同期ツールの `add_project_program_to_version_control` / `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
 - Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
 - `pull_project_program(on_local_changes="discard")` はローカル変更に対して `undoCheckout(keep=False)` を使用し、さらに checked-out 状態で `can_merge=true` の場合は `DomainFile.merge()` を呼ばず、古い checkout を破棄して最新サーバー状態へ追従します。
 - `can_merge=true` でも破棄できる checkout が無い場合、`pull_project_program` は Ghidra の PropertyList merge 経路を踏まずに `UNSAFE_MERGE_REQUIRED` で停止します。
-- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでローカル変更を破棄して最新状態へ追従し、`status=noop` / `reason=conflict_discarded` を返します（人間側の更新を優先）。
+- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでは `UNSAFE_MERGE_REQUIRED` で停止します。ローカル checkout を破棄して最新サーバー状態へ追従したい場合のみ `on_conflict="discard"` を明示してください（`status=noop` / `reason=conflict_discarded`）。
 - Docker 構成では `./samples:/samples:ro` と `ghidra-projects:/data/projects` を既定で使います。入力ファイルは `/samples/<filename>` として指定してください。
 - Docker で初回起動する server は project のみを登録した状態で立ち上がるため、まず `import_program` で取り込み、続けて `load_project_program` で program を開いてください。
 
@@ -179,13 +179,25 @@ uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --
 export GHIDRA_SERVER_PASSWORD='your-password'
 uv run ghidra-mcp \
     --project-location /Users/samsepi0l/ghidra_project.gpr \
-    --domain-path /main \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
-    --mcp-path /mcp \
+    --add-category shared_sync \
     --ghidra-server-user your-user \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
+```
+
+パスワード文字列を直接渡すこともできます。
+
+```bash
+uv run ghidra-mcp \
+    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --transport http \
+    --mcp-host 127.0.0.1 \
+    --mcp-port 8081 \
+    --add-category shared_sync \
+    --ghidra-server-user your-user \
+    --ghidra-server-password 'your-password'
 ```
 
 ## Ghidra Serverの設定
@@ -276,7 +288,7 @@ Claude Code では CLI から MCP サーバーを登録できます。推奨の 
 claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
 ```
 
-サーバー側で shared project 認証が必要な場合は、`ghidra-mcp` 起動時に `--ghidra-server-user` と `--ghidra-server-password-env` を指定してください（MCPクライアント側で平文パスワードを渡す方式ではありません）。
+サーバー側で shared project 認証が必要な場合は、`ghidra-mcp` 起動時に `--ghidra-server-user` と `--ghidra-server-password` または `--ghidra-server-password-env` を指定してください。
 
 ## Kilocode/Roocode での MCP 設定
 

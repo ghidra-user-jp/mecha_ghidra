@@ -1,4 +1,4 @@
-<img width="4096" height="700" alt="mecha_ghidra_one_lineのコピー" src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" />
+<img src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" />
 
 [English](README.md) | [日本語](README.ja.md)
 
@@ -48,7 +48,7 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 4. Point your MCP client to `http://127.0.0.1:8081/mcp`
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, which is required for the bundled Linux decompiler.
-- When you switch to `linux/arm64`, Docker now auto-selects the mecha_ghidra `v0.1.0-rc.1` patched Ghidra distribution. If you force the upstream official ZIP on ARM64, the build fails early with a clear error instead of failing later inside `decompile_function`.
+- When you switch to `linux/arm64`, Docker now auto-selects the bundled mecha_ghidra patched Ghidra distribution. If you force the upstream official ZIP on ARM64, the build fails early with a clear error instead of failing later inside `decompile_function`.
 - You can still override the bundle by setting both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`.
 - `./samples` is shared into the container as `/samples` in read-only mode. Use `/samples/<filename>` with `import_program`.
 - Ghidra project data is persisted in the named volume `ghidra-projects`, and the default project path is `/data/projects/default.gpr`. Create that project once before first use, or mount an existing Ghidra project there.
@@ -79,8 +79,8 @@ Override example:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.0-rc.1/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
-GHIDRA_DIST_SHA256=b8b4961048874091a7aabd08579eee485aec52f1885ae67bff665431f1606af2 \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
@@ -169,17 +169,18 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 
 #### Shared Project Sync (`shared_sync` category)
 
-`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `reload` support optional `domain_path` (if omitted, the currently loaded program is used).
+`get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `add_to_version_control` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `delete_shared_project_file` / `reload` support optional `domain_path` where documented (if omitted, the currently loaded program is used; deletion always requires an explicit `domain_path`).
 
 - `get_project_sync_status` - Get sync state against shared project
 - `get_version_history` - Get version history (version/user/comment/time)
 - `get_version_diff` - Get summarized differences between two versions (count/type/address range)
 - `checkout_project_program` - Checkout program (exclusive optional)
 - `add_project_program_to_version_control` - Add private program to shared version control
-- `commit_project_program` - Check in checked-out changes
+- `commit_project_program` - Check in checked-out changes (`on_conflict="discard"` is required to drop a conflicted checkout)
 - `pull_project_program` - Pull latest state (with optional discard/follow behavior)
 - `undo_checkout_project_program` - Undo checkout (optional local change discard)
 - `terminate_project_program_checkout` - Force-close an existing checkout by checkout ID
+- `delete_shared_project_file` - Delete an unloaded shared-project file after `confirm` matches `domain_path`
 - `reload_project_program` - Reload currently opened program
 
 See the [Usage Guide](docs/usage.md) for detailed workflows and constraints.

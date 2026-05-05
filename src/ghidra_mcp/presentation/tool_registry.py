@@ -126,9 +126,14 @@ def _tool_registration_options(spec: ToolSpec) -> dict[str, Any]:
     options: dict[str, Any] = {}
     if spec.description:
         options["description"] = spec.description
-    if spec.read_only_hint is not None or spec.idempotent_hint is not None:
+    if (
+        spec.read_only_hint is not None
+        or spec.destructive_hint is not None
+        or spec.idempotent_hint is not None
+    ):
         options["annotations"] = ToolAnnotations(
             readOnlyHint=spec.read_only_hint,
+            destructiveHint=spec.destructive_hint,
             idempotentHint=spec.idempotent_hint,
         )
     return options

@@ -44,8 +44,8 @@ class FakeTargetService:
         self.calls.append(("load_program", (target, domain_path), {}))
         return domain_path
 
-    def import_program(self, target: str, binary_path: str):
-        self.calls.append(("import_program", (target, binary_path), {}))
+    def import_program(self, target: str, binary_path: str, **kwargs):
+        self.calls.append(("import_program", (target, binary_path), dict(kwargs)))
         return binary_path
 
     def create_session(
@@ -124,6 +124,7 @@ class FakeSyncService:
         *,
         keep_checked_out: bool = False,
         auto_checkout: bool = True,
+        on_conflict: str = "abort",
         domain_path: str | None = None,
     ):
         self.calls.append(
@@ -133,6 +134,7 @@ class FakeSyncService:
                 {
                     "keep_checked_out": keep_checked_out,
                     "auto_checkout": auto_checkout,
+                    "on_conflict": on_conflict,
                     "domain_path": domain_path,
                 },
             )
@@ -180,6 +182,29 @@ class FakeSyncService:
                 "terminate_project_program_checkout",
                 (target,),
                 {"checkout_id": checkout_id, "domain_path": domain_path},
+            )
+        )
+        return {"status": "ok"}
+
+    def delete_shared_project_file(
+        self,
+        target: str,
+        *,
+        domain_path: str,
+        confirm: str,
+        expected_latest_version: int | None = None,
+        allow_private: bool = False,
+    ):
+        self.calls.append(
+            (
+                "delete_shared_project_file",
+                (target,),
+                {
+                    "domain_path": domain_path,
+                    "confirm": confirm,
+                    "expected_latest_version": expected_latest_version,
+                    "allow_private": allow_private,
+                },
             )
         )
         return {"status": "ok"}
@@ -279,7 +304,13 @@ def test_parse_session_definition_invalid(text):
             "/app",
         ),
         (
-            lambda a: a.import_program("fw", "/tmp/a.exe"),
+            lambda a: a.import_program(
+                "fw",
+                "/tmp/a.exe",
+                import_mode="raw_binary",
+                language_id="x86:LE:32:default",
+                entry_offset=0,
+            ),
             "/tmp/a.exe",
         ),
         (
@@ -331,6 +362,10 @@ def test_parse_session_definition_invalid(text):
         ),
         (
             lambda a: a.terminate_project_program_checkout("fw", checkout_id=7, domain_path="/app"),
+            {"status": "ok"},
+        ),
+        (
+            lambda a: a.delete_shared_project_file("fw", domain_path="/app", confirm="/app"),
             {"status": "ok"},
         ),
         (
@@ -512,6 +547,23 @@ def test_parse_args_ghidra_server_auth_options():
     assert args.ghidra_server_password_env == "GHIDRA_SERVER_PASSWORD"
 
 
+def test_parse_args_ghidra_server_auth_direct_password_option():
+    args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--ghidra-server-user",
+            "alice",
+            "--ghidra-server-password",
+            "secret",
+        ]
+    )
+    assert args.ghidra_server_user == "alice"
+    assert args.ghidra_server_password == "secret"
+
+
 def test_normalize_transport_alias():
     assert cli._normalize_transport("http") == "streamable-http"
     assert cli._normalize_transport("sse") == "sse"
@@ -605,7 +657,7 @@ def test_configure_mcp_for_sse_with_loopback_host_keeps_local_security(monkeypat
     assert "127.0.0.1:*" in security.allowed_hosts
 
 
-def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
+def test_configure_ghidra_server_auth_sets_client_authenticator_from_env(monkeypatch):
     called = {}
 
     class FakePasswordAuthenticator:
@@ -623,6 +675,7 @@ def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
 
     args = types.SimpleNamespace(
         ghidra_server_user="alice",
+        ghidra_server_password=None,
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
     cli.configure_ghidra_server_auth(args)
@@ -632,19 +685,71 @@ def test_configure_ghidra_server_auth_sets_client_authenticator(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("username", "password_env_name"),
+    ("username", "password_arg", "password_env_name"),
     [
-        ("alice", ""),
-        ("", "GHIDRA_SERVER_PASSWORD"),
+        ("alice", None, ""),
+        ("", None, "GHIDRA_SERVER_PASSWORD"),
+        ("alice", None, None),
+        ("", "secret", None),
     ],
 )
-def test_configure_ghidra_server_auth_requires_user_and_env(monkeypatch, username, password_env_name):
+def test_configure_ghidra_server_auth_requires_user_and_password_source(
+    monkeypatch, username, password_arg, password_env_name
+):
     monkeypatch.delenv("GHIDRA_SERVER_PASSWORD", raising=False)
     args = types.SimpleNamespace(
         ghidra_server_user=username,
+        ghidra_server_password=password_arg,
         ghidra_server_password_env=password_env_name,
     )
     with pytest.raises(ValueError, match="must be set together"):
+        cli.configure_ghidra_server_auth(args)
+
+
+def test_configure_ghidra_server_auth_sets_client_authenticator_from_direct_password(monkeypatch):
+    called = {}
+
+    class FakePasswordAuthenticator:
+        def __init__(self, username, password):
+            called["constructor"] = (username, password)
+
+    class FakeClientUtil:
+        @staticmethod
+        def setClientAuthenticator(authenticator):
+            called["authenticator"] = authenticator
+
+    monkeypatch.setattr(cli, "_password_client_authenticator_class", lambda: FakePasswordAuthenticator)
+    monkeypatch.setattr(cli, "_client_util_class", lambda: FakeClientUtil)
+
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password="secret",
+        ghidra_server_password_env=None,
+    )
+    cli.configure_ghidra_server_auth(args)
+
+    assert called["constructor"] == ("alice", "secret")
+    assert isinstance(called["authenticator"], FakePasswordAuthenticator)
+
+
+def test_configure_ghidra_server_auth_rejects_both_direct_password_and_env(monkeypatch):
+    monkeypatch.setenv("GHIDRA_SERVER_PASSWORD", "secret")
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password="secret",
+        ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
+    )
+    with pytest.raises(ValueError, match="cannot be used together"):
+        cli.configure_ghidra_server_auth(args)
+
+
+def test_configure_ghidra_server_auth_requires_non_empty_direct_password():
+    args = types.SimpleNamespace(
+        ghidra_server_user="alice",
+        ghidra_server_password="",
+        ghidra_server_password_env=None,
+    )
+    with pytest.raises(ValueError, match="is empty"):
         cli.configure_ghidra_server_auth(args)
 
 
@@ -652,6 +757,7 @@ def test_configure_ghidra_server_auth_requires_non_empty_env_value(monkeypatch):
     monkeypatch.setenv("GHIDRA_SERVER_PASSWORD", "")
     args = types.SimpleNamespace(
         ghidra_server_user="alice",
+        ghidra_server_password=None,
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
     with pytest.raises(ValueError, match="is empty"):
@@ -662,6 +768,7 @@ def test_configure_ghidra_server_auth_requires_existing_env(monkeypatch):
     monkeypatch.delenv("GHIDRA_SERVER_PASSWORD", raising=False)
     args = types.SimpleNamespace(
         ghidra_server_user="alice",
+        ghidra_server_password=None,
         ghidra_server_password_env="GHIDRA_SERVER_PASSWORD",
     )
     with pytest.raises(ValueError, match="is not set"):
