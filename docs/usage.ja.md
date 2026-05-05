@@ -171,7 +171,7 @@ uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --
 full を readonly に絞る:
 
 ```bash
-uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety safe_readonly
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety read_only
 ```
 
 ### shared project 認証つき起動例

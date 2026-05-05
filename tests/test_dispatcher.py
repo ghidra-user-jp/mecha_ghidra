@@ -593,7 +593,7 @@ def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
     spec = ToolSpec(
         name="dummy_load",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         executor_kind=ExecutorKind.REGISTRY_METHOD,
         command_or_method="load_program",

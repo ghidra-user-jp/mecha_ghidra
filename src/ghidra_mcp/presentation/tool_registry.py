@@ -9,6 +9,7 @@ from mcp.types import ToolAnnotations
 
 from ghidra_mcp.contracts.tool_spec import (
     ExecutorKind,
+    ToolSafetyTag,
     ToolSpec,
 )
 
@@ -126,14 +127,18 @@ def _tool_registration_options(spec: ToolSpec) -> dict[str, Any]:
     options: dict[str, Any] = {}
     if spec.description:
         options["description"] = spec.description
+
+    read_only_hint = True if spec.safety_tag == ToolSafetyTag.READ_ONLY else None
+    destructive_hint = True if spec.safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE else None
+
     if (
-        spec.read_only_hint is not None
-        or spec.destructive_hint is not None
+        read_only_hint is not None
+        or destructive_hint is not None
         or spec.idempotent_hint is not None
     ):
         options["annotations"] = ToolAnnotations(
-            readOnlyHint=spec.read_only_hint,
-            destructiveHint=spec.destructive_hint,
+            readOnlyHint=read_only_hint,
+            destructiveHint=destructive_hint,
             idempotentHint=spec.idempotent_hint,
         )
     return options

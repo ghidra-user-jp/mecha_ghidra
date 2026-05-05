@@ -49,10 +49,10 @@ def _manual_selected_names(
         ([], _manual_selected_names(categories=set(DEFAULT_CATEGORIES))),
         (["--tool-profile", "default"], _manual_selected_names(categories=set(DEFAULT_CATEGORIES))),
         (
-            ["--tool-profile", "default", "--allow-safety", "safe_readonly"],
+            ["--tool-profile", "default", "--allow-safety", "read_only"],
             _manual_selected_names(
                 categories=set(DEFAULT_CATEGORIES),
-                safety_tags={ToolSafetyTag.SAFE_READONLY},
+                safety_tags={ToolSafetyTag.READ_ONLY},
             ),
         ),
         (
@@ -71,18 +71,18 @@ def _manual_selected_names(
             ["--tool-profile", "readonly", "--add-category", "shared_sync"],
             _manual_selected_names(
                 categories=set(DEFAULT_CATEGORIES) | {ToolCategoryTag.SHARED_SYNC},
-                safety_tags={ToolSafetyTag.SAFE_READONLY},
+                safety_tags={ToolSafetyTag.READ_ONLY},
             ),
         ),
         (
-            ["--tool-profile", "full", "--allow-safety", "safe_readonly"],
-            _manual_selected_names(safety_tags={ToolSafetyTag.SAFE_READONLY}),
+            ["--tool-profile", "full", "--allow-safety", "read_only"],
+            _manual_selected_names(safety_tags={ToolSafetyTag.READ_ONLY}),
         ),
         (
             ["--tool-profile", "readonly", "--enable-tool", "rename_function"],
             _manual_selected_names(
                 categories=set(DEFAULT_CATEGORIES),
-                safety_tags={ToolSafetyTag.SAFE_READONLY},
+                safety_tags={ToolSafetyTag.READ_ONLY},
                 enable_tools={"rename_function"},
             ),
         ),
@@ -107,8 +107,8 @@ def test_filter_tool_specs_combines_same_type_with_or_and_different_types_with_a
         profile=ToolProfile.FULL,
         allow_categories=[ToolCategoryTag.CORE.value, ToolCategoryTag.SHARED_SYNC.value],
         allow_safety=[
-            ToolSafetyTag.SAFE_READONLY.value,
-            ToolSafetyTag.SAFE_NONSEMANTIC_EDIT.value,
+            ToolSafetyTag.READ_ONLY.value,
+            ToolSafetyTag.WRITE.value,
         ],
         allow_operation_levels=[
             ToolOperationLevel.BASIC.value,
@@ -119,8 +119,8 @@ def test_filter_tool_specs_combines_same_type_with_or_and_different_types_with_a
     expected = _manual_selected_names(
         categories={ToolCategoryTag.CORE, ToolCategoryTag.SHARED_SYNC},
         safety_tags={
-            ToolSafetyTag.SAFE_READONLY,
-            ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+            ToolSafetyTag.READ_ONLY,
+            ToolSafetyTag.WRITE,
         },
         operation_levels={
             ToolOperationLevel.BASIC,

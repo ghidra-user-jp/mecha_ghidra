@@ -171,7 +171,7 @@ uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --
 Full profile narrowed to readonly tools:
 
 ```bash
-uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety safe_readonly
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety read_only
 ```
 
 ### Startup Example with Shared-Project Authentication

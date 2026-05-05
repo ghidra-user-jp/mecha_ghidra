@@ -28,11 +28,9 @@ class ToolCategoryTag(str, Enum):
 
 
 class ToolSafetyTag(str, Enum):
-    SAFE_READONLY = "safe_readonly"
-    SAFE_NONSEMANTIC_EDIT = "safe_nonsemantic_edit"
-    UNSAFE_SEMANTIC_EDIT = "unsafe_semantic_edit"
-    UNSAFE_BINARY_DESTRUCTIVE = "unsafe_binary_destructive"
-    UNSAFE_NONBINARY_DESTRUCTIVE = "unsafe_nonbinary_destructive"
+    READ_ONLY = "read_only"
+    WRITE = "write"
+    DESTRUCTIVE_WRITE = "destructive_write"
 
 
 class ToolOperationLevel(str, Enum):
@@ -78,8 +76,6 @@ class ToolSpec:
     include_none_keys: frozenset[str] = field(default_factory=frozenset)
     omit_falsey_keys: frozenset[str] = field(default_factory=frozenset)
     description: str | None = None
-    read_only_hint: bool | None = None
-    destructive_hint: bool | None = None
     idempotent_hint: bool | None = None
     checkout_required: bool = False
 
@@ -389,8 +385,6 @@ def _tool(
     include_none_keys: Iterable[str] = (),
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
-    read_only_hint: bool | None = None,
-    destructive_hint: bool | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
 ) -> ToolSpec:
@@ -421,8 +415,6 @@ def _tool(
         include_none_keys=frozenset(include_none_keys),
         omit_falsey_keys=frozenset(omit_falsey_keys),
         description=description,
-        read_only_hint=read_only_hint,
-        destructive_hint=destructive_hint,
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -442,7 +434,6 @@ def _core_tool(
     include_none_keys: Iterable[str] = (),
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
-    read_only_hint: bool | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
 ) -> ToolSpec:
@@ -461,7 +452,6 @@ def _core_tool(
         include_none_keys=include_none_keys,
         omit_falsey_keys=omit_falsey_keys,
         description=description,
-        read_only_hint=read_only_hint,
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -486,7 +476,6 @@ def _registry_tool(
     include_none_keys: Iterable[str] = (),
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
-    read_only_hint: bool | None = None,
     idempotent_hint: bool | None = None,
 ) -> ToolSpec:
     return _tool(
@@ -508,7 +497,6 @@ def _registry_tool(
         include_none_keys=include_none_keys,
         omit_falsey_keys=omit_falsey_keys,
         description=description,
-        read_only_hint=read_only_hint,
         idempotent_hint=idempotent_hint,
     )
 
@@ -523,8 +511,6 @@ def _shared_sync_tool(
     output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
     description: str | None = None,
     include_none_keys: Iterable[str] = (),
-    read_only_hint: bool | None = None,
-    destructive_hint: bool | None = None,
     idempotent_hint: bool | None = None,
 ) -> ToolSpec:
     return _tool(
@@ -538,8 +524,6 @@ def _shared_sync_tool(
         output_fields=output_fields,
         include_none_keys=include_none_keys,
         description=description,
-        read_only_hint=read_only_hint,
-        destructive_hint=destructive_hint,
         idempotent_hint=idempotent_hint,
     )
 
@@ -550,7 +534,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         "list_targets",
         method_name="list_targets",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         include_target=False,
         list_output=True,
@@ -558,14 +542,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "List registered targets and their state, including project info and whether a program "
             "is loaded (domain_path). Call this before target-scoped operations."
         ),
-        read_only_hint=True,
         idempotent_hint=True,
     ),
     _registry_tool(
         "create_session",
         method_name="create_session",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("project_location", str, ...),
@@ -581,14 +564,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "This is non-idempotent and fails if the target already exists. "
             "If the target already exists, use load_project_program."
         ),
-        read_only_hint=False,
         idempotent_hint=False,
     ),
     _registry_tool(
         "register_target",
         method_name="register_target",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("project_location", str, ...),
@@ -599,14 +581,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "Register a target with project information only, without loading a program yet. "
             "Use load_project_program later to open a domain path."
         ),
-        read_only_hint=False,
         idempotent_hint=False,
     ),
     _registry_tool(
         "close_session",
         method_name="close_session",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         output_fields=_CLOSE_SESSION_OUTPUT_FIELDS,
         result_adapter="status_target_ok",
@@ -616,7 +597,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         "close_session_and_remove_program",
         method_name="close_session",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         output_fields=_CLOSE_SESSION_OUTPUT_FIELDS,
         static_kwargs={"remove_program": True},
@@ -627,7 +608,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         "list_project_programs",
         method_name="list_programs",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         list_output=True,
     ),
@@ -635,7 +616,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         "import_program",
         method_name="import_program",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_IMPORT_PROGRAM_FIELDS,
         scalar_output_type=str,
@@ -646,7 +627,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         "load_project_program",
         method_name="load_program",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(("domain_path", str, ...),),
         scalar_output_type=str,
@@ -656,14 +637,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "Use this for targets that already exist (including project-only targets) "
             "instead of create_session."
         ),
-        read_only_hint=False,
         idempotent_hint=False,
     ),
     _registry_tool(
         "save_project_program",
         method_name="save_project_program",
         category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(_DOMAIN_PATH_FIELD,),
         output_fields=_SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS,
@@ -673,14 +653,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "Use this after mutating tools such as rename_function_by_address when changes "
             "must remain visible after reopening the project."
         ),
-        read_only_hint=False,
         idempotent_hint=True,
     ),
     # function_analysis
     _core_tool(
         "list_methods",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -688,7 +667,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "list_functions",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -697,13 +676,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "Requires an initialized target with a loaded program; call list_targets first, "
             "then use create_session or load_project_program when needed."
         ),
-        read_only_hint=True,
         idempotent_hint=True,
     ),
     _core_tool(
         "list_classes",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -711,7 +689,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "list_namespaces",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -719,7 +697,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "search_functions_by_name",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("query", str, ...), *_OFFSET_LIMIT_FIELDS),
         list_output=True,
@@ -727,7 +705,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "decompile_function",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(("name", str, ...),),
         scalar_output_type=str,
@@ -735,7 +713,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "decompile_function_by_address",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...),),
         scalar_output_type=str,
@@ -743,7 +721,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "disassemble_function",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...),),
         list_output=True,
@@ -751,14 +729,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_function_by_address",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...),),
     ),
     _core_tool(
         "get_function_xrefs",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(("name", str, ...), *_OFFSET_LIMIT_FIELDS),
         list_output=True,
@@ -766,7 +744,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_callee",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...),),
         list_output=True,
@@ -775,7 +753,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "list_segments",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -783,7 +761,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "list_imports",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -791,7 +769,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "list_exports",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -799,7 +777,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "list_data_items",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
@@ -807,7 +785,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "list_strings",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
             ("offset", int, 0),
@@ -820,7 +798,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_xrefs_to",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...), *_OFFSET_LIMIT_FIELDS),
         list_output=True,
@@ -828,7 +806,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_xrefs_from",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...), *_OFFSET_LIMIT_FIELDS),
         list_output=True,
@@ -836,7 +814,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_data_by_label",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("label", str, ...),),
         list_output=True,
@@ -844,7 +822,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_bytes",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("address", str, ...),
@@ -855,7 +833,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "search_bytes",
         category_tag=ToolCategoryTag.MEMORY_DATA,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("bytes", str, ...),
@@ -868,7 +846,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "rename_function",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
             ("oldName", str, ...),
@@ -880,7 +858,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "rename_function_by_address",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("function_address", str, ...),
@@ -891,7 +869,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "rename_variable",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
             ("functionName", str, ...),
@@ -908,7 +886,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "rename_data",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("address", str, ...),
@@ -920,7 +898,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "set_function_prototype",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("function_address", str, ...),
@@ -931,7 +909,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "set_local_variable_type",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("function_address", str, ...),
@@ -943,7 +921,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "set_global_data_type",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("address", str, ...),
@@ -957,7 +935,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "set_bytes",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.UNSAFE_BINARY_DESTRUCTIVE,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("address", str, ...),
@@ -969,7 +947,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "set_decompiler_comment",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("address", str, ...),
@@ -980,7 +958,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "set_disassembly_comment",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("address", str, ...),
@@ -991,7 +969,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "add_bookmark",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.SAFE_NONSEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("address", str, ...),
@@ -1006,7 +984,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "create_struct",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("name", str, ...),
@@ -1020,7 +998,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "add_struct_members",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("struct_name", str, ...),
@@ -1033,7 +1011,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "clear_struct",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("struct_name", str, ...),
@@ -1045,7 +1023,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "remove_struct_members",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("struct_name", str, ...),
@@ -1058,7 +1036,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_struct",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("name", str, ...),
@@ -1069,7 +1047,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "create_enum",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("name", str, ...),
@@ -1083,7 +1061,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "add_enum_values",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("enum_name", str, ...),
@@ -1096,7 +1074,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "remove_enum_values",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("enum_name", str, ...),
@@ -1109,7 +1087,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "get_enum",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("name", str, ...),
@@ -1120,7 +1098,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "create_class",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("name", str, ...),
@@ -1133,7 +1111,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "add_class_members",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("class_name", str, ...),
@@ -1146,7 +1124,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _core_tool(
         "remove_class_members",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("class_name", str, ...),
@@ -1160,20 +1138,18 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
     _shared_sync_tool(
         "get_project_sync_status",
         method_name="get_project_sync_status",
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(_DOMAIN_PATH_FIELD,),
         output_fields=_GET_PROJECT_SYNC_STATUS_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Get shared-project version-control status for the target program",
-        read_only_hint=True,
-        destructive_hint=False,
         idempotent_hint=True,
     ),
     _shared_sync_tool(
         "get_version_history",
         method_name="get_version_history",
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("limit", int, 50),
@@ -1182,14 +1158,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_GET_VERSION_HISTORY_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Get version history metadata for the target program in a shared project",
-        read_only_hint=True,
-        destructive_hint=False,
         idempotent_hint=True,
     ),
     _shared_sync_tool(
         "get_version_diff",
         method_name="get_version_diff",
-        safety_tag=ToolSafetyTag.SAFE_READONLY,
+        safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("from_version", int, ...),
@@ -1200,14 +1174,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_GET_VERSION_DIFF_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Get a summary of differences between two shared-project versions of the target program",
-        read_only_hint=True,
-        destructive_hint=False,
         idempotent_hint=True,
     ),
     _shared_sync_tool(
         "checkout_project_program",
         method_name="checkout_project_program",
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
             ("exclusive", bool, False),
@@ -1216,14 +1188,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Checkout the target program in a shared project",
-        read_only_hint=False,
-        destructive_hint=False,
         idempotent_hint=True,
     ),
     _shared_sync_tool(
         "add_project_program_to_version_control",
         method_name="add_project_program_to_version_control",
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("comment", str, ...),
@@ -1233,14 +1203,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_ADD_PROJECT_PROGRAM_TO_VERSION_CONTROL_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Add the target program to shared-project version control",
-        read_only_hint=False,
-        destructive_hint=False,
         idempotent_hint=True,
     ),
     _shared_sync_tool(
         "commit_project_program",
         method_name="commit_project_program",
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
             ("message", str, ...),
@@ -1255,14 +1223,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "Check-in changes of the target program to the shared project server; "
             "on_conflict controls stale checkout handling"
         ),
-        read_only_hint=False,
-        destructive_hint=True,
         idempotent_hint=False,
     ),
     _shared_sync_tool(
         "pull_project_program",
         method_name="pull_project_program",
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
             ("on_local_changes", str, "abort"),
@@ -1271,14 +1237,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_PULL_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Pull/merge latest remote changes for the target program",
-        read_only_hint=False,
-        destructive_hint=True,
         idempotent_hint=False,
     ),
     _shared_sync_tool(
         "undo_checkout_project_program",
         method_name="undo_checkout_project_program",
-        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("discard_local_changes", bool, True),
@@ -1287,14 +1251,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_UNDO_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Undo checkout for the target program (optionally discard local changes)",
-        read_only_hint=False,
-        destructive_hint=True,
         idempotent_hint=False,
     ),
     _shared_sync_tool(
         "terminate_project_program_checkout",
         method_name="terminate_project_program_checkout",
-        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("checkout_id", int, ...),
@@ -1303,14 +1265,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_TERMINATE_PROJECT_PROGRAM_CHECKOUT_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Terminate a stale checkout by checkout id for the target program",
-        read_only_hint=False,
-        destructive_hint=True,
         idempotent_hint=False,
     ),
     _shared_sync_tool(
         "delete_shared_project_file",
         method_name="delete_shared_project_file",
-        safety_tag=ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
             ("domain_path", str, ...),
@@ -1320,21 +1280,17 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         output_fields=_DELETE_SHARED_PROJECT_FILE_OUTPUT_FIELDS,
         description="Delete a shared-project file after confirmation and checkout safety checks",
-        read_only_hint=False,
-        destructive_hint=True,
         idempotent_hint=False,
     ),
     _shared_sync_tool(
         "reload_project_program",
         method_name="reload_project_program",
-        safety_tag=ToolSafetyTag.UNSAFE_SEMANTIC_EDIT,
+        safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(_DOMAIN_PATH_FIELD,),
         output_fields=_RELOAD_PROJECT_PROGRAM_OUTPUT_FIELDS,
         include_none_keys=("domain_path",),
         description="Reload the target program by closing and reopening the current domain path",
-        read_only_hint=False,
-        destructive_hint=False,
         idempotent_hint=True,
     ),
 )
@@ -1354,7 +1310,7 @@ _PROFILE_SPECS: dict[ToolProfile, ToolProfileSpec] = {
     ToolProfile.DEFAULT: ToolProfileSpec(categories=_DEFAULT_PROFILE_CATEGORIES),
     ToolProfile.READONLY: ToolProfileSpec(
         categories=_DEFAULT_PROFILE_CATEGORIES,
-        safety_tags=frozenset({ToolSafetyTag.SAFE_READONLY}),
+        safety_tags=frozenset({ToolSafetyTag.READ_ONLY}),
     ),
     ToolProfile.FULL: ToolProfileSpec(
         categories=frozenset(ToolCategoryTag),

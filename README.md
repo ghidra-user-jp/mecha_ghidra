@@ -193,13 +193,13 @@ See the [Usage Guide](docs/usage.md) for detailed workflows and constraints.
 Every tool now carries three tags:
 
 - `category`: `core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`, `shared_sync`
-- `safety`: `safe_readonly`, `safe_nonsemantic_edit`, `unsafe_semantic_edit`, `unsafe_binary_destructive`, `unsafe_nonbinary_destructive`
+- `safety`: `read_only`, `write`, `destructive_write`
 - `operation_level`: `basic`, `standard`, `advanced`
 
 Profiles:
 
 - `default`: existing-compatible default. Categories = `core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`
-- `readonly`: `default` categories + `safe_readonly` only
+- `readonly`: `default` categories + `read_only` only
 - `full`: every category, including `shared_sync`
 
 Rules:
@@ -258,7 +258,7 @@ uv run ghidra-mcp \
     --project-location /path/to/project.gpr \
     --domain-path /main \
     --tool-profile full \
-    --allow-safety safe_readonly
+    --allow-safety read_only
 ```
 
 Individual enable/disable overrides:

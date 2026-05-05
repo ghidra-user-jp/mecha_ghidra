@@ -520,7 +520,7 @@ def test_parse_args_accepts_tool_filter_options():
             "--add-category",
             "core",
             "--allow-safety",
-            "safe_readonly",
+            "read_only",
             "--allow-operation-level",
             "advanced",
             "--enable-tool",
@@ -532,7 +532,7 @@ def test_parse_args_accepts_tool_filter_options():
     assert args.tool_profile == "full"
     assert args.allow_category == ["shared_sync"]
     assert args.add_category == ["core"]
-    assert args.allow_safety == ["safe_readonly"]
+    assert args.allow_safety == ["read_only"]
     assert args.allow_operation_level == ["advanced"]
     assert args.enable_tool == ["rename_function"]
     assert args.disable_tool == ["set_bytes"]

@@ -197,13 +197,13 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 各ツールには次の 3 種類のタグがあります。
 
 - `category`: `core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`, `shared_sync`
-- `safety`: `safe_readonly`, `safe_nonsemantic_edit`, `unsafe_semantic_edit`, `unsafe_binary_destructive`, `unsafe_nonbinary_destructive`
+- `safety`: `read_only`, `write`, `destructive_write`
 - `operation_level`: `basic`, `standard`, `advanced`
 
 プロファイル:
 
 - `default`: 既存互換。`core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`
-- `readonly`: `default` の category + `safe_readonly` のみ
+- `readonly`: `default` の category + `read_only` のみ
 - `full`: 全 category を公開。`shared_sync` も含む
 
 評価ルール:
@@ -262,7 +262,7 @@ uv run ghidra-mcp \
     --project-location /path/to/project.gpr \
     --domain-path /main \
     --tool-profile full \
-    --allow-safety safe_readonly
+    --allow-safety read_only
 ```
 
 個別 enable / disable:

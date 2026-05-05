@@ -30,31 +30,31 @@ def test_tool_specs_include_expected_tags():
     specs = get_all_tool_specs()
 
     assert specs["list_functions"].category_tag == ToolCategoryTag.FUNCTION_ANALYSIS
-    assert specs["list_functions"].safety_tag == ToolSafetyTag.SAFE_READONLY
+    assert specs["list_functions"].safety_tag == ToolSafetyTag.READ_ONLY
     assert specs["list_functions"].operation_level == ToolOperationLevel.STANDARD
 
     assert specs["rename_function"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
-    assert specs["rename_function"].safety_tag == ToolSafetyTag.SAFE_NONSEMANTIC_EDIT
+    assert specs["rename_function"].safety_tag == ToolSafetyTag.WRITE
     assert specs["rename_function"].operation_level == ToolOperationLevel.BASIC
 
     assert specs["import_program"].category_tag == ToolCategoryTag.CORE
-    assert specs["import_program"].safety_tag == ToolSafetyTag.SAFE_NONSEMANTIC_EDIT
+    assert specs["import_program"].safety_tag == ToolSafetyTag.WRITE
     assert specs["import_program"].operation_level == ToolOperationLevel.ADVANCED
 
     assert specs["set_bytes"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
-    assert specs["set_bytes"].safety_tag == ToolSafetyTag.UNSAFE_BINARY_DESTRUCTIVE
+    assert specs["set_bytes"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
     assert specs["set_bytes"].operation_level == ToolOperationLevel.ADVANCED
 
     assert specs["clear_struct"].category_tag == ToolCategoryTag.DATATYPE_OPS
-    assert specs["clear_struct"].safety_tag == ToolSafetyTag.UNSAFE_SEMANTIC_EDIT
+    assert specs["clear_struct"].safety_tag == ToolSafetyTag.WRITE
     assert specs["clear_struct"].operation_level == ToolOperationLevel.STANDARD
 
     assert specs["get_project_sync_status"].category_tag == ToolCategoryTag.SHARED_SYNC
-    assert specs["get_project_sync_status"].safety_tag == ToolSafetyTag.SAFE_READONLY
+    assert specs["get_project_sync_status"].safety_tag == ToolSafetyTag.READ_ONLY
     assert specs["get_project_sync_status"].operation_level == ToolOperationLevel.BASIC
 
     assert specs["undo_checkout_project_program"].category_tag == ToolCategoryTag.SHARED_SYNC
-    assert specs["undo_checkout_project_program"].safety_tag == ToolSafetyTag.UNSAFE_NONBINARY_DESTRUCTIVE
+    assert specs["undo_checkout_project_program"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
     assert specs["undo_checkout_project_program"].operation_level == ToolOperationLevel.STANDARD
 
 
@@ -651,7 +651,7 @@ def test_specs_include_contract_driven_metadata():
     assert specs["create_session"].include_none_keys == frozenset({"project_name"})
     assert specs["list_strings"].omit_falsey_keys == frozenset({"filter"})
     assert specs["list_targets"].description is not None
-    assert specs["list_targets"].read_only_hint is True
+    assert specs["list_targets"].safety_tag == ToolSafetyTag.READ_ONLY
     assert specs["list_targets"].idempotent_hint is True
 
 
