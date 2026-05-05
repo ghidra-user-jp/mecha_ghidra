@@ -97,3 +97,124 @@ def test_checkout_guard_fails_closed_when_checkout_state_unavailable(monkeypatch
 
     with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.isCheckedOut"):
         core_helpers._ensure_checkout_for_versioned_program(types.SimpleNamespace(program=Program()))
+
+
+def test_readonly_decompile_does_not_auto_analyze_after_decompile_failure(monkeypatch: pytest.MonkeyPatch):
+    core_helpers = _import_core_helpers(monkeypatch)
+    calls: list[str] = []
+
+    class DecompileResult:
+        def getDecompiledFunction(self):
+            return None
+
+        def getErrorMessage(self):
+            return "needs analysis"
+
+    class FailingDecompInterface:
+        def openProgram(self, _program):
+            calls.append("openProgram")
+            return True
+
+        def decompileFunction(self, _function, _timeout, _monitor):
+            calls.append("decompileFunction")
+            return DecompileResult()
+
+        def dispose(self):
+            calls.append("dispose")
+
+    class Utilities:
+        def shouldAskToAnalyze(self, _program):
+            calls.append("shouldAskToAnalyze")
+            return True
+
+        def markProgramAnalyzed(self, _program):
+            calls.append("markProgramAnalyzed")
+
+    class ScriptUtil:
+        def acquireBundleHostReference(self):
+            calls.append("acquire")
+
+        def releaseBundleHostReference(self):
+            calls.append("release")
+
+    class FlatAPI:
+        def analyzeAll(self, _program):
+            calls.append("analyzeAll")
+
+    monkeypatch.setattr(core_helpers, "DecompInterface", FailingDecompInterface)
+    monkeypatch.setattr(core_helpers, "_ghidra_program_utilities", lambda: Utilities())
+    monkeypatch.setattr(core_helpers, "_ghidra_script_util", lambda: ScriptUtil())
+
+    ctx = types.SimpleNamespace(
+        program=object(),
+        flat_api=FlatAPI(),
+        monitor=lambda: None,
+    )
+
+    with pytest.raises(RuntimeError, match="Decompilation result is empty: needs analysis"):
+        core_helpers._decompile_function_object(ctx, object())
+
+    assert calls == ["openProgram", "decompileFunction", "dispose"]
+
+
+def test_high_function_fallback_requires_checkout_before_analysis(monkeypatch: pytest.MonkeyPatch):
+    core_helpers = _import_core_helpers(monkeypatch)
+    calls: list[str] = []
+
+    class DecompileResult:
+        def decompileCompleted(self):
+            return False
+
+        def getErrorMessage(self):
+            return "needs analysis"
+
+    class FailingDecompInterface:
+        def openProgram(self, _program):
+            calls.append("openProgram")
+            return True
+
+        def decompileFunction(self, _function, _timeout, _monitor):
+            calls.append("decompileFunction")
+            return DecompileResult()
+
+        def dispose(self):
+            calls.append("dispose")
+
+    class DomainFile:
+        def isVersioned(self):
+            calls.append("isVersioned")
+            return True
+
+        def isCheckedOut(self):
+            calls.append("isCheckedOut")
+            return False
+
+    class Program:
+        def getDomainFile(self):
+            return DomainFile()
+
+    class Utilities:
+        def shouldAskToAnalyze(self, _program):
+            calls.append("shouldAskToAnalyze")
+            return True
+
+        def markProgramAnalyzed(self, _program):
+            calls.append("markProgramAnalyzed")
+
+    class FlatAPI:
+        def analyzeAll(self, _program):
+            calls.append("analyzeAll")
+
+    monkeypatch.setattr(core_helpers, "DecompInterface", FailingDecompInterface)
+    monkeypatch.setattr(core_helpers, "_ghidra_program_utilities", lambda: Utilities())
+
+    ctx = types.SimpleNamespace(
+        program=Program(),
+        flat_api=FlatAPI(),
+        monitor=lambda: None,
+    )
+
+    with pytest.raises(RuntimeError, match="CHECKOUT_REQUIRED"):
+        core_helpers._decompile_high_function(ctx, object())
+
+    assert calls == ["openProgram", "decompileFunction", "dispose", "isVersioned", "isCheckedOut"]

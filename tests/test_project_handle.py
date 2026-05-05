@@ -97,6 +97,19 @@ def test_open_program_allows_reopen_after_release(monkeypatch):
     assert session_two.get_program().getDomainFile().getPathname() == "/folder/app"
 
 
+def test_open_program_normalizes_relative_domain_path_for_duplicate_guard(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    first_session = handle.open_program("folder/app")
+
+    assert first_session.get_program().getDomainFile().getPathname() == "/folder/app"
+    with pytest.raises(RuntimeError, match="active session"):
+        handle.open_program("/folder/app")
+
+    first_session.close()
+    assert handle._open_programs == set()
+
+
 def test_close_can_skip_save(monkeypatch):
     handle = build_handle(monkeypatch)
 
@@ -263,6 +276,31 @@ def test_sync_status_raises_when_required_call_fails():
 
     with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
         session.sync_utils._sync_status_from_domain_file(BrokenDomainFile())
+
+
+def test_sync_status_raises_when_checkout_status_lookup_fails():
+    class BrokenCheckoutStatusDomainFile:
+        def getCheckoutStatus(self):
+            raise RuntimeError("checkout status unavailable")
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.getCheckoutStatus"):
+        session.sync_utils._sync_status_from_domain_file(BrokenCheckoutStatusDomainFile())
+
+
+def test_sync_status_raises_when_remote_checkout_id_unavailable():
+    class BrokenCheckout:
+        def getCheckoutId(self):
+            raise RuntimeError("checkout id unavailable")
+
+    class BrokenCheckoutDomainFile:
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return [BrokenCheckout()]
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to call CheckoutStatus.getCheckoutId"):
+        session.sync_utils._sync_status_from_domain_file(BrokenCheckoutDomainFile())
 
 
 def test_sync_status_normalizes_unversioned_version_fields():
@@ -503,6 +541,51 @@ def test_add_program_to_version_control_auto_connects_shared_repository(monkeypa
 
     assert repository.connect_calls == 1
     assert calls == [("Initial import", True, "monitor")]
+
+
+def test_add_program_to_version_control_fails_closed_when_can_add_unavailable(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class DummyRepository:
+        def isConnected(self):
+            return True
+
+    calls: list[tuple[str, bool, object]] = []
+
+    class SharedDomainFile:
+        def canAddToRepository(self):
+            raise RuntimeError("backend unavailable")
+
+        def addToVersionControl(self, comment, keep_checked_out, monitor):
+            calls.append((comment, bool(keep_checked_out), monitor))
+
+    class SharedProjectData:
+        def getFile(self, _domain_path):
+            return SharedDomainFile()
+
+        def getRepository(self):
+            return DummyRepository()
+
+    class SharedProject(DummyProject):
+        def __init__(self) -> None:
+            super().__init__()
+            self._project_data = SharedProjectData()
+
+        def getProjectData(self):
+            return self._project_data
+
+    handle.project = SharedProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: True),
+    )
+    monkeypatch.setattr(session.java_bindings, "_console_monitor", lambda: "monitor")
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.canAddToRepository"):
+        handle.add_program_to_version_control("/folder/app", "Initial import", keep_checked_out=True)
+
+    assert calls == []
 
 
 def test_refresh_project_data_invokes_project_data_refresh(monkeypatch):
@@ -1187,6 +1270,122 @@ def test_import_program_rolls_back_when_post_processing_fails(monkeypatch, tmp_p
     assert handle.project.closed == [imported_program]
 
 
+def test_import_program_preserves_import_when_post_processing_close_fails(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "sample.bin"
+    binary_path.write_bytes(b"\x90")
+    imported_program = DummyProgram("/sample.bin")
+    deleted_paths: list[str] = []
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class ImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+        def importProgram(self, java_file):  # noqa: ARG002
+            return imported_program
+
+        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
+            return None
+
+    def fail_post_process_close(*_args, **_kwargs):
+        raise session.project_handle._ImportedProgramCloseError(  # noqa: SLF001
+            "PROGRAM_CLOSE_FAILED: failed to close imported program /sample.bin: close failed"
+        )
+
+    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
+    monkeypatch.setattr(handle, "_post_process_imported_program_locked", fail_post_process_close)
+    monkeypatch.setattr(
+        handle,
+        "_delete_domain_file_locked",
+        lambda path: deleted_paths.append(path) or {"domain_path": path},
+    )
+    handle.project = ImportProject()
+
+    with pytest.raises(RuntimeError, match="IMPORT_CLOSE_FAILED: imported program /sample.bin"):
+        handle.import_program(str(binary_path), entry_offset=0)
+
+    assert deleted_paths == []
+    assert handle.project.closed == [imported_program]
+
+
+def test_import_program_auto_close_failure_reports_imported_path_without_rollback(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "sample.bin"
+    binary_path.write_bytes(b"\x90")
+    imported_program = DummyProgram("/sample.bin")
+    deleted_paths: list[str] = []
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class FailingCloseImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+        def importProgram(self, java_file):  # noqa: ARG002
+            return imported_program
+
+        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
+            return None
+
+        def close(self, program=None):
+            super().close(program)
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
+    monkeypatch.setattr(
+        handle,
+        "_delete_domain_file_locked",
+        lambda path: deleted_paths.append(path) or {"domain_path": path},
+    )
+    handle.project = FailingCloseImportProject()
+
+    with pytest.raises(RuntimeError, match="PROGRAM_CLOSE_FAILED: failed to close imported program /sample.bin"):
+        handle.import_program(str(binary_path))
+
+    assert deleted_paths == []
+    assert handle.project.closed == [imported_program]
+
+
+def test_import_program_auto_preserves_import_failure_when_close_also_fails(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "sample.bin"
+    binary_path.write_bytes(b"\x90")
+    imported_program = DummyProgram("/sample.bin")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class FailingSaveAndCloseProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+        def importProgram(self, java_file):  # noqa: ARG002
+            return imported_program
+
+        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
+            raise RuntimeError("saveAs failed")
+
+        def close(self, program=None):
+            super().close(program)
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
+    handle.project = FailingSaveAndCloseProject()
+
+    with pytest.raises(RuntimeError, match="saveAs failed") as exc_info:
+        handle.import_program(str(binary_path))
+
+    assert "PROGRAM_CLOSE_FAILED" not in str(exc_info.value)
+    assert handle.project.closed == [imported_program]
+
+
 def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
     handle = build_handle(monkeypatch)
     binary_path = tmp_path / "shellcode.bin"
@@ -1300,6 +1499,137 @@ def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
         ("load", None),
     ]
     assert fake_builder.load_results.closed is True
+
+
+def test_import_program_raw_binary_close_failure_reports_imported_path(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "shellcode.bin"
+    binary_path.write_bytes(b"\x90\xc3")
+    deleted_paths: list[str] = []
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class RawImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+    class FakeLoaded:
+        def save(self, _monitor):
+            return DummyDomainFile("/shellcode.bin")
+
+    class FakeLoadResults:
+        def getPrimary(self):
+            return FakeLoaded()
+
+        def close(self):
+            raise RuntimeError("close failed")
+
+    class FakeBuilder:
+        def project(self, _value):
+            return self
+
+        def projectFolderPath(self, _value):
+            return self
+
+        def source(self, _value):
+            return self
+
+        def name(self, _value):
+            return self
+
+        def loaders(self, _value):
+            return self
+
+        def language(self, _value):
+            return self
+
+        def load(self):
+            return FakeLoadResults()
+
+    monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", FakeBuilder, raising=False)
+    monkeypatch.setattr(handle, "_resolve_binary_loader_args_locked", lambda _builder, *, required_options=None: {})
+    monkeypatch.setattr(
+        handle,
+        "_delete_domain_file_locked",
+        lambda path: deleted_paths.append(path) or {"domain_path": path},
+    )
+    handle.project = RawImportProject()
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROGRAM_CLOSE_FAILED: failed to close raw import results for imported program /shellcode.bin",
+    ):
+        handle.import_program(
+            str(binary_path),
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            analyze_imported=False,
+        )
+
+    assert deleted_paths == []
+
+
+def test_import_program_raw_binary_preserves_save_failure_when_close_also_fails(monkeypatch, tmp_path):
+    handle = build_handle(monkeypatch)
+    binary_path = tmp_path / "shellcode.bin"
+    binary_path.write_bytes(b"\x90\xc3")
+
+    class DummyProjectData:
+        def getFile(self, _domain_path):
+            return None
+
+    class RawImportProject(DummyProject):
+        def getProjectData(self):
+            return DummyProjectData()
+
+    class FakeLoaded:
+        def save(self, _monitor):
+            raise RuntimeError("save failed")
+
+    class FakeLoadResults:
+        def getPrimary(self):
+            return FakeLoaded()
+
+        def close(self):
+            raise RuntimeError("close failed")
+
+    class FakeBuilder:
+        def project(self, _value):
+            return self
+
+        def projectFolderPath(self, _value):
+            return self
+
+        def source(self, _value):
+            return self
+
+        def name(self, _value):
+            return self
+
+        def loaders(self, _value):
+            return self
+
+        def language(self, _value):
+            return self
+
+        def load(self):
+            return FakeLoadResults()
+
+    monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", FakeBuilder, raising=False)
+    monkeypatch.setattr(handle, "_resolve_binary_loader_args_locked", lambda _builder, *, required_options=None: {})
+    handle.project = RawImportProject()
+
+    with pytest.raises(RuntimeError, match="save failed") as exc_info:
+        handle.import_program(
+            str(binary_path),
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            analyze_imported=False,
+        )
+
+    assert "PROGRAM_CLOSE_FAILED" not in str(exc_info.value)
 
 
 def test_import_program_raw_binary_rejects_unavailable_loader_option(monkeypatch, tmp_path):

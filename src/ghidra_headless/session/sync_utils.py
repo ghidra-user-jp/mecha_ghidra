@@ -21,22 +21,25 @@ def _safe_call(obj, name: str, *args):
         return None
 
 
-def _required_call(obj, name: str, *args):
+def _required_call(obj, name: str, *args, owner: str = "DomainFile"):
     method = getattr(obj, name, None)
     if method is None:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: DomainFile.{name} is unavailable")
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: {owner}.{name} is unavailable")
     try:
         return method(*args)
     except Exception as exc:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.{name}: {exc}")
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: failed to call {owner}.{name}: {exc}") from exc
 
 
 def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
     if status is None:
         return None
+    checkout_id = _required_call(status, "getCheckoutId", owner="CheckoutStatus")
+    if checkout_id is None:
+        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: CheckoutStatus.getCheckoutId returned None")
     checkout_type = _safe_call(status, "getCheckoutType")
     return {
-        "checkout_id": _safe_call(status, "getCheckoutId"),
+        "checkout_id": checkout_id,
         "checkout_type": None if checkout_type is None else str(checkout_type),
         "user": _safe_call(status, "getUser"),
         "checkout_version": _safe_call(status, "getCheckoutVersion"),
@@ -45,8 +48,8 @@ def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
 
 
 def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
-    checkout_status = _to_checkout_status_dict(_safe_call(domain_file, "getCheckoutStatus"))
-    checkouts = _safe_call(domain_file, "getCheckouts")
+    checkout_status = _to_checkout_status_dict(_required_call(domain_file, "getCheckoutStatus"))
+    checkouts = _required_call(domain_file, "getCheckouts")
     checkouts_list = []
     if checkouts:
         for item in list(checkouts):

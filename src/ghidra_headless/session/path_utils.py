@@ -25,6 +25,8 @@ def _parse_domain_path(project, domain_path: Optional[str]):
     if not domain_path:
         raise ValueError("No program found in the project")
     domain_file = pathlib.PurePosixPath(domain_path)
+    if not domain_file.is_absolute():
+        domain_file = pathlib.PurePosixPath("/") / domain_file
     return domain_file.parent.as_posix(), domain_file.name
 
 

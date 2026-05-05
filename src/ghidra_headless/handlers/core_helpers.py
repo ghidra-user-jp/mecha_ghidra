@@ -495,17 +495,7 @@ def _decompile_function_object(ctx, function):
         finally:
             interface.dispose()
 
-    try:
-        return _run_decompile()
-    except RuntimeError:
-        analyzed = False
-        try:
-            analyzed = _analyze_program_if_needed(ctx)
-        except Exception:
-            analyzed = False
-        if not analyzed:
-            raise
-        return _run_decompile()
+    return _run_decompile()
 
 
 def _decompile_high_function(ctx, function):
@@ -537,6 +527,7 @@ def _decompile_high_function(ctx, function):
     try:
         return _run_decompile()
     except RuntimeError:
+        _ensure_checkout_for_versioned_program(ctx)
         analyzed = False
         try:
             analyzed = _analyze_program_if_needed(ctx)

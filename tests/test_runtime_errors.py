@@ -135,6 +135,25 @@ def test_to_domain_error_defaults_to_sync_operation_failed_for_sync_operation():
     }
 
 
+def test_to_domain_error_maps_sync_status_unavailable_as_sync_failure():
+    message = "SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.isVersioned: backend unavailable"
+    err = to_domain_error(
+        RuntimeError(message),
+        operation="get_project_sync_status",
+        target="fw",
+        domain_path="/main",
+    )
+
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.details == {
+        "operation": "get_project_sync_status",
+        "target": "fw",
+        "domain_path": "/main",
+        "cause_type": "RuntimeError",
+        "cause_message": message,
+    }
+
+
 def test_to_domain_error_maps_project_lock_and_redacts_paths():
     err = to_domain_error(
         RuntimeError("Unable to lock project! /home/ghidra/shared_user"),

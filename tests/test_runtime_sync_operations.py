@@ -99,6 +99,11 @@ class _FailingChangedFakeSession(_FakeSession):
         return _FailingChangedFakeProgram(self._path)
 
 
+class _BrokenDomainPathSession(_FakeSession):
+    def get_program(self):
+        raise RuntimeError("domain path unavailable")
+
+
 class _ClosingSession(_FakeSession):
     def close(self, *, save: bool = True, remove_program: bool = False) -> None:  # noqa: ARG002
         super().close(save=save, remove_program=remove_program)
@@ -1195,6 +1200,20 @@ def test_reload_registered_only_target_reports_target_already_loaded(monkeypatch
     assert core.initialized == []
 
 
+def test_reload_registered_only_target_fails_closed_when_loaded_target_inspection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_BrokenDomainPathSession)
+    store.locks["fw-shadow"] = threading.RLock()
+    store.target_projects["fw-shadow"] = handle.get_key()
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to inspect loaded target 'fw'"):
+        sync.reload_project_program("fw-shadow", domain_path="/main")
+
+    assert "fw" in store.sessions
+    assert core.initialized == []
+
+
 def test_commit_operation_failure_after_reopen_preserves_reopened_target(monkeypatch: pytest.MonkeyPatch):
     sync, store, core, handle = _build_sync_runtime(
         monkeypatch,
@@ -1379,6 +1398,20 @@ def test_delete_shared_project_file_rejects_loaded_program(monkeypatch: pytest.M
         "domain_path": "/main",
         "owner_target": "fw",
     }
+    assert handle.deleted_domain_files == []
+    assert core.initialized == []
+
+
+def test_delete_shared_project_file_fails_closed_when_loaded_target_inspection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_BrokenDomainPathSession)
+    store.locks["fw-shadow"] = threading.RLock()
+    store.target_projects["fw-shadow"] = handle.get_key()
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to inspect loaded target 'fw'"):
+        sync.delete_shared_project_file("fw-shadow", domain_path="/main", confirm="/main")
+
     assert handle.deleted_domain_files == []
     assert core.initialized == []
 

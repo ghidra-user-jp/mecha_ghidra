@@ -827,8 +827,13 @@ class RuntimeSyncOperations:
             try:
                 session_handle = session.get_project_handle()
                 session_domain_path = self._store.session_domain_path(session)
-            except Exception:
-                continue
+            except Exception as exc:
+                if self._session_lookup_error_is_closed(exc):
+                    continue
+                raise RuntimeError(
+                    "SYNC_STATUS_UNAVAILABLE: failed to inspect loaded target "
+                    f"'{target_name}': {exc}"
+                ) from exc
             if session_handle.get_key() != requested_key:
                 continue
             if session_domain_path == domain_path:
@@ -1019,6 +1024,10 @@ class RuntimeSyncOperations:
             return False
         except Exception:
             return True
+
+    @staticmethod
+    def _session_lookup_error_is_closed(exc: Exception) -> bool:
+        return "Session is already closed" in str(exc)
 
     @staticmethod
     def _discard_conflict_checkout_operation(handle: ProjectHandle, domain_path: str) -> Dict[str, bool]:

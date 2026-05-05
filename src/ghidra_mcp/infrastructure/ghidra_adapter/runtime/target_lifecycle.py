@@ -614,6 +614,8 @@ class RuntimeTargetLifecycle:
         program = session.get_program()
         should_analyze = bool(utilities.shouldAskToAnalyze(program))
         if should_analyze:
+            if not self._auto_analysis_allowed_locked(name=name, domain_path=domain_path, session=session):
+                return
             script_util = java_bindings._ghidra_script_util()
             script_util.acquireBundleHostReference()
             try:
@@ -623,6 +625,31 @@ class RuntimeTargetLifecycle:
             finally:
                 script_util.releaseBundleHostReference()
         self._store.mark_analyzed_load(name, domain_path)
+
+    @staticmethod
+    def _auto_analysis_allowed_locked(
+        *,
+        name: str,
+        domain_path: str,
+        session: ProgramSession,
+    ) -> bool:
+        handle = session.get_project_handle()
+        try:
+            status = handle.get_sync_status(domain_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "skipping initial auto-analysis for target '%s' because sync status is unavailable: %s",
+                name,
+                exc,
+            )
+            return False
+        if status.get("is_versioned") and not status.get("is_checked_out"):
+            logger.info(
+                "skipping initial auto-analysis for target '%s' because the shared-project program is not checked out",
+                name,
+            )
+            return False
+        return True
 
     @staticmethod
     def _save_analyzed_program_locked(session: ProgramSession, program) -> None:  # noqa: ANN001
