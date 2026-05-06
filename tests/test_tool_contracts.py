@@ -9,11 +9,12 @@ from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_all_tool_specs
 ROOT = Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core.py"
 PRESENTATION_CLI_PATH = ROOT / "src" / "ghidra_mcp" / "presentation" / "cli.py"
+TOOL_REGISTRY_PATH = ROOT / "src" / "ghidra_mcp" / "presentation" / "tool_registry.py"
 LEGACY_SERVICES_DIR = ROOT / "src" / "ghidra_mcp" / "services"
 
 
 def _core_command_specs() -> dict[str, tuple[str, ...]]:
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
     return {
         spec.command_or_method: tuple(spec.input_model.model_fields.keys())
         for spec in specs.values()
@@ -48,6 +49,21 @@ def test_command_dep_keys_cover_all_supported_commands():
 def test_presentation_cli_does_not_import_legacy_services_module():
     source = PRESENTATION_CLI_PATH.read_text(encoding="utf-8")
     assert "ghidra_mcp.services" not in source
+
+
+def test_presentation_cli_does_not_hardcode_checkout_required_tools():
+    source = PRESENTATION_CLI_PATH.read_text(encoding="utf-8")
+    assert "_CHECKOUT_REQUIRED_COMMANDS" not in source
+    assert "get_checkout_required_tool_names" in source
+
+
+def test_tool_registry_does_not_define_tool_specific_maps():
+    source = TOOL_REGISTRY_PATH.read_text(encoding="utf-8")
+    assert "_RAW_TO_PUBLIC_NAME" not in source
+    assert "_ALWAYS_INCLUDE_NONE_KEYS" not in source
+    assert "_OMIT_FALSEY_KEYS" not in source
+    assert "_TOOL_DECORATOR_OPTIONS" not in source
+    assert "_SHARED_SYNC_DESCRIPTIONS" not in source
 
 
 def test_legacy_services_directory_is_removed():

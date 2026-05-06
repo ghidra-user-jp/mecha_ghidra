@@ -4,26 +4,65 @@ from pathlib import Path
 from typing import Any, Literal
 
 import ghidra_mcp.contracts.tool_models as tool_models
-import ghidra_mcp.contracts.tool_spec as tool_spec_module
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, get_all_tool_specs
+from ghidra_mcp.contracts.tool_spec import (
+    ExecutorKind,
+    ToolCategoryTag,
+    ToolOperationLevel,
+    ToolSafetyTag,
+    filter_tool_specs,
+    get_all_tool_specs,
+    get_checkout_required_tool_names,
+)
 from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
 from ghidra_mcp.presentation import cli as presentation_cli
-from ghidra_mcp.presentation.tool_registry import build_tool_functions, register_shared_sync_tools
+from ghidra_mcp.presentation.tool_registry import build_tool_functions, register_tool_functions
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_SPEC_PATH = ROOT / "src" / "ghidra_mcp" / "contracts" / "tool_spec.py"
 
 
 def test_tool_specs_cover_all_public_tools():
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
     assert set(specs) == set(presentation_cli.PUBLIC_TOOL_FUNCTIONS)
+
+
+def test_tool_specs_include_expected_tags():
+    specs = get_all_tool_specs()
+
+    assert specs["list_functions"].category_tag == ToolCategoryTag.FUNCTION_ANALYSIS
+    assert specs["list_functions"].safety_tag == ToolSafetyTag.READ_ONLY
+    assert specs["list_functions"].operation_level == ToolOperationLevel.STANDARD
+
+    assert specs["rename_function"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
+    assert specs["rename_function"].safety_tag == ToolSafetyTag.WRITE
+    assert specs["rename_function"].operation_level == ToolOperationLevel.BASIC
+
+    assert specs["import_program"].category_tag == ToolCategoryTag.CORE
+    assert specs["import_program"].safety_tag == ToolSafetyTag.WRITE
+    assert specs["import_program"].operation_level == ToolOperationLevel.ADVANCED
+
+    assert specs["set_bytes"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
+    assert specs["set_bytes"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
+    assert specs["set_bytes"].operation_level == ToolOperationLevel.ADVANCED
+
+    assert specs["clear_struct"].category_tag == ToolCategoryTag.DATATYPE_OPS
+    assert specs["clear_struct"].safety_tag == ToolSafetyTag.WRITE
+    assert specs["clear_struct"].operation_level == ToolOperationLevel.STANDARD
+
+    assert specs["get_project_sync_status"].category_tag == ToolCategoryTag.SHARED_SYNC
+    assert specs["get_project_sync_status"].safety_tag == ToolSafetyTag.READ_ONLY
+    assert specs["get_project_sync_status"].operation_level == ToolOperationLevel.BASIC
+
+    assert specs["undo_checkout_project_program"].category_tag == ToolCategoryTag.SHARED_SYNC
+    assert specs["undo_checkout_project_program"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
+    assert specs["undo_checkout_project_program"].operation_level == ToolOperationLevel.STANDARD
 
 
 def test_core_command_spec_keys_are_consumed_by_handlers():
     supported = set(COMMAND_NAMES)
     dep_keys_by_command = {name: set(keys) for name, keys in COMMAND_DEP_KEYS.items()}
 
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
     mismatches: list[str] = []
 
     for spec in specs.values():
@@ -41,12 +80,12 @@ def test_core_command_spec_keys_are_consumed_by_handlers():
     assert not mismatches, "\n".join(mismatches)
 
 
-def test_shared_sync_specs_are_gated_by_exposure():
-    specs = get_all_tool_specs(include_shared_sync=True)
+def test_shared_sync_specs_are_tagged_as_shared_sync_category():
+    specs = get_all_tool_specs()
     shared_sync_names = {
         name
         for name, spec in specs.items()
-        if spec.exposure == ToolExposure.SHARED_SYNC
+        if spec.category_tag == ToolCategoryTag.SHARED_SYNC
     }
 
     assert shared_sync_names == {
@@ -64,8 +103,8 @@ def test_shared_sync_specs_are_gated_by_exposure():
     }
 
 
-def test_shared_sync_specs_match_registration_function():
-    specs = get_all_tool_specs(include_shared_sync=True)
+def test_shared_sync_specs_register_via_generic_tool_registration():
+    specs = filter_tool_specs(allow_categories=[ToolCategoryTag.SHARED_SYNC])
     tools = build_tool_functions(
         specs=specs,
         dispatcher_provider=lambda: presentation_cli.dispatch_tool,
@@ -76,13 +115,17 @@ def test_shared_sync_specs_match_registration_function():
     annotations_by_name: dict[str, Any] = {}
 
     class DummyMCP:
-        def add_tool(self, fn, description=None, annotations=None):  # noqa: ARG002
-            registered.append(fn.__name__)
-            annotations_by_name[fn.__name__] = annotations
+        def tool(self, **kwargs):  # noqa: ARG002
+            def _decorator(fn):
+                registered.append(fn.__name__)
+                annotations_by_name[fn.__name__] = kwargs.get("annotations")
+                return fn
 
-    register_shared_sync_tools(DummyMCP(), tools=tools)
+            return _decorator
 
-    shared_sync_names = [name for name, spec in specs.items() if spec.exposure == ToolExposure.SHARED_SYNC]
+    register_tool_functions(DummyMCP(), tools=tools, specs=specs)
+
+    shared_sync_names = list(specs)
     assert registered == shared_sync_names
     assert {
         name
@@ -107,7 +150,7 @@ def test_shared_sync_specs_match_registration_function():
 
 
 def test_typed_input_models_for_function_listing_slice():
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
 
     def _assert_fields(tool_name: str, expected_fields: dict[str, tuple[type, object]]):
         model = specs[tool_name].input_model
@@ -580,7 +623,7 @@ def test_typed_input_models_for_function_listing_slice():
 
 
 def test_registry_and_shared_sync_adapters_are_configured():
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
 
     assert specs["load_project_program"].result_adapter == "status_program_ok"
     assert specs["import_program"].result_adapter == "status_program_ok"
@@ -594,17 +637,52 @@ def test_registry_and_shared_sync_adapters_are_configured():
 
 
 def test_specs_include_contract_driven_metadata():
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
 
     assert specs["list_functions"].public_signature[-1] == "target"
     assert specs["register_target"].public_signature[0] == "target"
     assert specs["list_targets"].public_signature == ()
     assert specs["create_session"].error_policy == "legacy_compatible"
     assert hasattr(specs["create_session"], "output_model")
+    assert specs["rename_function"].public_name_overrides == {
+        "oldName": "old_name",
+        "newName": "new_name",
+    }
+    assert specs["create_session"].include_none_keys == frozenset({"project_name"})
+    assert specs["list_strings"].omit_falsey_keys == frozenset({"filter"})
+    assert specs["list_targets"].description is not None
+    assert specs["list_targets"].safety_tag == ToolSafetyTag.READ_ONLY
+    assert specs["list_targets"].idempotent_hint is True
+
+
+def test_checkout_required_tools_are_declared_on_specs():
+    assert get_checkout_required_tool_names() == {
+        "rename_function",
+        "rename_function_by_address",
+        "rename_data",
+        "rename_variable",
+        "set_decompiler_comment",
+        "set_disassembly_comment",
+        "set_function_prototype",
+        "set_local_variable_type",
+        "set_global_data_type",
+        "create_struct",
+        "create_class",
+        "add_struct_members",
+        "clear_struct",
+        "create_enum",
+        "add_enum_values",
+        "add_class_members",
+        "remove_class_members",
+        "remove_enum_values",
+        "remove_struct_members",
+        "set_bytes",
+        "add_bookmark",
+    }
 
 
 def test_all_output_models_are_strict_and_typed():
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
 
     list_output_tools = {
         "list_methods",
@@ -632,7 +710,165 @@ def test_all_output_models_are_strict_and_typed():
         "decompile_function_by_address": str,
         "get_bytes": str,
     }
-    direct_output_fields = tool_spec_module._DIRECT_OUTPUT_FIELDS  # noqa: SLF001
+
+    direct_output_fields: dict[str, dict[str, tuple[type[Any], Any]]] = {
+        "load_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+        },
+        "import_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+        },
+        "create_session": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "project_location": (str, ...),
+            "project_name": (str | None, None),
+            "domain_path": (str | None, None),
+        },
+        "close_session": {
+            "status": (str, ...),
+            "closed": (bool, ...),
+            "target": (str, ...),
+            "remove_program": (bool, ...),
+        },
+        "close_session_and_remove_program": {
+            "status": (str, ...),
+            "closed": (bool, ...),
+            "target": (str, ...),
+            "remove_program": (bool, ...),
+        },
+        "save_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "saved": (bool, ...),
+        },
+        "get_project_sync_status": {
+            "target": (str, ...),
+            "program": (str, ...),
+            "is_versioned": (bool, ...),
+            "is_checked_out": (bool, ...),
+            "is_checked_out_exclusive": (bool, ...),
+            "is_latest_version": (bool | None, ...),
+            "modified_since_checkout": (bool, ...),
+            "can_add_to_repository": (bool, ...),
+            "can_checkout": (bool, ...),
+            "can_checkin": (bool, ...),
+            "can_merge": (bool, ...),
+            "is_hijacked": (bool, ...),
+            "version": (int | None, ...),
+            "latest_version": (int | None, ...),
+            "checkout_status": (dict[str, object] | None, ...),
+            "checkouts": (list[object], ...),
+            "shared_project_url": (str | None, ...),
+        },
+        "get_version_history": {
+            "target": (str, ...),
+            "program": (str, ...),
+            "current_version": (int, ...),
+            "latest_version": (int, ...),
+            "total_versions": (int, ...),
+            "versions": (list[object], ...),
+        },
+        "get_version_diff": {
+            "target": (str, ...),
+            "program": (str, ...),
+            "from_version": (int, ...),
+            "to_version": (int, ...),
+            "total_diff_addresses": (int, ...),
+            "total_diff_ranges": (int, ...),
+            "diff_types": (list[object], ...),
+            "ranges": (list[object], ...),
+            "ranges_truncated": (bool, ...),
+            "warnings": (str | None, ...),
+        },
+        "checkout_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "checked_out": (bool, ...),
+            "already_checked_out": (bool, ...),
+            "exclusive": (bool, ...),
+        },
+        "add_project_program_to_version_control": {
+            "status": (str, ...),
+            "reason": (str | None, None),
+            "target": (str, ...),
+            "program": (str, ...),
+            "is_versioned": (bool | None, None),
+            "version": (int | None, None),
+            "latest_version": (int | None, None),
+            "checked_out": (bool | None, None),
+            "effective_keep_checked_out": (bool | None, None),
+        },
+        "commit_project_program": {
+            "status": (str, ...),
+            "reason": (str | None, None),
+            "target": (str, ...),
+            "program": (str, ...),
+            "required_action": (str | None, None),
+            "can_add_to_repository": (bool | None, None),
+            "message": (str | None, None),
+            "new_version": (int | None, None),
+            "version": (int | None, None),
+            "latest_version": (int | None, None),
+            "checked_out": (bool | None, None),
+            "effective_keep_checked_out": (bool | None, None),
+            "is_latest_version": (bool | None, None),
+            "discarded_local_changes": (bool | None, None),
+            "merged": (bool | None, None),
+        },
+        "pull_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "updated": (bool, ...),
+            "merged": (bool, ...),
+            "discarded_local_changes": (bool, ...),
+            "followed_latest": (bool, ...),
+            "version": (int | None, ...),
+            "latest_version": (int | None, ...),
+            "is_latest_version": (bool | None, ...),
+        },
+        "undo_checkout_project_program": {
+            "status": (str, ...),
+            "reason": (str | None, None),
+            "target": (str, ...),
+            "program": (str, ...),
+            "checked_out": (bool | None, None),
+            "version": (int | None, None),
+            "is_latest_version": (bool | None, None),
+            "kept_program": (str | None, None),
+        },
+        "terminate_project_program_checkout": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "checkout_id": (int, ...),
+            "active_checkouts": (list[object], ...),
+        },
+        "delete_shared_project_file": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "domain_path": (str, ...),
+            "deleted": (bool, ...),
+            "content_type": (str | None, ...),
+            "was_versioned": (bool, ...),
+            "version": (int | None, ...),
+            "latest_version": (int | None, ...),
+        },
+        "reload_project_program": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "reloaded": (bool, ...),
+        },
+    }
 
     categorized = set(list_output_tools) | set(scalar_output_tools) | set(direct_output_fields)
     assert categorized <= set(specs)
@@ -670,7 +906,7 @@ def test_any_output_model_helper_is_removed():
 
 
 def test_all_specs_have_required_contract_fields():
-    specs = get_all_tool_specs(include_shared_sync=True)
+    specs = get_all_tool_specs()
 
     for spec in specs.values():
         assert spec.output_model is not None

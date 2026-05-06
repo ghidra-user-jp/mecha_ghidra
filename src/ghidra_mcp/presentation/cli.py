@@ -19,10 +19,22 @@ from typing import Dict
 
 import pyghidra
 import pyghidra.core as pycore
+from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from ghidra_mcp.contracts.tool_spec import (
+    ToolCategoryTag,
+    ToolOperationLevel,
+    ToolProfile,
+    ToolSafetyTag,
+    ToolSpec,
+    filter_tool_specs,
+    get_all_tool_specs,
+    get_checkout_required_tool_names,
+)
 from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
-from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter as ServiceRegistryAdapter, create_cli_runtime
+from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter, create_cli_runtime
+from ghidra_mcp.presentation.tool_registry import build_tool_functions
 from ghidra_mcp.presentation.transport import (
     configure_mcp_for_sse as _configure_mcp_for_sse,
     configure_mcp_for_streamable_http as _configure_mcp_for_streamable_http,
@@ -37,33 +49,15 @@ from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 logger = logging.getLogger(__name__)
 
 _core_module = None
-_shared_project_sync_tools_registered = False
 _PASSWORD_CLIENT_AUTHENTICATOR_CLASS = None
 _CLIENT_UTIL_CLASS = None
+_registry = None
+mcp = FastMCP("GhidraMCP Headless")
 
-_CHECKOUT_REQUIRED_COMMANDS = {
-    "rename_function",
-    "rename_function_by_address",
-    "rename_data",
-    "rename_variable",
-    "set_decompiler_comment",
-    "set_disassembly_comment",
-    "set_function_prototype",
-    "set_local_variable_type",
-    "set_global_data_type",
-    "create_struct",
-    "create_class",
-    "add_struct_members",
-    "clear_struct",
-    "create_enum",
-    "add_enum_values",
-    "add_class_members",
-    "remove_class_members",
-    "remove_enum_values",
-    "remove_struct_members",
-    "set_bytes",
-    "add_bookmark",
-}
+_ALL_TOOL_SPECS = get_all_tool_specs()
+_DEFAULT_TOOL_SPECS = filter_tool_specs(specs=_ALL_TOOL_SPECS, profile=ToolProfile.DEFAULT)
+_TOOL_NAMES = sorted(_ALL_TOOL_SPECS)
+
 
 def _core():
     global _core_module
@@ -88,26 +82,30 @@ def _client_util_class():
     return _CLIENT_UTIL_CLASS
 
 
-_runtime_bundle = create_cli_runtime(
-    core_accessor=lambda: _core(),
-    checkout_required_commands=set(_CHECKOUT_REQUIRED_COMMANDS),
+def _get_registry(selected_specs: dict[str, ToolSpec] | None = None) -> ServiceRegistryAdapter:
+    global _registry, mcp
+    if selected_specs is None and _registry is not None:
+        return _registry
+    effective_specs = _DEFAULT_TOOL_SPECS if selected_specs is None else selected_specs
+    bundle = create_cli_runtime(
+        registered_specs=effective_specs,
+        core_accessor=lambda: _core(),
+        checkout_required_commands=get_checkout_required_tool_names(effective_specs),
+        dispatcher_provider=lambda: dispatch_tool,
+        registry_provider=lambda: _registry,
+    )
+    _registry = bundle.registry
+    mcp = bundle.runtime.mcp
+    return _registry
+
+
+_PUBLIC_TOOL_FUNCTIONS = build_tool_functions(
+    specs=_ALL_TOOL_SPECS,
     dispatcher_provider=lambda: dispatch_tool,
-    registry_provider=lambda: _registry,
+    registry_provider=_get_registry,
 )
-_registry = _runtime_bundle.registry
-_runtime = _runtime_bundle.runtime
-mcp = _runtime.mcp
-
-for _tool_name, _tool_fn in _runtime.tools.items():
+for _tool_name, _tool_fn in _PUBLIC_TOOL_FUNCTIONS.items():
     globals()[_tool_name] = _tool_fn
-
-
-def register_shared_project_sync_tools() -> None:
-    global _shared_project_sync_tools_registered
-    if _shared_project_sync_tools_registered:
-        return
-    _runtime.register_shared_sync()
-    _shared_project_sync_tools_registered = True
 
 
 def configure_logging(level: int) -> None:
@@ -129,6 +127,10 @@ def _parse_session_definition(text: str) -> Dict[str, str]:
     if "project_location" not in result:
         raise ValueError("Session definition requires project_location")
     return result
+
+
+def _enum_choices(enum_cls) -> list[str]:
+    return [member.value for member in enum_cls]
 
 
 def parse_args(argv: list[str]):
@@ -170,12 +172,62 @@ def parse_args(argv: list[str]):
     parser.add_argument("--mcp-port", type=int, help="SSE/Streamable HTTP port (unused for stdio)")
     parser.add_argument("--mcp-path", type=str, default="/mcp", help="Streamable HTTP path (e.g. /mcp)")
     parser.add_argument(
-        "--enable-shared-project-sync",
-        action="store_true",
-        help="Expose shared-project commit/pull/checkout tools",
+        "--tool-profile",
+        default=ToolProfile.DEFAULT.value,
+        choices=_enum_choices(ToolProfile),
+        help="Tool exposure profile. 'default' matches the no-argument startup behavior.",
+    )
+    parser.add_argument(
+        "--allow-category",
+        action="append",
+        choices=_enum_choices(ToolCategoryTag),
+        help="Replace the profile category set with the specified category (repeatable, OR within category).",
+    )
+    parser.add_argument(
+        "--add-category",
+        action="append",
+        choices=_enum_choices(ToolCategoryTag),
+        help="Add categories on top of the current profile/allow-category set (repeatable).",
+    )
+    parser.add_argument(
+        "--allow-safety",
+        action="append",
+        choices=_enum_choices(ToolSafetyTag),
+        help="Keep only tools with the specified safety tag (repeatable, OR within safety).",
+    )
+    parser.add_argument(
+        "--allow-operation-level",
+        action="append",
+        choices=_enum_choices(ToolOperationLevel),
+        help="Keep only tools with the specified operation level (repeatable, OR within operation level).",
+    )
+    parser.add_argument(
+        "--enable-tool",
+        action="append",
+        choices=_TOOL_NAMES,
+        help="Add a specific tool after tag/profile filtering (repeatable).",
+    )
+    parser.add_argument(
+        "--disable-tool",
+        action="append",
+        choices=_TOOL_NAMES,
+        help="Remove a specific tool after all other filtering. Highest priority (repeatable).",
     )
     parser.add_argument("--log-level", default="INFO", help="Log level")
     return parser.parse_args(argv)
+
+
+def resolve_tool_specs_from_args(args) -> dict[str, ToolSpec]:
+    return filter_tool_specs(
+        specs=_ALL_TOOL_SPECS,
+        profile=args.tool_profile,
+        allow_categories=args.allow_category,
+        add_categories=args.add_category,
+        allow_safety=args.allow_safety,
+        allow_operation_levels=args.allow_operation_level,
+        enable_tools=args.enable_tool,
+        disable_tools=args.disable_tool,
+    )
 
 
 def _normalize_transport(transport: str) -> str:
@@ -248,7 +300,15 @@ def main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
     args = parse_args(argv)
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
-    logger.info("Starting PyGhidra MCP server")
+
+    selected_specs = resolve_tool_specs_from_args(args)
+    registry = _get_registry(selected_specs)
+
+    logger.info(
+        "Starting PyGhidra MCP server with %d tools (profile=%s)",
+        len(selected_specs),
+        args.tool_profile,
+    )
 
     ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
     if ghidra_path:
@@ -275,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
                 config = _parse_session_definition(definition)
                 domain_path = config.get("domain_path")
                 if domain_path:
-                    _registry.create_session(
+                    registry.create_session(
                         config["name"],
                         project_location=config["project_location"],
                         project_name=config.get("project_name"),
@@ -283,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     logger.info("Loaded session '%s'", config["name"])
                 else:
-                    _registry.register_target(
+                    registry.register_target(
                         config["name"],
                         project_location=config["project_location"],
                         project_name=config.get("project_name"),
@@ -291,13 +351,13 @@ def main(argv: list[str] | None = None) -> int:
                     logger.info("Registered target '%s' with project metadata only", config["name"])
             except Exception as exc:  # noqa: BLE001
                 logger.error("Error while processing session definition '%s': %s", definition, exc)
-                _registry.close_all()
+                registry.close_all()
                 return 1
 
     if args.project_location:
         try:
             if args.domain_path:
-                _registry.create_session(
+                registry.create_session(
                     args.target_name,
                     project_location=args.project_location,
                     project_name=args.project_name,
@@ -305,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 logger.info("Loaded default target '%s'", args.target_name)
             else:
-                _registry.register_target(
+                registry.register_target(
                     args.target_name,
                     project_location=args.project_location,
                     project_name=args.project_name,
@@ -316,10 +376,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to initialize default session: %s", exc)
-            _registry.close_all()
+            registry.close_all()
             return 1
 
-    if not _registry.has_targets():
+    if not registry.has_targets():
         logger.error("Specify at least one target via --session or --project-location")
         return 1
 
@@ -327,15 +387,11 @@ def main(argv: list[str] | None = None) -> int:
 
     def _shutdown_handler(signum, frame):
         logger.info("Received signal %s; starting shutdown", signum)
-        _registry.close_all()
+        registry.close_all()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
-
-    if args.enable_shared_project_sync:
-        register_shared_project_sync_tools()
-        logger.info("Enabled shared-project sync tools")
 
     transport = _normalize_transport(args.transport)
     if transport == "sse":
@@ -346,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         mcp.run(transport=transport)
     finally:
-        _registry.close_all()
+        registry.close_all()
     return 0
 
 
@@ -359,7 +415,7 @@ def configure_mcp_for_streamable_http(args) -> None:
 
 
 # expose generated tool callables to static analysis/tests
-PUBLIC_TOOL_FUNCTIONS = tuple(name for name in _runtime.tools)
+PUBLIC_TOOL_FUNCTIONS = tuple(name for name in _PUBLIC_TOOL_FUNCTIONS)
 
 if __name__ == "__main__":
     sys.exit(main())
