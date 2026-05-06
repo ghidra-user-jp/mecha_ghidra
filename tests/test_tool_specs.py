@@ -174,6 +174,30 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
+        "disassemble_range",
+        {
+            "start_address": (str, ...),
+            "end_address": (str | None, None),
+            "length": (int | None, None),
+            "limit": (int, 200),
+        },
+    )
+    _assert_fields(
+        "create_function",
+        {
+            "address": (str, ...),
+            "name": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "delete_function",
+        {
+            "address": (str, ...),
+        },
+    )
+    _assert_fields("analyze_program", {})
+    _assert_fields("reanalyze_program", {})
+    _assert_fields(
         "get_callee",
         {
             "address": (str, ...),
@@ -364,6 +388,22 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
+        "delete_struct",
+        {
+            "struct_name": (str, ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "list_data_types",
+        {
+            "offset": (int, 0),
+            "limit": (int, 100),
+            "filter": (str | None, None),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
         "create_enum",
         {
             "name": (str, ...),
@@ -385,6 +425,21 @@ def test_typed_input_models_for_function_listing_slice():
         {
             "enum_name": (str, ...),
             "values": (list[str], ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "delete_enum",
+        {
+            "enum_name": (str, ...),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "rename_data_type",
+        {
+            "name": (str, ...),
+            "new_name": (str, ...),
             "category": (str | None, None),
         },
     )
@@ -446,7 +501,35 @@ def test_typed_input_models_for_function_listing_slice():
             "format": (str, "json"),
         },
     )
+    _assert_fields(
+        "list_bookmarks",
+        {
+            "offset": (int, 0),
+            "limit": (int, 100),
+            "address": (str | None, None),
+            "type": (str | None, None),
+            "category": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "delete_bookmark",
+        {
+            "id": (int | None, None),
+            "address": (str | None, None),
+            "category": (str | None, None),
+            "comment": (str | None, None),
+            "type": (str | None, None),
+        },
+    )
     _assert_fields("list_targets", {})
+    _assert_fields(
+        "create_project",
+        {
+            "project_location": (str, ...),
+            "project_name": (str | None, None),
+            "overwrite": (bool, False),
+        },
+    )
     _assert_fields("list_project_programs", {})
     _assert_fields(
         "register_target",
@@ -612,6 +695,7 @@ def test_all_output_models_are_strict_and_typed():
         "list_classes",
         "search_functions_by_name",
         "disassemble_function",
+        "disassemble_range",
         "get_callee",
         "get_xrefs_to",
         "get_xrefs_from",
@@ -621,9 +705,11 @@ def test_all_output_models_are_strict_and_typed():
         "list_exports",
         "list_namespaces",
         "list_data_items",
+        "list_data_types",
         "list_strings",
         "get_data_by_label",
         "search_bytes",
+        "list_bookmarks",
         "list_targets",
         "list_project_programs",
     }

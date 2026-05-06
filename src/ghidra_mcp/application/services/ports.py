@@ -6,6 +6,15 @@ from typing import Any, Protocol
 
 
 class TargetRuntimePort(Protocol):
+    def create_project(
+        self,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
     def create_session(
         self,
         name: str,

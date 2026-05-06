@@ -133,6 +133,8 @@ _CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
     "list_classes": ("offset", "limit"),
     "decompile_function": ("name",),
     "decompile_function_by_address": ("address",),
+    "create_function": ("address", "name"),
+    "delete_function": ("address",),
     "rename_function": ("oldName", "newName"),
     "rename_function_by_address": ("function_address", "new_name"),
     "rename_data": ("address", "newName"),
@@ -145,6 +147,9 @@ _CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
     "search_functions_by_name": ("query", "offset", "limit"),
     "get_function_by_address": ("address",),
     "disassemble_function": ("address",),
+    "disassemble_range": ("start_address", "end_address", "length", "limit"),
+    "analyze_program": (),
+    "reanalyze_program": (),
     "set_decompiler_comment": ("address", "comment"),
     "set_disassembly_comment": ("address", "comment"),
     "set_function_prototype": ("function_address", "prototype"),
@@ -156,13 +161,17 @@ _CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
     "create_struct": ("name", "size", "category", "members"),
     "add_struct_members": ("struct_name", "members", "category"),
     "clear_struct": ("struct_name", "category"),
+    "delete_struct": ("struct_name", "category"),
     "get_struct": ("name", "category"),
+    "list_data_types": ("offset", "limit", "filter", "category"),
     "get_data_by_label": ("label",),
     "get_bytes": ("address", "size"),
     "search_bytes": ("bytes", "offset", "limit"),
     "create_enum": ("name", "size", "category", "values"),
     "add_enum_values": ("enum_name", "values", "category"),
+    "delete_enum": ("enum_name", "category"),
     "get_enum": ("name", "category"),
+    "rename_data_type": ("name", "new_name", "category"),
     "set_global_data_type": ("address", "data_type", "length", "clear_mode"),
     "create_class": ("name", "parent_namespace", "members"),
     "add_class_members": ("class_name", "members", "parent_namespace"),
@@ -172,11 +181,14 @@ _CORE_COMMAND_PARAM_KEYS: dict[str, tuple[str, ...]] = {
     "set_bytes": ("address", "bytes"),
     "get_callee": ("address",),
     "add_bookmark": ("address", "category", "comment", "type", "format"),
+    "list_bookmarks": ("offset", "limit", "address", "type", "category"),
+    "delete_bookmark": ("id", "address", "category", "comment", "type"),
 }
 
 # name -> (registry_method, input_fields, include_target, static_kwargs)
 _REGISTRY_METHOD_SPECS: dict[str, tuple[str, tuple[str, ...], bool, dict[str, Any]]] = {
     "list_targets": ("list_targets", (), False, {}),
+    "create_project": ("create_project", ("project_location", "project_name", "overwrite"), False, {}),
     "list_project_programs": ("list_programs", (), True, {}),
     "register_target": ("register_target", ("project_location", "project_name"), True, {}),
     "load_project_program": ("load_program", ("domain_path",), True, {}),
@@ -246,6 +258,7 @@ _LIST_OUTPUT_TOOLS: set[str] = {
     "list_classes",
     "search_functions_by_name",
     "disassemble_function",
+    "disassemble_range",
     "get_callee",
     "get_xrefs_to",
     "get_xrefs_from",
@@ -255,9 +268,11 @@ _LIST_OUTPUT_TOOLS: set[str] = {
     "list_exports",
     "list_namespaces",
     "list_data_items",
+    "list_data_types",
     "list_strings",
     "get_data_by_label",
     "search_bytes",
+    "list_bookmarks",
     "list_targets",
     "list_project_programs",
 }
@@ -303,6 +318,14 @@ _DIRECT_OUTPUT_FIELDS: dict[str, dict[str, tuple[type[Any], Any]]] = {
         "target": (str, ...),
         "program": (str, ...),
         "saved": (bool, ...),
+    },
+    "create_project": {
+        "status": (str, ...),
+        "project_location": (str, ...),
+        "project_name": (str, ...),
+        "project_file": (str, ...),
+        "created": (bool, ...),
+        "overwritten": (bool, ...),
     },
     "get_project_sync_status": {
         "target": (str, ...),
@@ -449,6 +472,11 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
         return ImportProgramInput
     typed_fields_by_tool: dict[str, dict[str, tuple[type[Any], Any]]] = {
         "list_targets": {},
+        "create_project": {
+            "project_location": (str, ...),
+            "project_name": (str | None, None),
+            "overwrite": (bool, False),
+        },
         "list_project_programs": {},
         "register_target": {
             "project_location": (str, ...),
@@ -546,6 +574,21 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
         "disassemble_function": {
             "address": (str, ...),
         },
+        "disassemble_range": {
+            "start_address": (str, ...),
+            "end_address": (str | None, None),
+            "length": (int | None, None),
+            "limit": (int, 200),
+        },
+        "create_function": {
+            "address": (str, ...),
+            "name": (str | None, None),
+        },
+        "delete_function": {
+            "address": (str, ...),
+        },
+        "analyze_program": {},
+        "reanalyze_program": {},
         "get_callee": {
             "address": (str, ...),
         },
@@ -658,6 +701,16 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
             "struct_name": (str, ...),
             "category": (str | None, None),
         },
+        "delete_struct": {
+            "struct_name": (str, ...),
+            "category": (str | None, None),
+        },
+        "list_data_types": {
+            "offset": (int, 0),
+            "limit": (int, 100),
+            "filter": (str | None, None),
+            "category": (str | None, None),
+        },
         "create_enum": {
             "name": (str, ...),
             "size": (int, 4),
@@ -672,6 +725,15 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
         "remove_enum_values": {
             "enum_name": (str, ...),
             "values": (list[str], ...),
+            "category": (str | None, None),
+        },
+        "delete_enum": {
+            "enum_name": (str, ...),
+            "category": (str | None, None),
+        },
+        "rename_data_type": {
+            "name": (str, ...),
+            "new_name": (str, ...),
             "category": (str | None, None),
         },
         "create_class": {
@@ -710,6 +772,20 @@ def _build_input_model(tool_name: str, field_names: tuple[str, ...]) -> type[Bas
             "comment": (str, ...),
             "type": (str, ...),
             "format": (str, "json"),
+        },
+        "list_bookmarks": {
+            "offset": (int, 0),
+            "limit": (int, 100),
+            "address": (str | None, None),
+            "type": (str | None, None),
+            "category": (str | None, None),
+        },
+        "delete_bookmark": {
+            "id": (int | None, None),
+            "address": (str | None, None),
+            "category": (str | None, None),
+            "comment": (str | None, None),
+            "type": (str | None, None),
         },
     }
     if tool_name in typed_fields_by_tool:

@@ -238,10 +238,33 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
         assert isinstance(function_info, dict)
         assert function_info["entry"].lower().endswith("401000")
 
+        delete_function_result = _unwrap_runtime_result(
+            cli.delete_function(address="0x401000", target=target)
+        )
+        create_function_result = _unwrap_runtime_result(
+            cli.create_function(address="0x401000", name="runtime_manual_entry", target=target)
+        )
+        _log_runtime_result("delete_function(raw)", delete_function_result)
+        _log_runtime_result("create_function(raw)", create_function_result)
+
         disassembly = _unwrap_runtime_result(
             cli.disassemble_function(address="0x401000", target=target)
         )
         assert isinstance(disassembly, list) and disassembly
+
+        range_disassembly = _unwrap_runtime_result(
+            cli.disassemble_range(start_address="0x401000", length=4, limit=5, target=target)
+        )
+        analyze_result = _unwrap_runtime_result(cli.analyze_program(target=target))
+        reanalyze_result = _unwrap_runtime_result(cli.reanalyze_program(target=target))
+        _log_runtime_result("disassemble_range(raw)", range_disassembly)
+        _log_runtime_result("analyze_program(raw)", analyze_result)
+        _log_runtime_result("reanalyze_program(raw)", reanalyze_result)
+        assert isinstance(range_disassembly, list) and range_disassembly
+        assert create_function_result["created"] is True
+        assert delete_function_result["deleted"] is True
+        assert isinstance(analyze_result, dict)
+        assert reanalyze_result["forced"] is True
     finally:
         try:
             cli.close_session(target=target)
@@ -288,6 +311,10 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             )
         )
         _log_runtime_result("add_bookmark", bookmark_result)
+        list_bookmarks_result = _unwrap_runtime_result(
+            cli.list_bookmarks(address=primary_address, type="Info", category="Validation", target=target)
+        )
+        _log_runtime_result("list_bookmarks", list_bookmarks_result)
 
         decompiler_comment_result = _unwrap_runtime_result(
             cli.set_decompiler_comment(
@@ -413,6 +440,22 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             )
         )
         _log_runtime_result("remove_struct_members", remove_struct_members_result)
+        list_data_types_result = _unwrap_runtime_result(
+            cli.list_data_types(offset=0, limit=20, filter="__it_struct_mut", target=target)
+        )
+        _log_runtime_result("list_data_types", list_data_types_result)
+        rename_data_type_result = _unwrap_runtime_result(
+            cli.rename_data_type(
+                name="__it_struct_mut",
+                new_name="__it_struct_mut_renamed",
+                target=target,
+            )
+        )
+        _log_runtime_result("rename_data_type", rename_data_type_result)
+        delete_struct_result = _unwrap_runtime_result(
+            cli.delete_struct(struct_name="__it_struct_mut_renamed", target=target)
+        )
+        _log_runtime_result("delete_struct", delete_struct_result)
 
         create_enum_result = _unwrap_runtime_result(
             cli.create_enum(name="__it_enum_mut", target=target)
@@ -436,6 +479,10 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             )
         )
         _log_runtime_result("remove_enum_values", remove_enum_values_result)
+        delete_enum_result = _unwrap_runtime_result(
+            cli.delete_enum(enum_name="__it_enum_mut", target=target)
+        )
+        _log_runtime_result("delete_enum", delete_enum_result)
 
         create_class_result = _unwrap_runtime_result(
             cli.create_class(name="__ItRuntimeClass", target=target)
@@ -487,6 +534,17 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             raise RuntimeError(f"set_global_data_type failed: {set_global_error}")
         _log_runtime_result("set_global_data_type", set_global_data_type_result)
 
+        delete_bookmark_result = _unwrap_runtime_result(
+            cli.delete_bookmark(
+                address=primary_address,
+                type="Info",
+                category="Validation",
+                comment="runtime mutating test",
+                target=target,
+            )
+        )
+        _log_runtime_result("delete_bookmark", delete_bookmark_result)
+
         runtime_results = {
             "rename_function": rename_function_result,
             "rename_function_by_address": rename_function_by_address_result,
@@ -499,9 +557,13 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             "create_struct": create_struct_result,
             "add_struct_members": add_struct_members_result,
             "clear_struct": clear_struct_result,
+            "delete_struct": delete_struct_result,
+            "list_data_types": list_data_types_result,
+            "rename_data_type": rename_data_type_result,
             "create_enum": create_enum_result,
             "add_enum_values": add_enum_values_result,
             "remove_enum_values": remove_enum_values_result,
+            "delete_enum": delete_enum_result,
             "create_class": create_class_result,
             "add_class_members": add_class_members_result,
             "remove_class_members": remove_class_members_result,
@@ -509,9 +571,14 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             "set_global_data_type": set_global_data_type_result,
             "set_bytes": set_bytes_result,
             "add_bookmark": bookmark_result,
+            "list_bookmarks": list_bookmarks_result,
+            "delete_bookmark": delete_bookmark_result,
         }
 
         for command_name, value in runtime_results.items():
+            if command_name in {"list_data_types", "list_bookmarks"}:
+                assert isinstance(value, list), f"{command_name} returned non-list value: {type(value)}"
+                continue
             assert isinstance(value, dict), f"{command_name} returned non-dict value: {type(value)}"
     finally:
         try:

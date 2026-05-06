@@ -94,7 +94,7 @@ If ARM Linux starts without the patched binaries, Mecha Ghidra now returns a cle
 - **Comments**: set disassembly/decompiler comments.
 - **PyGhidra-based runtime**: calls Ghidra APIs directly from CPython (not Jython).
 - **Multi-target management**: hold multiple sessions in one process and switch by target name.
-- **Project operations**: list project programs with `list_project_programs`, import new binaries with `import_program`, and switch loaded programs with `load_project_program`.
+- **Project operations**: create local projects with `create_project`, list programs with `list_project_programs`, import new binaries with `import_program`, and switch loaded programs with `load_project_program`.
 
 FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to MCP clients through `ghidra_mcp.cli`. For full CLI options, run `uv run ghidra-mcp --help`.
 
@@ -103,6 +103,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 #### Core Operations
 
 - `list_targets` - List registered targets and associated project metadata
+- `create_project` - Create an empty local Ghidra project
 - `create_session` - Add a target by opening an existing project program
 - `register_target` - Register project metadata to a target without opening a program
 - `close_session` - Close a target session
@@ -122,7 +123,12 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `decompile_function` - Get C-like pseudocode by function name
 - `decompile_function_by_address` - Get C-like pseudocode by address
 - `disassemble_function` - Get disassembly for a function
+- `disassemble_range` - Get disassembly for an address range
 - `get_function_by_address` - Get function metadata by address
+- `create_function` - Create a function at an address
+- `delete_function` - Delete a function by address
+- `analyze_program` - Run analysis when the program is marked unanalyzed
+- `reanalyze_program` - Force program analysis to run again
 - `get_function_xrefs` - Get incoming/outgoing references from a function name
 - `get_callee` - Get callee function at a specific address
 
@@ -152,6 +158,8 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `set_decompiler_comment` - Set decompiler comment
 - `set_disassembly_comment` - Set disassembly comment
 - `add_bookmark` - Add bookmark
+- `list_bookmarks` - List bookmarks
+- `delete_bookmark` - Delete a bookmark by ID or by address/type/category
 
 After mutating tools such as `rename_function_by_address`, call `save_project_program(target="default")` to persist edits into the Ghidra project. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 
@@ -161,10 +169,14 @@ After mutating tools such as `rename_function_by_address`, call `save_project_pr
 - `add_struct_members` - Add struct members
 - `clear_struct` - Remove all struct members
 - `remove_struct_members` - Remove selected struct members
+- `delete_struct` - Delete a struct data type
 - `get_struct` - Get struct definition
+- `list_data_types` - List program data types
+- `rename_data_type` - Rename a data type
 - `create_enum` - Create enum
 - `add_enum_values` - Add enum values
 - `remove_enum_values` - Remove enum values
+- `delete_enum` - Delete an enum data type
 - `get_enum` - Get enum definition
 - `create_class` - Create GhidraClass namespace and backing struct
 - `add_class_members` - Add members to class-like data type

@@ -52,10 +52,13 @@ _CHECKOUT_REQUIRED_COMMANDS = {
     "set_local_variable_type",
     "set_global_data_type",
     "create_struct",
+    "delete_struct",
+    "rename_data_type",
     "create_class",
     "add_struct_members",
     "clear_struct",
     "create_enum",
+    "delete_enum",
     "add_enum_values",
     "add_class_members",
     "remove_class_members",
@@ -63,6 +66,11 @@ _CHECKOUT_REQUIRED_COMMANDS = {
     "remove_struct_members",
     "set_bytes",
     "add_bookmark",
+    "delete_bookmark",
+    "create_function",
+    "delete_function",
+    "analyze_program",
+    "reanalyze_program",
 }
 
 def _core():
@@ -320,8 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     if not _registry.has_targets():
-        logger.error("Specify at least one target via --session or --project-location")
-        return 1
+        logger.info("No targets configured; use create_project/register_target/create_session to initialize one")
 
     _core_module = _core()
 

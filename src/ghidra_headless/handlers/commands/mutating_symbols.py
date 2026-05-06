@@ -3,6 +3,16 @@
 from __future__ import absolute_import, print_function
 
 
+def _bookmark_to_dict(bookmark):
+    return {
+        "id": int(bookmark.getId()),
+        "address": str(bookmark.getAddress()),
+        "type": bookmark.getTypeString(),
+        "category": bookmark.getCategory(),
+        "comment": bookmark.getComment() or "",
+    }
+
+
 def rename_function(params, *, ensure_context, find_function_by_name, txn, source_type):
     ctx = ensure_context()
     old_name = params.get("oldName")
@@ -311,6 +321,79 @@ def set_bytes(params, *, ensure_context, get_address, decode_hex_bytes, txn):
     return {"address": address_text, "length": len(data)}
 
 
+def create_function(params, *, ensure_context, get_address, txn):
+    ctx = ensure_context()
+    address_text = params.get("address")
+    name = params.get("name")
+    if not address_text:
+        raise ValueError("address is required")
+    address = get_address(ctx, address_text)
+    existing = ctx.function_manager.getFunctionAt(address)
+    if existing is not None:
+        return {
+            "name": existing.getName(),
+            "entry": str(existing.getEntryPoint()),
+            "created": False,
+            "already_exists": True,
+        }
+    containing = ctx.function_manager.getFunctionContaining(address)
+    if containing is not None:
+        raise ValueError("Address is already inside function: %s" % containing.getName())
+
+    def _create():
+        if ctx.listing.getInstructionAt(address) is None:
+            ctx.flat_api.disassemble(address)
+        function = ctx.flat_api.createFunction(address, name)
+        if function is None:
+            function = ctx.function_manager.getFunctionAt(address)
+        if function is None:
+            raise RuntimeError("Failed to create function at address: %s" % address_text)
+        return function
+
+    function = txn(ctx, "Create function", _create)
+    return {
+        "name": function.getName(),
+        "entry": str(function.getEntryPoint()),
+        "created": True,
+        "already_exists": False,
+    }
+
+
+def delete_function(params, *, ensure_context, get_address, txn):
+    ctx = ensure_context()
+    address_text = params.get("address")
+    if not address_text:
+        raise ValueError("address is required")
+    address = get_address(ctx, address_text)
+    function = ctx.function_manager.getFunctionAt(address)
+    if function is None:
+        function = ctx.function_manager.getFunctionContaining(address)
+    if function is None:
+        raise LookupError("Function not found: %s" % address_text)
+    name = function.getName()
+    entry = function.getEntryPoint()
+
+    def _delete():
+        if not bool(ctx.function_manager.removeFunction(entry)):
+            raise RuntimeError("Failed to delete function at address: %s" % entry)
+        return True
+
+    txn(ctx, "Delete function", _delete)
+    return {"name": name, "entry": str(entry), "deleted": True}
+
+
+def analyze_program(params, *, ensure_context, analyze_program_impl):
+    ctx = ensure_context()
+    analyzed = analyze_program_impl(ctx, force=False)
+    return {"analyzed": bool(analyzed), "forced": False}
+
+
+def reanalyze_program(params, *, ensure_context, analyze_program_impl):
+    ctx = ensure_context()
+    analyzed = analyze_program_impl(ctx, force=True)
+    return {"analyzed": bool(analyzed), "forced": True}
+
+
 def add_bookmark(params, *, ensure_context, get_address, txn):
     ctx = ensure_context()
     address_text = params.get("address")
@@ -335,3 +418,79 @@ def add_bookmark(params, *, ensure_context, get_address, txn):
         "type": bookmark_type,
         "comment": comment,
     }
+
+
+def list_bookmarks(params, *, ensure_context, get_address, to_int, collect, iter_items):
+    ctx = ensure_context()
+    offset = to_int(params.get("offset"), 0)
+    limit = to_int(params.get("limit"), 100)
+    address_text = params.get("address")
+    bookmark_type = params.get("type")
+    category = params.get("category")
+    manager = ctx.program.getBookmarkManager()
+
+    if address_text:
+        address = get_address(ctx, address_text)
+        if bookmark_type:
+            bookmarks = manager.getBookmarks(address, bookmark_type)
+        else:
+            bookmarks = manager.getBookmarks(address)
+        iterator = iter_items(bookmarks)
+    else:
+        iterator = manager.getBookmarksIterator()
+
+    def _matches(bookmark):
+        if bookmark_type and bookmark.getTypeString() != bookmark_type:
+            return False
+        if category and bookmark.getCategory() != category:
+            return False
+        return True
+
+    return collect((bookmark for bookmark in iter_items(iterator) if _matches(bookmark)), offset, limit, _bookmark_to_dict)
+
+
+def delete_bookmark(params, *, ensure_context, get_address, txn, iter_items):
+    ctx = ensure_context()
+    bookmark_id = params.get("id")
+    address_text = params.get("address")
+    bookmark_type = params.get("type")
+    category = params.get("category")
+    comment = params.get("comment")
+    manager = ctx.program.getBookmarkManager()
+
+    if bookmark_id is None and not address_text:
+        raise ValueError("id or address is required")
+    if bookmark_id is None and (not bookmark_type or not category):
+        raise ValueError("type and category are required when deleting by address")
+
+    def _candidate_bookmarks():
+        if bookmark_id is not None:
+            bookmark = manager.getBookmark(int(bookmark_id))
+            return [] if bookmark is None else [bookmark]
+        address = get_address(ctx, address_text)
+        exact = manager.getBookmark(address, bookmark_type, category)
+        if exact is not None:
+            return [exact]
+        return list(iter_items(manager.getBookmarks(address, bookmark_type)))
+
+    candidates = _candidate_bookmarks()
+    matched = []
+    for bookmark in candidates:
+        if bookmark_type and bookmark.getTypeString() != bookmark_type:
+            continue
+        if category and bookmark.getCategory() != category:
+            continue
+        if comment is not None and bookmark.getComment() != comment:
+            continue
+        matched.append(bookmark)
+    if not matched:
+        raise LookupError("Bookmark not found")
+    deleted = [_bookmark_to_dict(bookmark) for bookmark in matched]
+
+    def _delete():
+        for bookmark in matched:
+            manager.removeBookmark(bookmark)
+        return True
+
+    txn(ctx, "Delete bookmark", _delete)
+    return {"deleted": len(deleted), "bookmarks": deleted}

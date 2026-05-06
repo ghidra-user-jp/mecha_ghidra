@@ -164,6 +164,17 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         function_name = first["name"]
         _log_runtime_result("list_functions(seed)", first_functions)
 
+        bookmark_result = _unwrap_runtime_result(
+            cli.add_bookmark(
+                address=address,
+                category="Validation",
+                comment="runtime readonly seed",
+                type="Info",
+                target=target,
+            )
+        )
+        _log_runtime_result("add_bookmark(seed)", bookmark_result)
+
         search_result = _unwrap_runtime_result(
             cli.search_functions_by_name(
                 query="main",
@@ -209,6 +220,9 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "disassemble_function": _unwrap_runtime_result(
                 cli.disassemble_function(address=address, target=target)
             ),
+            "disassemble_range": _unwrap_runtime_result(
+                cli.disassemble_range(start_address=address, length=32, limit=10, target=target)
+            ),
             "get_callee": _unwrap_runtime_result(
                 cli.get_callee(address=address, target=target)
             ),
@@ -239,6 +253,9 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "list_data_items": _unwrap_runtime_result(
                 cli.list_data_items(offset=0, limit=5, target=target)
             ),
+            "list_data_types": _unwrap_runtime_result(
+                cli.list_data_types(offset=0, limit=20, filter="__it_", target=target)
+            ),
             "list_strings": _unwrap_runtime_result(
                 cli.list_strings(offset=0, limit=5, target=target)
             ),
@@ -255,6 +272,9 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "get_enum": _unwrap_runtime_result(
                 cli.get_enum(name="__it_enum", target=target)
             ),
+            "list_bookmarks": _unwrap_runtime_result(
+                cli.list_bookmarks(address=address, type="Info", category="Validation", target=target)
+            ),
         }
 
         for command_name, value in runtime_results.items():
@@ -263,6 +283,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["decompile_function"], str)
         assert isinstance(runtime_results["decompile_function_by_address"], str)
         assert isinstance(runtime_results["disassemble_function"], list)
+        assert isinstance(runtime_results["disassemble_range"], list)
         assert isinstance(runtime_results["get_callee"], list)
         assert isinstance(runtime_results["list_methods"], list)
         assert isinstance(runtime_results["get_xrefs_to"], list)
@@ -274,14 +295,17 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["list_classes"], list)
         assert isinstance(runtime_results["list_namespaces"], list)
         assert isinstance(runtime_results["list_data_items"], list)
+        assert isinstance(runtime_results["list_data_types"], list)
         assert isinstance(runtime_results["list_strings"], list)
         assert isinstance(runtime_results["get_data_by_label"], list)
         assert isinstance(runtime_results["get_bytes"], str)
         assert isinstance(runtime_results["search_bytes"], list)
         assert isinstance(runtime_results["get_struct"], dict)
         assert isinstance(runtime_results["get_enum"], dict)
+        assert isinstance(runtime_results["list_bookmarks"], list)
         assert runtime_results["get_struct"].get("name") == "__it_struct"
         assert runtime_results["get_enum"].get("name") == "__it_enum"
+        assert any(item.get("comment") == "runtime readonly seed" for item in runtime_results["list_bookmarks"])
     finally:
         try:
             cli.close_session(target)

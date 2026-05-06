@@ -234,6 +234,112 @@ def remove_struct_members(params, *, ensure_context, txn, get_struct_datatype, d
     return describe_struct(struct_dt)
 
 
+def delete_struct(params, *, ensure_context, txn, get_struct_datatype, dt_manager, describe_struct):
+    ctx = ensure_context()
+    struct_name = params.get("struct_name") or params.get("name")
+    if not struct_name:
+        raise ValueError("struct_name is required")
+    category = params.get("category")
+
+    def _delete():
+        struct = get_struct_datatype(ctx, struct_name, category)
+        if struct is None:
+            raise LookupError("Struct not found: %s" % struct_name)
+        info = describe_struct(struct)
+        if not bool(dt_manager(ctx).remove(struct)):
+            raise RuntimeError("Failed to delete struct: %s" % struct_name)
+        return info
+
+    deleted = txn(ctx, "Delete struct", _delete)
+    return {"deleted": True, "data_type": deleted}
+
+
+def delete_enum(params, *, ensure_context, txn, get_enum_datatype, dt_manager, describe_enum):
+    ctx = ensure_context()
+    enum_name = params.get("enum_name") or params.get("name")
+    if not enum_name:
+        raise ValueError("enum_name is required")
+    category = params.get("category")
+
+    def _delete():
+        enum_dt = get_enum_datatype(ctx, enum_name, category)
+        if enum_dt is None:
+            raise LookupError("Enum not found: %s" % enum_name)
+        info = describe_enum(enum_dt)
+        if not bool(dt_manager(ctx).remove(enum_dt)):
+            raise RuntimeError("Failed to delete enum: %s" % enum_name)
+        return info
+
+    deleted = txn(ctx, "Delete enum", _delete)
+    return {"deleted": True, "data_type": deleted}
+
+
+def rename_data_type(
+    params,
+    *,
+    ensure_context,
+    txn,
+    dt_manager,
+    category_path,
+    find_data_type_by_name,
+    describe_data_type,
+):
+    ctx = ensure_context()
+    name = params.get("name")
+    new_name = params.get("new_name") or params.get("newName")
+    category = params.get("category")
+    if not name or not new_name:
+        raise ValueError("name and new_name are required")
+
+    def _rename():
+        manager = dt_manager(ctx)
+        data_type = None
+        if category:
+            data_type = manager.getDataType(category_path(category), name)
+        if data_type is None:
+            data_type = find_data_type_by_name(manager, name)
+        if data_type is None:
+            raise LookupError("Data type not found: %s" % name)
+        data_type.setName(new_name)
+        return describe_data_type(data_type)
+
+    return txn(ctx, "Rename data type", _rename)
+
+
+def list_data_types(params, *, ensure_context, to_int, dt_manager, collect, iter_items, safe_call, describe_data_type):
+    ctx = ensure_context()
+    offset = to_int(params.get("offset"), 0)
+    limit = to_int(params.get("limit"), 100)
+    text_filter = params.get("filter")
+    category = params.get("category")
+    filter_lower = str(text_filter).lower() if text_filter else None
+    category_text = str(category) if category else None
+    manager = dt_manager(ctx)
+
+    def _matches(data_type):
+        if category_text:
+            category_path = safe_call(data_type, "getCategoryPath")
+            path = category_path.getPath() if category_path else "/"
+            if path != category_text:
+                return False
+        if filter_lower:
+            haystack = " ".join(
+                str(value)
+                for value in (
+                    safe_call(data_type, "getName"),
+                    safe_call(data_type, "getDisplayName"),
+                    safe_call(data_type, "getPathName"),
+                )
+                if value
+            ).lower()
+            if filter_lower not in haystack:
+                return False
+        return True
+
+    iterator = (data_type for data_type in iter_items(manager.getAllDataTypes()) if _matches(data_type))
+    return collect(iterator, offset, limit, describe_data_type)
+
+
 def set_global_data_type(
     params,
     *,

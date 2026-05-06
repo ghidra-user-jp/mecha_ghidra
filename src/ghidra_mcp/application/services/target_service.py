@@ -68,6 +68,22 @@ class TargetService:
     def _raise_domain_error(self, exc: Exception, *, operation: str, target: str | None = None) -> None:
         raise self._to_domain_error(exc, operation=operation, target=target) from exc
 
+    def create_project(
+        self,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        overwrite: bool = False,
+    ):
+        try:
+            return self._runtime.create_project(
+                project_location,
+                project_name=project_name,
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            self._raise_domain_error(exc, operation="create_project")
+
     def create_session(
         self,
         name: str,

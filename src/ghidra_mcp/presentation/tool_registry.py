@@ -23,6 +23,7 @@ _RAW_TO_PUBLIC_NAME: dict[str, dict[str, str]] = {
 }
 
 _ALWAYS_INCLUDE_NONE_KEYS: dict[str, set[str]] = {
+    "create_project": {"project_name"},
     "register_target": {"project_name"},
     "save_project_program": {"domain_path"},
     "create_session": {"project_name"},
@@ -40,6 +41,10 @@ _ALWAYS_INCLUDE_NONE_KEYS: dict[str, set[str]] = {
 
 _OMIT_FALSEY_KEYS: dict[str, set[str]] = {
     "list_strings": {"filter"},
+    "list_data_types": {"filter", "category"},
+    "delete_struct": {"category"},
+    "delete_enum": {"category"},
+    "rename_data_type": {"category"},
     "create_struct": {"category", "members"},
     "add_struct_members": {"category"},
     "clear_struct": {"category"},
@@ -53,6 +58,8 @@ _OMIT_FALSEY_KEYS: dict[str, set[str]] = {
     "remove_enum_values": {"category"},
     "remove_struct_members": {"category"},
     "set_global_data_type": {"clear_mode"},
+    "list_bookmarks": {"address", "type", "category"},
+    "delete_bookmark": {"address", "category", "comment", "type"},
 }
 
 _TOOL_DECORATOR_OPTIONS: dict[str, dict[str, Any]] = {
@@ -70,6 +77,13 @@ _TOOL_DECORATOR_OPTIONS: dict[str, dict[str, Any]] = {
             "is loaded (domain_path). Call this before target-scoped operations."
         ),
         "annotations": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    },
+    "create_project": {
+        "description": (
+            "Create an empty local Ghidra project. Refuses to overwrite an existing .gpr/.rep "
+            "unless overwrite=true."
+        ),
+        "annotations": ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False),
     },
     "register_target": {
         "description": (

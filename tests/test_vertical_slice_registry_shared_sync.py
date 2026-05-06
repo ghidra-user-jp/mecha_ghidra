@@ -10,6 +10,12 @@ from ghidra_mcp import cli
     ("tool_name", "call", "expected_args", "expected_target"),
     [
         ("list_targets", lambda: cli.list_targets(), {}, "default"),
+        (
+            "create_project",
+            lambda: cli.create_project(project_location="/tmp/sample.gpr", project_name=None, overwrite=False),
+            {"project_location": "/tmp/sample.gpr", "project_name": None, "overwrite": False},
+            "default",
+        ),
         ("list_project_programs", lambda: cli.list_project_programs("fw"), {}, "fw"),
         (
             "register_target",

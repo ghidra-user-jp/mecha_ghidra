@@ -471,6 +471,21 @@ def _analyze_program_if_needed(ctx):
     return True
 
 
+def _analyze_program(ctx, force=False):
+    _ensure_checkout_for_versioned_program(ctx)
+    utilities = _ghidra_program_utilities()
+    if not force and not utilities.shouldAskToAnalyze(ctx.program):
+        return False
+    script_util = _ghidra_script_util()
+    script_util.acquireBundleHostReference()
+    try:
+        ctx.flat_api.analyzeAll(ctx.program)
+        utilities.markProgramAnalyzed(ctx.program)
+    finally:
+        script_util.releaseBundleHostReference()
+    return True
+
+
 def _decompile_function_object(ctx, function):
     def _run_decompile():
         interface = DecompInterface()
@@ -714,6 +729,23 @@ def _describe_enum(enum_dt):
     }
 
 
+def _describe_data_type(data_type):
+    category = _safe_call(data_type, "getCategoryPath")
+    path = _safe_call(data_type, "getPathName")
+    java_class = _safe_call(data_type, "getClass")
+    kind = None
+    if java_class is not None:
+        kind = _safe_call(java_class, "getSimpleName")
+    return {
+        "name": _safe_call(data_type, "getName"),
+        "display_name": _safe_call(data_type, "getDisplayName"),
+        "path": str(path) if path is not None else None,
+        "category": category.getPath() if category else "/",
+        "length": _safe_call(data_type, "getLength"),
+        "kind": str(kind) if kind is not None else data_type.__class__.__name__,
+    }
+
+
 def _component_length(data_type):
     length = data_type.getLength()
     return length if length > 0 else 1
@@ -742,6 +774,7 @@ __all__ = [
     "_ghidra_program_utilities",
     "_ghidra_script_util",
     "_analyze_program_if_needed",
+    "_analyze_program",
     "_decompile_function_object",
     "_decompile_high_function",
     "_requires_full_param_commit",
@@ -756,5 +789,6 @@ __all__ = [
     "_get_enum_datatype",
     "_describe_struct",
     "_describe_enum",
+    "_describe_data_type",
     "_component_length",
 ]

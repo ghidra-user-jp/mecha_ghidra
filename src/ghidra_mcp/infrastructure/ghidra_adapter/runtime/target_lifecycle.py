@@ -82,6 +82,20 @@ class RuntimeTargetLifecycle:
                 domain_path=domain_path,
             )
 
+    def create_project(
+        self,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        overwrite: bool = False,
+    ) -> Dict[str, object]:
+        with self._store.operation_lock.read_lock():
+            return ProjectHandle.create_project(
+                project_location,
+                project_name,
+                overwrite=overwrite,
+            )
+
     def _create_session_locked(
         self,
         name: str,
