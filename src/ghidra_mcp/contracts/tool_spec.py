@@ -93,6 +93,11 @@ _OFFSET_LIMIT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("limit", int, 100),
 )
 _DOMAIN_PATH_FIELD: ToolFieldSpec = ("domain_path", str | None, None)
+_STATUS_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+)
 _SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("status", str, ...),
     ("target", str, ...),
@@ -100,12 +105,14 @@ _SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("saved", bool, ...),
 )
 _CREATE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
     ("target", str, ...),
     ("project_location", str, ...),
     ("project_name", str | None, None),
     ("domain_path", str | None, None),
 )
 _CLOSE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
     ("closed", bool, ...),
     ("target", str, ...),
     ("remove_program", bool, ...),
@@ -619,9 +626,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_IMPORT_PROGRAM_FIELDS,
-        scalar_output_type=str,
+        output_fields=_STATUS_PROGRAM_OUTPUT_FIELDS,
         result_adapter="status_program_ok",
-        description="Import a binary, raw binary, or Ghidra archive (.gzf) into the current target's project",
+        description=(
+            "Import a binary, Ghidra archive (.gzf), or raw binary / shellcode into the current "
+            "target's project. Raw imports support BinaryLoader options such as language_id, "
+            "base_address, entry bootstrap, and automatic analysis."
+        ),
     ),
     _registry_tool(
         "load_project_program",
@@ -630,7 +641,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(("domain_path", str, ...),),
-        scalar_output_type=str,
+        output_fields=_STATUS_PROGRAM_OUTPUT_FIELDS,
         result_adapter="status_program_ok",
         description=(
             "Load or switch a program for an existing target by domain path. "

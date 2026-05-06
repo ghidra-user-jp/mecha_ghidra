@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ghidra_mcp.application.services.ports import TargetRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_utils import is_project_lock_error, safe_cause_details
 from ghidra_mcp.infrastructure.locks import LockManager
 
 
@@ -26,12 +27,39 @@ class TargetService:
                 details=details,
             )
 
+        message = str(exc)
+        code = ErrorCode.OPERATION_FAILED
+        retryable = False
+        details = {"operation": operation, "target": target}
+
+        if is_project_lock_error(exc):
+            code = ErrorCode.PROJECT_LOCKED
+            retryable = True
+            details.update(safe_cause_details(exc))
+        elif message.startswith("SAVE_FAILED"):
+            code = ErrorCode.SAVE_FAILED
+            details.update(safe_cause_details(exc))
+        elif message.startswith("LOCAL_CHANGES_EXIST"):
+            code = ErrorCode.LOCAL_CHANGES_EXIST
+        elif message.startswith("UNSAFE_PROGRAM_REMOVE"):
+            code = ErrorCode.UNSAFE_PROGRAM_REMOVE
+        elif message.startswith("REOPEN_FAILED"):
+            code = ErrorCode.REOPEN_FAILED
+            retryable = True
+        elif message.startswith("LOCK_TIMEOUT"):
+            code = ErrorCode.LOCK_TIMEOUT
+            retryable = True
+        elif "Session '" in message and ("does not exist" in message or "is not initialized" in message):
+            code = ErrorCode.SESSION_NOT_FOUND
+        elif "Target '" in message and "is not initialized" in message:
+            code = ErrorCode.TARGET_NOT_REGISTERED
+
         return DomainError(
-            code=ErrorCode.OPERATION_FAILED,
-            message=str(exc),
+            code=code,
+            message=message,
             hint="Check target/session state for this operation",
-            retryable=False,
-            details={"operation": operation, "target": target},
+            retryable=retryable,
+            details=details,
         )
 
     def _project_key(self, target: str) -> str | None:

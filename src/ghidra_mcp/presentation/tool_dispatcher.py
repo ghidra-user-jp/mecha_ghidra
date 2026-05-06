@@ -8,11 +8,14 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_tool_spec
-from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.error_mapper import map_exception
 
 
-def _status_target_ok(_result: Any, target: str) -> dict[str, Any]:
+def _status_target_ok(result: Any, target: str) -> dict[str, Any]:
+    if isinstance(result, dict):
+        adapted = {"status": "ok", **result}
+        adapted.setdefault("target", target)
+        return adapted
     return {"status": "ok", "target": target}
 
 
@@ -26,17 +29,24 @@ _RESULT_ADAPTERS = {
 }
 
 
-def _create_session_error(_exc: Exception, target: str) -> RuntimeError:
+def _create_session_error(_exc: Exception, target: str) -> Exception:
+    mapped = map_exception(_exc)
+    if mapped is not _exc:
+        return mapped
     return RuntimeError(f"Failed to create session '{target}'")
 
 
-def _close_session_error(_exc: Exception, target: str) -> RuntimeError:
+def _close_session_error(_exc: Exception, target: str) -> Exception:
+    mapped = map_exception(_exc)
+    if mapped is not _exc:
+        return mapped
     return RuntimeError(f"Failed to close session '{target}'")
 
 
 def _close_remove_error(_exc: Exception, target: str) -> Exception:
-    if isinstance(_exc, DomainError) and _exc.code == ErrorCode.UNSAFE_PROGRAM_REMOVE:
-        return map_exception(_exc)
+    mapped = map_exception(_exc)
+    if mapped is not _exc:
+        return mapped
     return RuntimeError(f"Failed to close/remove session '{target}'")
 
 
@@ -129,10 +139,6 @@ def dispatch_tool(
                 result = method(target, **kwargs)
             else:
                 result = method(**kwargs)
-
-        result = _validate_output(spec_name, spec.output_model, result)
-        if result_adapter is not None:
-            result = result_adapter(result, target)
     except Exception as exc:
         if error_adapter is not None:
             raise error_adapter(exc, target) from exc
@@ -140,6 +146,10 @@ def dispatch_tool(
         if mapped is not exc:
             raise mapped from exc
         raise
+
+    if result_adapter is not None:
+        result = result_adapter(result, target)
+    result = _validate_output(spec_name, spec.output_model, result)
 
     return normalize_empty_list_result(result) if spec.empty_list_policy == "normalize" else result
 

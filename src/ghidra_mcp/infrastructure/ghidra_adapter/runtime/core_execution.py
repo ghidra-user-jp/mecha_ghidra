@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any, Dict
 
@@ -28,22 +29,45 @@ class RuntimeCoreExecution:
         params: Dict[str, Any] | None = None,
         target: str = "default",
     ) -> Any:
-        registry_lock = (
-            self._store.registry_lock.write_lock()
-            if command in self._checkout_required_commands
-            else self._store.registry_lock.read_lock()
-        )
-        with registry_lock:
-            self._store.ensure_session(target)
-            lock = self._store.ensure_lock(target)
+        with self._store.operation_lock.read_lock():
+            with self._store.registry_lock.write_lock():
+                session = self._store.ensure_session(target)
+                lock = self._store.ensure_lock(target)
+                project_key = self._store.target_projects.get(target)
+                if project_key is None:
+                    get_key = getattr(session.get_project_handle(), "get_key", None)
+                    if get_key is not None:
+                        project_key = get_key()
+                        self._store.target_projects[target] = project_key
+                project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
+
             with lock:
-                self._ensure_checkout_for_mutating_command_locked(command, target)
-                result = self._store.core_accessor().execute(command, params or {}, key=target)
-                if command in self._checkout_required_commands:
-                    session = self._store.sessions.get(target)
-                    if session is not None:
-                        self._store.mark_dirty_program(target, self._store.session_domain_path(session))
-                return self._normalize_result(result)
+                lock_context = project_lock if project_lock is not None else contextlib.nullcontext()
+                with lock_context:
+                    with self._store.registry_lock.write_lock():
+                        current_session = self._store.sessions.get(target)
+                        if current_session is None:
+                            raise RuntimeError(f"Session '{target}' is not initialized")
+                        if current_session is not session:
+                            raise RuntimeError(
+                                f"SESSION_CHANGED: target '{target}' session changed before core command execution"
+                            )
+                        current_project_key = self._store.target_projects.get(target)
+                        if (
+                            project_key is not None
+                            and current_project_key is not None
+                            and current_project_key != project_key
+                        ):
+                            raise RuntimeError(
+                                f"SESSION_CHANGED: target '{target}' project changed before core command execution"
+                            )
+                    self._ensure_checkout_for_mutating_command_locked(command, target)
+                    result = self._store.core_accessor().execute(command, params or {}, key=target)
+                    if command in self._checkout_required_commands:
+                        session = self._store.sessions.get(target)
+                        if session is not None:
+                            self._store.mark_dirty_program(target, self._store.session_domain_path(session))
+                    return self._normalize_result(result)
 
     def _ensure_checkout_for_mutating_command_locked(self, command: str, target: str) -> None:
         if command not in self._checkout_required_commands:
@@ -114,15 +138,17 @@ class RuntimeCoreExecution:
                 self._store.core_accessor().initialize(reopened.get_program(), key=target)
                 self._store.sessions[target] = reopened
                 reopened_session_bound = True
-            except Exception:
+            except Exception as init_error:  # noqa: BLE001
                 try:
                     reopened.close(save=False)
                 except Exception as close_exc:  # noqa: BLE001
-                    logger.warning(
-                        "failed to close reopened session during checkout guard rollback for target '%s': %s",
-                        target,
-                        close_exc,
-                    )
+                    self._store.sessions[target] = reopened
+                    reopened_session_bound = True
+                    raise RuntimeError(
+                        "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
+                        f"checkout guard rollback for target '{target}': {close_exc}; "
+                        f"original error: {init_error}"
+                    ) from init_error
                 raise
             finally:
                 if active_handle is not None and self._handle_is_closed(active_handle):
@@ -142,8 +168,13 @@ class RuntimeCoreExecution:
             return False
         try:
             return bool(session.get_program().isChanged())
-        except Exception:
-            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to determine active program dirty state for target '%s'; assuming changed: %s",
+                target,
+                exc,
+            )
+            return True
 
     def _cleanup_reopenable_target_state_locked(self, target: str, *, handle=None) -> None:  # noqa: ANN001
         self._store.sessions.pop(target, None)

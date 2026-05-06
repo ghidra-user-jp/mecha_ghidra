@@ -84,9 +84,24 @@ class _DirtyAwareFakeProgram(_FakeProgram):
         return bool(getattr(self._handle, "program_reports_changed", False))
 
 
+class _FailingChangedFakeProgram(_FakeProgram):
+    def isChanged(self) -> bool:
+        raise RuntimeError("dirty state unavailable")
+
+
 class _DirtyAwareFakeSession(_FakeSession):
     def get_program(self):
         return _DirtyAwareFakeProgram(self._path, self._handle)
+
+
+class _FailingChangedFakeSession(_FakeSession):
+    def get_program(self):
+        return _FailingChangedFakeProgram(self._path)
+
+
+class _BrokenDomainPathSession(_FakeSession):
+    def get_program(self):
+        raise RuntimeError("domain path unavailable")
 
 
 class _ClosingSession(_FakeSession):
@@ -122,6 +137,12 @@ class _FailingCloseSession(_FakeSession):
         if not self._path:
             raise RuntimeError("Session is already closed")
         return super().get_program()
+
+
+class _FailingCloseReopenedSession(_FakeSession):
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:  # noqa: ARG002
+        self.close_saves.append(bool(save))
+        raise RuntimeError("reopened close failed")
 
 
 class _FakeHandle:
@@ -522,6 +543,17 @@ class _ExplodingCommitHandle(_FakeHandle):
         raise RuntimeError("commit exploded")
 
 
+class _FailingCloseReopenHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.reopened_sessions: list[_FailingCloseReopenedSession] = []
+
+    def open_program(self, domain_path: str):
+        reopened = _FailingCloseReopenedSession(self, domain_path)
+        self.reopened_sessions.append(reopened)
+        return reopened
+
+
 class _PatchedProjectHandle:
     @staticmethod
     def make_key(project_location: str, project_name: str | None) -> tuple[str, str]:
@@ -567,6 +599,22 @@ def test_pull_abort_refreshes_active_checked_out_changes(monkeypatch: pytest.Mon
         monkeypatch,
         handle_cls=_StaleStatusHandle,
         session_cls=_DirtyAwareFakeSession,
+    )
+    assert isinstance(handle, _StaleStatusHandle)
+    handle.mark_active_change()
+
+    with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
+        sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+    assert handle.project.saved == 0
+    assert core.initialized == []
+
+
+def test_pull_abort_fails_closed_when_dirty_state_unavailable(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_StaleStatusHandle,
+        session_cls=_FailingChangedFakeSession,
     )
     assert isinstance(handle, _StaleStatusHandle)
     handle.mark_active_change()
@@ -632,6 +680,47 @@ def test_pull_discard_on_runtime_marked_dirty_changes(monkeypatch: pytest.Monkey
     assert handle.project.saved == 0
     assert handle.undo_checkout_calls == 0
     assert core.initialized and core.initialized[-1][1] == "fw"
+
+
+def test_pull_discard_reopen_failure_exposes_completed_operation_result(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_ClosingSession)
+    handle._status["modified_since_checkout"] = True  # noqa: SLF001
+    handle.fail_reopen = True
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.details == {
+        "operation_completed": True,
+        "partial_success": True,
+        "operation_result": {
+            "discarded_local_changes": True,
+            "merged": False,
+            "followed_latest": False,
+        },
+    }
+    assert "fw" not in store.sessions
+    assert core.removed == ["fw"]
+
+
+def test_add_to_version_control_reopen_failure_exposes_none_result_completion(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_UnversionedAddableHandle,
+        session_cls=_ClosingSession,
+    )
+    handle.fail_reopen = True
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.add_project_program_to_version_control("fw", "initial import", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.details == {"operation_completed": True, "partial_success": True}
+    assert "fw" not in store.sessions
+    assert core.removed == ["fw"]
 
 
 def test_pull_abort_unsaved_active_changes_does_not_try_to_save(monkeypatch: pytest.MonkeyPatch):
@@ -1123,6 +1212,32 @@ def test_checkout_already_checked_out_does_not_reload_dirty_loaded_owner(monkeyp
     assert core.initialized == []
 
 
+def test_cross_target_sync_uses_project_lock_without_nested_active_target_lock(monkeypatch: pytest.MonkeyPatch):
+    sync, store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_UnversionedAddableHandle)
+    assert isinstance(handle, _UnversionedAddableHandle)
+    store.locks["fw-shadow"] = threading.RLock()
+    store.target_projects["fw-shadow"] = handle.get_key()
+
+    original_ensure_lock = store.ensure_lock
+
+    def ensure_lock(name: str):
+        if name == "fw":
+            raise AssertionError("cross-target sync must not take the active target lock after caller lock")
+        return original_ensure_lock(name)
+
+    monkeypatch.setattr(store, "ensure_lock", ensure_lock)
+
+    result = sync.add_project_program_to_version_control(
+        "fw-shadow",
+        "initial import",
+        domain_path="/main",
+    )
+
+    assert result["status"] == "ok"
+    assert handle.add_calls == 1
+    assert handle.get_key() in store.project_locks
+
+
 def test_reload_reopen_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatch):
     sync, store, core, handle = _build_sync_runtime(monkeypatch)
     handle.fail_reopen = True
@@ -1147,6 +1262,28 @@ def test_reload_close_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatc
     assert core.removed == ["fw"]
 
 
+def test_sync_reopen_init_failure_preserves_reopened_session_when_close_fails(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_FailingCloseReopenHandle,
+        session_cls=_ClosingSession,
+    )
+    assert isinstance(handle, _FailingCloseReopenHandle)
+
+    def fail_initialize(_program, _key):  # noqa: ANN001
+        raise RuntimeError("initialize failed")
+
+    core.initialize = fail_initialize
+
+    with pytest.raises(RuntimeError, match="REOPEN_FAILED"):
+        sync.checkout_project_program("fw", exclusive=False, domain_path="/main")
+
+    assert store.sessions["fw"] is handle.reopened_sessions[-1]
+    assert "fw" in store.locks
+    assert store.target_projects["fw"] == handle.get_key()
+    assert core.removed == []
+
+
 def test_reload_registered_only_target_reports_target_already_loaded(monkeypatch: pytest.MonkeyPatch):
     sync, store, core, handle = _build_sync_runtime(monkeypatch, handle_cls=_DuplicateSessionRejectingHandle)
     assert isinstance(handle, _DuplicateSessionRejectingHandle)
@@ -1166,6 +1303,20 @@ def test_reload_registered_only_target_reports_target_already_loaded(monkeypatch
     }
     assert handle.open_program_calls == 0
     assert store.session_domain_path(store.sessions["fw"]) == "/main"
+    assert core.initialized == []
+
+
+def test_reload_registered_only_target_fails_closed_when_loaded_target_inspection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_BrokenDomainPathSession)
+    store.locks["fw-shadow"] = threading.RLock()
+    store.target_projects["fw-shadow"] = handle.get_key()
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to inspect loaded target 'fw'"):
+        sync.reload_project_program("fw-shadow", domain_path="/main")
+
+    assert "fw" in store.sessions
     assert core.initialized == []
 
 
@@ -1353,6 +1504,20 @@ def test_delete_shared_project_file_rejects_loaded_program(monkeypatch: pytest.M
         "domain_path": "/main",
         "owner_target": "fw",
     }
+    assert handle.deleted_domain_files == []
+    assert core.initialized == []
+
+
+def test_delete_shared_project_file_fails_closed_when_loaded_target_inspection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_BrokenDomainPathSession)
+    store.locks["fw-shadow"] = threading.RLock()
+    store.target_projects["fw-shadow"] = handle.get_key()
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to inspect loaded target 'fw'"):
+        sync.delete_shared_project_file("fw-shadow", domain_path="/main", confirm="/main")
+
     assert handle.deleted_domain_files == []
     assert core.initialized == []
 

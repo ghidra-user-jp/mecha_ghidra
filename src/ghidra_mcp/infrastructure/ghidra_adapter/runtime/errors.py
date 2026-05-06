@@ -58,6 +58,8 @@ def to_domain_error(
         code = ErrorCode.OPERATION_FAILED
     elif message.startswith("SYNC_OPERATION_FAILED"):
         code = ErrorCode.SYNC_OPERATION_FAILED
+    elif message.startswith("SYNC_STATUS_UNAVAILABLE"):
+        code = ErrorCode.SYNC_OPERATION_FAILED
     elif message.startswith("CHECKOUT_REQUIRED"):
         code = ErrorCode.CHECKOUT_REQUIRED
     elif message.startswith("NOT_SHARED_PROJECT"):

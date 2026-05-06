@@ -12,6 +12,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+dist-ci-repro/
 downloads/
 eggs/
 .eggs/
@@ -207,6 +208,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Local analysis inputs
+samples/
 
 # Marimo
 marimo/_static/

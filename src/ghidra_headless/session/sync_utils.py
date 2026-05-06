@@ -21,22 +21,25 @@ def _safe_call(obj, name: str, *args):
         return None
 
 
-def _required_call(obj, name: str, *args):
+def _required_call(obj, name: str, *args, owner: str = "DomainFile"):
     method = getattr(obj, name, None)
     if method is None:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: DomainFile.{name} is unavailable")
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: {owner}.{name} is unavailable")
     try:
         return method(*args)
     except Exception as exc:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.{name}: {exc}")
+        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: failed to call {owner}.{name}: {exc}") from exc
 
 
 def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
     if status is None:
         return None
+    checkout_id = _required_call(status, "getCheckoutId", owner="CheckoutStatus")
+    if checkout_id is None:
+        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: CheckoutStatus.getCheckoutId returned None")
     checkout_type = _safe_call(status, "getCheckoutType")
     return {
-        "checkout_id": _safe_call(status, "getCheckoutId"),
+        "checkout_id": checkout_id,
         "checkout_type": None if checkout_type is None else str(checkout_type),
         "user": _safe_call(status, "getUser"),
         "checkout_version": _safe_call(status, "getCheckoutVersion"),
@@ -45,37 +48,53 @@ def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
 
 
 def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
-    checkout_status = _to_checkout_status_dict(_safe_call(domain_file, "getCheckoutStatus"))
-    checkouts = _safe_call(domain_file, "getCheckouts")
-    checkouts_list = []
-    if checkouts:
-        for item in list(checkouts):
-            converted = _to_checkout_status_dict(item)
-            if converted is not None:
-                checkouts_list.append(converted)
     shared_url = _safe_call(domain_file, "getSharedProjectURL", None)
     is_versioned = bool(_required_call(domain_file, "isVersioned"))
 
     if is_versioned:
+        checkout_status = _to_checkout_status_dict(_required_call(domain_file, "getCheckoutStatus"))
+        checkouts = _required_call(domain_file, "getCheckouts")
+        checkouts_list = []
+        if checkouts:
+            for item in list(checkouts):
+                converted = _to_checkout_status_dict(item)
+                if converted is not None:
+                    checkouts_list.append(converted)
         is_latest_version: bool | None = bool(_required_call(domain_file, "isLatestVersion"))
         version = _required_call(domain_file, "getVersion")
         latest_version = _required_call(domain_file, "getLatestVersion")
+        is_checked_out = bool(_required_call(domain_file, "isCheckedOut"))
+        is_checked_out_exclusive = bool(_required_call(domain_file, "isCheckedOutExclusive"))
+        modified_since_checkout = bool(_required_call(domain_file, "modifiedSinceCheckout"))
+        can_checkout = bool(_required_call(domain_file, "canCheckout"))
+        can_checkin = bool(_required_call(domain_file, "canCheckin"))
+        can_merge = bool(_required_call(domain_file, "canMerge"))
+        is_hijacked = bool(_required_call(domain_file, "isHijacked"))
     else:
+        checkout_status = None
+        checkouts_list = []
         is_latest_version = None
         version = None
         latest_version = None
+        is_checked_out = False
+        is_checked_out_exclusive = False
+        modified_since_checkout = False
+        can_checkout = False
+        can_checkin = False
+        can_merge = False
+        is_hijacked = False
 
     return {
         "is_versioned": is_versioned,
-        "is_checked_out": bool(_required_call(domain_file, "isCheckedOut")),
-        "is_checked_out_exclusive": bool(_required_call(domain_file, "isCheckedOutExclusive")),
+        "is_checked_out": is_checked_out,
+        "is_checked_out_exclusive": is_checked_out_exclusive,
         "is_latest_version": is_latest_version,
-        "modified_since_checkout": bool(_required_call(domain_file, "modifiedSinceCheckout")),
-        "can_add_to_repository": bool(_safe_call(domain_file, "canAddToRepository")),
-        "can_checkout": bool(_required_call(domain_file, "canCheckout")),
-        "can_checkin": bool(_required_call(domain_file, "canCheckin")),
-        "can_merge": bool(_required_call(domain_file, "canMerge")),
-        "is_hijacked": bool(_required_call(domain_file, "isHijacked")),
+        "modified_since_checkout": modified_since_checkout,
+        "can_add_to_repository": bool(_required_call(domain_file, "canAddToRepository")),
+        "can_checkout": can_checkout,
+        "can_checkin": can_checkin,
+        "can_merge": can_merge,
+        "is_hijacked": is_hijacked,
         "version": version,
         "latest_version": latest_version,
         "checkout_status": checkout_status,

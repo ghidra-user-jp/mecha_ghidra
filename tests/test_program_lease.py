@@ -70,6 +70,21 @@ def test_program_lease_reopen_failure_maps_to_domain_error():
     assert "reopen boom" in err.message
 
 
+def test_program_lease_reopen_failure_marks_none_result_as_partial_success():
+    lease = ProgramLease(
+        before_close=lambda: None,
+        do_operation=lambda: None,
+        reopen=lambda: (_ for _ in ()).throw(RuntimeError("reopen boom")),
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        lease.run()
+
+    err = exc_info.value
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.details == {"operation_completed": True, "partial_success": True}
+
+
 def test_program_lease_reopen_failure_keeps_operation_error_in_details():
     def _operation():
         raise RuntimeError("operation boom")
@@ -86,3 +101,23 @@ def test_program_lease_reopen_failure_keeps_operation_error_in_details():
     err = exc_info.value
     assert err.code == ErrorCode.REOPEN_FAILED
     assert err.details == {"operation_error": "operation boom"}
+
+
+def test_program_lease_reopen_failure_keeps_success_result_in_details():
+    operation_result = {"discarded_local_changes": True, "merged": False}
+    lease = ProgramLease(
+        before_close=lambda: None,
+        do_operation=lambda: operation_result,
+        reopen=lambda: (_ for _ in ()).throw(RuntimeError("reopen boom")),
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        lease.run()
+
+    err = exc_info.value
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.details == {
+        "operation_completed": True,
+        "partial_success": True,
+        "operation_result": operation_result,
+    }

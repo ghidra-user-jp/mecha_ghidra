@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 from mcp.types import CallToolResult
-from pydantic import BaseModel, ConfigDict
 
 import ghidra_mcp.presentation.tool_dispatcher as tool_dispatcher_module
 from ghidra_mcp.contracts.tool_spec import (
@@ -12,7 +11,7 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSafetyTag,
     ToolSpec,
 )
-from ghidra_mcp.contracts.tool_models import create_typed_input_model
+from ghidra_mcp.contracts.tool_models import create_typed_input_model, create_typed_output_model
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
@@ -466,6 +465,7 @@ def test_dispatch_tool_applies_status_program_result_adapter():
     )
 
     assert result == {"status": "ok", "target": "fw", "program": "/folder/app"}
+    tool_dispatcher_module.get_tool_spec("load_project_program").output_model.model_validate(result)
 
 
 def test_dispatch_tool_routes_save_project_program_to_registry_method():
@@ -500,7 +500,13 @@ def test_dispatch_tool_applies_status_target_result_adapter():
         registry=registry,
     )
 
-    assert result == {"status": "ok", "target": "fw"}
+    assert result == {
+        "status": "ok",
+        "target": "fw",
+        "project_location": "/tmp/sample.gpr",
+        "project_name": None,
+        "domain_path": "/folder/app",
+    }
 
 
 def test_dispatch_tool_applies_error_adapter_for_create_session():
@@ -517,6 +523,39 @@ def test_dispatch_tool_applies_error_adapter_for_create_session():
         )
 
 
+def test_dispatch_tool_preserves_domain_error_for_create_session():
+    class FailingRegistry(DummyRegistry):
+        def create_session(self, target, **kwargs):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.PROJECT_LOCKED,
+                message="PROJECT_LOCKED: Unable to lock project",
+                retryable=True,
+                details={
+                    "target": target,
+                    "operation": "create_session",
+                    "cause_type": "RuntimeError",
+                    "cause_message": "Unable to lock project",
+                },
+            )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dispatch_tool(
+            "create_session",
+            {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
+            "fw",
+            registry=FailingRegistry(),
+        )
+
+    assert str(exc_info.value) == "PROJECT_LOCKED: project is locked by another process (RuntimeError: Unable to lock project)"
+    assert getattr(exc_info.value, "domain_error")["code"] == ErrorCode.PROJECT_LOCKED.value
+    assert getattr(exc_info.value, "domain_error")["details"] == {
+        "target": "fw",
+        "operation": "create_session",
+        "cause_type": "RuntimeError",
+        "cause_message": "Unable to lock project",
+    }
+
+
 def test_dispatch_tool_applies_error_adapter_for_close_session():
     class FailingRegistry(DummyRegistry):
         def close_session(self, target, **kwargs):  # noqa: ARG002
@@ -529,6 +568,31 @@ def test_dispatch_tool_applies_error_adapter_for_close_session():
             "fw",
             registry=FailingRegistry(),
         )
+
+
+def test_dispatch_tool_preserves_domain_error_for_close_session():
+    class FailingRegistry(DummyRegistry):
+        def close_session(self, target, **kwargs):  # noqa: ARG002
+            raise DomainError(
+                code=ErrorCode.SAVE_FAILED,
+                message="SAVE_FAILED: failed to save program before close: disk full",
+                details={"target": target, "operation": "close_session"},
+            )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dispatch_tool(
+            "close_session",
+            {},
+            "fw",
+            registry=FailingRegistry(),
+        )
+
+    assert str(exc_info.value) == "SAVE_FAILED: save operation failed"
+    assert getattr(exc_info.value, "domain_error")["code"] == ErrorCode.SAVE_FAILED.value
+    assert getattr(exc_info.value, "domain_error")["details"] == {
+        "target": "fw",
+        "operation": "close_session",
+    }
 
 
 def test_dispatch_tool_applies_error_adapter_for_close_remove():
@@ -544,6 +608,32 @@ def test_dispatch_tool_applies_error_adapter_for_close_remove():
             "fw",
             registry=FailingRegistry(),
         )
+
+
+def test_dispatch_tool_preserves_domain_error_for_close_remove():
+    class FailingRegistry(DummyRegistry):
+        def close_session(self, target, **kwargs):  # noqa: ARG002
+            assert kwargs == {"remove_program": True}
+            raise DomainError(
+                code=ErrorCode.SAVE_FAILED,
+                message="SAVE_FAILED: failed to save program before close: disk full",
+                details={"target": target, "operation": "close_session"},
+            )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        dispatch_tool(
+            "close_session_and_remove_program",
+            {},
+            "fw",
+            registry=FailingRegistry(),
+        )
+
+    assert str(exc_info.value) == "SAVE_FAILED: save operation failed"
+    assert getattr(exc_info.value, "domain_error")["code"] == ErrorCode.SAVE_FAILED.value
+    assert getattr(exc_info.value, "domain_error")["details"] == {
+        "target": "fw",
+        "operation": "close_session",
+    }
 
 
 def test_dispatch_tool_exposes_unsafe_program_remove_for_close_remove():
@@ -581,11 +671,7 @@ def test_dispatch_tool_raises_when_registry_has_no_core_call():
         )
 
 
-def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
-    class OutputMustBeDict(BaseModel):
-        model_config = ConfigDict(extra="forbid", strict=True)
-        payload: dict[str, str]
-
+def test_dispatch_tool_validates_output_after_result_adapter(monkeypatch):
     class Registry:
         def load_program(self, target, **kwargs):  # noqa: ARG002
             return "/folder/app"
@@ -598,7 +684,10 @@ def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
         executor_kind=ExecutorKind.REGISTRY_METHOD,
         command_or_method="load_program",
         input_model=create_typed_input_model("DummyInput", {"domain_path": (str, ...)}),
-        output_model=OutputMustBeDict,
+        output_model=create_typed_output_model(
+            "OutputMustHaveIntegerProgram",
+            {"status": (str, ...), "target": (str, ...), "program": (int, ...)},
+        ),
         include_target=True,
         result_adapter="status_program_ok",
     )
@@ -635,15 +724,15 @@ def test_dispatch_tool_validates_output_before_result_adapter(monkeypatch):
             "create_session",
             {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
             {"create_session_result": {"target": "fw"}},
-            RuntimeError,
-            "Failed to create session 'fw'",
+            ValueError,
+            "create_session output validation failed",
         ),
         (
             "close_session",
             {},
             {"close_session_result": None},
-            RuntimeError,
-            "Failed to close session 'fw'",
+            ValueError,
+            "close_session output validation failed",
         ),
         (
             "load_project_program",

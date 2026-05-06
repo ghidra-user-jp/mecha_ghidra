@@ -32,30 +32,40 @@ class _DomainFile:
 
 
 class _Program:
-    def __init__(self, *, changed: bool = False) -> None:
+    def __init__(self, *, changed: bool = False, fail_changed: bool = False) -> None:
         self._changed = changed
+        self._fail_changed = fail_changed
 
     def getDomainFile(self):
         return _DomainFile()
 
     def isChanged(self) -> bool:
+        if self._fail_changed:
+            raise RuntimeError("dirty state unavailable")
         return self._changed
 
 
 class _Session:
-    def __init__(self, handle, *, changed: bool = False) -> None:  # noqa: ANN001
+    def __init__(self, handle, *, changed: bool = False, fail_changed: bool = False) -> None:  # noqa: ANN001
         self._handle = handle
         self._changed = changed
+        self._fail_changed = fail_changed
         self.closed_with: list[bool] = []
 
     def get_project_handle(self):
         return self._handle
 
     def get_program(self):
-        return _Program(changed=self._changed)
+        return _Program(changed=self._changed, fail_changed=self._fail_changed)
 
     def close(self, *, save: bool = True) -> None:
         self.closed_with.append(save)
+
+
+class _FailingCloseSession(_Session):
+    def close(self, *, save: bool = True) -> None:
+        self.closed_with.append(save)
+        raise RuntimeError("reopened close failed")
 
 
 class _Handle:
@@ -136,10 +146,30 @@ class _UnversionedAddableHandle(_ReopenVersionedHandle):
         return _Session(self)
 
 
+class _FailingCloseReopenHandle(_ReopenVersionedHandle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reopened_sessions: list[_FailingCloseSession] = []
+
+    def open_program(self, domain_path: str):
+        self.open_program_calls += 1
+        self._status.update(
+            {
+                "is_versioned": True,
+                "is_checked_out": False,
+                "can_add_to_repository": False,
+            }
+        )
+        reopened = _FailingCloseSession(self)
+        self.reopened_sessions.append(reopened)
+        return reopened
+
+
 def _build_core_execution(
     handle,  # noqa: ANN001
     *,
     changed: bool = False,
+    fail_changed: bool = False,
 ) -> tuple[RuntimeCoreExecution, RuntimeSessionStore, _Core]:
     core = _Core()
     state = RuntimeState(
@@ -148,7 +178,7 @@ def _build_core_execution(
         normalize_result=lambda value: value,
     )
     store = RuntimeSessionStore(state=state, core_accessor=lambda: core)
-    store.sessions["fw"] = _Session(handle, changed=changed)
+    store.sessions["fw"] = _Session(handle, changed=changed, fail_changed=fail_changed)
     store.locks["fw"] = threading.RLock()
     return (
         RuntimeCoreExecution(
@@ -195,6 +225,27 @@ def test_mutating_checkout_guard_aborts_when_refresh_fails():
     assert core.calls == []
 
 
+def test_core_call_rechecks_session_after_target_lock_acquisition(monkeypatch: pytest.MonkeyPatch):
+    handle = _CheckedOutAfterRefreshHandle()
+    execution, store, core = _build_core_execution(handle)
+    original_ensure_lock = store.ensure_lock
+
+    def ensure_lock(name: str):
+        lock = original_ensure_lock(name)
+        store.sessions.pop(name, None)
+        store.locks.pop(name, None)
+        store.target_projects.pop(name, None)
+        return lock
+
+    monkeypatch.setattr(store, "ensure_lock", ensure_lock)
+
+    with pytest.raises(RuntimeError, match="Session 'fw' is not initialized"):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert handle.refresh_calls == 0
+    assert core.calls == []
+
+
 def test_mutating_checkout_guard_reopens_stale_unversioned_active_program():
     handle = _ReopenVersionedHandle()
     execution, _store, core = _build_core_execution(handle)
@@ -207,9 +258,44 @@ def test_mutating_checkout_guard_reopens_stale_unversioned_active_program():
     assert core.calls == []
 
 
+def test_mutating_checkout_guard_preserves_reopened_session_when_rollback_close_fails():
+    handle = _FailingCloseReopenHandle()
+    execution, store, core = _build_core_execution(handle)
+    original_initialize = core.initialize
+
+    def fail_initialize(_program, _key):  # noqa: ANN001
+        raise RuntimeError("initialize failed")
+
+    core.initialize = fail_initialize
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROGRAM_CLOSE_FAILED: failed to close reopened session during checkout guard rollback",
+    ):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert store.sessions["fw"] is handle.reopened_sessions[-1]
+    assert "fw" in store.locks
+    assert core.calls == []
+    assert core.removed == []
+    core.initialize = original_initialize
+
+
 def test_mutating_checkout_guard_rejects_dirty_stale_unversioned_active_program():
     handle = _ReopenVersionedHandle()
     execution, _store, core = _build_core_execution(handle, changed=True)
+
+    with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert handle.refresh_calls == 1
+    assert handle.open_program_calls == 0
+    assert core.calls == []
+
+
+def test_mutating_checkout_guard_fails_closed_when_dirty_state_unavailable():
+    handle = _ReopenVersionedHandle()
+    execution, _store, core = _build_core_execution(handle, fail_changed=True)
 
     with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")

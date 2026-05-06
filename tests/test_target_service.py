@@ -165,6 +165,42 @@ def test_target_service_fallback_non_domain_error_is_operation_failed():
     assert exc_info.value.details == {"operation": "list_programs", "target": "fw"}
 
 
+def test_target_service_maps_close_save_failure_to_domain_code():
+    class Runtime(DummyRuntime):
+        def close_session(self, name: str, *, remove_program: bool = False):  # noqa: ARG002
+            raise RuntimeError("SAVE_FAILED: failed to save program before close: disk full")
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.close_session("fw")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SAVE_FAILED
+    assert err.details["operation"] == "close_session"
+    assert err.details["target"] == "fw"
+    assert err.details["cause_type"] == "RuntimeError"
+    assert err.details["cause_message"] == "SAVE_FAILED: failed to save program before close: disk full"
+
+
+def test_target_service_maps_close_project_lock_to_domain_code():
+    class Runtime(DummyRuntime):
+        def close_session(self, name: str, *, remove_program: bool = False):  # noqa: ARG002
+            raise RuntimeError("Unable to lock project! /tmp/shared/project")
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+
+    with pytest.raises(DomainError) as exc_info:
+        service.close_session("fw")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.PROJECT_LOCKED
+    assert err.retryable is True
+    assert err.details["operation"] == "close_session"
+    assert err.details["target"] == "fw"
+    assert err.details["cause_message"] == "Unable to lock project! <path>"
+
+
 def test_target_service_preserves_domain_error_and_merges_details():
     class Runtime(DummyRuntime):
         def import_program(self, name: str, binary_path: str, **kwargs):  # noqa: ARG002

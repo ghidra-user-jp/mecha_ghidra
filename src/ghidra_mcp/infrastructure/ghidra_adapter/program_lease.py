@@ -32,9 +32,11 @@ class ProgramLease:
         self.before_close()
 
         operation_error: Exception | None = None
+        operation_completed = False
         result: Any = None
         try:
             result = self.do_operation()
+            operation_completed = True
         except Exception as exc:  # noqa: BLE001
             operation_error = exc
 
@@ -44,6 +46,10 @@ class ProgramLease:
             details: dict[str, Any] | None = None
             if operation_error is not None:
                 details = {"operation_error": str(operation_error)}
+            elif operation_completed:
+                details = {"operation_completed": True, "partial_success": True}
+                if result is not None:
+                    details["operation_result"] = result
             raise DomainError(
                 code=ErrorCode.REOPEN_FAILED,
                 message=f"Failed to reopen program: {exc}",

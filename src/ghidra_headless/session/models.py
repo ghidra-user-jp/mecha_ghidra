@@ -46,11 +46,7 @@ class ProgramSession:
             self.project_handle.release_program(self.program, save=save, remove_program=remove_program)
         except Exception as exc:
             message = str(exc)
-            if (
-                message.startswith("SAVE_FAILED:")
-                or message.startswith("SESSION_CLOSE_FAILED:")
-                or message.startswith("REMOVE_PROGRAM_FAILED:")
-            ):
+            if message.startswith("SESSION_CLOSE_FAILED:") or message.startswith("REMOVE_PROGRAM_FAILED:"):
                 _mark_closed()
             raise
 

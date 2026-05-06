@@ -43,3 +43,27 @@ def test_lock_manager_timeout_raises_domain_error():
     assert err.code == ErrorCode.LOCK_TIMEOUT
     assert err.retryable is True
     assert err.details == {"lock": "target", "timeout": 0.01}
+
+
+def test_lock_manager_allows_different_targets_to_overlap():
+    manager = LockManager()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    def _holder():
+        with manager.acquire(target="fw1", timeout=0.5):
+            first_entered.set()
+            release_first.wait(timeout=1.0)
+
+    thread = threading.Thread(target=_holder)
+    thread.start()
+    assert first_entered.wait(timeout=1.0)
+
+    try:
+        with manager.acquire(target="fw2", timeout=0.05):
+            second_entered.set()
+        assert second_entered.is_set()
+    finally:
+        release_first.set()
+        thread.join(timeout=1.0)

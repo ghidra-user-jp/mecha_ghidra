@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Optional
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
@@ -18,10 +19,12 @@ class RuntimeSessionStore:
         self.core_accessor = core_accessor
         self.sessions = state.sessions
         self.locks = state.locks
+        self.project_locks = state.project_locks
         self.target_projects = state.target_projects
         self.project_handles = state.project_handles
         self.analyzed_loads = state.analyzed_loads
         self.dirty_programs = state.dirty_programs
+        self.operation_lock = state.operation_lock
         self.registry_lock = state.registry_lock
 
     def ensure_session(self, name: str) -> ProgramSession:
@@ -40,6 +43,13 @@ class RuntimeSessionStore:
             return self.locks[name]
         except KeyError:
             raise RuntimeError(f"Session '{name}' is not initialized")
+
+    def ensure_project_lock(self, key: tuple[str, str]) -> threading.RLock:
+        lock = self.project_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            self.project_locks[key] = lock
+        return lock
 
     def get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
         key = ProjectHandle.make_key(project_location, project_name)
@@ -100,15 +110,25 @@ class RuntimeSessionStore:
         if remove_context:
             self.core_accessor().remove_context(name)
 
+        session_closed = False
+        if session is not None:
+            try:
+                session_closed = session.get_project_handle() is None
+            except Exception:
+                session_closed = True
+
         if handle is not None and handle.is_closed():
             self.project_handles.pop(handle.get_key(), None)
-        if session_domain_path is not None:
+        if session_domain_path is not None and (close_error is None or session_closed):
             self.clear_dirty_program(name, session_domain_path)
 
         if close_error is not None:
             message = str(close_error)
-            if message.startswith("SAVE_FAILED:") or message.startswith("SESSION_CLOSE_FAILED:") or message.startswith(
-                "REMOVE_PROGRAM_FAILED:"
+            if (
+                message.startswith("SAVE_FAILED:")
+                or message.startswith("PROGRAM_CLOSE_FAILED:")
+                or message.startswith("SESSION_CLOSE_FAILED:")
+                or message.startswith("REMOVE_PROGRAM_FAILED:")
             ):
                 raise RuntimeError(message) from close_error
             raise RuntimeError(f"SESSION_CLOSE_FAILED: {close_error}")
