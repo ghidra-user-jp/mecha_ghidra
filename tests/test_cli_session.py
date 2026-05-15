@@ -30,6 +30,16 @@ class FakeTargetService:
         self.calls.append(("list_programs", (target,), {}))
         return ["/main"]
 
+    def create_project(self, *, project_location: str, project_name: str | None = None, overwrite: bool = False):
+        self.calls.append(
+            (
+                "create_project",
+                (),
+                {"project_location": project_location, "project_name": project_name, "overwrite": overwrite},
+            )
+        )
+        return {"status": "ok", "project_location": project_location, "project_name": project_name or "sample"}
+
     def register_target(self, target: str, project_location: str, *, project_name: str | None = None):
         self.calls.append(
             (
@@ -294,6 +304,10 @@ def test_parse_session_definition_invalid(text):
         (
             lambda a: a.list_targets(),
             [{"target": "fw"}],
+        ),
+        (
+            lambda a: a.create_project(project_location="/tmp/p.gpr", project_name=None),
+            {"status": "ok", "project_location": "/tmp/p.gpr", "project_name": "sample"},
         ),
         (
             lambda a: a.list_programs("fw"),

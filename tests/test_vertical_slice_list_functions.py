@@ -50,6 +50,16 @@ from ghidra_mcp import cli
             {"address": "0x401000"},
         ),
         (
+            "disassemble_range",
+            lambda: cli.disassemble_range(
+                start_address="0x401000",
+                end_address="0x401020",
+                limit=8,
+                target="fw",
+            ),
+            {"start_address": "0x401000", "end_address": "0x401020", "limit": 8},
+        ),
+        (
             "get_callee",
             lambda: cli.get_callee(address="0x401000", target="fw"),
             {"address": "0x401000"},
@@ -124,6 +134,16 @@ from ghidra_mcp import cli
             lambda: cli.get_enum(name="E", category="/c", target="fw"),
             {"name": "E", "category": "/c"},
         ),
+        (
+            "list_data_types",
+            lambda: cli.list_data_types(offset=1, limit=5, filter="S", category="/c", target="fw"),
+            {"offset": 1, "limit": 5, "filter": "S", "category": "/c"},
+        ),
+        (
+            "list_bookmarks",
+            lambda: cli.list_bookmarks(offset=1, limit=5, address="0x401000", type="Info", category="Analysis", target="fw"),
+            {"offset": 1, "limit": 5, "address": "0x401000", "type": "Info", "category": "Analysis"},
+        ),
     ],
 )
 def test_function_listing_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_args):
@@ -160,6 +180,7 @@ def test_function_listing_slice_uses_dispatcher(monkeypatch, tool_name, call, ex
         lambda: cli.decompile_function(name="main", target="fw"),
         lambda: cli.decompile_function_by_address(address="0x401000", target="fw"),
         lambda: cli.disassemble_function(address="0x401000", target="fw"),
+        lambda: cli.disassemble_range(start_address="0x401000", length=16, limit=10, target="fw"),
         lambda: cli.get_callee(address="0x401000", target="fw"),
         lambda: cli.get_xrefs_to(address="0x401000", offset=0, limit=10, target="fw"),
         lambda: cli.get_xrefs_from(address="0x401000", offset=0, limit=10, target="fw"),
@@ -175,6 +196,8 @@ def test_function_listing_slice_uses_dispatcher(monkeypatch, tool_name, call, ex
         lambda: cli.search_bytes(pattern="9090", offset=0, limit=10, target="fw"),
         lambda: cli.get_struct(name="S", category="/c", target="fw"),
         lambda: cli.get_enum(name="E", category="/c", target="fw"),
+        lambda: cli.list_data_types(offset=0, limit=10, target="fw"),
+        lambda: cli.list_bookmarks(offset=0, limit=10, target="fw"),
     ],
 )
 def test_function_listing_slice_empty_result_keeps_compatibility(monkeypatch, call):
@@ -201,6 +224,7 @@ def test_function_listing_slice_empty_result_keeps_compatibility(monkeypatch, ca
         lambda: cli.decompile_function(name="main", target="fw"),
         lambda: cli.decompile_function_by_address(address="0x401000", target="fw"),
         lambda: cli.disassemble_function(address="0x401000", target="fw"),
+        lambda: cli.disassemble_range(start_address="0x401000", length=16, limit=10, target="fw"),
         lambda: cli.get_callee(address="0x401000", target="fw"),
         lambda: cli.get_xrefs_to(address="0x401000", offset=0, limit=10, target="fw"),
         lambda: cli.get_xrefs_from(address="0x401000", offset=0, limit=10, target="fw"),
@@ -216,6 +240,8 @@ def test_function_listing_slice_empty_result_keeps_compatibility(monkeypatch, ca
         lambda: cli.search_bytes(pattern="9090", offset=0, limit=10, target="fw"),
         lambda: cli.get_struct(name="S", category="/c", target="fw"),
         lambda: cli.get_enum(name="E", category="/c", target="fw"),
+        lambda: cli.list_data_types(offset=0, limit=10, target="fw"),
+        lambda: cli.list_bookmarks(offset=0, limit=10, target="fw"),
     ],
 )
 def test_function_listing_slice_error_message_is_unchanged(monkeypatch, call):

@@ -71,7 +71,7 @@ If you want to try the server without installing Ghidra on the host, use the bun
 4. **Connect your MCP client**
    `http://127.0.0.1:8081/mcp`
 
-In this compose setup, the server starts with `--project-location /data/projects --project-name default` and expects the project files to live at `/data/projects/default.gpr` and `/data/projects/default.rep`. Create that Ghidra project once before first use, then import a binary and load it. No program is loaded at startup, so the first workflow is `import_program` followed by `load_project_program`.
+In this compose setup, the server starts with `--project-location /data/projects --project-name default` and expects the project files to live at `/data/projects/default.gpr` and `/data/projects/default.rep`. On a fresh volume, create that empty project from MCP first with `create_project(project_location="/data/projects/default.gpr")`, then import a binary and load it. No program is loaded at startup, so the normal first workflow is `create_project` (fresh volume only), `import_program`, then `load_project_program`.
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, matching the bundled Linux decompiler.
 - You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build now auto-selects the bundled mecha_ghidra patched Ghidra distribution.
@@ -139,8 +139,9 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - Startup also fails when `--ghidra-server-password` is empty or when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged. If you want to avoid exposing secrets in process arguments, prefer `--ghidra-server-password-env`.
 - On Linux ARM64, startup/decompiler initialization now fails with a specific message when `Ghidra/Features/Decompiler/os/linux_arm_64` is missing or not executable.
 - If `--domain-path` is omitted, startup registers only the project target (works with empty projects). In this mode, import with `import_program` and open with `load_project_program`.
+- If the project does not exist yet, `create_project` can create an empty local `.gpr/.rep` before `register_target`, `import_program`, or `load_project_program`. It refuses existing projects unless `overwrite=true`.
 - Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
-- In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis.
+- In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis; use `analyze_program` or `reanalyze_program` when you need an explicit analysis pass.
 - After mutating tools such as `rename_function_by_address`, call `save_project_program(target="default")` to persist changes into `.gpr/.rep`. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 - Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
 - Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
@@ -152,7 +153,7 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - When `can_merge=true` but there is no disposable checkout to drop, `pull_project_program` fails with `UNSAFE_MERGE_REQUIRED` instead of invoking Ghidra's PropertyList merge path.
 - `commit_project_program` detects merge conflicts (`can_merge=true`) and now aborts by default with `UNSAFE_MERGE_REQUIRED`; pass `on_conflict="discard"` only when you explicitly want to drop the local checkout and follow the latest server state (`status=noop` / `reason=conflict_discarded`).
 - In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
-- The Docker server starts with project metadata only, so import first with `import_program` and then open the imported program with `load_project_program`.
+- The Docker server starts with project metadata only, so create the project with `create_project` on a fresh volume, then import with `import_program` and open it with `load_project_program`.
 
 ### Tool Exposure Examples
 

@@ -52,6 +52,45 @@ class ProjectHandle:
         return ProjectHandle.resolve_project_location_and_file(project_location, project_name)
 
     @staticmethod
+    def create_project(project_location: str, project_name: Optional[str] = None, *, overwrite: bool = False) -> Dict[str, Any]:
+        path = pathlib.Path(project_location).expanduser().resolve()
+        if project_name is not None:
+            effective_name = project_name.strip()
+            if not effective_name:
+                raise ValueError("project_name must not be empty")
+            project_dir = path.parent if path.suffix.lower() == ".gpr" else path
+            if path.suffix.lower() == ".gpr" and path.stem != effective_name:
+                raise ValueError("project_name must match the .gpr filename when project_location points to a .gpr file")
+        else:
+            if path.suffix.lower() != ".gpr":
+                raise ValueError("project_name is required when project_location is not a .gpr file")
+            effective_name = path.stem
+            project_dir = path.parent
+
+        project_file = project_dir / f"{effective_name}.gpr"
+        project_rep = project_dir / f"{effective_name}.rep"
+        existed = project_file.exists() or project_rep.exists()
+        if existed and not overwrite:
+            raise RuntimeError(f"PROJECT_ALREADY_EXISTS: {project_file}")
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        from ghidra.base.project import GhidraProject
+
+        project = GhidraProject.createProject(str(project_dir), effective_name, False)
+        try:
+            project.close()
+        except Exception as exc:
+            raise RuntimeError(f"PROJECT_CLOSE_FAILED: failed to close created project: {exc}") from exc
+        return {
+            "status": "ok",
+            "project_location": str(project_dir),
+            "project_name": effective_name,
+            "project_file": str(project_file),
+            "created": True,
+            "overwritten": bool(existed),
+        }
+
+    @staticmethod
     def list_programs_from_metadata(project_location: str, project_name: Optional[str]) -> Optional[list[Dict[str, str]]]:
         rep_dir = ProjectHandle._project_rep_dir(project_location, project_name)
         idata_dir = rep_dir / "idata"

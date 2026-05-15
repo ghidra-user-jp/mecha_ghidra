@@ -47,6 +47,22 @@ class RuntimeBackend:
                 domain_path=domain_path,
             ) from exc
 
+    def create_project(
+        self,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        overwrite: bool = False,
+    ) -> Dict[str, Any]:
+        return self._invoke(
+            operation="create_project",
+            func=lambda: self._target_lifecycle.create_project(
+                project_location,
+                project_name=project_name,
+                overwrite=overwrite,
+            ),
+        )
+
     def create_session(
         self,
         name: str,

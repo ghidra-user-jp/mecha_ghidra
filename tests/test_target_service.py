@@ -26,6 +26,17 @@ class DummyRuntime:
     def project_lock_key(self, name: str) -> str | None:
         return self.project_keys.get(name)
 
+    def create_project(self, project_location: str, *, project_name: str | None = None, overwrite: bool = False):
+        self.calls.append(("create_project", (project_location,), {"project_name": project_name, "overwrite": overwrite}))
+        return {
+            "status": "ok",
+            "project_location": project_location,
+            "project_name": project_name or "sample",
+            "project_file": f"{project_location}/sample.gpr",
+            "created": True,
+            "overwritten": overwrite,
+        }
+
     def create_session(self, name: str, project_location: str, *, project_name: str | None = None, domain_path: str | None = None):
         self.calls.append(("create_session", (name, project_location), {"project_name": project_name, "domain_path": domain_path}))
         return {"target": name, "domain_path": domain_path}
@@ -74,6 +85,14 @@ def test_target_service_lifecycle_and_lock_routing():
     lock_manager = DummyLockManager()
     service = TargetService(runtime, lock_manager=lock_manager)
 
+    assert service.create_project("/tmp/prj", project_name="sample") == {
+        "status": "ok",
+        "project_location": "/tmp/prj",
+        "project_name": "sample",
+        "project_file": "/tmp/prj/sample.gpr",
+        "created": True,
+        "overwritten": False,
+    }
     assert service.register_target("fw", "/tmp/prj", project_name="sample") == {"target": "fw"}
     assert service.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main") == {
         "target": "fw",

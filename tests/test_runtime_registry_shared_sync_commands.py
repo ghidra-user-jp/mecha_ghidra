@@ -133,6 +133,21 @@ def _copy_shared_project_cache(tmp_path: Path, project_location: str, project_na
     return str(dest_dir / f"{project_name}.gpr")
 
 
+def test_runtime_create_project_success(tmp_path):
+    _start_pyghidra()
+
+    project_file = tmp_path / "created_by_tool.gpr"
+    result = _unwrap_runtime_result(
+        cli.create_project(project_location=str(project_file), project_name=None)
+    )
+
+    _log_runtime_result("create_project", result)
+    assert result["status"] == "ok"
+    assert result["project_name"] == "created_by_tool"
+    assert Path(result["project_file"]).is_file()
+    assert (tmp_path / "created_by_tool.rep").is_dir()
+
+
 def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
     _start_pyghidra()
 

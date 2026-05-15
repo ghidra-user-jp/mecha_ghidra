@@ -18,6 +18,8 @@ SYMBOL_COMMANDS: tuple[str, ...] = (
     "set_local_variable_type",
     "set_bytes",
     "add_bookmark",
+    "list_bookmarks",
+    "delete_bookmark",
 )
 
 

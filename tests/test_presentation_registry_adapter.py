@@ -19,6 +19,7 @@ _LIST_CORE_COMMANDS = {
     "list_classes",
     "search_functions_by_name",
     "disassemble_function",
+    "disassemble_range",
     "get_callee",
     "get_xrefs_to",
     "get_xrefs_from",
@@ -28,9 +29,11 @@ _LIST_CORE_COMMANDS = {
     "list_exports",
     "list_namespaces",
     "list_data_items",
+    "list_data_types",
     "list_strings",
     "get_data_by_label",
     "search_bytes",
+    "list_bookmarks",
 }
 _CORE_COMMANDS = set(FUNCTION_COMMANDS) | set(MEMORY_COMMANDS) | set(SYMBOL_COMMANDS) | set(DATATYPE_COMMANDS)
 
@@ -62,6 +65,16 @@ class RecordingService:
             self.calls.append((name, args, dict(kwargs)))
             if name in {"list_targets", "list_programs"}:
                 return []
+            if name == "create_project":
+                project_location = args[0] if args else kwargs["project_location"]
+                return {
+                    "status": "ok",
+                    "project_location": project_location,
+                    "project_name": kwargs.get("project_name") or "sample",
+                    "project_file": f"{project_location}/sample.gpr",
+                    "created": True,
+                    "overwritten": bool(kwargs.get("overwrite", False)),
+                }
             if name in {"load_program", "import_program"}:
                 return "/program"
             if name == "save_project_program":

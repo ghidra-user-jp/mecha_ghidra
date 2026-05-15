@@ -55,6 +55,19 @@ class ServiceRegistryAdapter:
     def list_targets(self):
         return self._target_service.list_targets()
 
+    def create_project(
+        self,
+        *,
+        project_location: str,
+        project_name: str | None = None,
+        overwrite: bool = False,
+    ):
+        return self._target_service.create_project(
+            project_location=project_location,
+            project_name=project_name,
+            overwrite=overwrite,
+        )
+
     def list_programs(self, target: str):
         return self._target_service.list_programs(target)
 

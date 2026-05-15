@@ -3,6 +3,31 @@
 from __future__ import absolute_import, print_function
 
 
+def _instruction_to_dict(inst, code_unit):
+    operand_parts = []
+    try:
+        operand_count = inst.getNumOperands()
+    except Exception:
+        operand_count = 0
+
+    for operand_index in range(operand_count):
+        try:
+            operand_repr = inst.getDefaultOperandRepresentation(operand_index)
+        except Exception:
+            operand_repr = None
+        if operand_repr:
+            operand_parts.append(str(operand_repr))
+
+    operands = ", ".join(operand_parts)
+    comment = inst.getComment(code_unit.EOL_COMMENT)
+    return {
+        "address": str(inst.getAddress()),
+        "mnemonic": str(inst.getMnemonicString()),
+        "operands": str(operands),
+        "comment": str(comment) if comment else "",
+    }
+
+
 def decompile_function(params, *, ensure_context, find_function_by_name, decompile_function_object):
     ctx = ensure_context()
     name = params.get("name")
@@ -36,29 +61,41 @@ def disassemble_function(params, *, ensure_context, get_address, iter_items, cod
     instructions = ctx.listing.getInstructions(body, True)
     lines = []
     for inst in iter_items(instructions):
-        operand_parts = []
-        try:
-            operand_count = inst.getNumOperands()
-        except Exception:
-            operand_count = 0
+        lines.append(_instruction_to_dict(inst, code_unit))
+    return lines
 
-        for operand_index in range(operand_count):
-            try:
-                operand_repr = inst.getDefaultOperandRepresentation(operand_index)
-            except Exception:
-                operand_repr = None
-            if operand_repr:
-                operand_parts.append(str(operand_repr))
 
-        operands = ", ".join(operand_parts)
-        comment = inst.getComment(code_unit.EOL_COMMENT)
-        line = {
-            "address": str(inst.getAddress()),
-            "mnemonic": str(inst.getMnemonicString()),
-            "operands": str(operands),
-            "comment": str(comment) if comment else "",
-        }
-        lines.append(line)
+def disassemble_range(params, *, ensure_context, get_address, to_int, iter_items, code_unit):
+    ctx = ensure_context()
+    start_text = params.get("start_address") or params.get("address")
+    end_text = params.get("end_address")
+    length = params.get("length")
+    limit = to_int(params.get("limit"), 200)
+    if not start_text:
+        raise ValueError("start_address is required")
+    if end_text is None and length is None:
+        raise ValueError("end_address or length is required")
+    start = get_address(ctx, start_text)
+    if end_text is not None:
+        end = get_address(ctx, end_text)
+    else:
+        normalized_length = to_int(length, 0)
+        if normalized_length <= 0:
+            raise ValueError("length must be > 0")
+        end = start.add(normalized_length - 1)
+    if start.compareTo(end) > 0:
+        raise ValueError("start_address must be <= end_address")
+    if limit <= 0:
+        return []
+
+    lines = []
+    instructions = ctx.listing.getInstructions(start, True)
+    for inst in iter_items(instructions):
+        if inst.getAddress().compareTo(end) > 0:
+            break
+        lines.append(_instruction_to_dict(inst, code_unit))
+        if len(lines) >= limit:
+            break
     return lines
 
 

@@ -98,7 +98,7 @@ ARM Linux 上で patched binary が無いまま起動した場合は、`linux_ar
 - **コメント付与**: 逆アセンブリ／デコンパイラコメントの設定が可能。
 - **PyGhidra ベース**: Jython ではなく CPython 上で Ghidra API を直接呼び出します。
 - **複数ターゲット管理**: 同一プロセスで複数セッションを保持し、ターゲット名で切り替えながら解析できます。
-- **プロジェクト操作**: `list_project_programs` でプロジェクト内のプログラム一覧を取得し、`import_program` で新規バイナリを追加、`load_project_program` で既存プログラムへ切り替えできます。
+- **プロジェクト操作**: `create_project` でローカル project を作成し、`list_project_programs` でプログラム一覧取得、`import_program` で新規バイナリ追加、`load_project_program` で既存プログラムへ切り替えできます。
 
 FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、MCP クライアントからは `ghidra_mcp.cli` を通じて利用できます。詳しいオプションは `uv run ghidra-mcp --help` を参照してください。
 
@@ -107,6 +107,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 #### Core Operations
 
 - `list_targets` - 登録済みターゲットと紐づくプロジェクト情報を一覧表示
+- `create_project` - 空のローカル Ghidra project を作成
 - `create_session` - 既存プロジェクトのプログラムを開いてターゲットを追加
 - `register_target` - プログラムを開かずにターゲットへプロジェクト情報のみ登録
 - `close_session` - ターゲットのセッションをクローズ
@@ -126,7 +127,12 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `decompile_function` - 関数名指定で C 擬似コードを取得
 - `decompile_function_by_address` - アドレス指定で C 擬似コードを取得
 - `disassemble_function` - 関数の逆アセンブル結果を取得
+- `disassemble_range` - アドレス範囲の逆アセンブル結果を取得
 - `get_function_by_address` - アドレスに対応する関数情報を取得
+- `create_function` - アドレスに関数を作成
+- `delete_function` - アドレス指定で関数を削除
+- `analyze_program` - 未解析扱いの program に解析を実行
+- `reanalyze_program` - program 解析を強制的に再実行
 - `get_function_xrefs` - 関数名を起点に参照元/参照先を取得
 - `get_callee` - 指定アドレスの呼び出し先関数を取得
 
@@ -156,6 +162,8 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `set_decompiler_comment` - デコンパイラコメントを設定
 - `set_disassembly_comment` - 逆アセンブリコメントを設定
 - `add_bookmark` - ブックマークを追加
+- `list_bookmarks` - ブックマーク一覧を取得
+- `delete_bookmark` - ID または address/type/category 指定でブックマークを削除
 
 `rename_function_by_address` などの更新系 tool を使った後は、`save_project_program(target="default")` を呼ぶと変更が Ghidra project に保存されます。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードしてください。
 
@@ -165,10 +173,14 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `add_struct_members` - 構造体メンバーを追加
 - `clear_struct` - 構造体メンバーを全削除
 - `remove_struct_members` - 構造体メンバーを選択削除
+- `delete_struct` - 構造体データ型を削除
 - `get_struct` - 構造体定義を取得
+- `list_data_types` - program 内のデータ型一覧を取得
+- `rename_data_type` - データ型名を変更
 - `create_enum` - 列挙体を作成
 - `add_enum_values` - 列挙体の値を追加
 - `remove_enum_values` - 列挙体の値を削除
+- `delete_enum` - 列挙体データ型を削除
 - `get_enum` - 列挙体定義を取得
 - `create_class` - GhidraClass 名前空間と対応構造体を作成
 - `add_class_members` - クラス相当データ型へメンバーを追加

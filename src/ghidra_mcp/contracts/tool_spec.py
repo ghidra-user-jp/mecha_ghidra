@@ -552,6 +552,25 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         idempotent_hint=True,
     ),
     _registry_tool(
+        "create_project",
+        method_name="create_project",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("project_location", str, ...),
+            ("project_name", str | None, None),
+            ("overwrite", bool, False),
+        ),
+        include_target=False,
+        include_none_keys=("project_name",),
+        description=(
+            "Create an empty local Ghidra project. Refuses to overwrite an existing .gpr/.rep "
+            "unless overwrite=true."
+        ),
+        idempotent_hint=False,
+    ),
+    _registry_tool(
         "create_session",
         method_name="create_session",
         category_tag=ToolCategoryTag.CORE,
@@ -738,6 +757,52 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         list_output=True,
     ),
     _core_tool(
+        "disassemble_range",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("start_address", str, ...),
+            ("end_address", str | None, None),
+            ("length", int | None, None),
+            ("limit", int, 200),
+        ),
+        list_output=True,
+    ),
+    _core_tool(
+        "create_function",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("address", str, ...),
+            ("name", str | None, None),
+        ),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "delete_function",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(("address", str, ...),),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "analyze_program",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        checkout_required=True,
+    ),
+    _core_tool(
+        "reanalyze_program",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        checkout_required=True,
+    ),
+    _core_tool(
         "get_function_by_address",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
@@ -829,6 +894,20 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("label", str, ...),),
         list_output=True,
+    ),
+    _core_tool(
+        "list_data_types",
+        category_tag=ToolCategoryTag.MEMORY_DATA,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("offset", int, 0),
+            ("limit", int, 100),
+            ("filter", str | None, None),
+            ("category", str | None, None),
+        ),
+        list_output=True,
+        omit_falsey_keys=("filter", "category"),
     ),
     _core_tool(
         "get_bytes",
@@ -991,6 +1070,36 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         checkout_required=True,
     ),
+    _core_tool(
+        "list_bookmarks",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("offset", int, 0),
+            ("limit", int, 100),
+            ("address", str | None, None),
+            ("type", str | None, None),
+            ("category", str | None, None),
+        ),
+        list_output=True,
+        omit_falsey_keys=("address", "type", "category"),
+    ),
+    _core_tool(
+        "delete_bookmark",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("id", int | None, None),
+            ("address", str | None, None),
+            ("category", str | None, None),
+            ("comment", str | None, None),
+            ("type", str | None, None),
+        ),
+        omit_falsey_keys=("address", "category", "comment", "type"),
+        checkout_required=True,
+    ),
     # datatype_ops
     _core_tool(
         "create_struct",
@@ -1023,6 +1132,18 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         "clear_struct",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
         safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("struct_name", str, ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "delete_struct",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("struct_name", str, ...),
@@ -1090,6 +1211,31 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         input_fields=(
             ("enum_name", str, ...),
             ("values", list[str], ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "delete_enum",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("enum_name", str, ...),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("category",),
+        checkout_required=True,
+    ),
+    _core_tool(
+        "rename_data_type",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("name", str, ...),
+            ("new_name", str, ...),
             ("category", str | None, None),
         ),
         omit_falsey_keys=("category",),
