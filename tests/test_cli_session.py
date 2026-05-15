@@ -5,7 +5,7 @@ import types
 import pytest
 
 from ghidra_mcp import cli
-from ghidra_mcp.contracts.tool_spec import get_all_tool_specs
+from ghidra_mcp.contracts.tool_spec import ToolProfile, filter_tool_specs, get_all_tool_specs
 
 
 class FakeCoreCommandService:
@@ -482,19 +482,6 @@ def test_list_methods_and_list_classes_error_message_compat(monkeypatch, call, m
         call()
 
 
-def test_register_shared_project_sync_tools_is_idempotent(monkeypatch):
-    calls: list[str] = []
-    fake_runtime = types.SimpleNamespace(register_shared_sync=lambda: calls.append("register"))
-
-    monkeypatch.setattr(cli, "_runtime", fake_runtime)
-    monkeypatch.setattr(cli, "_shared_project_sync_tools_registered", False)
-
-    cli.register_shared_project_sync_tools()
-    cli.register_shared_project_sync_tools()
-
-    assert calls == ["register"]
-
-
 def test_parse_args_accepts_http():
     args = cli.parse_args(
         [
@@ -533,17 +520,36 @@ def test_parse_args_rejects_stream_http():
         )
 
 
-def test_parse_args_enable_shared_project_sync():
+def test_parse_args_accepts_tool_filter_options():
     args = cli.parse_args(
         [
             "--project-location",
             "/tmp/sample.gpr",
             "--domain-path",
             "/main",
-            "--enable-shared-project-sync",
+            "--tool-profile",
+            "full",
+            "--allow-category",
+            "shared_sync",
+            "--add-category",
+            "core",
+            "--allow-safety",
+            "read_only",
+            "--allow-operation-level",
+            "advanced",
+            "--enable-tool",
+            "rename_function",
+            "--disable-tool",
+            "set_bytes",
         ]
     )
-    assert args.enable_shared_project_sync is True
+    assert args.tool_profile == "full"
+    assert args.allow_category == ["shared_sync"]
+    assert args.add_category == ["core"]
+    assert args.allow_safety == ["read_only"]
+    assert args.allow_operation_level == ["advanced"]
+    assert args.enable_tool == ["rename_function"]
+    assert args.disable_tool == ["set_bytes"]
 
 
 def test_parse_args_ghidra_server_auth_options():
@@ -811,4 +817,72 @@ def test_ensure_supported_ghidra_installation_raises_for_missing_linux_arm64(mon
 
 
 def test_public_tool_functions_match_declared_specs():
-    assert set(cli.PUBLIC_TOOL_FUNCTIONS) == set(get_all_tool_specs(include_shared_sync=True))
+    assert set(cli.PUBLIC_TOOL_FUNCTIONS) == set(get_all_tool_specs())
+
+
+def test_get_registry_keeps_empty_selected_specs(monkeypatch):
+    captured: dict[str, object] = {}
+    sentinel_registry = object()
+    sentinel_mcp = object()
+
+    def fake_create_cli_runtime(
+        *,
+        registered_specs,
+        core_accessor,
+        checkout_required_commands,
+        dispatcher_provider,
+        registry_provider,
+    ):
+        captured["registered_specs"] = dict(registered_specs)
+        captured["checkout_required_commands"] = set(checkout_required_commands)
+        return types.SimpleNamespace(
+            registry=sentinel_registry,
+            runtime=types.SimpleNamespace(mcp=sentinel_mcp),
+        )
+
+    monkeypatch.setattr(cli, "_registry", None)
+    monkeypatch.setattr(cli, "create_cli_runtime", fake_create_cli_runtime)
+
+    assert cli._get_registry({}) is sentinel_registry
+    assert captured["registered_specs"] == {}
+    assert captured["checkout_required_commands"] == set()
+    assert cli.mcp is sentinel_mcp
+
+
+def test_resolve_tool_specs_from_args_defaults_to_default_profile():
+    args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+        ]
+    )
+    expected = filter_tool_specs(profile=ToolProfile.DEFAULT)
+    resolved = cli.resolve_tool_specs_from_args(args)
+
+    assert set(resolved) == set(expected)
+    assert "get_project_sync_status" not in resolved
+
+
+def test_resolve_tool_specs_from_args_explicit_default_matches_no_args():
+    implicit_args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+        ]
+    )
+    explicit_args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--tool-profile",
+            "default",
+        ]
+    )
+
+    assert set(cli.resolve_tool_specs_from_args(implicit_args)) == set(cli.resolve_tool_specs_from_args(explicit_args))

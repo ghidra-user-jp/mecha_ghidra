@@ -4,7 +4,13 @@ import pytest
 from mcp.types import CallToolResult
 
 import ghidra_mcp.presentation.tool_dispatcher as tool_dispatcher_module
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolExposure, ToolSpec
+from ghidra_mcp.contracts.tool_spec import (
+    ExecutorKind,
+    ToolCategoryTag,
+    ToolOperationLevel,
+    ToolSafetyTag,
+    ToolSpec,
+)
 from ghidra_mcp.contracts.tool_models import create_typed_input_model, create_typed_output_model
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
@@ -672,7 +678,9 @@ def test_dispatch_tool_validates_output_after_result_adapter(monkeypatch):
 
     spec = ToolSpec(
         name="dummy_load",
-        exposure=ToolExposure.ALWAYS,
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
         executor_kind=ExecutorKind.REGISTRY_METHOD,
         command_or_method="load_program",
         input_model=create_typed_input_model("DummyInput", {"domain_path": (str, ...)}),

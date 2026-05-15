@@ -3,7 +3,7 @@
 [English](README.md) | [日本語](README.ja.md)
 
 # Mecha Ghidra - Headless Ghidra MCP for Ghidra Server
-Mecha Ghidra is a Python package that exposes Ghidra as a headless MCP server with PyGhidra and FastMCP. It supports analysis and editing in Ghidra projects, multi-target session management, import/load switching, and optional shared-project sync workflows for collaborative AI-assisted reverse engineering.
+Mecha Ghidra is a Python package that exposes Ghidra as a headless MCP server with PyGhidra and FastMCP. It supports analysis and editing in Ghidra projects, multi-target session management, import/load switching, and tag-based shared-project sync workflows for collaborative AI-assisted reverse engineering.
 
 ## Documentation
 
@@ -182,7 +182,7 @@ After mutating tools such as `rename_function_by_address`, call `save_project_pr
 - `add_class_members` - Add members to class-like data type
 - `remove_class_members` - Remove members from class-like data type
 
-#### Shared Project Sync (only with `--enable-shared-project-sync`)
+#### Shared Project Sync (`shared_sync` category)
 
 `get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `add_to_version_control` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `delete_shared_project_file` / `reload` support optional `domain_path` where documented (if omitted, the currently loaded program is used; deletion always requires an explicit `domain_path`).
 
@@ -199,6 +199,90 @@ After mutating tools such as `rename_function_by_address`, call `save_project_pr
 - `reload_project_program` - Reload currently opened program
 
 See the [Usage Guide](docs/usage.md) for detailed workflows and constraints.
+
+### Tool Exposure Controls
+
+Every tool now carries three tags:
+
+- `category`: `core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`, `shared_sync`
+- `safety`: `read_only`, `write`, `destructive_write`
+- `operation_level`: `basic`, `standard`, `advanced`
+
+Profiles:
+
+- `default`: existing-compatible default. Categories = `core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`
+- `readonly`: `default` categories + `read_only` only
+- `full`: every category, including `shared_sync`
+
+Rules:
+
+- No tool flags means the same result as `--tool-profile default`
+- `shared_sync` is now a normal `category`
+- `shared_sync` is not included by default
+- `--enable-shared-project-sync` has been removed
+- Repeating the same allow flag is OR
+- Different allow flag types combine with AND
+- `--allow-category` replaces the current category set
+- `--add-category` adds categories on top of the current set
+- `--enable-tool` adds tools after tag/profile filtering
+- `--disable-tool` removes tools last and always wins
+
+Examples:
+
+Existing-compatible startup:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main
+```
+
+Readonly profile:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile readonly
+```
+
+Full profile:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile full
+```
+
+Default profile plus shared-project sync:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile default \
+    --add-category shared_sync
+```
+
+Full profile narrowed to readonly tools only:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile full \
+    --allow-safety read_only
+```
+
+Individual enable/disable overrides:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile readonly \
+    --enable-tool rename_function \
+    --disable-tool set_bytes
+```
 
 ## License
 

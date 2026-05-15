@@ -3,7 +3,7 @@
 [English](README.md) | [日本語](README.ja.md)
 
 # Mecha Ghidra — Headless Ghidra MCP for Ghidra Server
-PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開する Python パッケージです。Ghidra プロジェクトの解析・編集に加え、複数ターゲット管理やプログラムの import/load 切り替え、オプションの shared project 同期機能を使った AI クライアントとの共同解析まで行えます。
+PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開する Python パッケージです。Ghidra プロジェクトの解析・編集に加え、複数ターゲット管理やプログラムの import/load 切り替え、タグベースで制御できる shared project 同期機能を使った AI クライアントとの共同解析まで行えます。
 
 ## ドキュメント
 
@@ -186,7 +186,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `add_class_members` - クラス相当データ型へメンバーを追加
 - `remove_class_members` - クラス相当データ型からメンバーを削除
 
-#### Shared Project Sync (`--enable-shared-project-sync` 指定時のみ)
+#### Shared Project Sync（`shared_sync` category）
 
 `get_project_sync_status` / `get_version_history` / `get_version_diff` / `checkout` / `add_to_version_control` / `commit` / `pull` / `undo_checkout` / `terminate_checkout` / `delete_shared_project_file` / `reload` は記載のある箇所で `domain_path` を指定できます（未指定時は現在ロード中のprogram。削除は明示的な `domain_path` が必須）。
 
@@ -203,6 +203,90 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `reload_project_program` - 現在プログラムを再ロード
 
 詳細な運用フローや制約事項は [利用ガイド](docs/usage.ja.md) を参照してください。
+
+### ツール公開制御
+
+各ツールには次の 3 種類のタグがあります。
+
+- `category`: `core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`, `shared_sync`
+- `safety`: `read_only`, `write`, `destructive_write`
+- `operation_level`: `basic`, `standard`, `advanced`
+
+プロファイル:
+
+- `default`: 既存互換。`core`, `function_analysis`, `memory_data`, `symbol_comment_edit`, `datatype_ops`
+- `readonly`: `default` の category + `read_only` のみ
+- `full`: 全 category を公開。`shared_sync` も含む
+
+評価ルール:
+
+- ツール制御引数を何も付けない場合は `--tool-profile default` と同じ
+- `shared_sync` は通常の `category` として扱う
+- 既定では `shared_sync` を含まない
+- `--enable-shared-project-sync` は廃止
+- 同じ種類の allow 指定は OR
+- 異なる種類の allow 指定は AND
+- `--allow-category` は現在の category 集合を置き換える
+- `--add-category` は現在の category 集合に追加する
+- `--enable-tool` はタグ/profile フィルタ後に追加する
+- `--disable-tool` は最後に除外し、常に優先される
+
+起動例:
+
+既存互換:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main
+```
+
+readonly:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile readonly
+```
+
+full:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile full
+```
+
+default + shared_sync 追加:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile default \
+    --add-category shared_sync
+```
+
+full + readonly 絞り込み:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile full \
+    --allow-safety read_only
+```
+
+個別 enable / disable:
+
+```bash
+uv run ghidra-mcp \
+    --project-location /path/to/project.gpr \
+    --domain-path /main \
+    --tool-profile readonly \
+    --enable-tool rename_function \
+    --disable-tool set_bytes
+```
 
 ## ライセンス
 

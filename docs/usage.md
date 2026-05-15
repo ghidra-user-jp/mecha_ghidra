@@ -131,7 +131,10 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - `--transport http` is recommended for HTTP connectivity. This starts FastMCP in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
 - `--transport sse` is still available for compatibility (`/sse`).
 - If you bind to `--mcp-host 0.0.0.0` (or `::`), protection assumptions differ from local-only mode. Use reverse proxy, TLS, and access controls for external exposure.
-- Enable shared-project sync tools with `--enable-shared-project-sync` only when you need to expose `commit/pull/checkout/delete` operations.
+- Tool exposure is controlled by `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, and `--disable-tool`.
+- `shared_sync` is a regular tool category. Add it with `--add-category shared_sync` or use `--tool-profile full` when you need to expose shared-project sync tools for `commit/pull/checkout/delete` operations.
+- No tool flags is equivalent to `--tool-profile default`, which keeps the default tool set and excludes `shared_sync`.
+- `--allow-category` replaces the current category set, `--add-category` extends it, same-type allow flags are OR, and different allow types are AND.
 - If shared-project authentication is required, specify `--ghidra-server-user` together with exactly one of `--ghidra-server-password` or `--ghidra-server-password-env`. Supplying only one side, or supplying both password options together, causes startup failure.
 - Startup also fails when `--ghidra-server-password` is empty or when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged. If you want to avoid exposing secrets in process arguments, prefer `--ghidra-server-password-env`.
 - On Linux ARM64, startup/decompiler initialization now fails with a specific message when `Ghidra/Features/Decompiler/os/linux_arm_64` is missing or not executable.
@@ -152,6 +155,26 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
 - The Docker server starts with project metadata only, so create the project with `create_project` on a fresh volume, then import with `import_program` and open it with `load_project_program`.
 
+### Tool Exposure Examples
+
+Readonly profile:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile readonly
+```
+
+Default profile plus shared-project sync:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --add-category shared_sync
+```
+
+Full profile narrowed to readonly tools:
+
+```bash
+uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety read_only
+```
+
 ### Startup Example with Shared-Project Authentication
 
 ```bash
@@ -161,7 +184,7 @@ uv run ghidra-mcp \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
-    --enable-shared-project-sync \
+    --add-category shared_sync \
     --ghidra-server-user your-user \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
 ```
@@ -174,7 +197,7 @@ uv run ghidra-mcp \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
-    --enable-shared-project-sync \
+    --add-category shared_sync \
     --ghidra-server-user your-user \
     --ghidra-server-password 'your-password'
 ```
