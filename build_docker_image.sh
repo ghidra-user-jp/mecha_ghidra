@@ -47,7 +47,7 @@ Environment:
   GHIDRA_DIST_SHA256    Default Ghidra ZIP SHA256 override.
 
 Defaults:
-  linux/amd64           Uses the upstream official Ghidra 12.0.4 ZIP.
+  linux/amd64           Uses the upstream official Ghidra 12.1 ZIP.
   linux/arm64           Uses the mecha_ghidra patched ARM64 Ghidra ZIP.
 EOF
 }

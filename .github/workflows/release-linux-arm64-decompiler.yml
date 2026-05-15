@@ -135,6 +135,8 @@ jobs:
               "*.sha256",
               "mecha_ghidra_release_assets.txt",
               "mecha_ghidra_source_code.zip",
+              "mecha_ghidra_docker_arm64_*.zip",
+              "mecha_ghidra_docker_arm64_*.tar.gz",
               "ghidra_*_linux_arm_64_decompiler.zip",
               "ghidra_*_linux_arm_64_decompiler_overlay.tar.gz",
           ]

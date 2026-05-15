@@ -91,7 +91,7 @@ DOCKER_PLATFORM=linux/arm64 docker compose up -d
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_docker_arm64_ghidra_12.1_patched.zip \
 GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```

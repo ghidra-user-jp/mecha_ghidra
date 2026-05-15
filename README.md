@@ -60,12 +60,12 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 The repository now ships a dedicated build path for Linux ARM64 Ghidra decompiler binaries.
 
 - `./scripts/build_linux_arm64_decompiler.sh` builds `linux_arm_64` native `decompile` and `sleigh`.
-- The release workflow publishes two artifacts:
+- The build script creates raw artifacts:
   - `ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
   - `ghidra_*_linux_arm_64_decompiler.zip`
 - The overlay archive preserves the exact path `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` so it can be unpacked directly into an existing Ghidra install.
 - The patched ZIP is intended for ARM Linux Docker builds and direct ARM Linux installs.
-- GitHub releases also publish `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` assets whose names explicitly indicate they are for Apple Silicon / Linux ARM64 Docker or overlay use.
+- GitHub releases publish user-facing `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` copies whose names explicitly indicate they are for Apple Silicon / Linux ARM64 Docker or overlay use.
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
 
 Example ARM64 Docker build:
@@ -79,7 +79,7 @@ Override example:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_12.0.4_PUBLIC_20260303_linux_arm_64_decompiler.zip \
+GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_docker_arm64_ghidra_12.1_patched.zip \
 GHIDRA_DIST_SHA256=<release-asset-sha256> \
 docker compose build
 ```
