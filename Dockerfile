@@ -8,7 +8,7 @@ ARG GHIDRA_DIST_SHA256
 ARG GHIDRA_DIST_URL_AMD64_DEFAULT=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1_build/ghidra_12.1_PUBLIC_20260513.zip
 ARG GHIDRA_DIST_SHA256_AMD64_DEFAULT=aa5cbcbbf48f41ca185fce900e19592f1ade4cd5994eb6e0ede468dac8a6f302
 ARG GHIDRA_DIST_URL_ARM64_DEFAULT=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.2/mecha_ghidra_docker_arm64_ghidra_12.1_patched.zip
-ARG GHIDRA_DIST_SHA256_ARM64_DEFAULT=be573228d23e0c7cc2217e768667ef2478d7e673e68ae4e2fa6dddec072d3494
+ARG GHIDRA_DIST_SHA256_ARM64_DEFAULT=5b6c03d01040d9fb966b6c7c96b9530e7e8017696e6b836896f4887ef87dbe00
 
 ENV DEBIAN_FRONTEND=noninteractive \
     GHIDRA_INSTALL_DIR=/opt/ghidra \
