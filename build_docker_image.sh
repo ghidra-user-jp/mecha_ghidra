@@ -10,13 +10,16 @@ DEFAULT_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 RELEASE_ENV_FILE="${REPO_ROOT}/scripts/ghidra_release.env"
 DEFAULT_GHIDRA_DIST_URL_AMD64=""
 DEFAULT_GHIDRA_DIST_SHA256_AMD64=""
-DEFAULT_GHIDRA_DIST_URL_ARM64=""
-DEFAULT_GHIDRA_DIST_SHA256_ARM64=""
+DEFAULT_GHIDRA_DECOMPILER_NATIVES_URL_ARM64=""
+DEFAULT_GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64=""
 DOCKER_CONTEXT=""
 IMAGE_TAG="${DEFAULT_IMAGE_TAG}"
 PLATFORM="${DEFAULT_PLATFORM}"
 GHIDRA_DIST_URL="${GHIDRA_DIST_URL:-}"
 GHIDRA_DIST_SHA256="${GHIDRA_DIST_SHA256:-}"
+GHIDRA_DIST_OVERRIDDEN=0
+GHIDRA_DECOMPILER_NATIVES_URL="${GHIDRA_DECOMPILER_NATIVES_URL:-}"
+GHIDRA_DECOMPILER_NATIVES_SHA256="${GHIDRA_DECOMPILER_NATIVES_SHA256:-}"
 TEMP_DOCKER_CONFIG=""
 
 cleanup() {
@@ -39,16 +42,25 @@ Options:
   --ghidra-dist-url URL Override the Ghidra distribution ZIP URL.
   --ghidra-dist-sha256 HASH
                         Override the expected SHA256 for the Ghidra ZIP.
+  --decompiler-natives-url URL
+                        Override the decompiler natives overlay ZIP URL.
+  --decompiler-natives-sha256 HASH
+                        Override the expected SHA256 for the decompiler natives ZIP.
   -h, --help            Show this help.
 
 Environment:
   DOCKER_PLATFORM       Default platform override.
   GHIDRA_DIST_URL       Default Ghidra ZIP URL override.
   GHIDRA_DIST_SHA256    Default Ghidra ZIP SHA256 override.
+  GHIDRA_DECOMPILER_NATIVES_URL
+                        Default decompiler natives overlay URL override.
+  GHIDRA_DECOMPILER_NATIVES_SHA256
+                        Default decompiler natives overlay SHA256 override.
 
 Defaults:
   linux/amd64           Uses the upstream official Ghidra 12.1 ZIP.
-  linux/arm64           Uses the mecha_ghidra patched ARM64 Ghidra ZIP.
+  linux/arm64           Uses the upstream official Ghidra 12.1 ZIP plus
+                        the mecha_ghidra decompiler natives overlay.
 EOF
 }
 
@@ -70,8 +82,8 @@ load_release_env() {
 
   DEFAULT_GHIDRA_DIST_URL_AMD64="${MECHA_GHIDRA_GHIDRA_DIST_URL}"
   DEFAULT_GHIDRA_DIST_SHA256_AMD64="${MECHA_GHIDRA_GHIDRA_DIST_SHA256}"
-  DEFAULT_GHIDRA_DIST_URL_ARM64="${MECHA_GHIDRA_ARM64_PATCHED_DIST_URL}"
-  DEFAULT_GHIDRA_DIST_SHA256_ARM64="${MECHA_GHIDRA_ARM64_PATCHED_DIST_SHA256}"
+  DEFAULT_GHIDRA_DECOMPILER_NATIVES_URL_ARM64="${MECHA_GHIDRA_DECOMPILER_NATIVES_URL}"
+  DEFAULT_GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64="${MECHA_GHIDRA_DECOMPILER_NATIVES_SHA256}"
 }
 
 load_env_file() {
@@ -97,6 +109,12 @@ load_env_file() {
         ;;
       GHIDRA_DIST_SHA256)
         [[ -n "${GHIDRA_DIST_SHA256}" ]] || GHIDRA_DIST_SHA256="${value}"
+        ;;
+      GHIDRA_DECOMPILER_NATIVES_URL)
+        [[ -n "${GHIDRA_DECOMPILER_NATIVES_URL}" ]] || GHIDRA_DECOMPILER_NATIVES_URL="${value}"
+        ;;
+      GHIDRA_DECOMPILER_NATIVES_SHA256)
+        [[ -n "${GHIDRA_DECOMPILER_NATIVES_SHA256}" ]] || GHIDRA_DECOMPILER_NATIVES_SHA256="${value}"
         ;;
     esac
   done < "${env_path}"
@@ -143,22 +161,8 @@ prepare_docker_environment() {
 }
 
 select_ghidra_distribution() {
-  if [[ -n "${GHIDRA_DIST_URL}" || -n "${GHIDRA_DIST_SHA256}" ]]; then
-    if [[ -z "${GHIDRA_DIST_URL}" || -z "${GHIDRA_DIST_SHA256}" ]]; then
-      echo "Error: GHIDRA_DIST_URL and GHIDRA_DIST_SHA256 must be provided together." >&2
-      exit 2
-    fi
-    return 0
-  fi
-
   case "${PLATFORM}" in
-    linux/amd64*)
-      GHIDRA_DIST_URL="${DEFAULT_GHIDRA_DIST_URL_AMD64}"
-      GHIDRA_DIST_SHA256="${DEFAULT_GHIDRA_DIST_SHA256_AMD64}"
-      ;;
-    linux/arm64*)
-      GHIDRA_DIST_URL="${DEFAULT_GHIDRA_DIST_URL_ARM64}"
-      GHIDRA_DIST_SHA256="${DEFAULT_GHIDRA_DIST_SHA256_ARM64}"
+    linux/amd64*|linux/arm64*)
       ;;
     *)
       echo "Error: unsupported Docker platform '${PLATFORM}'." >&2
@@ -166,6 +170,27 @@ select_ghidra_distribution() {
       exit 2
       ;;
   esac
+
+  if [[ -n "${GHIDRA_DIST_URL}" || -n "${GHIDRA_DIST_SHA256}" ]]; then
+    if [[ -z "${GHIDRA_DIST_URL}" || -z "${GHIDRA_DIST_SHA256}" ]]; then
+      echo "Error: GHIDRA_DIST_URL and GHIDRA_DIST_SHA256 must be provided together." >&2
+      exit 2
+    fi
+    GHIDRA_DIST_OVERRIDDEN=1
+  else
+    GHIDRA_DIST_URL="${DEFAULT_GHIDRA_DIST_URL_AMD64}"
+    GHIDRA_DIST_SHA256="${DEFAULT_GHIDRA_DIST_SHA256_AMD64}"
+  fi
+
+  if [[ -n "${GHIDRA_DECOMPILER_NATIVES_URL}" || -n "${GHIDRA_DECOMPILER_NATIVES_SHA256}" ]]; then
+    if [[ -z "${GHIDRA_DECOMPILER_NATIVES_URL}" || -z "${GHIDRA_DECOMPILER_NATIVES_SHA256}" ]]; then
+      echo "Error: GHIDRA_DECOMPILER_NATIVES_URL and GHIDRA_DECOMPILER_NATIVES_SHA256 must be provided together." >&2
+      exit 2
+    fi
+  elif [[ "${PLATFORM}" == linux/arm64* && "${GHIDRA_DIST_OVERRIDDEN}" == "0" ]]; then
+    GHIDRA_DECOMPILER_NATIVES_URL="${DEFAULT_GHIDRA_DECOMPILER_NATIVES_URL_ARM64}"
+    GHIDRA_DECOMPILER_NATIVES_SHA256="${DEFAULT_GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64}"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -193,6 +218,16 @@ while [[ $# -gt 0 ]]; do
     --ghidra-dist-sha256)
       [[ $# -ge 2 ]] || { echo "Error: --ghidra-dist-sha256 requires a value." >&2; exit 2; }
       GHIDRA_DIST_SHA256="$2"
+      shift 2
+      ;;
+    --decompiler-natives-url)
+      [[ $# -ge 2 ]] || { echo "Error: --decompiler-natives-url requires a value." >&2; exit 2; }
+      GHIDRA_DECOMPILER_NATIVES_URL="$2"
+      shift 2
+      ;;
+    --decompiler-natives-sha256)
+      [[ $# -ge 2 ]] || { echo "Error: --decompiler-natives-sha256 requires a value." >&2; exit 2; }
+      GHIDRA_DECOMPILER_NATIVES_SHA256="$2"
       shift 2
       ;;
     -h|--help)
@@ -243,6 +278,10 @@ fi
 echo "Using docker platform: ${PLATFORM}"
 echo "Using Ghidra distribution URL: ${GHIDRA_DIST_URL}"
 echo "Using Ghidra distribution SHA256: ${GHIDRA_DIST_SHA256}"
+if [[ -n "${GHIDRA_DECOMPILER_NATIVES_URL}" ]]; then
+  echo "Using decompiler natives overlay URL: ${GHIDRA_DECOMPILER_NATIVES_URL}"
+  echo "Using decompiler natives overlay SHA256: ${GHIDRA_DECOMPILER_NATIVES_SHA256}"
+fi
 echo "Repository root: ${REPO_ROOT}"
 
 "${DOCKER_CMD[@]}" buildx build \
@@ -252,6 +291,8 @@ echo "Repository root: ${REPO_ROOT}"
   --build-arg "TARGETPLATFORM=${PLATFORM}" \
   --build-arg "GHIDRA_DIST_URL=${GHIDRA_DIST_URL}" \
   --build-arg "GHIDRA_DIST_SHA256=${GHIDRA_DIST_SHA256}" \
+  --build-arg "GHIDRA_DECOMPILER_NATIVES_URL=${GHIDRA_DECOMPILER_NATIVES_URL}" \
+  --build-arg "GHIDRA_DECOMPILER_NATIVES_SHA256=${GHIDRA_DECOMPILER_NATIVES_SHA256}" \
   -t "${IMAGE_TAG}" \
   "${REPO_ROOT}"
 

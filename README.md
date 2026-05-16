@@ -48,8 +48,8 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 4. Point your MCP client to `http://127.0.0.1:8081/mcp`
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, which is required for the bundled Linux decompiler.
-- When you switch to `linux/arm64`, Docker now auto-selects the bundled mecha_ghidra patched Ghidra distribution. If you force the upstream official ZIP on ARM64, the build fails early with a clear error instead of failing later inside `decompile_function`.
-- You can still override the bundle by setting both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`.
+- When you switch to `linux/arm64`, Docker now uses the upstream official Ghidra distribution plus the bundled mecha_ghidra decompiler natives overlay. If ARM64 starts without the overlay, the build fails early with a clear error instead of failing later inside `decompile_function`.
+- You can still override the Ghidra distribution by setting both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`. For ARM64 overlay overrides, also set both `GHIDRA_DECOMPILER_NATIVES_URL` and `GHIDRA_DECOMPILER_NATIVES_SHA256`.
 - `./samples` is shared into the container as `/samples` in read-only mode. Use `/samples/<filename>` with `import_program`.
 - Ghidra project data is persisted in the named volume `ghidra-projects`, and the default project path is `/data/projects/default.gpr`. Create that project once before first use, or mount an existing Ghidra project there.
 - The server starts with project metadata only and no program loaded. Run `import_program(target="default", binary_path="/samples/<filename>")`, then pass the returned `domain_path` to `load_project_program`.
@@ -71,7 +71,14 @@ The repository ships dedicated build paths for the Ghidra native decompiler bina
   - `ghidra_*_mac_x86_64_decompiler.zip`
 - The overlay archive preserves the exact path `Ghidra/Features/Decompiler/os/<platform>/{decompile,sleigh}` so it can be unpacked directly into an existing Ghidra install.
 - The patched ZIPs are intended for the matching platform: ARM Linux Docker/direct installs, Apple Silicon macOS, or Intel macOS.
-- GitHub releases publish user-facing `mecha_ghidra_docker_arm64_*` and `mecha_ghidra_macos_*` copies whose names explicitly indicate their target platform and use.
+- GitHub releases publish one user-facing `mecha_ghidra_decompiler_natives_all.zip` that contains all added native decompiler files:
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
+- The release body lists only those added paths.
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
 
 Example ARM64 Docker build:
@@ -85,8 +92,8 @@ Override example:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_docker_arm64_ghidra_12.1_patched.zip \
-GHIDRA_DIST_SHA256=<release-asset-sha256> \
+GHIDRA_DECOMPILER_NATIVES_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_decompiler_natives_all.zip \
+GHIDRA_DECOMPILER_NATIVES_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 

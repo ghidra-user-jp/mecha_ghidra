@@ -52,8 +52,8 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 4. MCP クライアントは `http://127.0.0.1:8081/mcp` に接続
 
 - `docker compose build` も引き続き利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、これは同梱 Linux decompiler を動かすために必要です。
-- `linux/arm64` を使う場合は、Docker build が既定で同梱の mecha_ghidra patched Ghidra 配布物を自動選択します。upstream の公式 ZIP を ARM64 へ無理に指定した場合は、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
-- 独自の patched ZIP を使いたい場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定して上書きできます。
+- `linux/arm64` を使う場合は、Docker build が upstream 公式 Ghidra 配布物に mecha_ghidra の decompiler natives overlay を重ねます。ARM64 overlay が無い状態なら、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
+- Ghidra 配布物を上書きしたい場合は `GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定します。ARM64 overlay も上書きする場合は、`GHIDRA_DECOMPILER_NATIVES_URL` と `GHIDRA_DECOMPILER_NATIVES_SHA256` も両方指定してください。
 - `./samples` はコンテナ内に `/samples` として read-only 共有されます。`import_program` では `/samples/<filename>` を指定してください。
 - Ghidra project は named volume `ghidra-projects` に永続化され、既定の project path は `/data/projects/default.gpr` です。初回利用前に一度その project を作成するか、既存の Ghidra project をそこへ mount してください。
 - 起動直後は program 未ロードの状態です。`import_program(target="default", binary_path="/samples/<filename>")` 実行後、返ってきた `domain_path` を `load_project_program` に渡してください。
@@ -75,7 +75,14 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
   - `ghidra_*_mac_x86_64_decompiler.zip`
 - overlay tarball には `Ghidra/Features/Decompiler/os/<platform>/{decompile,sleigh}` のパスがそのまま入るので、既存の Ghidra install にそのまま展開できます。
 - patched ZIP は対象 platform ごとに、ARM Linux Docker/直接配置、Apple Silicon macOS、Intel macOS で使う想定です。
-- GitHub release には、対象 platform が分かるように `mecha_ghidra_docker_arm64_*` と `mecha_ghidra_macos_*` の利用者向け copy を publish します。
+- GitHub release には、追加した native decompiler ファイルをすべて含む利用者向け `mecha_ghidra_decompiler_natives_all.zip` を 1 つだけ publish します。
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
+- release 本文には、上記の追加パスだけを書きます。
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使ってください。
 
 ARM64 Docker build 例:
@@ -89,8 +96,8 @@ DOCKER_PLATFORM=linux/arm64 docker compose up -d
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_docker_arm64_ghidra_12.1_patched.zip \
-GHIDRA_DIST_SHA256=<release-asset-sha256> \
+GHIDRA_DECOMPILER_NATIVES_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_decompiler_natives_all.zip \
+GHIDRA_DECOMPILER_NATIVES_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 

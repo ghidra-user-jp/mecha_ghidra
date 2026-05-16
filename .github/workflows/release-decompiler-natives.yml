@@ -60,8 +60,8 @@ jobs:
       - name: Make scripts executable
         run: chmod +x scripts/build_decompiler_natives.sh scripts/build_linux_arm64_decompiler.sh
 
-      - name: Build decompiler overlay and patched distribution
-        run: ./scripts/build_decompiler_natives.sh --platform "${{ matrix.platform }}" --no-docker --output-dir dist
+      - name: Build decompiler overlay
+        run: ./scripts/build_decompiler_natives.sh --platform "${{ matrix.platform }}" --no-docker --no-patched-dist --output-dir dist
 
       - name: Verify overlay contents
         run: |
@@ -69,13 +69,6 @@ jobs:
           test -n "${overlay}"
           tar -tzf "${overlay}" | grep "^Ghidra/Features/Decompiler/os/${{ matrix.platform }}/decompile$"
           tar -tzf "${overlay}" | grep "^Ghidra/Features/Decompiler/os/${{ matrix.platform }}/sleigh$"
-
-      - name: Verify patched distribution contents
-        run: |
-          patched_zip="$(find dist -type f -name "*${{ matrix.platform }}_decompiler.zip" | head -n 1)"
-          test -n "${patched_zip}"
-          unzip -Z1 "${patched_zip}" | grep "/Ghidra/Features/Decompiler/os/${{ matrix.platform }}/decompile$"
-          unzip -Z1 "${patched_zip}" | grep "/Ghidra/Features/Decompiler/os/${{ matrix.platform }}/sleigh$"
 
       - name: Upload platform artifacts
         uses: actions/upload-artifact@v4
@@ -99,83 +92,51 @@ jobs:
         with:
           path: platform-artifacts
 
-      - name: Prepare user-facing release assets
+      - name: Prepare user-facing release asset
         run: |
           set -eu
           . ./scripts/ghidra_release.env
           mkdir -p release-assets
 
-          copy_asset() {
-            raw_pattern="$1"
-            release_name="$2"
-            asset="$(find platform-artifacts -type f -name "${raw_pattern}" | head -n 1)"
-            test -n "${asset}"
-            cp "${asset}" "release-assets/${release_name}"
-          }
+          mkdir -p release-assets/decompiler-natives
+          for overlay in \
+            "$(find platform-artifacts -type f -name '*linux_arm_64_decompiler_overlay.tar.gz' | head -n 1)" \
+            "$(find platform-artifacts -type f -name '*mac_arm_64_decompiler_overlay.tar.gz' | head -n 1)" \
+            "$(find platform-artifacts -type f -name '*mac_x86_64_decompiler_overlay.tar.gz' | head -n 1)"
+          do
+            test -n "${overlay}"
+            tar -xzf "${overlay}" -C release-assets/decompiler-natives
+          done
 
-          copy_asset "*linux_arm_64_decompiler_overlay.tar.gz" "${MECHA_GHIDRA_RELEASE_LINUX_ARM64_OVERLAY_BASENAME}"
-          copy_asset "*linux_arm_64_decompiler.zip" "${MECHA_GHIDRA_RELEASE_LINUX_ARM64_PATCHED_DIST_BASENAME}"
-          copy_asset "*mac_arm_64_decompiler_overlay.tar.gz" "${MECHA_GHIDRA_RELEASE_MAC_ARM64_OVERLAY_BASENAME}"
-          copy_asset "*mac_arm_64_decompiler.zip" "${MECHA_GHIDRA_RELEASE_MAC_ARM64_PATCHED_DIST_BASENAME}"
-          copy_asset "*mac_x86_64_decompiler_overlay.tar.gz" "${MECHA_GHIDRA_RELEASE_MAC_X86_64_OVERLAY_BASENAME}"
-          copy_asset "*mac_x86_64_decompiler.zip" "${MECHA_GHIDRA_RELEASE_MAC_X86_64_PATCHED_DIST_BASENAME}"
+          (
+            cd release-assets/decompiler-natives
+            zip -qr "../${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}" Ghidra
+          )
+          rm -rf release-assets/decompiler-natives
 
-      - name: Verify user-facing release assets
+      - name: Verify user-facing release asset
         run: |
           set -eu
           . ./scripts/ghidra_release.env
-          test -f "release-assets/${MECHA_GHIDRA_RELEASE_LINUX_ARM64_OVERLAY_BASENAME}"
-          test -f "release-assets/${MECHA_GHIDRA_RELEASE_LINUX_ARM64_PATCHED_DIST_BASENAME}"
-          test -f "release-assets/${MECHA_GHIDRA_RELEASE_MAC_ARM64_OVERLAY_BASENAME}"
-          test -f "release-assets/${MECHA_GHIDRA_RELEASE_MAC_ARM64_PATCHED_DIST_BASENAME}"
-          test -f "release-assets/${MECHA_GHIDRA_RELEASE_MAC_X86_64_OVERLAY_BASENAME}"
-          test -f "release-assets/${MECHA_GHIDRA_RELEASE_MAC_X86_64_PATCHED_DIST_BASENAME}"
+          zip_path="release-assets/${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}"
+          test -f "${zip_path}"
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_arm_64/decompile$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_arm_64/sleigh$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_x86_64/decompile$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_x86_64/sleigh$'
 
       - name: Prepare release body
         run: |
           set -eu
-          . ./scripts/ghidra_release.env
-          linux_patched_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_LINUX_ARM64_PATCHED_DIST_BASENAME}" | awk '{print $1}')"
-          linux_overlay_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_LINUX_ARM64_OVERLAY_BASENAME}" | awk '{print $1}')"
-          mac_arm_patched_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_MAC_ARM64_PATCHED_DIST_BASENAME}" | awk '{print $1}')"
-          mac_arm_overlay_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_MAC_ARM64_OVERLAY_BASENAME}" | awk '{print $1}')"
-          mac_x86_patched_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_MAC_X86_64_PATCHED_DIST_BASENAME}" | awk '{print $1}')"
-          mac_x86_overlay_sha256="$(sha256sum "release-assets/${MECHA_GHIDRA_RELEASE_MAC_X86_64_OVERLAY_BASENAME}" | awk '{print $1}')"
           cat > release-body.md <<EOF
-          ## Release Assets
-
-          - \`${MECHA_GHIDRA_RELEASE_LINUX_ARM64_PATCHED_DIST_BASENAME}\`
-            Patched Ghidra bundle for Apple Silicon / Linux ARM64 Docker use.
-            This is not the normal source code ZIP.
-            SHA-256: \`${linux_patched_sha256}\`
-
-          - \`${MECHA_GHIDRA_RELEASE_LINUX_ARM64_OVERLAY_BASENAME}\`
-            linux_arm_64 decompiler overlay for an existing Ghidra installation.
-            SHA-256: \`${linux_overlay_sha256}\`
-
-          - \`${MECHA_GHIDRA_RELEASE_MAC_ARM64_PATCHED_DIST_BASENAME}\`
-            Patched Ghidra bundle with mac_arm_64 decompiler binaries for Apple Silicon macOS.
-            This is not the normal source code ZIP.
-            SHA-256: \`${mac_arm_patched_sha256}\`
-
-          - \`${MECHA_GHIDRA_RELEASE_MAC_ARM64_OVERLAY_BASENAME}\`
-            mac_arm_64 decompiler overlay for an existing Ghidra installation.
-            SHA-256: \`${mac_arm_overlay_sha256}\`
-
-          - \`${MECHA_GHIDRA_RELEASE_MAC_X86_64_PATCHED_DIST_BASENAME}\`
-            Patched Ghidra bundle with mac_x86_64 decompiler binaries for Intel macOS.
-            This is not the normal source code ZIP.
-            SHA-256: \`${mac_x86_patched_sha256}\`
-
-          - \`${MECHA_GHIDRA_RELEASE_MAC_X86_64_OVERLAY_BASENAME}\`
-            mac_x86_64 decompiler overlay for an existing Ghidra installation.
-            SHA-256: \`${mac_x86_overlay_sha256}\`
-
-          GitHub's built-in \`Source code (zip)\` and \`Source code (tar.gz)\`
-          links are the normal source code snapshots for this repository.
-
-          Separate \`.sha256\` release assets are no longer published.
-          The SHA-256 values are listed in this release body instead.
+          Ghidra/Features/Decompiler/os/linux_arm_64/decompile
+          Ghidra/Features/Decompiler/os/linux_arm_64/sleigh
+          Ghidra/Features/Decompiler/os/mac_arm_64/decompile
+          Ghidra/Features/Decompiler/os/mac_arm_64/sleigh
+          Ghidra/Features/Decompiler/os/mac_x86_64/decompile
+          Ghidra/Features/Decompiler/os/mac_x86_64/sleigh
           EOF
 
       - name: Remove legacy release assets
@@ -206,6 +167,7 @@ jobs:
               "*.sha256",
               "mecha_ghidra_release_assets.txt",
               "mecha_ghidra_source_code.zip",
+              "mecha_ghidra_decompiler_natives_all.zip",
               "mecha_ghidra_docker_arm64_*.zip",
               "mecha_ghidra_docker_arm64_*.tar.gz",
               "mecha_ghidra_macos_*.zip",

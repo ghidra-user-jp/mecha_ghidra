@@ -24,10 +24,14 @@
   - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
   - `dist/ghidra_*_mac_x86_64_decompiler.zip`
   - matching `.sha256` files for local verification
-- The GitHub Actions workflow `.github/workflows/release-decompiler-natives.yml` builds all release decompiler artifacts on native hosted runners: `ubuntu-24.04-arm`, `macos-15`, and `macos-15-intel`.
-- Tag pushes and published GitHub releases publish the generated release assets after all platform builds complete. Manual workflow runs build and upload workflow artifacts without publishing a release.
-- For GitHub releases, the workflow now republishes clearer user-facing asset names:
-  - `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` for Apple Silicon or Linux ARM64 Docker-related artifacts
-  - `mecha_ghidra_macos_*.zip` / `*.tar.gz` for macOS decompiler artifacts
+- The GitHub Actions workflow `.github/workflows/release-decompiler-natives.yml` builds all release decompiler overlays on native hosted runners: `ubuntu-24.04-arm`, `macos-15`, and `macos-15-intel`.
+- Tag pushes and published GitHub releases publish the generated release asset after all platform builds complete. Manual workflow runs build and upload workflow artifacts without publishing a release.
+- For GitHub releases, the workflow publishes one user-facing `mecha_ghidra_decompiler_natives_all.zip` containing these added files:
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
-- The release page body also explains what each published asset is for in English and shows the SHA-256 values directly, so separate `.sha256` release assets are not published and older legacy checksum assets are removed during publish.
+- The release page body lists only those added paths. Separate `.sha256` and older legacy release assets are removed during publish.

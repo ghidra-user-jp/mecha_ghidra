@@ -74,25 +74,25 @@ If you want to try the server without installing Ghidra on the host, use the bun
 In this compose setup, the server starts with `--project-location /data/projects --project-name default` and expects the project files to live at `/data/projects/default.gpr` and `/data/projects/default.rep`. On a fresh volume, create that empty project from MCP first with `create_project(project_location="/data/projects/default.gpr")`, then import a binary and load it. No program is loaded at startup, so the normal first workflow is `create_project` (fresh volume only), `import_program`, then `load_project_program`.
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, matching the bundled Linux decompiler.
-- You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build now auto-selects the bundled mecha_ghidra patched Ghidra distribution.
-- If you explicitly force the upstream official ZIP on ARM64, Docker now fails fast during build instead of failing later inside `decompile_function`.
-- If you want a custom artifact, provide both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`.
+- You can override `DOCKER_PLATFORM`. When you use `linux/arm64`, the Docker build applies the bundled mecha_ghidra decompiler natives overlay to the upstream official Ghidra distribution.
+- If ARM64 starts without the overlay, Docker now fails fast during build instead of failing later inside `decompile_function`.
+- If you want a custom Ghidra distribution, provide both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`. For a custom ARM64 overlay, provide both `GHIDRA_DECOMPILER_NATIVES_URL` and `GHIDRA_DECOMPILER_NATIVES_SHA256`.
 
 ### ARM64 Docker Build
 
-For Linux ARM64 or Apple Silicon Docker builds, `DOCKER_PLATFORM=linux/arm64` is now enough to use the default patched ARM64 distribution.
+For Linux ARM64 or Apple Silicon Docker builds, `DOCKER_PLATFORM=linux/arm64` is now enough to use the upstream official Ghidra distribution with the default decompiler natives overlay.
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 docker compose build
 DOCKER_PLATFORM=linux/arm64 docker compose up -d
 ```
 
-To override the bundled ARM64 artifact:
+To override the bundled ARM64 decompiler natives overlay:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DIST_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_docker_arm64_ghidra_12.1_patched.zip \
-GHIDRA_DIST_SHA256=<release-asset-sha256> \
+GHIDRA_DECOMPILER_NATIVES_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_decompiler_natives_all.zip \
+GHIDRA_DECOMPILER_NATIVES_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
@@ -112,6 +112,8 @@ This creates:
 - `dist/ghidra_*_mac_arm_64_decompiler.zip`
 - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
 - `dist/ghidra_*_mac_x86_64_decompiler.zip`
+
+GitHub releases publish a single `mecha_ghidra_decompiler_natives_all.zip` containing the added `linux_arm_64`, `mac_arm_64`, and `mac_x86_64` `decompile` / `sleigh` paths.
 
 ### Docker Path Sharing
 

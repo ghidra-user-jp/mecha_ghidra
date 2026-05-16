@@ -24,10 +24,14 @@
   - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
   - `dist/ghidra_*_mac_x86_64_decompiler.zip`
   - ローカル検証用の対応する `.sha256`
-- GitHub Actions の `.github/workflows/release-decompiler-natives.yml` では、release 用 decompiler 成果物をすべて native hosted runner 上でビルドします。対象 runner は `ubuntu-24.04-arm`、`macos-15`、`macos-15-intel` です。
+- GitHub Actions の `.github/workflows/release-decompiler-natives.yml` では、release 用 decompiler overlay をすべて native hosted runner 上でビルドします。対象 runner は `ubuntu-24.04-arm`、`macos-15`、`macos-15-intel` です。
 - tag push と GitHub release publish では、全 platform のビルド完了後に release asset を公開します。手動 workflow 実行では release 公開はせず、workflow artifact としてアップロードします。
-- GitHub release へは、用途が分かりやすい user-facing asset 名で publish します。
-  - `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz`: Apple Silicon / Linux ARM64 の Docker 関連成果物
-  - `mecha_ghidra_macos_*.zip` / `*.tar.gz`: macOS decompiler 成果物
+- GitHub release へは、追加したファイルをすべて含む利用者向け `mecha_ghidra_decompiler_natives_all.zip` を 1 つだけ publish します。
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
+  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使います。
-- release page 本文にも、公開している各 asset の用途を英語で説明し、SHA-256 も直接表示します。そのため `.sha256` の release asset は publish せず、古い legacy checksum asset も publish 時に削除します。
+- release page 本文には、上記の追加パスだけを書きます。`.sha256` や古い legacy release asset は publish 時に削除します。
