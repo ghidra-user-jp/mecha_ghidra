@@ -91,7 +91,7 @@ To override the bundled ARM64 decompiler natives overlay:
 
 ```bash
 DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DECOMPILER_NATIVES_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/mecha_ghidra_decompiler_natives_all.zip \
+GHIDRA_DECOMPILER_NATIVES_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_decompiler_natives_all.zip \
 GHIDRA_DECOMPILER_NATIVES_SHA256=<release-asset-sha256> \
 docker compose build
 ```
@@ -113,7 +113,7 @@ This creates:
 - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
 - `dist/ghidra_*_mac_x86_64_decompiler.zip`
 
-GitHub releases publish both a ready-to-use `mecha_ghidra_ghidra_12.1_decompiler_natives_all.zip` Ghidra bundle and a smaller `mecha_ghidra_decompiler_natives_all.zip` overlay containing the added `linux_arm_64`, `mac_arm_64`, and `mac_x86_64` `decompile` / `sleigh` paths.
+GitHub releases publish both a ready-to-use `ghidra_12.1_decompiler_natives_all.zip` Ghidra bundle and a smaller `ghidra_decompiler_natives_all.zip` overlay containing the added `linux_arm_64`, `mac_arm_64`, and `mac_x86_64` `decompile` / `sleigh` paths.
 
 ### Docker Path Sharing
 

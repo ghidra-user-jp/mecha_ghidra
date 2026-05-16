@@ -27,8 +27,8 @@
 - The GitHub Actions workflow `.github/workflows/release-decompiler-natives.yml` builds all release decompiler overlays on native hosted runners: `ubuntu-24.04-arm`, `macos-15`, and `macos-15-intel`.
 - Tag pushes and published GitHub releases publish the generated release assets after all platform builds complete. Manual workflow runs build and upload workflow artifacts without publishing a release.
 - For GitHub releases, the workflow publishes two user-facing ZIP assets:
-  - `mecha_ghidra_ghidra_12.1_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1 distribution with the native decompiler files already installed
-  - `mecha_ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added native decompiler files for an existing Ghidra 12.1 install
+  - `ghidra_12.1_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1 distribution with the native decompiler files already installed
+  - `ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added native decompiler files for an existing Ghidra 12.1 install
 - The included native decompiler paths are:
   - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
   - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`

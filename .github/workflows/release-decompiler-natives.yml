@@ -210,6 +210,8 @@ jobs:
               "*.sha256",
               "mecha_ghidra_release_assets.txt",
               "mecha_ghidra_source_code.zip",
+              "ghidra_decompiler_natives_all.zip",
+              "ghidra_*_decompiler_natives_all.zip",
               "mecha_ghidra_decompiler_natives_all.zip",
               "mecha_ghidra_ghidra_*_decompiler_natives_all.zip",
               "mecha_ghidra_docker_arm64_*.zip",
