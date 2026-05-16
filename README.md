@@ -55,17 +55,23 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 - The server starts with project metadata only and no program loaded. Run `import_program(target="default", binary_path="/samples/<filename>")`, then pass the returned `domain_path` to `load_project_program`.
 - The recommended sharing model is `input bind mount (read-only) + Ghidra project named volume (read-write)`. `import_program` copies the input into the project, so the source file does not need write access, and the `.rep` tree tends to behave more reliably on a volume than a bind mount.
 
-## Linux ARM64 Decompiler Artifacts
+## Native Decompiler Artifacts
 
-The repository now ships a dedicated build path for Linux ARM64 Ghidra decompiler binaries.
+The repository ships dedicated build paths for the Ghidra native decompiler binaries that upstream distributions may not include for every host platform.
 
 - `./scripts/build_linux_arm64_decompiler.sh` builds `linux_arm_64` native `decompile` and `sleigh`.
+- `./scripts/build_decompiler_natives.sh --platform mac_arm_64` builds the Apple Silicon macOS decompiler binaries.
+- `./scripts/build_decompiler_natives.sh --platform mac_x86_64` builds the Intel macOS decompiler binaries.
 - The build script creates raw artifacts:
   - `ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
   - `ghidra_*_linux_arm_64_decompiler.zip`
-- The overlay archive preserves the exact path `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` so it can be unpacked directly into an existing Ghidra install.
-- The patched ZIP is intended for ARM Linux Docker builds and direct ARM Linux installs.
-- GitHub releases publish user-facing `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` copies whose names explicitly indicate they are for Apple Silicon / Linux ARM64 Docker or overlay use.
+  - `ghidra_*_mac_arm_64_decompiler_overlay.tar.gz`
+  - `ghidra_*_mac_arm_64_decompiler.zip`
+  - `ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
+  - `ghidra_*_mac_x86_64_decompiler.zip`
+- The overlay archive preserves the exact path `Ghidra/Features/Decompiler/os/<platform>/{decompile,sleigh}` so it can be unpacked directly into an existing Ghidra install.
+- The patched ZIPs are intended for the matching platform: ARM Linux Docker/direct installs, Apple Silicon macOS, or Intel macOS.
+- GitHub releases publish user-facing `mecha_ghidra_docker_arm64_*` and `mecha_ghidra_macos_*` copies whose names explicitly indicate their target platform and use.
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
 
 Example ARM64 Docker build:

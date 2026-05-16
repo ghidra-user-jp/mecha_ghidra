@@ -100,12 +100,18 @@ docker compose build
 
 ```bash
 ./scripts/build_linux_arm64_decompiler.sh
+./scripts/build_decompiler_natives.sh --platform mac_arm_64
+./scripts/build_decompiler_natives.sh --platform mac_x86_64
 ```
 
 生成物:
 
 - `dist/ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
 - `dist/ghidra_*_linux_arm_64_decompiler.zip`
+- `dist/ghidra_*_mac_arm_64_decompiler_overlay.tar.gz`
+- `dist/ghidra_*_mac_arm_64_decompiler.zip`
+- `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
+- `dist/ghidra_*_mac_x86_64_decompiler.zip`
 
 ### Docker での共有パス
 

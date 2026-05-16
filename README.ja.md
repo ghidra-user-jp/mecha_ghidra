@@ -59,17 +59,23 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 - 起動直後は program 未ロードの状態です。`import_program(target="default", binary_path="/samples/<filename>")` 実行後、返ってきた `domain_path` を `load_project_program` に渡してください。
 - 推奨共有方法は「入力 bind mount(read-only) + Ghidra project named volume(read-write)」です。`import_program` は入力ファイルを project にコピーするので入力側は read-only で十分で、`.rep` 配下の重い I/O は bind mount より volume の方が安定しやすいためです。
 
-## Linux ARM64 decompiler 配布物
+## native decompiler 配布物
 
-このリポジトリには、Linux ARM64 向け Ghidra decompiler を生成して配布する専用導線を追加しました。
+このリポジトリには、upstream 配布物に含まれない場合がある Ghidra native decompiler を生成して配布する専用導線があります。
 
 - `./scripts/build_linux_arm64_decompiler.sh` で `linux_arm_64` 用の native `decompile` / `sleigh` をビルドできます。
+- `./scripts/build_decompiler_natives.sh --platform mac_arm_64` で Apple Silicon macOS 用の native `decompile` / `sleigh` をビルドできます。
+- `./scripts/build_decompiler_natives.sh --platform mac_x86_64` で Intel macOS 用の native `decompile` / `sleigh` をビルドできます。
 - build script は次の raw artifacts を生成します。
   - `ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
   - `ghidra_*_linux_arm_64_decompiler.zip`
-- overlay tarball には `Ghidra/Features/Decompiler/os/linux_arm_64/{decompile,sleigh}` のパスがそのまま入るので、既存の Ghidra install にそのまま展開できます。
-- patched ZIP は ARM Linux の Docker build や、ARM Linux へそのまま配置する用途を想定しています。
-- GitHub release には、Apple Silicon / Linux ARM64 の Docker 用・overlay 用だと分かるように `mecha_ghidra_docker_arm64_*.zip` / `*.tar.gz` の利用者向け copy を publish します。
+  - `ghidra_*_mac_arm_64_decompiler_overlay.tar.gz`
+  - `ghidra_*_mac_arm_64_decompiler.zip`
+  - `ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
+  - `ghidra_*_mac_x86_64_decompiler.zip`
+- overlay tarball には `Ghidra/Features/Decompiler/os/<platform>/{decompile,sleigh}` のパスがそのまま入るので、既存の Ghidra install にそのまま展開できます。
+- patched ZIP は対象 platform ごとに、ARM Linux Docker/直接配置、Apple Silicon macOS、Intel macOS で使う想定です。
+- GitHub release には、対象 platform が分かるように `mecha_ghidra_docker_arm64_*` と `mecha_ghidra_macos_*` の利用者向け copy を publish します。
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使ってください。
 
 ARM64 Docker build 例:
