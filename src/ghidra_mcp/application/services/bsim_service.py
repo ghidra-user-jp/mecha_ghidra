@@ -7,13 +7,18 @@ import os
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, NoReturn, TypeVar
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from ghidra_mcp.infrastructure.bsim import BsimJavaBackend, mask_bsim_url
 
 from .core_command_service import CoreCommandService
 from .target_service import TargetService
+
+
+BSIM_MATCHED_REF_VERSION = 1
+_BSIM_CODE_RE = re.compile(r"^BSIM_[A-Z0-9_]+(?::|$)")
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -25,29 +30,85 @@ class BsimConfig:
     command_timeout: int = 300
 
 
+@dataclass(frozen=True)
+class _MatchedRef:
+    raw: dict[str, object]
+    executable_md5: str
+    executable_name: str
+    domain_path: str
+    address: str
+    name: str
+    project_location: str | None
+    project_name: str | None
+    repository: str | None
+    ghidra_url: str | None
+
+
+def _bsim_message(code: str, message: str) -> str:
+    text = str(message).strip() or "unknown error"
+    if _BSIM_CODE_RE.match(text):
+        return text
+    return f"{code}: {text}"
+
+
+def _classify_bsim_message(message: str, *, default_code: str = "BSIM_OPERATION_FAILED") -> str:
+    text = str(message).strip() or "unknown error"
+    lower = text.lower()
+    has_specific_code = _BSIM_CODE_RE.match(text) and not text.startswith(
+        ("BSIM_DATABASE_INIT_FAILED:", "BSIM_QUERY_FAILED:", "BSIM_CLI_FAILED:")
+    )
+    if has_specific_code:
+        return text
+    if "function not found" in lower:
+        return _bsim_message("BSIM_FUNCTION_NOT_FOUND", text)
+    if "password" in lower or "authentication" in lower or "auth failed" in lower:
+        return _bsim_message("BSIM_AUTHENTICATION_FAILED", text)
+    if (
+        "connection refused" in lower
+        or "could not connect" in lower
+        or "timed out" in lower
+        or "timeout" in lower
+        or "unknown host" in lower
+        or "unreachable" in lower
+    ):
+        return _bsim_message("BSIM_DATABASE_UNREACHABLE", text)
+    return _bsim_message(default_code, text)
+
+
+def _raise_classified_bsim_error(exc: Exception, *, default_code: str = "BSIM_OPERATION_FAILED") -> NoReturn:
+    message = _classify_bsim_message(str(exc), default_code=default_code)
+    if message.startswith("BSIM_FUNCTION_NOT_FOUND:"):
+        raise LookupError(message) from exc
+    if isinstance(exc, ValueError):
+        raise ValueError(message) from exc
+    raise RuntimeError(message) from exc
+
+
 def _resolve_config_password(config: BsimConfig) -> str | None:
     env_name = (config.bsim_password_env or "").strip()
     has_password = config.bsim_password is not None
     if has_password and env_name:
-        raise ValueError("--bsim-password and --bsim-password-env cannot be used together")
+        raise ValueError(
+            "BSIM_PASSWORD_CONFIG_INVALID: --bsim-password and --bsim-password-env cannot be used together"
+        )
     if has_password:
         if config.bsim_password == "":
-            raise ValueError("--bsim-password is empty")
+            raise ValueError("BSIM_PASSWORD_CONFIG_INVALID: --bsim-password is empty")
         return config.bsim_password
     if not env_name:
         return None
     value = os.environ.get(env_name)
     if value is None:
-        raise ValueError(f"Environment variable '{env_name}' is not set")
+        raise ValueError(f"BSIM_PASSWORD_CONFIG_INVALID: Environment variable '{env_name}' is not set")
     if value == "":
-        raise ValueError(f"Environment variable '{env_name}' is empty")
+        raise ValueError(f"BSIM_PASSWORD_CONFIG_INVALID: Environment variable '{env_name}' is empty")
     return value
 
 
 def _hostport(parts) -> str:
     hostname = parts.hostname
     if not hostname:
-        raise ValueError("--bsim-password requires bsim_url with a hostname")
+        raise ValueError("BSIM_URL_INVALID: --bsim-password requires bsim_url with a hostname")
     host = hostname
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
@@ -61,9 +122,15 @@ def _bsim_url_with_password(bsim_url: str, password: str | None) -> str:
         return bsim_url
     parts = urlsplit(bsim_url)
     if not parts.scheme or not parts.netloc:
-        raise ValueError("--bsim-password requires a network BSim URL such as postgresql://user@host/database")
+        raise ValueError(
+            "BSIM_URL_INVALID: --bsim-password requires a network BSim URL such as "
+            "postgresql://user@host/database"
+        )
     if parts.password is not None:
-        raise ValueError("bsim_url already contains a password; use either bsim_url credentials or --bsim-password")
+        raise ValueError(
+            "BSIM_PASSWORD_CONFIG_INVALID: bsim_url already contains a password; "
+            "use either bsim_url credentials or --bsim-password"
+        )
 
     username = unquote(parts.username or "") or getpass.getuser()
     userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
@@ -92,10 +159,10 @@ def _project_identity(project_location: str, project_name: str | None = None) ->
 
 def _project_from_ghidra_url(url: str | None) -> tuple[str, str | None]:
     if not url:
-        raise ValueError("matched_ref requires repository or ghidra_url")
+        raise ValueError("BSIM_INVALID_MATCHED_REF: matched_ref requires repository or ghidra_url")
     parts = urlsplit(str(url))
     if parts.scheme != "ghidra":
-        raise ValueError(f"unsupported BSim ghidra URL: {url}")
+        raise ValueError(f"BSIM_INVALID_MATCHED_REF: unsupported BSim ghidra URL: {url}")
     if parts.netloc:
         raise ValueError(
             "BSIM_REMOTE_PROJECT_LOAD_UNSUPPORTED: matched_ref points to a remote ghidra:// repository; "
@@ -112,6 +179,66 @@ def _default_match_target(md5: str | None, executable_name: str | None) -> str:
         return "bsim_" + re.sub(r"[^0-9a-fA-F]", "", md5)[:12].lower()
     base = re.sub(r"[^A-Za-z0-9_]+", "_", executable_name or "match").strip("_")
     return "bsim_" + (base or "match")
+
+
+def _validate_matched_ref(matched_ref: dict[str, object]) -> _MatchedRef:
+    if not isinstance(matched_ref, dict):
+        raise ValueError("BSIM_INVALID_MATCHED_REF: matched_ref must be an object")
+
+    raw_version = matched_ref.get("matched_ref_version")
+    try:
+        version = int(str(raw_version))
+    except (TypeError, ValueError):
+        version = None
+    if version != BSIM_MATCHED_REF_VERSION:
+        raise ValueError(
+            "BSIM_INVALID_MATCHED_REF: matched_ref.matched_ref_version must be "
+            f"{BSIM_MATCHED_REF_VERSION}"
+        )
+
+    def _field(name: str) -> str | None:
+        return BsimService._text(matched_ref.get(name))
+
+    executable_md5 = _field("executable_md5")
+    executable_name = _field("executable_name")
+    domain_path = _normalize_domain_path(_field("domain_path") or _field("path"))
+    address = _field("address")
+    name = _field("name")
+    project_location = _field("project_location")
+    project_name = _field("project_name")
+    repository = _field("repository")
+    ghidra_url = _field("ghidra_url")
+
+    missing = [
+        key
+        for key, value in (
+            ("executable_md5", executable_md5),
+            ("executable_name", executable_name),
+            ("domain_path", domain_path),
+            ("address", address),
+            ("name", name),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ValueError("BSIM_INVALID_MATCHED_REF: missing required keys: " + ", ".join(missing))
+    if not project_location and not repository and not ghidra_url:
+        raise ValueError(
+            "BSIM_INVALID_MATCHED_REF: matched_ref requires project_location, repository, or ghidra_url"
+        )
+
+    return _MatchedRef(
+        raw=matched_ref,
+        executable_md5=executable_md5,
+        executable_name=executable_name,
+        domain_path=domain_path,
+        address=address,
+        name=name,
+        project_location=project_location,
+        project_name=project_name,
+        repository=repository,
+        ghidra_url=ghidra_url,
+    )
 
 
 class BsimService:
@@ -132,7 +259,7 @@ class BsimService:
     def _resolve_bsim_url(self, bsim_url: str | None = None) -> str:
         resolved = (bsim_url or self._config.bsim_url or "").strip()
         if not resolved:
-            raise ValueError("bsim_url is required; set --bsim-url or pass bsim_url")
+            raise ValueError("BSIM_URL_REQUIRED: set --bsim-url or pass bsim_url")
         return _bsim_url_with_password(resolved, _resolve_config_password(self._config))
 
     @staticmethod
@@ -141,16 +268,63 @@ class BsimService:
         result["bsim_url"] = mask_bsim_url(bsim_url)
         return result
 
+    @staticmethod
+    def _add_query_provenance(
+        payload: dict[str, Any],
+        *,
+        scope: str,
+        target: str,
+        masked_bsim_url: str | None,
+        similarity_threshold: float,
+        significance_threshold: float,
+        matches_per_function: int,
+        max_results: int,
+        address: str | None = None,
+        function_name: str | None = None,
+    ) -> dict[str, Any]:
+        result = dict(payload)
+        query: dict[str, Any] = {
+            "scope": scope,
+            "target": target,
+            "program": result.get("program"),
+            "bsim_url": masked_bsim_url,
+            "similarity_threshold": float(similarity_threshold),
+            "significance_threshold": float(significance_threshold),
+            "matches_per_function": int(matches_per_function),
+            "max_results": int(max_results),
+        }
+        if address is not None:
+            query["address"] = address
+        if function_name is not None:
+            query["function_name"] = function_name
+        result["query"] = query
+        return result
+
+    @staticmethod
+    def _call_bsim(operation: Callable[[], _T], *, default_code: str = "BSIM_OPERATION_FAILED") -> _T:
+        try:
+            return operation()
+        except Exception as exc:
+            _raise_classified_bsim_error(exc, default_code=default_code)
+
     def get_database_status(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
-        return self._mask_response_url(self._java_backend.get_database_status(resolved), resolved)
+        result = self._call_bsim(
+            lambda: self._java_backend.get_database_status(resolved),
+            default_code="BSIM_DATABASE_STATUS_FAILED",
+        )
+        return self._mask_response_url(result, resolved)
 
     def get_bsim_database_status(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         return self.get_database_status(bsim_url=bsim_url)
 
     def list_categories(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
-        return self._mask_response_url(self._java_backend.list_categories(resolved), resolved)
+        result = self._call_bsim(
+            lambda: self._java_backend.list_categories(resolved),
+            default_code="BSIM_LIST_CATEGORIES_FAILED",
+        )
+        return self._mask_response_url(result, resolved)
 
     def list_bsim_categories(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         return self.list_categories(bsim_url=bsim_url)
@@ -166,13 +340,16 @@ class BsimService:
         limit: int = 100,
     ) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
-        result = self._java_backend.list_executables(
-            resolved,
-            name=name,
-            md5=md5,
-            arch=arch,
-            compiler=compiler,
-            limit=limit,
+        result = self._call_bsim(
+            lambda: self._java_backend.list_executables(
+                resolved,
+                name=name,
+                md5=md5,
+                arch=arch,
+                compiler=compiler,
+                limit=limit,
+            ),
+            default_code="BSIM_LIST_EXECUTABLES_FAILED",
         )
         return self._mask_response_url(result, resolved)
 
@@ -203,7 +380,10 @@ class BsimService:
         name: str | None = None,
     ) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
-        result = self._java_backend.get_executable(resolved, md5=md5, name=name)
+        result = self._call_bsim(
+            lambda: self._java_backend.get_executable(resolved, md5=md5, name=name),
+            default_code="BSIM_GET_EXECUTABLE_FAILED",
+        )
         return self._mask_response_url(result, resolved)
 
     def get_bsim_executable(
@@ -226,19 +406,32 @@ class BsimService:
         max_results: int = 500,
     ) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
-        result = self._core_command_service.call(
-            "bsim_query_target",
-            {
-                "bsim_url": resolved,
-                "query_target": target,
-                "similarity_threshold": similarity_threshold,
-                "significance_threshold": significance_threshold,
-                "matches_per_function": matches_per_function,
-                "max_results": max_results,
-            },
-            target,
+        result = self._call_bsim(
+            lambda: self._core_command_service.call(
+                "bsim_query_target",
+                {
+                    "bsim_url": resolved,
+                    "query_target": target,
+                    "similarity_threshold": similarity_threshold,
+                    "significance_threshold": significance_threshold,
+                    "matches_per_function": matches_per_function,
+                    "max_results": max_results,
+                },
+                target,
+            ),
+            default_code="BSIM_QUERY_FAILED",
         )
-        return self._mask_response_url(result, resolved)
+        masked = self._mask_response_url(result, resolved)
+        return self._add_query_provenance(
+            masked,
+            scope="target",
+            target=target,
+            masked_bsim_url=masked.get("bsim_url"),
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=max_results,
+        )
 
     def bsim_query_target(
         self,
@@ -272,21 +465,36 @@ class BsimService:
         max_results: int = 100,
     ) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
-        result = self._core_command_service.call(
-            "bsim_query_function",
-            {
-                "bsim_url": resolved,
-                "query_target": target,
-                "address": address,
-                "function_name": function_name,
-                "similarity_threshold": similarity_threshold,
-                "significance_threshold": significance_threshold,
-                "matches_per_function": matches_per_function,
-                "max_results": max_results,
-            },
-            target,
+        result = self._call_bsim(
+            lambda: self._core_command_service.call(
+                "bsim_query_function",
+                {
+                    "bsim_url": resolved,
+                    "query_target": target,
+                    "address": address,
+                    "function_name": function_name,
+                    "similarity_threshold": similarity_threshold,
+                    "significance_threshold": significance_threshold,
+                    "matches_per_function": matches_per_function,
+                    "max_results": max_results,
+                },
+                target,
+            ),
+            default_code="BSIM_QUERY_FAILED",
         )
-        return self._mask_response_url(result, resolved)
+        masked = self._mask_response_url(result, resolved)
+        return self._add_query_provenance(
+            masked,
+            scope="function",
+            target=target,
+            masked_bsim_url=masked.get("bsim_url"),
+            address=address,
+            function_name=function_name,
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=max_results,
+        )
 
     def bsim_query_function(
         self,
@@ -320,10 +528,13 @@ class BsimService:
 
     def register_target(self, target: str, *, bsim_url: str | None = None) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
-        result = self._core_command_service.call(
-            "bsim_register_target",
-            {"bsim_url": resolved, "query_target": target},
-            target,
+        result = self._call_bsim(
+            lambda: self._core_command_service.call(
+                "bsim_register_target",
+                {"bsim_url": resolved, "query_target": target},
+                target,
+            ),
+            default_code="BSIM_REGISTER_FAILED",
         )
         return self._mask_response_url(result, resolved)
 
@@ -336,20 +547,17 @@ class BsimService:
         matched_ref: dict[str, object],
         target: str | None = None,
     ) -> dict[str, Any]:
-        executable_md5 = self._text(matched_ref.get("executable_md5"))
-        executable_name = self._text(matched_ref.get("executable_name"))
-        domain_path = _normalize_domain_path(
-            self._text(matched_ref.get("domain_path")) or self._text(matched_ref.get("path"))
-        )
-        if domain_path is None:
-            raise ValueError("matched_ref.domain_path is required")
-        matched_address = self._text(matched_ref.get("address"))
-        matched_name = self._text(matched_ref.get("name"))
+        ref = _validate_matched_ref(matched_ref)
+        executable_md5 = ref.executable_md5
+        executable_name = ref.executable_name
+        domain_path = ref.domain_path
+        matched_address = ref.address
+        matched_name = ref.name
 
         requested_target = (target or "").strip() or _default_match_target(executable_md5, executable_name)
         existing = self._find_loaded_match_target(
             executable_md5=executable_md5,
-            matched_ref=matched_ref,
+            matched_ref=ref.raw,
             domain_path=domain_path,
             requested_target=requested_target,
         )
@@ -361,13 +569,14 @@ class BsimService:
                 "matched_function_address": matched_address,
                 "matched_function_name": matched_name,
                 "executable_md5": executable_md5,
+                "matched_ref_version": BSIM_MATCHED_REF_VERSION,
             }
 
-        project_location = self._text(matched_ref.get("project_location"))
-        project_name = self._text(matched_ref.get("project_name"))
+        project_location = ref.project_location
+        project_name = ref.project_name
         if not project_location:
             project_location, project_name = _project_from_ghidra_url(
-                self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
+                ref.repository or ref.ghidra_url
             )
 
         created = self._target_service.create_session(
@@ -379,7 +588,7 @@ class BsimService:
         self._remember_loaded_match(
             target=requested_target,
             executable_md5=executable_md5,
-            matched_ref=matched_ref,
+            matched_ref=ref.raw,
             project_location=created.get("project_location") or project_location,
             project_name=created.get("project_name") or project_name,
             domain_path=domain_path,
@@ -391,6 +600,7 @@ class BsimService:
             "matched_function_address": matched_address,
             "matched_function_name": matched_name,
             "executable_md5": executable_md5,
+            "matched_ref_version": BSIM_MATCHED_REF_VERSION,
         }
 
     def bsim_load_matched_executable(

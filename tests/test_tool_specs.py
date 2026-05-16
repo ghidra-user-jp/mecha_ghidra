@@ -1041,6 +1041,7 @@ def test_all_output_models_are_strict_and_typed():
             "matched_function_address": (str | None, None),
             "matched_function_name": (str | None, None),
             "executable_md5": (str | None, None),
+            "matched_ref_version": (int, 1),
         },
     }
 

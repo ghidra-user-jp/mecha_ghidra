@@ -280,6 +280,7 @@ _BSIM_LOAD_MATCH_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("matched_function_address", str | None, None),
     ("matched_function_name", str | None, None),
     ("executable_md5", str | None, None),
+    ("matched_ref_version", int, 1),
 )
 
 class ImportProgramInput(ToolInputModel):

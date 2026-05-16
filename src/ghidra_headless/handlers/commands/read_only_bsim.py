@@ -5,6 +5,9 @@ from __future__ import absolute_import, print_function
 import pathlib
 
 
+BSIM_MATCHED_REF_VERSION = 1
+
+
 def _bsim_classes():
     from java.util import HashSet
 
@@ -71,6 +74,7 @@ def _matched_ref(function_description):
     repository = record.getRepository()
     ghidra_url = record.getURLString()
     return {
+        "matched_ref_version": BSIM_MATCHED_REF_VERSION,
         "executable_md5": str(record.getMd5()),
         "executable_name": str(record.getNameExec()),
         "ghidra_url": None if ghidra_url is None else str(ghidra_url),
@@ -150,16 +154,12 @@ def _run_query(ctx, params, function_symbols):
 
 def _rows_to_result(ctx, params, rows):
     target = params.get("query_target") or "default"
-    limit = int(params.get("max_results", 500))
-    matches = []
-    count = 0
-    total = rows.size() if hasattr(rows, "size") else None
+    limit = max(0, int(params.get("max_results", 500)))
+    raw_matches = []
     for row in _iter_items(rows):
-        if count >= limit:
-            break
         original = row.getOriginalFunctionDescription()
         matched = row.getMatchFunctionDescription()
-        matches.append(
+        raw_matches.append(
             {
                 "query_ref": _query_ref(ctx, target, original),
                 "matched_ref": _matched_ref(matched),
@@ -167,13 +167,21 @@ def _rows_to_result(ctx, params, rows):
                 "significance": float(row.getSignificance()),
             }
         )
-        count += 1
+    raw_matches.sort(
+        key=lambda item: (
+            -float(item.get("similarity", 0.0)),
+            -float(item.get("significance", 0.0)),
+            str(item["matched_ref"].get("executable_md5") or ""),
+            str(item["matched_ref"].get("address") or ""),
+        )
+    )
+    matches = raw_matches[:limit]
     return {
         "target": target,
         "program": _domain_path(ctx.program),
         "matches": matches,
         "count": len(matches),
-        "truncated": False if total is None else len(matches) < int(total),
+        "truncated": len(matches) < len(raw_matches),
     }
 
 
@@ -196,4 +204,4 @@ def bsim_query_function(params, *, ensure_context, get_address, find_function_by
     return _rows_to_result(ctx, params, rows)
 
 
-__all__ = ["bsim_query_function", "bsim_query_target"]
+__all__ = ["BSIM_MATCHED_REF_VERSION", "bsim_query_function", "bsim_query_target"]

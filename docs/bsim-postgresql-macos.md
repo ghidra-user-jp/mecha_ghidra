@@ -271,6 +271,8 @@ uv run ghidra-mcp \
 
 `--bsim-password`または`--bsim-password-env`を使う場合、BSim URLにユーザー名がなければOSユーザー名を使います。別ユーザーで接続する場合は`postgresql://user@host/database`の形で明示してください。返却値やエラー内のBSim URLは`postgresql://***:***@...`にマスクされます。
 
+MCPのBSim toolは、小さいprimitiveを組み合わせて使う前提です。`bsim_query_target`と`bsim_query_function`の結果には、検索条件を示す`query` provenanceと、`bsim_load_matched_executable`へそのまま渡せる`matched_ref`が含まれます。`matched_ref`には`matched_ref_version: 1`が入り、load時には必須キーが検証されます。
+
 実測結果:
 
 ```text
@@ -616,6 +618,7 @@ lsof -nP -iTCP:5432 -sTCP:LISTEN
 - portが5432以外なら、BSim DB URLにもportを含めます。
 - `--auth password`の場合、実行時に要求されるパスワードを入力します。
 - SSLや証明書まわりのエラーは、`pg_hba.conf`、`postgresql.conf`、BSim client側の接続設定を確認してください。
+- MCP toolのエラーは、認証失敗なら`BSIM_AUTHENTICATION_FAILED`、接続不能なら`BSIM_DATABASE_UNREACHABLE`、URL未指定なら`BSIM_URL_REQUIRED`、不正な`matched_ref`なら`BSIM_INVALID_MATCHED_REF`のように分類されます。
 
 ### `large_nosize`が使えない
 

@@ -241,6 +241,7 @@ class RecordingService:
                     "matched_function_address": kwargs["matched_ref"].get("address"),
                     "matched_function_name": kwargs["matched_ref"].get("name"),
                     "executable_md5": kwargs["matched_ref"].get("executable_md5"),
+                    "matched_ref_version": kwargs["matched_ref"].get("matched_ref_version", 1),
                 }
             return {"service": self.label, "method": name}
 
