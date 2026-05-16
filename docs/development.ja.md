@@ -26,7 +26,10 @@
   - ローカル検証用の対応する `.sha256`
 - GitHub Actions の `.github/workflows/release-decompiler-natives.yml` では、release 用 decompiler overlay をすべて native hosted runner 上でビルドします。対象 runner は `ubuntu-24.04-arm`、`macos-15`、`macos-15-intel` です。
 - tag push と GitHub release publish では、全 platform のビルド完了後に release asset を公開します。手動 workflow 実行では release 公開はせず、workflow artifact としてアップロードします。
-- GitHub release へは、追加したファイルをすべて含む利用者向け `mecha_ghidra_decompiler_natives_all.zip` を 1 つだけ publish します。
+- GitHub release へは、利用者向け ZIP asset を 2 つ publish します。
+  - `mecha_ghidra_ghidra_12.1_decompiler_natives_all.zip`: native decompiler ファイルを組み込み済みの、そのまま使える Ghidra 12.1 配布物
+  - `mecha_ghidra_decompiler_natives_all.zip`: 既存の Ghidra 12.1 install へ追加する native decompiler ファイルだけの overlay ZIP
+- 含まれる native decompiler path は次のとおりです。
   - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
   - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
   - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
@@ -34,4 +37,4 @@
   - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
   - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使います。
-- release page 本文には、zip の展開位置の説明と上記の追加パスを書きます。`.sha256` や古い legacy release asset は publish 時に削除します。
+- release page 本文には、どちらの ZIP を使うかの説明と上記の追加パスを書きます。`.sha256` や古い legacy release asset は publish 時に削除します。

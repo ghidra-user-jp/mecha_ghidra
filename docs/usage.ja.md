@@ -113,7 +113,7 @@ docker compose build
 - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
 - `dist/ghidra_*_mac_x86_64_decompiler.zip`
 
-GitHub release では、追加された `linux_arm_64` / `mac_arm_64` / `mac_x86_64` の `decompile` / `sleigh` パスをまとめた `mecha_ghidra_decompiler_natives_all.zip` を 1 つだけ公開します。
+GitHub release では、そのまま使える Ghidra bundle の `mecha_ghidra_ghidra_12.1_decompiler_natives_all.zip` と、追加された `linux_arm_64` / `mac_arm_64` / `mac_x86_64` の `decompile` / `sleigh` パスだけをまとめた小さい overlay `mecha_ghidra_decompiler_natives_all.zip` の両方を公開します。
 
 ### Docker での共有パス
 

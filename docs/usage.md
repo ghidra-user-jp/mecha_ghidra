@@ -113,7 +113,7 @@ This creates:
 - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
 - `dist/ghidra_*_mac_x86_64_decompiler.zip`
 
-GitHub releases publish a single `mecha_ghidra_decompiler_natives_all.zip` containing the added `linux_arm_64`, `mac_arm_64`, and `mac_x86_64` `decompile` / `sleigh` paths.
+GitHub releases publish both a ready-to-use `mecha_ghidra_ghidra_12.1_decompiler_natives_all.zip` Ghidra bundle and a smaller `mecha_ghidra_decompiler_natives_all.zip` overlay containing the added `linux_arm_64`, `mac_arm_64`, and `mac_x86_64` `decompile` / `sleigh` paths.
 
 ### Docker Path Sharing
 
