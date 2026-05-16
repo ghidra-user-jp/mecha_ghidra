@@ -8,6 +8,7 @@
 - Add formatting/type-check tools as needed and run them with `uv run <tool>`.
 - Test run: first install test dependencies (`pytest`, `pytest-mock`) with `uv sync --extra test`, then run unit tests with `uv run pytest`.
 - Runtime validation against a real Ghidra install only runs when `GHIDRA_RUNTIME_VALIDATION=1` is set. Set `GHIDRA_INSTALL_DIR` and `GHIDRA_RUNTIME_BINARY_PATH`; to validate shared-project sync, also set `GHIDRA_RUNTIME_SHARED_PROJECT_LOCATION`, `GHIDRA_RUNTIME_SHARED_PROJECT_NAME`, `GHIDRA_RUNTIME_SHARED_DOMAIN_PATH`, `GHIDRA_RUNTIME_SHARED_SERVER_USER` (or `GHIDRA_SERVER_USER`), and `GHIDRA_SERVER_PASSWORD`.
+- BSim runtime validation only runs when `GHIDRA_BSIM_RUNTIME_VALIDATION=1` is set. Set `GHIDRA_INSTALL_DIR` (Ghidra 12.1 is covered), `GHIDRA_BSIM_URL`, and either `GHIDRA_BSIM_PASSWORD` or `GHIDRA_BSIM_PASSWORD_ENV`. To validate query, matched executable loading, and decompilation, also set `GHIDRA_BSIM_PROJECT_LOCATION`, `GHIDRA_BSIM_PROJECT_NAME`, `GHIDRA_BSIM_QUERY_DOMAIN_PATH`, and `GHIDRA_BSIM_QUERY_FUNCTION`.
 - If a running MCP server already has the same Ghidra project open, use a separate local project cache for runtime tests. It may point at the same shared repository, but the local `.gpr` / `.rep` path must be different to avoid project-lock conflicts.
 
 ## Building Native Decompiler Artifacts
@@ -26,15 +27,5 @@
   - matching `.sha256` files for local verification
 - The GitHub Actions workflow `.github/workflows/release-decompiler-natives.yml` builds all release decompiler overlays on native hosted runners: `ubuntu-24.04-arm`, `macos-15`, and `macos-15-intel`.
 - Tag pushes and published GitHub releases publish the generated release assets after all platform builds complete. Manual workflow runs build and upload workflow artifacts without publishing a release.
-- For GitHub releases, the workflow publishes two user-facing ZIP assets:
-  - `ghidra_12.1_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1 distribution with the native decompiler files already installed
-  - `ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added native decompiler files for an existing Ghidra 12.1 install
-- The included native decompiler paths are:
-  - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
-- For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
-- The release page body explains which ZIP to use and lists those added paths. Separate `.sha256` and older legacy release assets are removed during publish.
+- See the [Usage Guide](usage.md#native-decompiler-artifacts) for user-facing ZIP asset types, included paths, and selection guidance.
+- Separate `.sha256` and older legacy release assets are removed during publish.

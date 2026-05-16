@@ -8,6 +8,7 @@
 - コード整形・型チェックなど必要に応じてツールを追加し、`uv run <tool>` で実行してください。
 - テスト実行: まず `uv sync --extra test` でテスト依存（`pytest`, `pytest-mock`）をインストールし、`uv run pytest` でユニットテストを実行できます。
 - Ghidra 実機テストは `GHIDRA_RUNTIME_VALIDATION=1` を指定したときだけ実行されます。`GHIDRA_INSTALL_DIR` と `GHIDRA_RUNTIME_BINARY_PATH` を設定し、shared project sync まで検証する場合は `GHIDRA_RUNTIME_SHARED_PROJECT_LOCATION`、`GHIDRA_RUNTIME_SHARED_PROJECT_NAME`、`GHIDRA_RUNTIME_SHARED_DOMAIN_PATH`、`GHIDRA_RUNTIME_SHARED_SERVER_USER`（または `GHIDRA_SERVER_USER`）、`GHIDRA_SERVER_PASSWORD` も設定してください。
+- BSim 実機テストは `GHIDRA_BSIM_RUNTIME_VALIDATION=1` を指定したときだけ実行されます。`GHIDRA_INSTALL_DIR`（Ghidra 12.1 検証対象）、`GHIDRA_BSIM_URL`、`GHIDRA_BSIM_PASSWORD` または `GHIDRA_BSIM_PASSWORD_ENV` を設定してください。query、matched executable load、decompile まで検証する場合は、さらに `GHIDRA_BSIM_PROJECT_LOCATION`、`GHIDRA_BSIM_PROJECT_NAME`、`GHIDRA_BSIM_QUERY_DOMAIN_PATH`、`GHIDRA_BSIM_QUERY_FUNCTION` を設定します。
 - 起動中の MCP サーバーが同じ Ghidra project を開いている場合は、実機テスト用に別のローカル project cache を用意してください。同じ shared repository を指していても、`.gpr` / `.rep` のローカルパスが別なら project lock の競合を避けられます。
 
 ## native decompiler 配布物のビルド
@@ -26,15 +27,5 @@
   - ローカル検証用の対応する `.sha256`
 - GitHub Actions の `.github/workflows/release-decompiler-natives.yml` では、release 用 decompiler overlay をすべて native hosted runner 上でビルドします。対象 runner は `ubuntu-24.04-arm`、`macos-15`、`macos-15-intel` です。
 - tag push と GitHub release publish では、全 platform のビルド完了後に release asset を公開します。手動 workflow 実行では release 公開はせず、workflow artifact としてアップロードします。
-- GitHub release へは、利用者向け ZIP asset を 2 つ publish します。
-  - `ghidra_12.1_decompiler_natives_all.zip`: native decompiler ファイルを組み込み済みの、そのまま使える Ghidra 12.1 配布物
-  - `ghidra_decompiler_natives_all.zip`: 既存の Ghidra 12.1 install へ追加する native decompiler ファイルだけの overlay ZIP
-- 含まれる native decompiler path は次のとおりです。
-  - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
-- 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使います。
-- release page 本文には、どちらの ZIP を使うかの説明と上記の追加パスを書きます。`.sha256` や古い legacy release asset は publish 時に削除します。
+- 利用者向け ZIP asset の種類、含まれる path、使い分けは [利用ガイド](usage.ja.md#native-decompiler-配布物) を参照してください。
+- `.sha256` や古い legacy release asset は publish 時に削除します。

@@ -20,6 +20,7 @@ from .tool_models import (
 
 class ToolCategoryTag(str, Enum):
     CORE = "core"
+    BSIM = "bsim"
     FUNCTION_ANALYSIS = "function_analysis"
     MEMORY_DATA = "memory_data"
     SYMBOL_COMMENT_EDIT = "symbol_comment_edit"
@@ -262,6 +263,23 @@ _RELOAD_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("target", str, ...),
     ("program", str, ...),
     ("reloaded", bool, ...),
+)
+
+_BSIM_URL_FIELD: ToolFieldSpec = ("bsim_url", str | None, None)
+_BSIM_QUERY_FIELDS: tuple[ToolFieldSpec, ...] = (
+    _BSIM_URL_FIELD,
+    ("similarity_threshold", float, 0.7),
+    ("significance_threshold", float, 0.0),
+    ("matches_per_function", int, 10),
+    ("max_results", int, 500),
+)
+_BSIM_LOAD_MATCH_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    ("matched_function_address", str | None, None),
+    ("matched_function_name", str | None, None),
+    ("executable_md5", str | None, None),
 )
 
 class ImportProgramInput(ToolInputModel):
@@ -684,6 +702,147 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "must remain visible after reopening the project."
         ),
         idempotent_hint=True,
+    ),
+    # bsim
+    _registry_tool(
+        "get_bsim_database_status",
+        method_name="get_bsim_database_status",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(_BSIM_URL_FIELD,),
+        include_target=False,
+        include_none_keys=("bsim_url",),
+        description="Get BSim database metadata and executable count.",
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "list_bsim_categories",
+        method_name="list_bsim_categories",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(_BSIM_URL_FIELD,),
+        include_target=False,
+        include_none_keys=("bsim_url",),
+        description="List executable category names and function tags configured in the BSim database.",
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "list_bsim_executables",
+        method_name="list_bsim_executables",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            _BSIM_URL_FIELD,
+            ("name", str | None, None),
+            ("md5", str | None, None),
+            ("arch", str | None, None),
+            ("compiler", str | None, None),
+            ("limit", int, 100),
+        ),
+        include_target=False,
+        include_none_keys=("bsim_url",),
+        omit_falsey_keys=("name", "md5", "arch", "compiler"),
+        description="List BSim executable records with optional filters.",
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "get_bsim_executable",
+        method_name="get_bsim_executable",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            _BSIM_URL_FIELD,
+            ("md5", str | None, None),
+            ("name", str | None, None),
+        ),
+        include_target=False,
+        include_none_keys=("bsim_url",),
+        omit_falsey_keys=("md5", "name"),
+        description="Get one BSim executable record by md5 or executable name.",
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "bsim_query_target",
+        method_name="bsim_query_target",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=_BSIM_QUERY_FIELDS,
+        include_none_keys=("bsim_url",),
+        description=(
+            "Compare every function in the loaded target program against the BSim database and "
+            "return matches with matched_ref values usable by bsim_load_matched_executable."
+        ),
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "bsim_query_function",
+        method_name="bsim_query_function",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            _BSIM_URL_FIELD,
+            ("address", str | None, None),
+            ("function_name", str | None, None),
+            ("similarity_threshold", float, 0.7),
+            ("significance_threshold", float, 0.0),
+            ("matches_per_function", int, 10),
+            ("max_results", int, 100),
+        ),
+        include_none_keys=("bsim_url",),
+        omit_falsey_keys=("address", "function_name"),
+        description=(
+            "Compare one function in the loaded target program against the BSim database by "
+            "address or function_name."
+        ),
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "bsim_load_matched_executable",
+        method_name="bsim_load_matched_executable",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("matched_ref", dict[str, object], ...),
+            ("target", str | None, None),
+        ),
+        output_fields=_BSIM_LOAD_MATCH_OUTPUT_FIELDS,
+        include_target=False,
+        include_none_keys=("target",),
+        description=(
+            "Load the executable referenced by a BSim matched_ref into a reusable target. "
+            "If that executable is already loaded, returns the existing target instead of reloading it."
+        ),
+        idempotent_hint=True,
+    ),
+    _core_tool(
+        "bsim_set_target_metadata",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("categories", dict[str, object], ...),),
+        description=(
+            "Set BSim executable metadata categories on the loaded target program before registration."
+        ),
+        idempotent_hint=True,
+        checkout_required=True,
+    ),
+    _registry_tool(
+        "bsim_register_target",
+        method_name="bsim_register_target",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(_BSIM_URL_FIELD,),
+        include_none_keys=("bsim_url",),
+        description="Generate signatures for the loaded target program and insert them into the BSim database.",
+        idempotent_hint=False,
     ),
     # function_analysis
     _core_tool(

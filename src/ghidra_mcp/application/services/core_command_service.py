@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ghidra_mcp.application.usecases.bsim import BSIM_COMMANDS, BsimUseCases
 from ghidra_mcp.application.usecases.datatypes import DATATYPE_COMMANDS, DatatypesUseCases
 from ghidra_mcp.application.usecases.functions import FUNCTION_COMMANDS, FunctionsUseCases
 from ghidra_mcp.application.usecases.memory import MEMORY_COMMANDS, MemoryUseCases
@@ -13,7 +14,7 @@ from ghidra_mcp.infrastructure.ghidra_adapter.core_gateway import CoreGateway
 
 
 _SUPPORTED_COMMANDS = frozenset(
-    (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS)
+    (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS, *BSIM_COMMANDS)
 )
 
 
@@ -26,11 +27,13 @@ class CoreCommandService:
         memory_usecases: MemoryUseCases | None = None,
         symbols_usecases: SymbolsUseCases | None = None,
         datatypes_usecases: DatatypesUseCases | None = None,
+        bsim_usecases: BsimUseCases | None = None,
     ) -> None:
         self._functions_usecases = functions_usecases or FunctionsUseCases(core_gateway)
         self._memory_usecases = memory_usecases or MemoryUseCases(core_gateway)
         self._symbols_usecases = symbols_usecases or SymbolsUseCases(core_gateway)
         self._datatypes_usecases = datatypes_usecases or DatatypesUseCases(core_gateway)
+        self._bsim_usecases = bsim_usecases or BsimUseCases(core_gateway)
 
     def call(self, command: str, params: dict[str, Any] | None = None, target: str = "default") -> Any:
         normalized_params = params or {}
@@ -48,6 +51,8 @@ class CoreCommandService:
             return self._memory_usecases.execute(command, normalized_params, target=target)
         if command in SYMBOL_COMMANDS:
             return self._symbols_usecases.execute(command, normalized_params, target=target)
+        if command in BSIM_COMMANDS:
+            return self._bsim_usecases.execute(command, normalized_params, target=target)
         return self._datatypes_usecases.execute(command, normalized_params, target=target)
 
 

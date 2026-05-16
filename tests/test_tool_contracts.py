@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
+from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES, INTERNAL_COMMAND_NAMES
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_all_tool_specs
 
 
@@ -29,7 +29,7 @@ def test_supported_commands_are_built_from_registry_in_declared_order():
 
 
 def test_core_command_specs_match_supported_commands():
-    assert set(_core_command_specs()) == set(COMMAND_NAMES)
+    assert set(_core_command_specs()) == set(COMMAND_NAMES) - set(INTERNAL_COMMAND_NAMES)
 
 
 def test_tool_spec_inputs_are_covered_by_command_dep_keys():

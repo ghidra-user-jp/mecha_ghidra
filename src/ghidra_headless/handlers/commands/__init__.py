@@ -32,6 +32,10 @@ from .read_only_xrefs import (
     get_xrefs_from,
     get_xrefs_to,
 )
+from .read_only_bsim import (
+    bsim_query_function,
+    bsim_query_target,
+)
 from .mutating_symbols import (
     add_bookmark,
     analyze_program,
@@ -69,6 +73,10 @@ from .mutating_classes import (
     create_class,
     remove_class_members,
 )
+from .mutating_bsim import (
+    bsim_register_target,
+    bsim_set_target_metadata,
+)
 
 __all__ = [
     "decompile_function",
@@ -79,6 +87,8 @@ __all__ = [
     "get_xrefs_to",
     "get_xrefs_from",
     "get_function_xrefs",
+    "bsim_query_function",
+    "bsim_query_target",
     "list_segments",
     "list_imports",
     "list_exports",
@@ -121,6 +131,8 @@ __all__ = [
     "delete_function",
     "analyze_program",
     "reanalyze_program",
+    "bsim_register_target",
+    "bsim_set_target_metadata",
     "list_methods",
     "list_functions",
     "list_classes",

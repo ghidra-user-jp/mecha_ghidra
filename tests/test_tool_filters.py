@@ -135,11 +135,12 @@ def test_default_profile_matches_legacy_non_shared_sync_set():
     legacy_default_specs = {
         name
         for name, spec in get_all_tool_specs().items()
-        if spec.category_tag != ToolCategoryTag.SHARED_SYNC
+        if spec.category_tag not in {ToolCategoryTag.SHARED_SYNC, ToolCategoryTag.BSIM}
     }
 
     assert set(default_specs) == legacy_default_specs
     assert "get_project_sync_status" not in default_specs
+    assert "bsim_query_target" not in default_specs
 
 
 def test_full_profile_exposes_every_tool():
