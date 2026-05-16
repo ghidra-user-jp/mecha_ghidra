@@ -82,7 +82,7 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
   - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
   - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
   - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
-- release 本文には、上記の追加パスだけを書きます。
+- release 本文には、zip の展開位置の説明と上記の追加パスを書きます。
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使ってください。
 
 ARM64 Docker build 例:

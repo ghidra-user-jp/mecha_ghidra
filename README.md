@@ -78,7 +78,7 @@ The repository ships dedicated build paths for the Ghidra native decompiler bina
   - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
   - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
   - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
-- The release body lists only those added paths.
+- The release body explains where to extract the ZIP and lists those added paths.
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
 
 Example ARM64 Docker build:

@@ -34,4 +34,4 @@
   - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
   - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
-- The release page body lists only those added paths. Separate `.sha256` and older legacy release assets are removed during publish.
+- The release page body explains where to extract the ZIP and lists those added paths. Separate `.sha256` and older legacy release assets are removed during publish.

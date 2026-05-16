@@ -34,4 +34,4 @@
   - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
   - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使います。
-- release page 本文には、上記の追加パスだけを書きます。`.sha256` や古い legacy release asset は publish 時に削除します。
+- release page 本文には、zip の展開位置の説明と上記の追加パスを書きます。`.sha256` や古い legacy release asset は publish 時に削除します。

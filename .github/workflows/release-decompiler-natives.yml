@@ -130,13 +130,26 @@ jobs:
       - name: Prepare release body
         run: |
           set -eu
+          . ./scripts/ghidra_release.env
+          zip_path="release-assets/${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}"
+          zip_sha256="$(sha256sum "${zip_path}" | awk '{print $1}')"
           cat > release-body.md <<EOF
-          Ghidra/Features/Decompiler/os/linux_arm_64/decompile
-          Ghidra/Features/Decompiler/os/linux_arm_64/sleigh
-          Ghidra/Features/Decompiler/os/mac_arm_64/decompile
-          Ghidra/Features/Decompiler/os/mac_arm_64/sleigh
-          Ghidra/Features/Decompiler/os/mac_x86_64/decompile
-          Ghidra/Features/Decompiler/os/mac_x86_64/sleigh
+          ## Native decompiler binaries
+
+          \`${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}\` は Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} 用の native \`decompile\` / \`sleigh\` をまとめた overlay ZIP です。
+          既存の Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} インストールディレクトリ直下で展開してください。
+          zip 内のファイルは、実際の配置先である \`Ghidra/Features/Decompiler/os/...\` 配下に入っています。
+
+          SHA-256: \`${zip_sha256}\`
+
+          含まれる追加パス:
+
+          - \`Ghidra/Features/Decompiler/os/linux_arm_64/decompile\`
+          - \`Ghidra/Features/Decompiler/os/linux_arm_64/sleigh\`
+          - \`Ghidra/Features/Decompiler/os/mac_arm_64/decompile\`
+          - \`Ghidra/Features/Decompiler/os/mac_arm_64/sleigh\`
+          - \`Ghidra/Features/Decompiler/os/mac_x86_64/decompile\`
+          - \`Ghidra/Features/Decompiler/os/mac_x86_64/sleigh\`
           EOF
 
       - name: Remove legacy release assets
