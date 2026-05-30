@@ -461,56 +461,6 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         )
         _log_runtime_result("delete_struct", delete_struct_result)
 
-        create_enum_result = _unwrap_runtime_result(
-            cli.create_enum(name="__it_enum_mut", target=target)
-        )
-        _log_runtime_result("create_enum", create_enum_result)
-
-        add_enum_values_result = _unwrap_runtime_result(
-            cli.add_enum_values(
-                enum_name="__it_enum_mut",
-                values=[{"name": "VALUE_A", "value": 1}],
-                target=target,
-            )
-        )
-        _log_runtime_result("add_enum_values", add_enum_values_result)
-
-        remove_enum_values_result = _unwrap_runtime_result(
-            cli.remove_enum_values(
-                enum_name="__it_enum_mut",
-                values=["VALUE_A"],
-                target=target,
-            )
-        )
-        _log_runtime_result("remove_enum_values", remove_enum_values_result)
-        delete_enum_result = _unwrap_runtime_result(
-            cli.delete_enum(enum_name="__it_enum_mut", target=target)
-        )
-        _log_runtime_result("delete_enum", delete_enum_result)
-
-        create_class_result = _unwrap_runtime_result(
-            cli.create_class(name="__ItRuntimeClass", target=target)
-        )
-        _log_runtime_result("create_class", create_class_result)
-
-        add_class_members_result = _unwrap_runtime_result(
-            cli.add_class_members(
-                class_name="__ItRuntimeClass",
-                members=[{"name": "member_a", "type": "int"}],
-                target=target,
-            )
-        )
-        _log_runtime_result("add_class_members", add_class_members_result)
-
-        remove_class_members_result = _unwrap_runtime_result(
-            cli.remove_class_members(
-                class_name="__ItRuntimeClass",
-                members=["member_a"],
-                target=target,
-            )
-        )
-        _log_runtime_result("remove_class_members", remove_class_members_result)
-
         set_global_data_type_result = None
         set_global_error = None
         for candidate_address in [data_address, primary_address, aux_address]:
@@ -564,13 +514,6 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             "delete_struct": delete_struct_result,
             "list_data_types": list_data_types_result,
             "rename_data_type": rename_data_type_result,
-            "create_enum": create_enum_result,
-            "add_enum_values": add_enum_values_result,
-            "remove_enum_values": remove_enum_values_result,
-            "delete_enum": delete_enum_result,
-            "create_class": create_class_result,
-            "add_class_members": add_class_members_result,
-            "remove_class_members": remove_class_members_result,
             "remove_struct_members": remove_struct_members_result,
             "set_global_data_type": set_global_data_type_result,
             "set_bytes": set_bytes_result,

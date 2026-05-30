@@ -254,12 +254,6 @@ def test_dispatch_tool_validation_error():
         ("create_struct", {}),
         ("add_struct_members", {"struct_name": "S"}),
         ("clear_struct", {}),
-        ("create_enum", {}),
-        ("add_enum_values", {"enum_name": "E"}),
-        ("remove_enum_values", {"enum_name": "E"}),
-        ("create_class", {}),
-        ("add_class_members", {"class_name": "C"}),
-        ("remove_class_members", {"class_name": "C"}),
         ("remove_struct_members", {"struct_name": "S"}),
         ("set_global_data_type", {"address": "0x1"}),
         ("set_bytes", {"address": "0x1"}),
@@ -317,12 +311,6 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("create_struct", {"name": "S", "size": "x"}),
         ("add_struct_members", {"struct_name": "S", "members": "bad"}),
         ("clear_struct", {"struct_name": 1}),
-        ("create_enum", {"name": "E", "values": "bad"}),
-        ("add_enum_values", {"enum_name": "E", "values": "bad"}),
-        ("remove_enum_values", {"enum_name": "E", "values": "bad"}),
-        ("create_class", {"name": "C", "members": "bad"}),
-        ("add_class_members", {"class_name": "C", "members": "bad"}),
-        ("remove_class_members", {"class_name": "C", "members": "bad"}),
         ("remove_struct_members", {"struct_name": "S", "members": "bad"}),
         ("set_global_data_type", {"address": "0x1", "data_type": "int", "length": "x"}),
         ("set_bytes", {"address": "0x1", "bytes": 1}),
@@ -707,13 +695,6 @@ def test_dispatch_tool_validates_output_after_result_adapter(monkeypatch):
     ("spec_name", "raw_args", "override", "expected_exc", "expected_message"),
     [
         (
-            "list_methods",
-            {"offset": 0, "limit": 3},
-            {"call_result": {"bad": "shape"}},
-            ValueError,
-            "list_methods output validation failed",
-        ),
-        (
             "get_bytes",
             {"address": "0x401000", "size": 8},
             {"call_result": {"bad": "shape"}},
@@ -766,8 +747,6 @@ def test_dispatch_tool_raises_output_validation_error_for_incompatible_result(
 ):
     class BadOutputRegistry(DummyRegistry):
         def call(self, command, params, target):
-            if command == "list_methods" and "call_result" in override:
-                return override["call_result"]
             if command == "get_bytes" and "call_result" in override:
                 return override["call_result"]
             return super().call(command, params, target)

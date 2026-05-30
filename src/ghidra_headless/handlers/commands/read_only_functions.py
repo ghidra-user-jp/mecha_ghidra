@@ -3,14 +3,6 @@
 from __future__ import absolute_import, print_function
 
 
-def list_methods(params, *, ensure_context, to_int, collect):
-    ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    iterator = ctx.function_manager.getFunctions(True)
-    return collect(iterator, offset, limit, lambda f: f.getName())
-
-
 def list_functions(params, *, ensure_context, to_int, collect):
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)

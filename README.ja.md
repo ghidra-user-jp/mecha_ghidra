@@ -109,7 +109,7 @@ ARM Linux 上で patched binary が無いまま起動した場合は、`linux_ar
 ## 主要機能
 
 - **関数・シンボル操作**: 関数一覧、デコンパイル、リネーム、Xref 取得など。
-- **データ型編集**: 構造体・列挙体・クラス相当のデータ型作成／更新／削除に対応。
+- **データ型編集**: 構造体の作成／更新／削除と列挙体の参照に対応。
 - **メモリアクセス**: メモリのバイト列取得・検索・書き込み、グローバルデータ型の適用。
 - **コメント付与**: 逆アセンブリ／デコンパイラコメントの設定が可能。
 - **PyGhidra ベース**: Jython ではなく CPython 上で Ghidra API を直接呼び出します。
@@ -135,7 +135,6 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 #### Function Analysis
 
-- `list_methods` - メソッド一覧を取得（ページング対応）
 - `list_functions` - 関数一覧を取得
 - `list_classes` - クラス一覧を取得
 - `list_namespaces` - 名前空間一覧を取得（ページング対応）
@@ -193,14 +192,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `get_struct` - 構造体定義を取得
 - `list_data_types` - program 内のデータ型一覧を取得
 - `rename_data_type` - データ型名を変更
-- `create_enum` - 列挙体を作成
-- `add_enum_values` - 列挙体の値を追加
-- `remove_enum_values` - 列挙体の値を削除
-- `delete_enum` - 列挙体データ型を削除
 - `get_enum` - 列挙体定義を取得
-- `create_class` - GhidraClass 名前空間と対応構造体を作成
-- `add_class_members` - クラス相当データ型へメンバーを追加
-- `remove_class_members` - クラス相当データ型からメンバーを削除
 
 #### Shared Project Sync（`shared_sync` category）
 

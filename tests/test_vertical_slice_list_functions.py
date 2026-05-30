@@ -15,11 +15,6 @@ from ghidra_mcp import cli
             {"offset": 3, "limit": 7},
         ),
         (
-            "list_methods",
-            lambda: cli.list_methods(offset=3, limit=7, target="fw"),
-            {"offset": 3, "limit": 7},
-        ),
-        (
             "list_classes",
             lambda: cli.list_classes(offset=3, limit=7, target="fw"),
             {"offset": 3, "limit": 7},
@@ -173,7 +168,6 @@ def test_function_listing_slice_uses_dispatcher(monkeypatch, tool_name, call, ex
     "call",
     [
         lambda: cli.list_functions(offset=0, limit=10, target="fw"),
-        lambda: cli.list_methods(offset=0, limit=10, target="fw"),
         lambda: cli.list_classes(offset=0, limit=10, target="fw"),
         lambda: cli.search_functions_by_name(query="main", offset=0, limit=10, target="fw"),
         lambda: cli.get_function_by_address(address="0x401000", target="fw"),
@@ -217,7 +211,6 @@ def test_function_listing_slice_empty_result_keeps_compatibility(monkeypatch, ca
     "call",
     [
         lambda: cli.list_functions(offset=0, limit=10, target="fw"),
-        lambda: cli.list_methods(offset=0, limit=10, target="fw"),
         lambda: cli.list_classes(offset=0, limit=10, target="fw"),
         lambda: cli.search_functions_by_name(query="main", offset=0, limit=10, target="fw"),
         lambda: cli.get_function_by_address(address="0x401000", target="fw"),

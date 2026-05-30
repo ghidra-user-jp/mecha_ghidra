@@ -152,11 +152,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         struct_result = _unwrap_runtime_result(
             cli.create_struct(name="__it_struct", target=target)
         )
-        enum_result = _unwrap_runtime_result(
-            cli.create_enum(name="__it_enum", target=target)
-        )
         _log_runtime_result("create_struct", struct_result)
-        _log_runtime_result("create_enum", enum_result)
 
         first_functions = _unwrap_runtime_result(
             cli.list_functions(offset=0, limit=1, target=target)
@@ -212,9 +208,6 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         _log_runtime_result("get_bytes(seed)", bytes_dump)
 
         runtime_results = {
-            "list_methods": _unwrap_runtime_result(
-                cli.list_methods(offset=0, limit=5, target=target)
-            ),
             "decompile_function": _unwrap_runtime_result(
                 cli.decompile_function(name=function_name, target=target)
             ),
@@ -273,9 +266,6 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "get_struct": _unwrap_runtime_result(
                 cli.get_struct(name="__it_struct", target=target)
             ),
-            "get_enum": _unwrap_runtime_result(
-                cli.get_enum(name="__it_enum", target=target)
-            ),
             "list_bookmarks": _unwrap_runtime_result(
                 cli.list_bookmarks(address=address, type="Info", category="Validation", target=target)
             ),
@@ -289,7 +279,6 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["disassemble_function"], list)
         assert isinstance(runtime_results["disassemble_range"], list)
         assert isinstance(runtime_results["get_callee"], list)
-        assert isinstance(runtime_results["list_methods"], list)
         assert isinstance(runtime_results["get_xrefs_to"], list)
         assert isinstance(runtime_results["get_xrefs_from"], list)
         assert isinstance(runtime_results["get_function_xrefs"], list)
@@ -305,10 +294,8 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["get_bytes"], str)
         assert isinstance(runtime_results["search_bytes"], list)
         assert isinstance(runtime_results["get_struct"], dict)
-        assert isinstance(runtime_results["get_enum"], dict)
         assert isinstance(runtime_results["list_bookmarks"], list)
         assert runtime_results["get_struct"].get("name") == "__it_struct"
-        assert runtime_results["get_enum"].get("name") == "__it_enum"
         assert any(item.get("comment") == "runtime readonly seed" for item in runtime_results["list_bookmarks"])
     finally:
         try:

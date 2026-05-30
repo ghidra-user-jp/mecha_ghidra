@@ -130,85 +130,6 @@ def clear_struct(
     return describe_struct(struct_dt)
 
 
-def create_enum(
-    params,
-    *,
-    ensure_context,
-    to_int,
-    txn,
-    category_path,
-    enum_data_type,
-    to_int_auto,
-    dt_manager,
-    describe_enum,
-):
-    ctx = ensure_context()
-    name = params.get("name")
-    if not name:
-        raise ValueError("name is required")
-    category = params.get("category")
-    size = to_int(params.get("size"), 4)
-    values = params.get("values") or []
-    if not isinstance(values, (list, tuple)):
-        raise ValueError("values must be a list")
-
-    def _create():
-        enum_dt = enum_data_type(category_path(category) if category else category_path("/"), name, size)
-        for value in values:
-            enum_dt.add(value.get("name"), to_int_auto(value.get("value")), value.get("comment"))
-        dt_manager(ctx).addDataType(enum_dt, None)
-        return enum_dt
-
-    enum_dt = txn(ctx, "Create enum", _create)
-    return describe_enum(enum_dt)
-
-
-def add_enum_values(params, *, ensure_context, txn, get_enum_datatype, to_int_auto, dt_manager, describe_enum):
-    ctx = ensure_context()
-    name = params.get("enum_name")
-    if not name:
-        raise ValueError("enum_name is required")
-    category = params.get("category")
-    values = params.get("values") or []
-    if not isinstance(values, (list, tuple)):
-        raise ValueError("values must be a list")
-
-    def _update():
-        enum_dt = get_enum_datatype(ctx, name, category)
-        if enum_dt is None:
-            raise LookupError("Enum not found: %s" % name)
-        for value in values:
-            enum_dt.add(value.get("name"), to_int_auto(value.get("value")), value.get("comment"))
-        dt_manager(ctx).replaceDataType(enum_dt, enum_dt, True)
-        return enum_dt
-
-    enum_dt = txn(ctx, "Add enum values", _update)
-    return describe_enum(enum_dt)
-
-
-def remove_enum_values(params, *, ensure_context, txn, get_enum_datatype, dt_manager, describe_enum):
-    ctx = ensure_context()
-    name = params.get("enum_name")
-    if not name:
-        raise ValueError("enum_name is required")
-    category = params.get("category")
-    values = params.get("values") or []
-    if not isinstance(values, (list, tuple)):
-        raise ValueError("values must be a list")
-
-    def _update():
-        enum_dt = get_enum_datatype(ctx, name, category)
-        if enum_dt is None:
-            raise LookupError("Enum not found: %s" % name)
-        for value in values:
-            enum_dt.remove(value)
-        dt_manager(ctx).replaceDataType(enum_dt, enum_dt, True)
-        return enum_dt
-
-    enum_dt = txn(ctx, "Remove enum values", _update)
-    return describe_enum(enum_dt)
-
-
 def remove_struct_members(params, *, ensure_context, txn, get_struct_datatype, dt_manager, describe_struct):
     ctx = ensure_context()
     struct_name = params.get("struct_name")
@@ -251,26 +172,6 @@ def delete_struct(params, *, ensure_context, txn, get_struct_datatype, dt_manage
         return info
 
     deleted = txn(ctx, "Delete struct", _delete)
-    return {"deleted": True, "data_type": deleted}
-
-
-def delete_enum(params, *, ensure_context, txn, get_enum_datatype, dt_manager, describe_enum):
-    ctx = ensure_context()
-    enum_name = params.get("enum_name") or params.get("name")
-    if not enum_name:
-        raise ValueError("enum_name is required")
-    category = params.get("category")
-
-    def _delete():
-        enum_dt = get_enum_datatype(ctx, enum_name, category)
-        if enum_dt is None:
-            raise LookupError("Enum not found: %s" % enum_name)
-        info = describe_enum(enum_dt)
-        if not bool(dt_manager(ctx).remove(enum_dt)):
-            raise RuntimeError("Failed to delete enum: %s" % enum_name)
-        return info
-
-    deleted = txn(ctx, "Delete enum", _delete)
     return {"deleted": True, "data_type": deleted}
 
 

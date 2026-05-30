@@ -128,92 +128,9 @@ from ghidra_mcp import cli
             {"struct_name": "S", "category": "/types"},
         ),
         (
-            "create_enum",
-            lambda: cli.create_enum(
-                name="E",
-                category="/types",
-                size=4,
-                values=[{"name": "A", "value": 1}],
-                target="fw",
-            ),
-            {
-                "name": "E",
-                "size": 4,
-                "category": "/types",
-                "values": [{"name": "A", "value": 1}],
-            },
-        ),
-        (
-            "add_enum_values",
-            lambda: cli.add_enum_values(
-                enum_name="E",
-                values=[{"name": "B", "value": 2}],
-                category="/types",
-                target="fw",
-            ),
-            {
-                "enum_name": "E",
-                "values": [{"name": "B", "value": 2}],
-                "category": "/types",
-            },
-        ),
-        (
-            "remove_enum_values",
-            lambda: cli.remove_enum_values(
-                enum_name="E",
-                values=["B"],
-                category="/types",
-                target="fw",
-            ),
-            {"enum_name": "E", "values": ["B"], "category": "/types"},
-        ),
-        (
-            "delete_enum",
-            lambda: cli.delete_enum(enum_name="E", category="/types", target="fw"),
-            {"enum_name": "E", "category": "/types"},
-        ),
-        (
             "rename_data_type",
             lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
             {"name": "OldType", "new_name": "NewType", "category": "/types"},
-        ),
-        (
-            "create_class",
-            lambda: cli.create_class(
-                name="C",
-                parent_namespace="ns",
-                members=[{"name": "f", "type": "int"}],
-                target="fw",
-            ),
-            {
-                "name": "C",
-                "parent_namespace": "ns",
-                "members": [{"name": "f", "type": "int"}],
-            },
-        ),
-        (
-            "add_class_members",
-            lambda: cli.add_class_members(
-                class_name="C",
-                members=[{"name": "g", "type": "char"}],
-                parent_namespace="ns",
-                target="fw",
-            ),
-            {
-                "class_name": "C",
-                "members": [{"name": "g", "type": "char"}],
-                "parent_namespace": "ns",
-            },
-        ),
-        (
-            "remove_class_members",
-            lambda: cli.remove_class_members(
-                class_name="C",
-                members=["g"],
-                parent_namespace="ns",
-                target="fw",
-            ),
-            {"class_name": "C", "members": ["g"], "parent_namespace": "ns"},
         ),
         (
             "remove_struct_members",
@@ -326,14 +243,7 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
         lambda: cli.add_struct_members(struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"),
         lambda: cli.clear_struct(struct_name="S", category="/types", target="fw"),
         lambda: cli.delete_struct(struct_name="S", category="/types", target="fw"),
-        lambda: cli.create_enum(name="E", category="/types", size=4, values=[{"name": "A", "value": 1}], target="fw"),
-        lambda: cli.add_enum_values(enum_name="E", values=[{"name": "B", "value": 2}], category="/types", target="fw"),
-        lambda: cli.remove_enum_values(enum_name="E", values=["B"], category="/types", target="fw"),
-        lambda: cli.delete_enum(enum_name="E", category="/types", target="fw"),
         lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
-        lambda: cli.create_class(name="C", parent_namespace="ns", members=[{"name": "f", "type": "int"}], target="fw"),
-        lambda: cli.add_class_members(class_name="C", members=[{"name": "g", "type": "char"}], parent_namespace="ns", target="fw"),
-        lambda: cli.remove_class_members(class_name="C", members=["g"], parent_namespace="ns", target="fw"),
         lambda: cli.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
         lambda: cli.set_global_data_type(
             address="0x403000",
@@ -394,14 +304,7 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
         lambda: cli.add_struct_members(struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"),
         lambda: cli.clear_struct(struct_name="S", category="/types", target="fw"),
         lambda: cli.delete_struct(struct_name="S", category="/types", target="fw"),
-        lambda: cli.create_enum(name="E", category="/types", size=4, values=[{"name": "A", "value": 1}], target="fw"),
-        lambda: cli.add_enum_values(enum_name="E", values=[{"name": "B", "value": 2}], category="/types", target="fw"),
-        lambda: cli.remove_enum_values(enum_name="E", values=["B"], category="/types", target="fw"),
-        lambda: cli.delete_enum(enum_name="E", category="/types", target="fw"),
         lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
-        lambda: cli.create_class(name="C", parent_namespace="ns", members=[{"name": "f", "type": "int"}], target="fw"),
-        lambda: cli.add_class_members(class_name="C", members=[{"name": "g", "type": "char"}], parent_namespace="ns", target="fw"),
-        lambda: cli.remove_class_members(class_name="C", members=["g"], parent_namespace="ns", target="fw"),
         lambda: cli.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
         lambda: cli.set_global_data_type(
             address="0x403000",

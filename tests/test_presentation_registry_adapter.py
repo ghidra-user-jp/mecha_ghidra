@@ -14,7 +14,6 @@ from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
 
 _LIST_CORE_COMMANDS = {
-    "list_methods",
     "list_functions",
     "list_classes",
     "search_functions_by_name",
