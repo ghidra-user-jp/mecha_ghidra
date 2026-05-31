@@ -35,8 +35,8 @@ from ghidra_mcp import cli
             {"name": "main"},
         ),
         (
-            "decompile_function_by_address",
-            lambda: cli.decompile_function_by_address(address="0x401000", target="fw"),
+            "decompile_function",
+            lambda: cli.decompile_function(address="0x401000", target="fw"),
             {"address": "0x401000"},
         ),
         (
@@ -172,7 +172,7 @@ def test_function_listing_slice_uses_dispatcher(monkeypatch, tool_name, call, ex
         lambda: cli.search_functions_by_name(query="main", offset=0, limit=10, target="fw"),
         lambda: cli.get_function_by_address(address="0x401000", target="fw"),
         lambda: cli.decompile_function(name="main", target="fw"),
-        lambda: cli.decompile_function_by_address(address="0x401000", target="fw"),
+        lambda: cli.decompile_function(address="0x401000", target="fw"),
         lambda: cli.disassemble_function(address="0x401000", target="fw"),
         lambda: cli.disassemble_range(start_address="0x401000", length=16, limit=10, target="fw"),
         lambda: cli.get_callee(address="0x401000", target="fw"),
@@ -215,7 +215,7 @@ def test_function_listing_slice_empty_result_keeps_compatibility(monkeypatch, ca
         lambda: cli.search_functions_by_name(query="main", offset=0, limit=10, target="fw"),
         lambda: cli.get_function_by_address(address="0x401000", target="fw"),
         lambda: cli.decompile_function(name="main", target="fw"),
-        lambda: cli.decompile_function_by_address(address="0x401000", target="fw"),
+        lambda: cli.decompile_function(address="0x401000", target="fw"),
         lambda: cli.disassemble_function(address="0x401000", target="fw"),
         lambda: cli.disassemble_range(start_address="0x401000", length=16, limit=10, target="fw"),
         lambda: cli.get_callee(address="0x401000", target="fw"),

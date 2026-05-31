@@ -9,7 +9,6 @@ from ghidra_mcp.infrastructure.ghidra_adapter.core_gateway import CoreGateway
 
 SYMBOL_COMMANDS: tuple[str, ...] = (
     "rename_function",
-    "rename_function_by_address",
     "rename_data",
     "rename_variable",
     "set_decompiler_comment",

@@ -15,13 +15,13 @@ from ghidra_mcp import cli
             {"oldName": "old_fn", "newName": "new_fn"},
         ),
         (
-            "rename_function_by_address",
-            lambda: cli.rename_function_by_address(
-                function_address="0x401000",
+            "rename_function",
+            lambda: cli.rename_function(
+                address="0x401000",
                 new_name="new_fn",
                 target="fw",
             ),
-            {"function_address": "0x401000", "new_name": "new_fn"},
+            {"address": "0x401000", "newName": "new_fn"},
         ),
         (
             "rename_data",
@@ -226,7 +226,7 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
     "call",
     [
         lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-        lambda: cli.rename_function_by_address(function_address="0x401000", new_name="new_fn", target="fw"),
+        lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
         lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
         lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
         lambda: cli.set_decompiler_comment(address="0x401000", comment="memo", target="fw"),
@@ -287,7 +287,7 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
     "call",
     [
         lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-        lambda: cli.rename_function_by_address(function_address="0x401000", new_name="new_fn", target="fw"),
+        lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
         lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
         lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
         lambda: cli.set_decompiler_comment(address="0x401000", comment="memo", target="fw"),

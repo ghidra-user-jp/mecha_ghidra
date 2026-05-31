@@ -165,7 +165,7 @@ def _pick_primary_function(target: str) -> tuple[str, str, str]:
     address = first["entry"]
     name = first["name"]
     decompiled = _unwrap_runtime_result(
-        cli.decompile_function_by_address(address=address, target=target)
+        cli.decompile_function(address=address, target=target)
     )
     return address, name, decompiled
 
@@ -179,7 +179,7 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
         )
         function_name = info["name"]
         decompiled = _unwrap_runtime_result(
-            cli.decompile_function_by_address(address=address, target=target)
+            cli.decompile_function(address=address, target=target)
         )
         for var_name in _extract_variable_candidates(decompiled):
             new_name = f"it_{var_name}_renamed"
@@ -397,13 +397,13 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         renamed_aux_2 = f"{renamed_aux_1}_r2"
         rename_function_by_address_result = _unwrap_runtime_result(
-            cli.rename_function_by_address(
-                function_address=aux_address,
+            cli.rename_function(
+                address=aux_address,
                 new_name=renamed_aux_2,
                 target=target,
             )
         )
-        _log_runtime_result("rename_function_by_address", rename_function_by_address_result)
+        _log_runtime_result("rename_function(address)", rename_function_by_address_result)
 
         rename_data_result = _unwrap_runtime_result(
             cli.rename_data(address=aux_address, new_name=f"{renamed_aux_2}_data", target=target)
@@ -501,7 +501,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         runtime_results = {
             "rename_function": rename_function_result,
-            "rename_function_by_address": rename_function_by_address_result,
+            "rename_function(address)": rename_function_by_address_result,
             "rename_data": rename_data_result,
             "rename_variable": rename_variable_result,
             "set_decompiler_comment": decompiler_comment_result,

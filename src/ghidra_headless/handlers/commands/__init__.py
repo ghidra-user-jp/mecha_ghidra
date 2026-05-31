@@ -2,7 +2,6 @@
 
 from .read_only_decompile import (
     decompile_function,
-    decompile_function_by_address,
     disassemble_function,
     disassemble_range,
     get_callee,
@@ -41,7 +40,6 @@ from .mutating_symbols import (
     reanalyze_program,
     rename_data,
     rename_function,
-    rename_function_by_address,
     rename_variable,
     set_bytes,
     set_decompiler_comment,
@@ -62,7 +60,6 @@ from .mutating_data_types import (
 
 __all__ = [
     "decompile_function",
-    "decompile_function_by_address",
     "disassemble_function",
     "disassemble_range",
     "get_callee",
@@ -81,7 +78,6 @@ __all__ = [
     "get_struct",
     "get_enum",
     "rename_function",
-    "rename_function_by_address",
     "rename_data",
     "rename_variable",
     "set_decompiler_comment",

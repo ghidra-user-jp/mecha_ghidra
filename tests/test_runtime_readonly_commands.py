@@ -211,8 +211,8 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "decompile_function": _unwrap_runtime_result(
                 cli.decompile_function(name=function_name, target=target)
             ),
-            "decompile_function_by_address": _unwrap_runtime_result(
-                cli.decompile_function_by_address(address=address, target=target)
+            "decompile_function(address)": _unwrap_runtime_result(
+                cli.decompile_function(address=address, target=target)
             ),
             "disassemble_function": _unwrap_runtime_result(
                 cli.disassemble_function(address=address, target=target)
@@ -275,7 +275,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             _log_runtime_result(command_name, value)
 
         assert isinstance(runtime_results["decompile_function"], str)
-        assert isinstance(runtime_results["decompile_function_by_address"], str)
+        assert isinstance(runtime_results["decompile_function(address)"], str)
         assert isinstance(runtime_results["disassemble_function"], list)
         assert isinstance(runtime_results["disassemble_range"], list)
         assert isinstance(runtime_results["get_callee"], list)

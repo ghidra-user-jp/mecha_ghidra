@@ -680,7 +680,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         include_none_keys=("domain_path",),
         description=(
             "Persist the currently loaded program for a target into its Ghidra project. "
-            "Use this after mutating tools such as rename_function_by_address when changes "
+            "Use this after mutating tools such as rename_function when changes "
             "must remain visible after reopening the project."
         ),
         idempotent_hint=True,
@@ -729,15 +729,11 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
-        input_fields=(("name", str, ...),),
-        scalar_output_type=str,
-    ),
-    _core_tool(
-        "decompile_function_by_address",
-        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.READ_ONLY,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(("address", str, ...),),
+        input_fields=(
+            ("address", str | None, None),
+            ("name", str | None, None),
+        ),
+        omit_falsey_keys=("address", "name"),
         scalar_output_type=str,
     ),
     _core_tool(
@@ -931,21 +927,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
-            ("oldName", str, ...),
             ("newName", str, ...),
+            ("address", str | None, None),
+            ("oldName", str | None, None),
         ),
-        public_name_overrides={"oldName": "old_name", "newName": "new_name"},
-        checkout_required=True,
-    ),
-    _core_tool(
-        "rename_function_by_address",
-        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(
-            ("function_address", str, ...),
-            ("new_name", str, ...),
-        ),
+        public_name_overrides={
+            "oldName": "old_name",
+            "newName": "new_name",
+        },
         checkout_required=True,
     ),
     _core_tool(

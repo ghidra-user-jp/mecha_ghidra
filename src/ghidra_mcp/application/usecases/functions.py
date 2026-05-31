@@ -13,7 +13,6 @@ FUNCTION_COMMANDS: tuple[str, ...] = (
     "search_functions_by_name",
     "get_function_by_address",
     "decompile_function",
-    "decompile_function_by_address",
     "disassemble_function",
     "disassemble_range",
     "create_function",

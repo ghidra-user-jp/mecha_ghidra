@@ -139,8 +139,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `list_classes` - クラス一覧を取得
 - `list_namespaces` - 名前空間一覧を取得（ページング対応）
 - `search_functions_by_name` - 関数名の部分一致検索
-- `decompile_function` - 関数名指定で C 擬似コードを取得
-- `decompile_function_by_address` - アドレス指定で C 擬似コードを取得
+- `decompile_function` - 関数名またはアドレス指定で C 擬似コードを取得（両方指定時は `address` 優先）
 - `disassemble_function` - 関数の逆アセンブル結果を取得
 - `disassemble_range` - アドレス範囲の逆アセンブル結果を取得
 - `get_function_by_address` - アドレスに対応する関数情報を取得
@@ -166,8 +165,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 #### Symbol & Comment Editing
 
-- `rename_function` - 関数名を変更（名前指定）
-- `rename_function_by_address` - 関数名を変更（アドレス指定）
+- `rename_function` - 関数名またはアドレス指定で関数名を変更（両方指定時は `address` 優先）
 - `rename_variable` - ローカル変数名/引数名を変更
 - `rename_data` - データラベル名を変更
 - `set_function_prototype` - 関数プロトタイプを設定
@@ -180,7 +178,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `list_bookmarks` - ブックマーク一覧を取得
 - `delete_bookmark` - ID または address/type/category 指定でブックマークを削除
 
-`rename_function_by_address` などの更新系 tool を使った後は、`save_project_program(target="default")` を呼ぶと変更が Ghidra project に保存されます。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードしてください。
+`rename_function` などの更新系 tool を使った後は、`save_project_program(target="default")` を呼ぶと変更が Ghidra project に保存されます。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードしてください。
 
 #### Data Type Operations
 

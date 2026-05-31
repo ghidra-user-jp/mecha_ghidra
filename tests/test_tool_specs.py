@@ -194,13 +194,8 @@ def test_typed_input_models_for_function_listing_slice():
     _assert_fields(
         "decompile_function",
         {
-            "name": (str, ...),
-        },
-    )
-    _assert_fields(
-        "decompile_function_by_address",
-        {
-            "address": (str, ...),
+            "address": (str | None, None),
+            "name": (str | None, None),
         },
     )
     _assert_fields(
@@ -344,15 +339,9 @@ def test_typed_input_models_for_function_listing_slice():
     _assert_fields(
         "rename_function",
         {
-            "oldName": (str, ...),
+            "address": (str | None, None),
+            "oldName": (str | None, None),
             "newName": (str, ...),
-        },
-    )
-    _assert_fields(
-        "rename_function_by_address",
-        {
-            "function_address": (str, ...),
-            "new_name": (str, ...),
         },
     )
     _assert_fields(
@@ -678,7 +667,6 @@ def test_specs_include_contract_driven_metadata():
 def test_checkout_required_tools_are_declared_on_specs():
     assert get_checkout_required_tool_names() == {
         "rename_function",
-        "rename_function_by_address",
         "rename_data",
         "rename_variable",
         "set_decompiler_comment",
@@ -730,7 +718,6 @@ def test_all_output_models_are_strict_and_typed():
     }
     scalar_output_tools = {
         "decompile_function": str,
-        "decompile_function_by_address": str,
         "get_bytes": str,
     }
 

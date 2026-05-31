@@ -135,8 +135,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `list_classes` - List classes
 - `list_namespaces` - List namespaces (with pagination)
 - `search_functions_by_name` - Partial-match search by function name
-- `decompile_function` - Get C-like pseudocode by function name
-- `decompile_function_by_address` - Get C-like pseudocode by address
+- `decompile_function` - Get C-like pseudocode by function name or address (`address` wins if both are set)
 - `disassemble_function` - Get disassembly for a function
 - `disassemble_range` - Get disassembly for an address range
 - `get_function_by_address` - Get function metadata by address
@@ -162,8 +161,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 
 #### Symbol and Comment Editing
 
-- `rename_function` - Rename a function (by old name)
-- `rename_function_by_address` - Rename a function (by address)
+- `rename_function` - Rename a function by old name or address (`address` wins if both are set)
 - `rename_variable` - Rename a local variable or argument
 - `rename_data` - Rename a data label
 - `set_function_prototype` - Set function prototype
@@ -176,7 +174,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `list_bookmarks` - List bookmarks
 - `delete_bookmark` - Delete a bookmark by ID or by address/type/category
 
-After mutating tools such as `rename_function_by_address`, call `save_project_program(target="default")` to persist edits into the Ghidra project. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
+After mutating tools such as `rename_function`, call `save_project_program(target="default")` to persist edits into the Ghidra project. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 
 #### Data Type Operations
 
