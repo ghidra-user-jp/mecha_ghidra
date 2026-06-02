@@ -7,7 +7,7 @@ from .read_only_decompile import (
     get_callee,
 )
 from .read_only_functions import (
-    get_function_by_address,
+    get_function,
     list_classes,
     list_functions,
     search_functions_by_name,
@@ -103,5 +103,5 @@ __all__ = [
     "list_functions",
     "list_classes",
     "search_functions_by_name",
-    "get_function_by_address",
+    "get_function",
 ]

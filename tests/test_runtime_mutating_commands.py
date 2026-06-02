@@ -175,7 +175,7 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
     for entry in function_entries:
         address = entry["entry"]
         info = _unwrap_runtime_result(
-            cli.get_function_by_address(address=address, target=target)
+            cli.get_function(address=address, target=target)
         )
         function_name = info["name"]
         decompiled = _unwrap_runtime_result(
@@ -237,7 +237,7 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
         cli.load_project_program(target=target, domain_path=domain_path)
 
         function_info = _unwrap_runtime_result(
-            cli.get_function_by_address(address="0x401000", target=target)
+            cli.get_function(address="0x401000", target=target)
         )
         assert isinstance(function_info, dict)
         assert function_info["entry"].lower().endswith("401000")
@@ -339,7 +339,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("set_disassembly_comment", disassembly_comment_result)
 
         current_primary_info = _unwrap_runtime_result(
-            cli.get_function_by_address(address=primary_address, target=target)
+            cli.get_function(address=primary_address, target=target)
         )
         current_primary_name = current_primary_info["name"]
         prototype_candidates = [

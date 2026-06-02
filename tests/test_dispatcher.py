@@ -230,7 +230,6 @@ def test_dispatch_tool_validation_error():
     ("spec_name", "raw_args"),
     [
         ("search_functions_by_name", {"offset": 0, "limit": 5}),
-        ("get_function_by_address", {}),
         ("disassemble_function", {}),
         ("get_callee", {}),
         ("get_xrefs_to", {"offset": 0, "limit": 10}),
@@ -279,7 +278,8 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
     ("spec_name", "raw_args"),
     [
         ("search_functions_by_name", {"query": 123, "offset": 0, "limit": 5}),
-        ("get_function_by_address", {"address": 123}),
+        ("get_function", {"address": 123}),
+        ("get_function", {"name": 123}),
         ("decompile_function", {"name": 123}),
         ("decompile_function", {"address": 123}),
         ("disassemble_function", {"address": 123}),

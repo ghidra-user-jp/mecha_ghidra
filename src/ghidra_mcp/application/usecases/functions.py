@@ -11,7 +11,7 @@ FUNCTION_COMMANDS: tuple[str, ...] = (
     "list_functions",
     "list_classes",
     "search_functions_by_name",
-    "get_function_by_address",
+    "get_function",
     "decompile_function",
     "disassemble_function",
     "disassemble_range",

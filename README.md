@@ -138,7 +138,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `decompile_function` - Get C-like pseudocode by function name or address (`address` wins if both are set)
 - `disassemble_function` - Get disassembly for a function
 - `disassemble_range` - Get disassembly for an address range
-- `get_function_by_address` - Get function metadata by address
+- `get_function` - Get function metadata by name or address (`address` wins if both are set)
 - `create_function` - Create a function at an address
 - `delete_function` - Delete a function by address
 - `analyze_program` - Run analysis when the program is marked unanalyzed

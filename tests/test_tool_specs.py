@@ -186,9 +186,10 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "get_function_by_address",
+        "get_function",
         {
-            "address": (str, ...),
+            "address": (str | None, None),
+            "name": (str | None, None),
         },
     )
     _assert_fields(

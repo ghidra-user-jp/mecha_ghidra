@@ -196,10 +196,10 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         _log_runtime_result("search_functions_by_name(seed)", search_result)
 
         function_info = _unwrap_runtime_result(
-            cli.get_function_by_address(address=address, target=target)
+            cli.get_function(address=address, target=target)
         )
         label = function_info["name"]
-        _log_runtime_result("get_function_by_address(seed)", function_info)
+        _log_runtime_result("get_function(seed)", function_info)
 
         bytes_dump = _unwrap_runtime_result(
             cli.get_bytes(address=address, size=16, target=target)

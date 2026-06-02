@@ -791,11 +791,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         checkout_required=True,
     ),
     _core_tool(
-        "get_function_by_address",
+        "get_function",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(("address", str, ...),),
+        input_fields=(
+            ("address", str | None, None),
+            ("name", str | None, None),
+        ),
     ),
     _core_tool(
         "get_function_xrefs",

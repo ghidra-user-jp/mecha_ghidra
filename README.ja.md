@@ -142,7 +142,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `decompile_function` - 関数名またはアドレス指定で C 擬似コードを取得（両方指定時は `address` 優先）
 - `disassemble_function` - 関数の逆アセンブル結果を取得
 - `disassemble_range` - アドレス範囲の逆アセンブル結果を取得
-- `get_function_by_address` - アドレスに対応する関数情報を取得
+- `get_function` - 関数名またはアドレス指定で関数情報を取得（両方指定時は `address` 優先）
 - `create_function` - アドレスに関数を作成
 - `delete_function` - アドレス指定で関数を削除
 - `analyze_program` - 未解析扱いの program に解析を実行

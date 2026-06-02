@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ghidra_headless.handlers.commands.mutating_symbols import rename_function
 from ghidra_headless.handlers.commands.read_only_decompile import decompile_function
+from ghidra_headless.handlers.commands.read_only_functions import get_function
 
 
 class _Function:
@@ -36,6 +37,37 @@ class _Context:
 
 class _SourceType:
     USER_DEFINED = object()
+
+
+def test_get_function_prefers_address_over_name():
+    address_function = _Function("by_address", "0x401000")
+    ctx = _Context(address_function)
+
+    def find_function_by_name(_ctx, _name):  # noqa: ARG001
+        raise AssertionError("name lookup should not run when address is provided")
+
+    result = get_function(
+        {"address": "0x401000", "name": "by_name"},
+        ensure_context=lambda: ctx,
+        get_address=lambda _ctx, text: text,
+        find_function_by_name=find_function_by_name,
+    )
+
+    assert result == {"name": "by_address", "entry": "0x401000"}
+
+
+def test_get_function_accepts_name():
+    named_function = _Function("by_name", "0x402000")
+    ctx = _Context(named_function)
+
+    result = get_function(
+        {"name": "by_name"},
+        ensure_context=lambda: ctx,
+        get_address=lambda _ctx, text: text,
+        find_function_by_name=lambda _ctx, _name: named_function,
+    )
+
+    assert result == {"name": "by_name", "entry": "0x402000"}
 
 
 def test_decompile_function_prefers_address_over_name():

@@ -68,13 +68,21 @@ def search_functions_by_name(params, *, ensure_context, to_int):
     return matches
 
 
-def get_function_by_address(params, *, ensure_context, get_address):
+def get_function(params, *, ensure_context, get_address, find_function_by_name):
     ctx = ensure_context()
     address_text = params.get("address")
-    address = get_address(ctx, address_text)
-    function = ctx.function_manager.getFunctionContaining(address)
-    if function is None:
-        raise LookupError("Function not found: %s" % address_text)
+    name = params.get("name")
+    if address_text:
+        address = get_address(ctx, address_text)
+        function = ctx.function_manager.getFunctionContaining(address)
+        if function is None:
+            raise LookupError("No function found for address: %s" % address_text)
+    else:
+        if not name:
+            raise ValueError("address or name is required")
+        function = find_function_by_name(ctx, name)
+        if function is None:
+            raise LookupError("Function not found: %s" % name)
     return {
         "name": function.getName(),
         "entry": str(function.getEntryPoint()),
