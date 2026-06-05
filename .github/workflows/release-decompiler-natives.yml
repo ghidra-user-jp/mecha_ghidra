@@ -26,10 +26,6 @@ jobs:
         include:
           - platform: linux_arm_64
             runs_on: ubuntu-24.04-arm
-          - platform: mac_arm_64
-            runs_on: macos-15
-          - platform: mac_x86_64
-            runs_on: macos-15-intel
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -100,9 +96,7 @@ jobs:
 
           mkdir -p release-assets/decompiler-natives
           for overlay in \
-            "$(find platform-artifacts -type f -name '*linux_arm_64_decompiler_overlay.tar.gz' | head -n 1)" \
-            "$(find platform-artifacts -type f -name '*mac_arm_64_decompiler_overlay.tar.gz' | head -n 1)" \
-            "$(find platform-artifacts -type f -name '*mac_x86_64_decompiler_overlay.tar.gz' | head -n 1)"
+            "$(find platform-artifacts -type f -name '*linux_arm_64_decompiler_overlay.tar.gz' | head -n 1)"
           do
             test -n "${overlay}"
             tar -xzf "${overlay}" -C release-assets/decompiler-natives
@@ -137,10 +131,6 @@ jobs:
           test -f "${full_zip_path}"
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
-          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_arm_64/decompile$'
-          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_arm_64/sleigh$'
-          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_x86_64/decompile$'
-          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_x86_64/sleigh$'
           unzip -Z1 "${full_zip_path}" | grep "^${MECHA_GHIDRA_GHIDRA_DIST_ROOT}/Ghidra/Features/Decompiler/os/linux_arm_64/decompile$"
           unzip -Z1 "${full_zip_path}" | grep "^${MECHA_GHIDRA_GHIDRA_DIST_ROOT}/Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$"
           unzip -Z1 "${full_zip_path}" | grep "^${MECHA_GHIDRA_GHIDRA_DIST_ROOT}/Ghidra/Features/Decompiler/os/mac_arm_64/decompile$"
@@ -162,24 +152,22 @@ jobs:
           This release provides two ZIP assets:
 
           - \`${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}\`
-            Ready-to-use Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} distribution with native \`decompile\` / \`sleigh\` binaries already included.
+            Ready-to-use Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} distribution with the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries already included.
             Extract this ZIP and run Ghidra from the extracted \`${MECHA_GHIDRA_GHIDRA_DIST_ROOT}\` directory.
             SHA-256: \`${full_zip_sha256}\`
 
           - \`${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}\`
-            Overlay ZIP containing only the added native \`decompile\` / \`sleigh\` binaries.
+            Overlay ZIP containing only the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries.
             Extract it at the root of an existing Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} installation.
             Files are already stored under their final \`Ghidra/Features/Decompiler/os/...\` paths inside the ZIP.
             SHA-256: \`${zip_sha256}\`
 
-          Included native paths:
+          Added native paths:
 
           - \`Ghidra/Features/Decompiler/os/linux_arm_64/decompile\`
           - \`Ghidra/Features/Decompiler/os/linux_arm_64/sleigh\`
-          - \`Ghidra/Features/Decompiler/os/mac_arm_64/decompile\`
-          - \`Ghidra/Features/Decompiler/os/mac_arm_64/sleigh\`
-          - \`Ghidra/Features/Decompiler/os/mac_x86_64/decompile\`
-          - \`Ghidra/Features/Decompiler/os/mac_x86_64/sleigh\`
+
+          The upstream Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} ZIP already includes \`mac_arm_64\` and \`mac_x86_64\` decompiler binaries.
           EOF
 
       - name: Remove legacy release assets

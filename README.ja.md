@@ -76,15 +76,12 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 - overlay tarball には `Ghidra/Features/Decompiler/os/<platform>/{decompile,sleigh}` のパスがそのまま入るので、既存の Ghidra install にそのまま展開できます。
 - patched ZIP は対象 platform ごとに、ARM Linux Docker/直接配置、Apple Silicon macOS、Intel macOS で使う想定です。
 - GitHub release には、利用者向け ZIP asset を 2 つ publish します。
-  - `ghidra_12.1.2_decompiler_natives_all.zip`: native decompiler ファイルを組み込み済みの、そのまま使える Ghidra 12.1.2 配布物。
-  - `ghidra_decompiler_natives_all.zip`: 既存の Ghidra 12.1.2 install へ追加する native decompiler ファイルだけの overlay ZIP。
-- 含まれる native decompiler path は次のとおりです。
+  - `ghidra_12.1.2_decompiler_natives_all.zip`: Linux ARM64 decompiler ファイルを追加済みの、そのまま使える Ghidra 12.1.2 配布物。
+  - `ghidra_decompiler_natives_all.zip`: 既存の Ghidra 12.1.2 install へ追加する Linux ARM64 decompiler ファイルだけの overlay ZIP。
+- release overlay が追加する native decompiler path は次のとおりです。
   - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
   - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
+- upstream 公式 Ghidra 12.1.2 ZIP には `mac_arm_64` と `mac_x86_64` の decompiler binaries が含まれています。
 - release 本文には、どちらの ZIP を使うかの説明と上記の追加パスを書きます。
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使ってください。
 

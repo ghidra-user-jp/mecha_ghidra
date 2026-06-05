@@ -72,15 +72,12 @@ The repository ships dedicated build paths for the Ghidra native decompiler bina
 - The overlay archive preserves the exact path `Ghidra/Features/Decompiler/os/<platform>/{decompile,sleigh}` so it can be unpacked directly into an existing Ghidra install.
 - The patched ZIPs are intended for the matching platform: ARM Linux Docker/direct installs, Apple Silicon macOS, or Intel macOS.
 - GitHub releases publish two user-facing ZIP assets:
-  - `ghidra_12.1.2_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1.2 distribution with the native decompiler files already installed.
-  - `ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added native decompiler files for an existing Ghidra 12.1.2 install.
-- The included native decompiler paths are:
+  - `ghidra_12.1.2_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1.2 distribution with the added Linux ARM64 decompiler files already installed.
+  - `ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added Linux ARM64 decompiler files for an existing Ghidra 12.1.2 install.
+- The release overlay adds these native decompiler paths:
   - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
   - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
+- The upstream Ghidra 12.1.2 ZIP already includes `mac_arm_64` and `mac_x86_64` decompiler binaries.
 - The release body explains which ZIP to use and lists those added paths.
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
 

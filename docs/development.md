@@ -24,17 +24,13 @@
   - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
   - `dist/ghidra_*_mac_x86_64_decompiler.zip`
   - matching `.sha256` files for local verification
-- The GitHub Actions workflow `.github/workflows/release-decompiler-natives.yml` builds all release decompiler overlays on native hosted runners: `ubuntu-24.04-arm`, `macos-15`, and `macos-15-intel`.
-- Tag pushes and published GitHub releases publish the generated release assets after all platform builds complete. Manual workflow runs build and upload workflow artifacts without publishing a release.
+- The GitHub Actions workflow `.github/workflows/release-decompiler-natives.yml` builds the release Linux ARM64 decompiler overlay on the native hosted runner `ubuntu-24.04-arm`. The upstream Ghidra 12.1.2 ZIP already includes `mac_arm_64` and `mac_x86_64` decompiler binaries.
+- Tag pushes and published GitHub releases publish the generated release assets after the release build completes. Manual workflow runs build and upload workflow artifacts without publishing a release.
 - For GitHub releases, the workflow publishes two user-facing ZIP assets:
-  - `ghidra_12.1.2_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1.2 distribution with the native decompiler files already installed
-  - `ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added native decompiler files for an existing Ghidra 12.1.2 install
-- The included native decompiler paths are:
+  - `ghidra_12.1.2_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1.2 distribution with the added Linux ARM64 decompiler files already installed
+  - `ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added Linux ARM64 decompiler files for an existing Ghidra 12.1.2 install
+- The release overlay adds these native decompiler paths:
   - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
   - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
-  - `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
 - For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
 - The release page body explains which ZIP to use and lists those added paths. Separate `.sha256` and older legacy release assets are removed during publish.
