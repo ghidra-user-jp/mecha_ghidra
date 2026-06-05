@@ -27,6 +27,8 @@ def _resolve_ghidra_install_dir() -> str:
         explicit,
         "/Applications/ghidra_11.4_PUBLIC",
         "/Applications/Ghidra.app/Contents/Resources/ghidra",
+        str(Path.home() / "ghidra" / "ghidra_12.1.2_PUBLIC"),
+        str(Path.home() / "Library" / "ghidra" / "ghidra_12.1.2_PUBLIC"),
         str(Path.home() / "ghidra" / "ghidra_12.1_PUBLIC"),
         str(Path.home() / "Library" / "ghidra" / "ghidra_12.1_PUBLIC"),
         str(Path.home() / "ghidra" / "ghidra_11.4_PUBLIC"),
