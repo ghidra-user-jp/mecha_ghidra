@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import Any, Iterator
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 
 def _iter_java_items(items) -> Iterator[Any]:  # noqa: ANN001
@@ -50,6 +51,49 @@ def _executable_to_dict(record) -> dict[str, Any]:  # noqa: ANN001
     }
 
 
+def _text_or_none(value) -> str | None:  # noqa: ANN001
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
+
+
+def _server_info_to_dict(server_info) -> dict[str, Any]:  # noqa: ANN001
+    if server_info is None:
+        return {}
+    return {
+        "database_type": _text_or_none(server_info.getDBType()),
+        "server_name": _text_or_none(server_info.getServerName()),
+        "server_port": int(server_info.getPort()),
+        "server_database": _text_or_none(server_info.getDBName()),
+        "server_user": _text_or_none(server_info.getUserName()),
+    }
+
+
+def _hostport(parts) -> str:
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return host
+
+
+def _postgresql_jdbc_url_and_properties(bsim_url: str):
+    parts = urlsplit(bsim_url)
+    if parts.scheme.lower() != "postgresql":
+        return None
+    from java.util import Properties
+
+    props = Properties()
+    if parts.username:
+        props.setProperty("user", unquote(parts.username))
+    if parts.password:
+        props.setProperty("password", unquote(parts.password))
+    jdbc_url = urlunsplit(("jdbc:postgresql", _hostport(parts), parts.path, parts.query, ""))
+    return jdbc_url, props
+
+
 class BsimJavaBackend:
     """Small wrapper around Ghidra's Java BSim query API.
 
@@ -82,10 +126,40 @@ class BsimJavaBackend:
         finally:
             database.close()
 
+    @staticmethod
+    def get_ghidra_version() -> str | None:
+        try:
+            from ghidra.framework import Application
+
+            return str(Application.getApplicationVersion())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _postgresql_version(bsim_url: str) -> tuple[str | None, str | None]:
+        connection_info = _postgresql_jdbc_url_and_properties(bsim_url)
+        if connection_info is None:
+            return None, None
+
+        from java.sql import DriverManager
+
+        connection = None
+        try:
+            connection = DriverManager.getConnection(*connection_info)
+            metadata = connection.getMetaData()
+            return str(metadata.getDatabaseProductVersion()), None
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
     def get_database_status(self, bsim_url: str) -> dict[str, Any]:
         classes = self._classes()
         with self._database(bsim_url) as database:
             info = database.getInfo()
+            server_info = _server_info_to_dict(database.getServerInfo())
+            postgresql_version, postgresql_version_error = self._postgresql_version(bsim_url)
             query = classes["QueryExeCount"]()
             response = database.query(query)
             if response is None:
@@ -102,6 +176,9 @@ class BsimJavaBackend:
                 "executable_count": int(response.recordCount),
                 "categories": [str(item) for item in _iter_java_items(info.execats)],
                 "function_tags": [str(item) for item in _iter_java_items(info.functionTags)],
+                "postgresql_version": postgresql_version,
+                "postgresql_version_error": postgresql_version_error,
+                **server_info,
             }
 
     def list_categories(self, bsim_url: str) -> dict[str, Any]:

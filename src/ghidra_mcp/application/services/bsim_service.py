@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import math
 import os
 import pathlib
 import re
@@ -18,6 +19,10 @@ from .target_service import TargetService
 
 BSIM_MATCHED_REF_VERSION = 1
 _BSIM_CODE_RE = re.compile(r"^BSIM_[A-Z0-9_]+(?::|$)")
+_BSIM_SUPPORTED_URL_SCHEMES = frozenset({"postgresql", "elastic", "https", "file"})
+_MAX_BSIM_LIST_LIMIT = 10_000
+_MAX_BSIM_MATCHES_PER_FUNCTION = 1_000
+_MAX_BSIM_QUERY_RESULTS = 10_000
 _T = TypeVar("_T")
 
 
@@ -28,6 +33,7 @@ class BsimConfig:
     bsim_password_env: str | None = None
     work_dir: str | None = None
     command_timeout: int = 300
+    ghidra_install_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,91 @@ def _bsim_url_with_password(bsim_url: str, password: str | None) -> str:
     username = unquote(parts.username or "") or getpass.getuser()
     userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
     return urlunsplit((parts.scheme, f"{userinfo}@{_hostport(parts)}", parts.path, parts.query, parts.fragment))
+
+
+def _validate_bsim_url(bsim_url: str) -> str:
+    parts = urlsplit(bsim_url)
+    scheme = parts.scheme.lower()
+    if not scheme:
+        raise ValueError(
+            "BSIM_URL_INVALID: bsim_url requires a scheme "
+            "(supported: postgresql://, elastic://, https://, file:)"
+        )
+    if scheme not in _BSIM_SUPPORTED_URL_SCHEMES:
+        supported = ", ".join(sorted(_BSIM_SUPPORTED_URL_SCHEMES))
+        raise ValueError(f"BSIM_URL_INVALID: unsupported BSim URL scheme '{parts.scheme}' (supported: {supported})")
+    if scheme in {"postgresql", "elastic", "https"} and not parts.netloc:
+        raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL requires a host")
+    if scheme in {"postgresql", "elastic", "https"}:
+        path = parts.path.strip("/")
+        if not path:
+            raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL requires a database name")
+        if "/" in path:
+            raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL database name must be one path element")
+    if scheme == "file":
+        path = parts.path
+        normalized_path = path.replace("\\", "/")
+        if parts.netloc:
+            raise ValueError("BSIM_URL_INVALID: remote file BSim URL is not supported")
+        if not path.strip("/"):
+            raise ValueError("BSIM_URL_INVALID: file BSim URL requires a database path")
+        if any(char in path for char in "';\""):
+            raise ValueError("BSIM_URL_INVALID: file BSim URL contains an unsupported path character")
+        if normalized_path.endswith("/") or not (
+            normalized_path.startswith("/") or re.match(r"^[A-Za-z]:/", normalized_path)
+        ):
+            raise ValueError("BSIM_URL_INVALID: file BSim URL requires an absolute database path")
+    return bsim_url
+
+
+def _validate_float_range(value: float, *, name: str, minimum: float, maximum: float | None = None) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be a number") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be finite")
+    if number < minimum:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be >= {minimum:g}")
+    if maximum is not None and number > maximum:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be <= {maximum:g}")
+    return number
+
+
+def _validate_positive_int(value: int, *, name: str, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be an integer") from exc
+    if number < 1:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be >= 1")
+    if number > maximum:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be <= {maximum}")
+    return number
+
+
+def _validate_query_parameters(
+    *,
+    similarity_threshold: float,
+    significance_threshold: float,
+    matches_per_function: int,
+    max_results: int,
+) -> tuple[float, float, int, int]:
+    return (
+        _validate_float_range(
+            similarity_threshold,
+            name="similarity_threshold",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        _validate_float_range(significance_threshold, name="significance_threshold", minimum=0.0),
+        _validate_positive_int(
+            matches_per_function,
+            name="matches_per_function",
+            maximum=_MAX_BSIM_MATCHES_PER_FUNCTION,
+        ),
+        _validate_positive_int(max_results, name="max_results", maximum=_MAX_BSIM_QUERY_RESULTS),
+    )
 
 
 def _normalize_domain_path(value: str | None) -> str | None:
@@ -260,7 +351,8 @@ class BsimService:
         resolved = (bsim_url or self._config.bsim_url or "").strip()
         if not resolved:
             raise ValueError("BSIM_URL_REQUIRED: set --bsim-url or pass bsim_url")
-        return _bsim_url_with_password(resolved, _resolve_config_password(self._config))
+        _validate_bsim_url(resolved)
+        return _validate_bsim_url(_bsim_url_with_password(resolved, _resolve_config_password(self._config)))
 
     @staticmethod
     def _mask_response_url(payload: dict[str, Any], bsim_url: str) -> dict[str, Any]:
@@ -307,13 +399,25 @@ class BsimService:
         except Exception as exc:
             _raise_classified_bsim_error(exc, default_code=default_code)
 
+    def _ghidra_install_dir(self) -> str | None:
+        configured = self._text(self._config.ghidra_install_dir) or self._text(os.environ.get("GHIDRA_INSTALL_DIR"))
+        if configured is None:
+            return None
+        return str(pathlib.Path(configured).expanduser())
+
     def get_database_status(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
         result = self._call_bsim(
             lambda: self._java_backend.get_database_status(resolved),
             default_code="BSIM_DATABASE_STATUS_FAILED",
         )
-        return self._mask_response_url(result, resolved)
+        masked = self._mask_response_url(result, resolved)
+        masked["ghidra_install_dir"] = self._ghidra_install_dir()
+        masked["ghidra_version"] = self._call_bsim(
+            self._java_backend.get_ghidra_version,
+            default_code="BSIM_GHIDRA_VERSION_FAILED",
+        )
+        return masked
 
     def get_bsim_database_status(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         return self.get_database_status(bsim_url=bsim_url)
@@ -340,6 +444,7 @@ class BsimService:
         limit: int = 100,
     ) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
+        limit = _validate_positive_int(limit, name="limit", maximum=_MAX_BSIM_LIST_LIMIT)
         result = self._call_bsim(
             lambda: self._java_backend.list_executables(
                 resolved,
@@ -405,6 +510,17 @@ class BsimService:
         matches_per_function: int = 10,
         max_results: int = 500,
     ) -> dict[str, Any]:
+        (
+            similarity_threshold,
+            significance_threshold,
+            matches_per_function,
+            max_results,
+        ) = _validate_query_parameters(
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=max_results,
+        )
         resolved = self._resolve_bsim_url(bsim_url)
         result = self._call_bsim(
             lambda: self._core_command_service.call(
@@ -464,6 +580,17 @@ class BsimService:
         matches_per_function: int = 10,
         max_results: int = 100,
     ) -> dict[str, Any]:
+        (
+            similarity_threshold,
+            significance_threshold,
+            matches_per_function,
+            max_results,
+        ) = _validate_query_parameters(
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=max_results,
+        )
         resolved = self._resolve_bsim_url(bsim_url)
         result = self._call_bsim(
             lambda: self._core_command_service.call(
@@ -636,6 +763,44 @@ class BsimService:
         if repository:
             self._loaded_match_index[f"url:{repository}::{domain_path}"] = target
 
+    def _matched_ref_project_identity(self, matched_ref: dict[str, object]) -> tuple[str, str] | None:
+        project_location = self._text(matched_ref.get("project_location"))
+        project_name = self._text(matched_ref.get("project_name"))
+        repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
+        if not project_location and repository:
+            try:
+                project_location, project_name = _project_from_ghidra_url(repository)
+            except ValueError:
+                return None
+        if not project_location:
+            return None
+        try:
+            return _project_identity(project_location, project_name)
+        except ValueError:
+            return None
+
+    def _target_matches_ref(
+        self,
+        item: dict[str, object],
+        *,
+        domain_path: str,
+        expected_identity: tuple[str, str] | None,
+    ) -> bool:
+        item_domain = _normalize_domain_path(self._text(item.get("domain_path")))
+        if item_domain != domain_path or expected_identity is None:
+            return False
+        item_project_location = self._text(item.get("project_location"))
+        if not item_project_location:
+            return False
+        try:
+            identity = _project_identity(
+                item_project_location,
+                self._text(item.get("project_name")),
+            )
+        except Exception:
+            return False
+        return identity == expected_identity
+
     def _find_loaded_match_target(
         self,
         *,
@@ -644,16 +809,28 @@ class BsimService:
         domain_path: str,
         requested_target: str,
     ) -> dict[str, str] | None:
-        candidates: list[str] = [requested_target]
+        candidates: list[str] = []
+        seen_candidates: set[str] = set()
+
+        def _add_candidate(candidate: str | None) -> None:
+            if candidate and candidate not in seen_candidates:
+                candidates.append(candidate)
+                seen_candidates.add(candidate)
+
+        expected_identity = self._matched_ref_project_identity(matched_ref)
+        _add_candidate(requested_target)
         if executable_md5:
             indexed = self._loaded_match_index.get(f"md5:{executable_md5.lower()}")
-            if indexed:
-                candidates.append(indexed)
+            _add_candidate(indexed)
         repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
         if repository:
             indexed = self._loaded_match_index.get(f"url:{repository}::{domain_path}")
-            if indexed:
-                candidates.append(indexed)
+            _add_candidate(indexed)
+        if expected_identity is not None:
+            indexed = self._loaded_match_index.get(
+                f"program:{expected_identity[0]}::{expected_identity[1]}::{domain_path}"
+            )
+            _add_candidate(indexed)
 
         targets = self._target_service.list_targets()
         by_name = {str(item.get("target")): item for item in targets if item.get("target") is not None}
@@ -661,39 +838,12 @@ class BsimService:
             info = by_name.get(candidate)
             if info is None:
                 continue
-            if _normalize_domain_path(self._text(info.get("domain_path"))) == domain_path:
+            if self._target_matches_ref(info, domain_path=domain_path, expected_identity=expected_identity):
                 return {"target": candidate, "program": domain_path}
 
-        project_location = self._text(matched_ref.get("project_location"))
-        project_name = self._text(matched_ref.get("project_name"))
-        if not project_location and repository:
-            try:
-                project_location, project_name = _project_from_ghidra_url(repository)
-            except ValueError:
-                project_location = None
-                project_name = None
-        if project_location:
-            try:
-                expected_identity = _project_identity(project_location, project_name)
-            except ValueError:
-                expected_identity = None
-            if expected_identity is not None:
-                for item in targets:
-                    item_domain = _normalize_domain_path(self._text(item.get("domain_path")))
-                    if item_domain != domain_path:
-                        continue
-                    item_project_location = self._text(item.get("project_location"))
-                    if not item_project_location:
-                        continue
-                    try:
-                        identity = _project_identity(
-                            item_project_location,
-                            self._text(item.get("project_name")),
-                        )
-                    except Exception:
-                        continue
-                    if identity == expected_identity:
-                        return {"target": str(item["target"]), "program": domain_path}
+        for item in targets:
+            if self._target_matches_ref(item, domain_path=domain_path, expected_identity=expected_identity):
+                return {"target": str(item["target"]), "program": domain_path}
         return None
 
 

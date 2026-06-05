@@ -66,7 +66,16 @@ class FakeTargetService:
 
 class FakeJavaBackend:
     def get_database_status(self, bsim_url: str):
-        return {"status": "ok", "raw_url": bsim_url}
+        return {
+            "status": "ok",
+            "raw_url": bsim_url,
+            "executable_count": 7,
+            "postgresql_version": "15.13",
+            "database_type": "postgres",
+        }
+
+    def get_ghidra_version(self):
+        return "12.1"
 
     def list_categories(self, bsim_url: str):
         return {"items": [], "raw_url": bsim_url}
@@ -83,6 +92,7 @@ def _service(
     bsim_url: str = "postgresql://user:secret@localhost/bsim",
     bsim_password: str | None = None,
     bsim_password_env: str | None = None,
+    ghidra_install_dir: str | None = None,
     target_service: FakeTargetService | None = None,
 ) -> tuple[BsimService, FakeCoreCommandService, FakeTargetService]:
     core = FakeCoreCommandService()
@@ -94,6 +104,7 @@ def _service(
             bsim_url=bsim_url,
             bsim_password=bsim_password,
             bsim_password_env=bsim_password_env,
+            ghidra_install_dir=ghidra_install_dir,
         ),
         java_backend=FakeJavaBackend(),  # type: ignore[arg-type]
     )
@@ -193,6 +204,90 @@ def test_bsim_password_env_requires_set_value(monkeypatch):
         service.query_function("fw", address="0x401000")
 
 
+def test_bsim_database_status_includes_client_and_backend_observability():
+    service, _core, _target = _service(ghidra_install_dir="/opt/ghidra")
+
+    result = service.get_database_status()
+
+    assert result["bsim_url"] == "postgresql://***:***@localhost/bsim"
+    assert result["executable_count"] == 7
+    assert result["database_type"] == "postgres"
+    assert result["postgresql_version"] == "15.13"
+    assert result["ghidra_install_dir"] == "/opt/ghidra"
+    assert result["ghidra_version"] == "12.1"
+
+
+def test_bsim_url_scheme_is_validated():
+    service, _core, _target = _service(bsim_url="ftp://localhost/bsim")
+
+    with pytest.raises(ValueError, match="BSIM_URL_INVALID"):
+        service.get_database_status()
+
+
+def test_bsim_postgresql_url_requires_database_name():
+    service, _core, _target = _service(bsim_url="postgresql://localhost")
+
+    with pytest.raises(ValueError, match="database name"):
+        service.get_database_status()
+
+
+def test_bsim_elastic_url_scheme_is_accepted():
+    service, _core, _target = _service(bsim_url="elastic://user:secret@localhost/bsim")
+
+    result = service.get_database_status()
+
+    assert result["bsim_url"] == "elastic://***:***@localhost/bsim"
+
+
+def test_bsim_http_url_scheme_is_rejected():
+    service, _core, _target = _service(bsim_url="http://localhost/bsim")
+
+    with pytest.raises(ValueError, match="unsupported BSim URL scheme"):
+        service.get_database_status()
+
+
+def test_bsim_elastic_url_requires_database_name():
+    service, _core, _target = _service(bsim_url="elastic://localhost")
+
+    with pytest.raises(ValueError, match="database name"):
+        service.get_database_status()
+
+
+def test_bsim_network_url_rejects_extra_path_segments():
+    service, _core, _target = _service(bsim_url="https://localhost/bsim/extra")
+
+    with pytest.raises(ValueError, match="one path element"):
+        service.get_database_status()
+
+
+def test_bsim_file_url_requires_absolute_path():
+    service, _core, _target = _service(bsim_url="file:relative_bsim")
+
+    with pytest.raises(ValueError, match="absolute database path"):
+        service.get_database_status()
+
+
+def test_bsim_query_parameters_are_validated_before_core_call():
+    service, core, _target = _service()
+
+    with pytest.raises(ValueError, match="similarity_threshold"):
+        service.query_function("fw", address="0x401000", similarity_threshold=1.1)
+    with pytest.raises(ValueError, match="significance_threshold"):
+        service.query_function("fw", address="0x401000", significance_threshold=-0.1)
+    with pytest.raises(ValueError, match="matches_per_function"):
+        service.query_function("fw", address="0x401000", matches_per_function=0)
+    with pytest.raises(ValueError, match="max_results"):
+        service.query_function("fw", address="0x401000", max_results=0)
+    assert core.calls == []
+
+
+def test_bsim_list_executables_limit_is_validated_before_backend_call():
+    service, _core, _target = _service()
+
+    with pytest.raises(ValueError, match="limit"):
+        service.list_executables(limit=0)
+
+
 def test_bsim_load_matched_executable_reuses_existing_loaded_target():
     target = FakeTargetService()
     target.targets.append(
@@ -226,6 +321,53 @@ def test_bsim_load_matched_executable_reuses_existing_loaded_target():
         "executable_md5": "deadbeefcafebabedeadbeefcafebabe",
         "matched_ref_version": 1,
     }
+    assert target.created == []
+
+
+def test_bsim_load_matched_executable_does_not_reuse_same_domain_from_different_project():
+    class StrictTargetService(FakeTargetService):
+        def create_session(
+            self,
+            name: str,
+            project_location: str,
+            *,
+            project_name: str | None = None,
+            domain_path: str | None = None,
+        ):
+            if any(item.get("target") == name for item in self.targets):
+                raise ValueError(f"Session '{name}' already exists")
+            return super().create_session(
+                name,
+                project_location,
+                project_name=project_name,
+                domain_path=domain_path,
+            )
+
+    target = StrictTargetService()
+    target.targets.append(
+        {
+            "target": "collision",
+            "project_location": "/tmp/other.gpr",
+            "project_name": None,
+            "domain_path": "/samples/old.exe",
+        }
+    )
+    service, _core, target = _service(target_service=target)
+
+    with pytest.raises(ValueError, match="already exists"):
+        service.load_matched_executable(
+            matched_ref={
+                "matched_ref_version": 1,
+                "executable_md5": "deadbeefcafebabedeadbeefcafebabe",
+                "executable_name": "old.exe",
+                "project_location": "/tmp/history.gpr",
+                "domain_path": "/samples/old.exe",
+                "address": "0x401000",
+                "name": "entry",
+            },
+            target="collision",
+        )
+
     assert target.created == []
 
 

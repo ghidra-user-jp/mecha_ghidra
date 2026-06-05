@@ -60,6 +60,10 @@ def test_runtime_bsim_database_status():
     assert result["status"] == "ok"
     assert isinstance(result["executable_count"], int)
     assert "://" in result["bsim_url"]
+    assert result["ghidra_install_dir"] == os.environ["GHIDRA_INSTALL_DIR"]
+    assert result["ghidra_version"]
+    if result.get("database_type") == "postgres":
+        assert result["postgresql_version"]
 
 
 def test_runtime_bsim_query_function_and_decompile_match():

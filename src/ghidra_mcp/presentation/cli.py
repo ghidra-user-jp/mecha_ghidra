@@ -332,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
 
     selected_specs = resolve_tool_specs_from_args(args)
+    ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
     registry = _get_registry(
         selected_specs,
         bsim_config=BsimConfig(
@@ -340,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             bsim_password_env=args.bsim_password_env,
             work_dir=args.bsim_work_dir,
             command_timeout=args.bsim_command_timeout,
+            ghidra_install_dir=ghidra_path,
         ),
     )
 
@@ -349,7 +351,6 @@ def main(argv: list[str] | None = None) -> int:
         args.tool_profile,
     )
 
-    ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
     if ghidra_path:
         os.environ["GHIDRA_INSTALL_DIR"] = ghidra_path
         try:
