@@ -3,16 +3,13 @@
 from __future__ import absolute_import, print_function
 
 import os
-from numbers import Integral
 
 import jpype
 
 from ghidra.app.decompiler import DecompInterface
 from ghidra.app.util.parser import FunctionSignatureParser
-from ghidra.program.model.symbol import SourceType
 from ghidra.program.model.data import (
     CategoryPath,
-    StructureDataType,
     DataUtilities,
     VoidDataType,
     CharDataType,
@@ -41,16 +38,6 @@ def _to_int(value, default):
         return int(value)
     except Exception:
         return default
-
-
-def _to_int_auto(value):
-    if value is None:
-        raise ValueError("Numeric value is required")
-    if isinstance(value, Integral):
-        return int(value)
-    if isinstance(value, str):
-        return int(value, 0)
-    return int(value)
 
 
 def _txn(ctx, description, func):
@@ -604,87 +591,6 @@ def _get_struct_datatype(ctx, name, category):
     return dtm.getDataType(cp, name)
 
 
-def _resolve_namespace(ctx, namespace_path):
-    global_namespace = ctx.program.getGlobalNamespace()
-    if not namespace_path:
-        return global_namespace
-
-    normalized = str(namespace_path).replace("/", "::")
-    parts = [part for part in normalized.split("::") if part]
-    current = global_namespace
-    for part in parts:
-        found = ctx.symbol_table.getNamespace(part, current)
-        if found is None:
-            return None
-        current = found
-    return current
-
-
-def _find_ghidra_class(ctx, class_name, parent_namespace):
-    symbols = ctx.symbol_table.getSymbols(class_name, parent_namespace)
-    for symbol in _iter_items(symbols):
-        symbol_type = _safe_call(symbol, "getSymbolType")
-        if symbol_type is None or str(symbol_type).upper() != "CLASS":
-            continue
-        class_namespace = _safe_call(symbol, "getObject")
-        if class_namespace is not None:
-            return class_namespace
-    return None
-
-
-def _build_class_category_path(class_namespace):
-    parts = []
-    current = class_namespace
-    while current is not None and not bool(current.isGlobal()):
-        parts.insert(0, current.getName())
-        current = current.getParentNamespace()
-    if not parts:
-        return "/classes"
-    return "/classes/" + "/".join(parts)
-
-
-def _ensure_class_struct(
-    ctx,
-    class_name,
-    parent_namespace,
-    create_class_if_missing=False,
-    create_struct_if_missing=False,
-):
-    parent = _resolve_namespace(ctx, parent_namespace)
-    if parent is None:
-        raise LookupError("Parent namespace not found: %s" % parent_namespace)
-
-    class_namespace = _find_ghidra_class(ctx, class_name, parent)
-    if class_namespace is None:
-        if not create_class_if_missing:
-            raise LookupError("Class not found: %s" % class_name)
-        class_namespace = ctx.symbol_table.createClass(parent, class_name, SourceType.USER_DEFINED)
-
-    category = _build_class_category_path(class_namespace)
-    struct = _get_struct_datatype(ctx, class_name, category)
-    if struct is None:
-        if not create_struct_if_missing:
-            raise LookupError("Class struct not found: %s" % class_name)
-        struct = StructureDataType(CategoryPath(category), class_name, 0)
-        struct = _dt_manager(ctx).addDataType(struct, None)
-    return class_namespace, struct
-
-
-def _apply_members_to_struct(ctx, struct, members):
-    for member in members:
-        if not isinstance(member, dict):
-            raise ValueError("Each members entry must be an object")
-        data_type = _parse_data_type(ctx, member.get("type"))
-        field_name = member.get("name", "")
-        comment = member.get("comment", "")
-        offset = member.get("offset")
-        length = _component_length(data_type)
-        if offset is not None:
-            struct.replaceAtOffset(int(offset), data_type, length, field_name, comment)
-        else:
-            struct.add(data_type, length, field_name, comment)
-
-
 def _get_enum_datatype(ctx, name, category):
     dtm = _dt_manager(ctx)
     cp = CategoryPath(category) if category else CategoryPath("/")
@@ -752,7 +658,6 @@ def _component_length(data_type):
 
 __all__ = [
     "_to_int",
-    "_to_int_auto",
     "_txn",
     "_safe_call",
     "_iter_items",
@@ -781,11 +686,6 @@ __all__ = [
     "_build_signature_parser",
     "_decode_hex_bytes",
     "_get_struct_datatype",
-    "_resolve_namespace",
-    "_find_ghidra_class",
-    "_build_class_category_path",
-    "_ensure_class_struct",
-    "_apply_members_to_struct",
     "_get_enum_datatype",
     "_describe_struct",
     "_describe_enum",

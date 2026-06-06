@@ -426,18 +426,13 @@ def test_service_registry_adapter_has_targets_and_close_all(adapter):
     ("call", "expected_spec", "expected_args"),
     [
         (
-            lambda: cli.list_methods(offset=1, limit=2, target="fw"),
-            "list_methods",
-            {"offset": 1, "limit": 2},
-        ),
-        (
             lambda: cli.list_classes(offset=3, limit=4, target="fw"),
             "list_classes",
             {"offset": 3, "limit": 4},
         ),
     ],
 )
-def test_list_methods_and_list_classes_use_dispatcher(monkeypatch, call, expected_spec, expected_args):
+def test_list_classes_use_dispatcher(monkeypatch, call, expected_spec, expected_args):
     called: dict[str, object] = {}
 
     def fake_dispatch(spec_name, raw_args, target, *, registry, core_executor=None):
@@ -462,16 +457,12 @@ def test_list_methods_and_list_classes_use_dispatcher(monkeypatch, call, expecte
     ("call", "message"),
     [
         (
-            lambda: cli.list_methods(offset=0, limit=10, target="fw"),
-            "Session 'fw' is not initialized",
-        ),
-        (
             lambda: cli.list_classes(offset=0, limit=10, target="fw"),
             "Session 'fw' is not initialized",
         ),
     ],
 )
-def test_list_methods_and_list_classes_error_message_compat(monkeypatch, call, message):
+def test_list_classes_error_message_compat(monkeypatch, call, message):
     class DummyRegistry:
         def call(self, command, params, target):  # noqa: ARG002
             raise RuntimeError(f"Session '{target}' is not initialized")

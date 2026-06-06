@@ -150,7 +150,7 @@ GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.2_d
 - project がまだ存在しない場合は、`create_project` で空のローカル `.gpr/.rep` を作成してから `register_target` / `import_program` / `load_project_program` を実行できます。既存 project は `overwrite=true` を明示しない限り上書きしません。
 - 既存ターゲットへ program をロード/切り替える操作は `load_project_program` を使い、新規ターゲット作成は `create_session` を使います。program 未指定で先にターゲットだけ作る場合は `register_target` を使ってください。
 - `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。明示的な解析パスが必要な場合は `analyze_program` または `reanalyze_program` を使ってください。
-- `rename_function_by_address` などの更新系 tool を使った後、変更を `.gpr/.rep` に残すには `save_project_program(target="default")` を呼んでください。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードが必要になることがあります。
+- `rename_function` などの更新系 tool を使った後、変更を `.gpr/.rep` に残すには `save_project_program(target="default")` を呼んでください。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードが必要になることがあります。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
 - shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
 - `delete_shared_project_file` は明示的な `domain_path` と、正規化後パスに一致する `confirm` が必須です。ロード中ファイル、active checkout があるファイル、`allow_private=true` でない private file は削除しません。

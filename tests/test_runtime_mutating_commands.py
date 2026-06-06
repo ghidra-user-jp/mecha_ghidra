@@ -167,7 +167,7 @@ def _pick_primary_function(target: str) -> tuple[str, str, str]:
     address = first["entry"]
     name = first["name"]
     decompiled = _unwrap_runtime_result(
-        cli.decompile_function_by_address(address=address, target=target)
+        cli.decompile_function(address=address, target=target)
     )
     return address, name, decompiled
 
@@ -177,11 +177,11 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
     for entry in function_entries:
         address = entry["entry"]
         info = _unwrap_runtime_result(
-            cli.get_function_by_address(address=address, target=target)
+            cli.get_function(address=address, target=target)
         )
         function_name = info["name"]
         decompiled = _unwrap_runtime_result(
-            cli.decompile_function_by_address(address=address, target=target)
+            cli.decompile_function(address=address, target=target)
         )
         for var_name in _extract_variable_candidates(decompiled):
             new_name = f"it_{var_name}_renamed"
@@ -239,7 +239,7 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
         cli.load_project_program(target=target, domain_path=domain_path)
 
         function_info = _unwrap_runtime_result(
-            cli.get_function_by_address(address="0x401000", target=target)
+            cli.get_function(address="0x401000", target=target)
         )
         assert isinstance(function_info, dict)
         assert function_info["entry"].lower().endswith("401000")
@@ -341,7 +341,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("set_disassembly_comment", disassembly_comment_result)
 
         current_primary_info = _unwrap_runtime_result(
-            cli.get_function_by_address(address=primary_address, target=target)
+            cli.get_function(address=primary_address, target=target)
         )
         current_primary_name = current_primary_info["name"]
         prototype_candidates = [
@@ -399,13 +399,13 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         renamed_aux_2 = f"{renamed_aux_1}_r2"
         rename_function_by_address_result = _unwrap_runtime_result(
-            cli.rename_function_by_address(
-                function_address=aux_address,
+            cli.rename_function(
+                address=aux_address,
                 new_name=renamed_aux_2,
                 target=target,
             )
         )
-        _log_runtime_result("rename_function_by_address", rename_function_by_address_result)
+        _log_runtime_result("rename_function(address)", rename_function_by_address_result)
 
         rename_data_result = _unwrap_runtime_result(
             cli.rename_data(address=aux_address, new_name=f"{renamed_aux_2}_data", target=target)
@@ -463,56 +463,6 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         )
         _log_runtime_result("delete_struct", delete_struct_result)
 
-        create_enum_result = _unwrap_runtime_result(
-            cli.create_enum(name="__it_enum_mut", target=target)
-        )
-        _log_runtime_result("create_enum", create_enum_result)
-
-        add_enum_values_result = _unwrap_runtime_result(
-            cli.add_enum_values(
-                enum_name="__it_enum_mut",
-                values=[{"name": "VALUE_A", "value": 1}],
-                target=target,
-            )
-        )
-        _log_runtime_result("add_enum_values", add_enum_values_result)
-
-        remove_enum_values_result = _unwrap_runtime_result(
-            cli.remove_enum_values(
-                enum_name="__it_enum_mut",
-                values=["VALUE_A"],
-                target=target,
-            )
-        )
-        _log_runtime_result("remove_enum_values", remove_enum_values_result)
-        delete_enum_result = _unwrap_runtime_result(
-            cli.delete_enum(enum_name="__it_enum_mut", target=target)
-        )
-        _log_runtime_result("delete_enum", delete_enum_result)
-
-        create_class_result = _unwrap_runtime_result(
-            cli.create_class(name="__ItRuntimeClass", target=target)
-        )
-        _log_runtime_result("create_class", create_class_result)
-
-        add_class_members_result = _unwrap_runtime_result(
-            cli.add_class_members(
-                class_name="__ItRuntimeClass",
-                members=[{"name": "member_a", "type": "int"}],
-                target=target,
-            )
-        )
-        _log_runtime_result("add_class_members", add_class_members_result)
-
-        remove_class_members_result = _unwrap_runtime_result(
-            cli.remove_class_members(
-                class_name="__ItRuntimeClass",
-                members=["member_a"],
-                target=target,
-            )
-        )
-        _log_runtime_result("remove_class_members", remove_class_members_result)
-
         set_global_data_type_result = None
         set_global_error = None
         for candidate_address in [data_address, primary_address, aux_address]:
@@ -553,7 +503,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         runtime_results = {
             "rename_function": rename_function_result,
-            "rename_function_by_address": rename_function_by_address_result,
+            "rename_function(address)": rename_function_by_address_result,
             "rename_data": rename_data_result,
             "rename_variable": rename_variable_result,
             "set_decompiler_comment": decompiler_comment_result,
@@ -566,13 +516,6 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             "delete_struct": delete_struct_result,
             "list_data_types": list_data_types_result,
             "rename_data_type": rename_data_type_result,
-            "create_enum": create_enum_result,
-            "add_enum_values": add_enum_values_result,
-            "remove_enum_values": remove_enum_values_result,
-            "delete_enum": delete_enum_result,
-            "create_class": create_class_result,
-            "add_class_members": add_class_members_result,
-            "remove_class_members": remove_class_members_result,
             "remove_struct_members": remove_struct_members_result,
             "set_global_data_type": set_global_data_type_result,
             "set_bytes": set_bytes_result,

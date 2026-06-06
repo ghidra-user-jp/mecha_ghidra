@@ -680,20 +680,12 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         include_none_keys=("domain_path",),
         description=(
             "Persist the currently loaded program for a target into its Ghidra project. "
-            "Use this after mutating tools such as rename_function_by_address when changes "
+            "Use this after mutating tools such as rename_function when changes "
             "must remain visible after reopening the project."
         ),
         idempotent_hint=True,
     ),
     # function_analysis
-    _core_tool(
-        "list_methods",
-        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.READ_ONLY,
-        operation_level=ToolOperationLevel.BASIC,
-        input_fields=_OFFSET_LIMIT_FIELDS,
-        list_output=True,
-    ),
     _core_tool(
         "list_functions",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
@@ -737,15 +729,11 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
-        input_fields=(("name", str, ...),),
-        scalar_output_type=str,
-    ),
-    _core_tool(
-        "decompile_function_by_address",
-        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.READ_ONLY,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(("address", str, ...),),
+        input_fields=(
+            ("address", str | None, None),
+            ("name", str | None, None),
+        ),
+        omit_falsey_keys=("address", "name"),
         scalar_output_type=str,
     ),
     _core_tool(
@@ -803,11 +791,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         checkout_required=True,
     ),
     _core_tool(
-        "get_function_by_address",
+        "get_function",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(("address", str, ...),),
+        input_fields=(
+            ("address", str | None, None),
+            ("name", str | None, None),
+        ),
     ),
     _core_tool(
         "get_function_xrefs",
@@ -939,21 +930,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
-            ("oldName", str, ...),
             ("newName", str, ...),
+            ("address", str | None, None),
+            ("oldName", str | None, None),
         ),
-        public_name_overrides={"oldName": "old_name", "newName": "new_name"},
-        checkout_required=True,
-    ),
-    _core_tool(
-        "rename_function_by_address",
-        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(
-            ("function_address", str, ...),
-            ("new_name", str, ...),
-        ),
+        public_name_overrides={
+            "oldName": "old_name",
+            "newName": "new_name",
+        },
         checkout_required=True,
     ),
     _core_tool(
@@ -1177,58 +1161,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         omit_falsey_keys=("category",),
     ),
     _core_tool(
-        "create_enum",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(
-            ("name", str, ...),
-            ("size", int, 4),
-            ("category", str | None, None),
-            ("values", list[dict] | None, None),
-        ),
-        omit_falsey_keys=("category", "values"),
-        checkout_required=True,
-    ),
-    _core_tool(
-        "add_enum_values",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(
-            ("enum_name", str, ...),
-            ("values", list[dict], ...),
-            ("category", str | None, None),
-        ),
-        omit_falsey_keys=("category",),
-        checkout_required=True,
-    ),
-    _core_tool(
-        "remove_enum_values",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(
-            ("enum_name", str, ...),
-            ("values", list[str], ...),
-            ("category", str | None, None),
-        ),
-        omit_falsey_keys=("category",),
-        checkout_required=True,
-    ),
-    _core_tool(
-        "delete_enum",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(
-            ("enum_name", str, ...),
-            ("category", str | None, None),
-        ),
-        omit_falsey_keys=("category",),
-        checkout_required=True,
-    ),
-    _core_tool(
         "rename_data_type",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
         safety_tag=ToolSafetyTag.WRITE,
@@ -1251,45 +1183,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("category", str | None, None),
         ),
         omit_falsey_keys=("category",),
-    ),
-    _core_tool(
-        "create_class",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(
-            ("name", str, ...),
-            ("parent_namespace", str | None, None),
-            ("members", list[dict] | None, None),
-        ),
-        omit_falsey_keys=("members", "parent_namespace"),
-        checkout_required=True,
-    ),
-    _core_tool(
-        "add_class_members",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(
-            ("class_name", str, ...),
-            ("members", list[dict], ...),
-            ("parent_namespace", str | None, None),
-        ),
-        omit_falsey_keys=("parent_namespace",),
-        checkout_required=True,
-    ),
-    _core_tool(
-        "remove_class_members",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(
-            ("class_name", str, ...),
-            ("members", list[str], ...),
-            ("parent_namespace", str | None, None),
-        ),
-        omit_falsey_keys=("parent_namespace",),
-        checkout_required=True,
     ),
     # shared_sync
     _shared_sync_tool(

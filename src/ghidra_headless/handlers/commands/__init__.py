@@ -2,16 +2,14 @@
 
 from .read_only_decompile import (
     decompile_function,
-    decompile_function_by_address,
     disassemble_function,
     disassemble_range,
     get_callee,
 )
 from .read_only_functions import (
-    get_function_by_address,
+    get_function,
     list_classes,
     list_functions,
-    list_methods,
     search_functions_by_name,
 )
 from .read_only_memory_data import (
@@ -42,7 +40,6 @@ from .mutating_symbols import (
     reanalyze_program,
     rename_data,
     rename_function,
-    rename_function_by_address,
     rename_variable,
     set_bytes,
     set_decompiler_comment,
@@ -51,28 +48,18 @@ from .mutating_symbols import (
     set_local_variable_type,
 )
 from .mutating_data_types import (
-    add_enum_values,
     add_struct_members,
     clear_struct,
-    create_enum,
     create_struct,
-    delete_enum,
     delete_struct,
     list_data_types,
-    remove_enum_values,
     remove_struct_members,
     rename_data_type,
     set_global_data_type,
 )
-from .mutating_classes import (
-    add_class_members,
-    create_class,
-    remove_class_members,
-)
 
 __all__ = [
     "decompile_function",
-    "decompile_function_by_address",
     "disassemble_function",
     "disassemble_range",
     "get_callee",
@@ -91,7 +78,6 @@ __all__ = [
     "get_struct",
     "get_enum",
     "rename_function",
-    "rename_function_by_address",
     "rename_data",
     "rename_variable",
     "set_decompiler_comment",
@@ -101,16 +87,9 @@ __all__ = [
     "create_struct",
     "add_struct_members",
     "clear_struct",
-    "create_enum",
-    "add_enum_values",
-    "remove_enum_values",
     "delete_struct",
-    "delete_enum",
     "rename_data_type",
     "list_data_types",
-    "create_class",
-    "add_class_members",
-    "remove_class_members",
     "remove_struct_members",
     "set_global_data_type",
     "set_bytes",
@@ -121,9 +100,8 @@ __all__ = [
     "delete_function",
     "analyze_program",
     "reanalyze_program",
-    "list_methods",
     "list_functions",
     "list_classes",
     "search_functions_by_name",
-    "get_function_by_address",
+    "get_function",
 ]

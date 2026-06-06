@@ -164,13 +164,6 @@ def test_typed_input_models_for_function_listing_slice():
                 assert fields[key].default == expected_default
 
     _assert_fields(
-        "list_methods",
-        {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-    )
-    _assert_fields(
         "list_functions",
         {
             "offset": (int, 0),
@@ -193,21 +186,17 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "get_function_by_address",
+        "get_function",
         {
-            "address": (str, ...),
+            "address": (str | None, None),
+            "name": (str | None, None),
         },
     )
     _assert_fields(
         "decompile_function",
         {
-            "name": (str, ...),
-        },
-    )
-    _assert_fields(
-        "decompile_function_by_address",
-        {
-            "address": (str, ...),
+            "address": (str | None, None),
+            "name": (str | None, None),
         },
     )
     _assert_fields(
@@ -351,15 +340,9 @@ def test_typed_input_models_for_function_listing_slice():
     _assert_fields(
         "rename_function",
         {
-            "oldName": (str, ...),
+            "address": (str | None, None),
+            "oldName": (str | None, None),
             "newName": (str, ...),
-        },
-    )
-    _assert_fields(
-        "rename_function_by_address",
-        {
-            "function_address": (str, ...),
-            "new_name": (str, ...),
         },
     )
     _assert_fields(
@@ -447,67 +430,11 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "create_enum",
-        {
-            "name": (str, ...),
-            "size": (int, 4),
-            "category": (str | None, None),
-            "values": (list[dict] | None, None),
-        },
-    )
-    _assert_fields(
-        "add_enum_values",
-        {
-            "enum_name": (str, ...),
-            "values": (list[dict], ...),
-            "category": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "remove_enum_values",
-        {
-            "enum_name": (str, ...),
-            "values": (list[str], ...),
-            "category": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "delete_enum",
-        {
-            "enum_name": (str, ...),
-            "category": (str | None, None),
-        },
-    )
-    _assert_fields(
         "rename_data_type",
         {
             "name": (str, ...),
             "new_name": (str, ...),
             "category": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "create_class",
-        {
-            "name": (str, ...),
-            "parent_namespace": (str | None, None),
-            "members": (list[dict] | None, None),
-        },
-    )
-    _assert_fields(
-        "add_class_members",
-        {
-            "class_name": (str, ...),
-            "members": (list[dict], ...),
-            "parent_namespace": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "remove_class_members",
-        {
-            "class_name": (str, ...),
-            "members": (list[str], ...),
-            "parent_namespace": (str | None, None),
         },
     )
     _assert_fields(
@@ -741,7 +668,6 @@ def test_specs_include_contract_driven_metadata():
 def test_checkout_required_tools_are_declared_on_specs():
     assert get_checkout_required_tool_names() == {
         "rename_function",
-        "rename_function_by_address",
         "rename_data",
         "rename_variable",
         "set_decompiler_comment",
@@ -756,15 +682,8 @@ def test_checkout_required_tools_are_declared_on_specs():
         "create_struct",
         "delete_struct",
         "rename_data_type",
-        "create_class",
         "add_struct_members",
         "clear_struct",
-        "create_enum",
-        "delete_enum",
-        "add_enum_values",
-        "add_class_members",
-        "remove_class_members",
-        "remove_enum_values",
         "remove_struct_members",
         "set_bytes",
         "add_bookmark",
@@ -776,7 +695,6 @@ def test_all_output_models_are_strict_and_typed():
     specs = get_all_tool_specs()
 
     list_output_tools = {
-        "list_methods",
         "list_functions",
         "list_classes",
         "search_functions_by_name",
@@ -801,7 +719,6 @@ def test_all_output_models_are_strict_and_typed():
     }
     scalar_output_tools = {
         "decompile_function": str,
-        "decompile_function_by_address": str,
         "get_bytes": str,
     }
 
