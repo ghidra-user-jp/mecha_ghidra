@@ -65,6 +65,10 @@ class FakeTargetService:
 
 
 class FakeJavaBackend:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.errors: dict[str, Exception] = {}
+
     def get_database_status(self, bsim_url: str):
         return {
             "status": "ok",
@@ -80,11 +84,31 @@ class FakeJavaBackend:
     def list_categories(self, bsim_url: str):
         return {"items": [], "raw_url": bsim_url}
 
+    def add_executable_category(self, bsim_url: str, **kwargs):
+        self.calls.append(("add_executable_category", bsim_url, dict(kwargs)))
+        if "add_executable_category" in self.errors:
+            raise self.errors["add_executable_category"]
+        return {
+            "status": "created",
+            "category": kwargs["category"],
+            "items": [kwargs["category"]],
+        }
+
     def list_executables(self, bsim_url: str, **kwargs):
         return {"items": [], "raw_url": bsim_url, "filters": dict(kwargs)}
 
     def get_executable(self, bsim_url: str, **kwargs):
         return {"raw_url": bsim_url, "lookup": dict(kwargs)}
+
+    def update_executable_metadata(self, bsim_url: str, **kwargs):
+        self.calls.append(("update_executable_metadata", bsim_url, dict(kwargs)))
+        if "update_executable_metadata" in self.errors:
+            raise self.errors["update_executable_metadata"]
+        return {
+            "status": "updated",
+            "categories": dict(kwargs["categories"]),
+            "updated_executables": 1,
+        }
 
 
 def _service(
@@ -97,6 +121,7 @@ def _service(
 ) -> tuple[BsimService, FakeCoreCommandService, FakeTargetService]:
     core = FakeCoreCommandService()
     target = target_service or FakeTargetService()
+    java_backend = FakeJavaBackend()
     service = BsimService(
         core_command_service=core,
         target_service=target,  # type: ignore[arg-type]
@@ -106,7 +131,7 @@ def _service(
             bsim_password_env=bsim_password_env,
             ghidra_install_dir=ghidra_install_dir,
         ),
-        java_backend=FakeJavaBackend(),  # type: ignore[arg-type]
+        java_backend=java_backend,  # type: ignore[arg-type]
     )
     return service, core, target
 
@@ -215,6 +240,105 @@ def test_bsim_database_status_includes_client_and_backend_observability():
     assert result["postgresql_version"] == "15.13"
     assert result["ghidra_install_dir"] == "/opt/ghidra"
     assert result["ghidra_version"] == "12.1"
+
+
+def test_bsim_add_executable_category_uses_configured_url_and_masks_response():
+    service, _core, _target = _service()
+
+    result = service.bsim_add_executable_category(category="FAMILY")
+
+    backend = service._java_backend  # type: ignore[attr-defined]
+    assert result["bsim_url"] == "postgresql://***:***@localhost/bsim"
+    assert result["category"] == "FAMILY"
+    assert backend.calls == [
+        (
+            "add_executable_category",
+            "postgresql://user:secret@localhost/bsim",
+            {"category": "FAMILY"},
+        )
+    ]
+
+
+def test_bsim_add_executable_category_rejects_invalid_category_name():
+    service, _core, _target = _service()
+
+    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_CATEGORY_INVALID"):
+        service.bsim_add_executable_category(category="bad$category")
+
+
+def test_bsim_update_executable_metadata_normalizes_categories_and_masks_response():
+    service, _core, _target = _service()
+
+    result = service.bsim_update_executable_metadata(
+        md5="0123456789abcdef0123456789abcdef",
+        categories={
+            "FAMILY": "Emotet",
+            "ACTOR": ["TA542", "TA542", ""],
+            "SOURCE": None,
+        },
+    )
+
+    backend = service._java_backend  # type: ignore[attr-defined]
+    assert result["bsim_url"] == "postgresql://***:***@localhost/bsim"
+    assert result["categories"] == {
+        "FAMILY": ["Emotet"],
+        "ACTOR": ["TA542"],
+        "SOURCE": [],
+    }
+    assert backend.calls == [
+        (
+            "update_executable_metadata",
+            "postgresql://user:secret@localhost/bsim",
+            {
+                "categories": {
+                    "FAMILY": ["Emotet"],
+                    "ACTOR": ["TA542"],
+                    "SOURCE": [],
+                },
+                "md5": "0123456789abcdef0123456789abcdef",
+                "name": None,
+            },
+        )
+    ]
+
+
+def test_bsim_update_executable_metadata_requires_lookup_key():
+    service, _core, _target = _service()
+
+    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_REQUIRED"):
+        service.bsim_update_executable_metadata(categories={"FAMILY": "Emotet"})
+
+
+def test_bsim_update_executable_metadata_rejects_partial_md5():
+    service, _core, _target = _service()
+
+    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_INVALID"):
+        service.bsim_update_executable_metadata(
+            md5="01234567",
+            categories={"FAMILY": "Emotet"},
+        )
+
+
+def test_bsim_update_executable_metadata_requires_non_empty_categories():
+    service, _core, _target = _service()
+
+    with pytest.raises(ValueError, match="categories must be a non-empty object"):
+        service.bsim_update_executable_metadata(
+            md5="0123456789abcdef0123456789abcdef",
+            categories={},
+        )
+
+
+def test_bsim_update_executable_metadata_classifies_not_found_errors():
+    service, _core, _target = _service()
+    backend = service._java_backend  # type: ignore[attr-defined]
+    backend.errors["update_executable_metadata"] = LookupError("BSIM_EXECUTABLE_NOT_FOUND")
+
+    with pytest.raises(LookupError, match="BSIM_EXECUTABLE_NOT_FOUND"):
+        service.bsim_update_executable_metadata(
+            md5="0123456789abcdef0123456789abcdef",
+            categories={"FAMILY": "Emotet"},
+        )
 
 
 def test_bsim_url_scheme_is_validated():

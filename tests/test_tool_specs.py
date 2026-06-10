@@ -122,8 +122,10 @@ def test_bsim_specs_are_tagged_as_bsim_category():
     assert bsim_names == {
         "get_bsim_database_status",
         "list_bsim_categories",
+        "bsim_add_executable_category",
         "list_bsim_executables",
         "get_bsim_executable",
+        "bsim_update_executable_metadata",
         "bsim_query_target",
         "bsim_query_function",
         "bsim_load_matched_executable",
@@ -739,6 +741,13 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
+        "bsim_add_executable_category",
+        {
+            "bsim_url": (str | None, None),
+            "category": (str, ...),
+        },
+    )
+    _assert_fields(
         "list_bsim_executables",
         {
             "bsim_url": (str | None, None),
@@ -747,6 +756,15 @@ def test_typed_input_models_for_function_listing_slice():
             "arch": (str | None, None),
             "compiler": (str | None, None),
             "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "bsim_update_executable_metadata",
+        {
+            "bsim_url": (str | None, None),
+            "categories": (dict[str, object], ...),
+            "md5": (str | None, None),
+            "name": (str | None, None),
         },
     )
     _assert_fields(

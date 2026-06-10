@@ -37,6 +37,17 @@ def _category_map(record) -> dict[str, list[str]]:  # noqa: ANN001
     return categories
 
 
+def _categories_to_java_list(categories: dict[str, list[str]]):  # noqa: ANN001
+    from ghidra.features.bsim.query.description import CategoryRecord
+    from java.util import ArrayList
+
+    records = ArrayList()
+    for category_type in sorted(categories):
+        for category in categories[category_type]:
+            records.add(CategoryRecord(category_type, category))
+    return records
+
+
 def _executable_to_dict(record) -> dict[str, Any]:  # noqa: ANN001
     return {
         "md5": str(record.getMd5()),
@@ -104,12 +115,21 @@ class BsimJavaBackend:
     @staticmethod
     def _classes():
         from ghidra.features.bsim.query import BSimClientFactory
-        from ghidra.features.bsim.query.protocol import QueryExeCount, QueryExeInfo
+        from ghidra.features.bsim.query.description import DescriptionManager
+        from ghidra.features.bsim.query.protocol import (
+            InstallCategoryRequest,
+            QueryExeCount,
+            QueryExeInfo,
+            QueryUpdate,
+        )
 
         return {
             "BSimClientFactory": BSimClientFactory,
+            "DescriptionManager": DescriptionManager,
+            "InstallCategoryRequest": InstallCategoryRequest,
             "QueryExeCount": QueryExeCount,
             "QueryExeInfo": QueryExeInfo,
+            "QueryUpdate": QueryUpdate,
         }
 
     @contextmanager
@@ -193,6 +213,35 @@ class BsimJavaBackend:
                 "function_tag_count": len(function_tags),
             }
 
+    def add_executable_category(self, bsim_url: str, *, category: str) -> dict[str, Any]:
+        classes = self._classes()
+        with self._database(bsim_url) as database:
+            info = database.getInfo()
+            existing = [str(item) for item in _iter_java_items(info.execats)]
+            if category in existing:
+                return {
+                    "status": "already_exists",
+                    "category": category,
+                    "items": existing,
+                    "count": len(existing),
+                }
+
+            query = classes["InstallCategoryRequest"]()
+            query.type_name = category
+            response = database.query(query)
+            if response is None:
+                last_error = database.getLastError()
+                message = "unknown error" if last_error is None else str(last_error.message)
+                raise RuntimeError(f"BSIM_ADD_EXECUTABLE_CATEGORY_FAILED: {message}")
+            updated_info = response.info or database.getInfo()
+            categories = [str(item) for item in _iter_java_items(updated_info.execats)]
+            return {
+                "status": "created",
+                "category": category,
+                "items": categories,
+                "count": len(categories),
+            }
+
     def list_executables(
         self,
         bsim_url: str,
@@ -241,6 +290,85 @@ class BsimJavaBackend:
         if len(items) > 1:
             raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
         return items[0]
+
+    def update_executable_metadata(
+        self,
+        bsim_url: str,
+        *,
+        categories: dict[str, list[str]],
+        md5: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        classes = self._classes()
+        with self._database(bsim_url) as database:
+            info = database.getInfo()
+            configured_categories = {str(item) for item in _iter_java_items(info.execats)}
+            unknown = sorted(set(categories) - configured_categories)
+            if unknown:
+                raise ValueError(
+                    "BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED: "
+                    + ", ".join(unknown)
+                    + "; call bsim_add_executable_category first"
+                )
+
+            query = classes["QueryExeInfo"]()
+            query.limit = 2
+            query.filterMd5 = md5
+            query.filterExeName = name
+            query.fillinCategories = True
+            response = database.query(query)
+            if response is None:
+                last_error = database.getLastError()
+                message = "unknown error" if last_error is None else str(last_error.message)
+                raise RuntimeError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+
+            records = list(_iter_java_items(response.records))
+            if not records:
+                raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
+            if int(response.recordCount) > 1 or len(records) > 1:
+                raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
+
+            source_record = records[0]
+            merged_categories = _category_map(source_record)
+            for category_type, values in categories.items():
+                if values:
+                    merged_categories[category_type] = list(values)
+                else:
+                    merged_categories.pop(category_type, None)
+
+            manager = classes["DescriptionManager"]()
+            updated_record = manager.transferExecutable(source_record)
+            manager.setExeCategories(updated_record, _categories_to_java_list(merged_categories))
+
+            update = classes["QueryUpdate"]()
+            update.manage = manager
+            update_response = database.query(update)
+            if update_response is None:
+                last_error = database.getLastError()
+                message = "unknown error" if last_error is None else str(last_error.message)
+                raise RuntimeError(f"BSIM_UPDATE_EXECUTABLE_METADATA_FAILED: {message}")
+
+            bad_executables = [
+                _executable_to_dict(record)
+                for record in _iter_java_items(update_response.badexe)
+            ]
+            bad_functions = [
+                {
+                    "executable_md5": str(func.getExecutableRecord().getMd5()),
+                    "name": str(func.getFunctionName()),
+                    "address": "0x%x" % int(func.getAddress()),
+                }
+                for func in _iter_java_items(update_response.badfunc)
+            ]
+            return {
+                "status": "updated" if int(update_response.exeupdate) else "unchanged",
+                "executable": _executable_to_dict(updated_record),
+                "categories": merged_categories,
+                "updated_executables": int(update_response.exeupdate),
+                "updated_functions": int(update_response.funcupdate),
+                "bad_executables": bad_executables,
+                "bad_functions": bad_functions,
+            }
 
 
 __all__ = ["BsimJavaBackend"]

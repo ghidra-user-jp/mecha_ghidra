@@ -730,6 +730,21 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         idempotent_hint=True,
     ),
     _registry_tool(
+        "bsim_add_executable_category",
+        method_name="bsim_add_executable_category",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("category", str, ...),
+            _BSIM_URL_FIELD,
+        ),
+        include_target=False,
+        include_none_keys=("bsim_url",),
+        description="Add a user-defined executable metadata category to the BSim database.",
+        idempotent_hint=True,
+    ),
+    _registry_tool(
         "list_bsim_executables",
         method_name="list_bsim_executables",
         category_tag=ToolCategoryTag.BSIM,
@@ -764,6 +779,27 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         include_none_keys=("bsim_url",),
         omit_falsey_keys=("md5", "name"),
         description="Get one BSim executable record by md5 or executable name.",
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "bsim_update_executable_metadata",
+        method_name="bsim_update_executable_metadata",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("categories", dict[str, object], ...),
+            _BSIM_URL_FIELD,
+            ("md5", str | None, None),
+            ("name", str | None, None),
+        ),
+        include_target=False,
+        include_none_keys=("bsim_url",),
+        omit_falsey_keys=("md5", "name"),
+        description=(
+            "Update executable metadata categories on an existing BSim executable record "
+            "looked up by md5 or executable name."
+        ),
         idempotent_hint=True,
     ),
     _registry_tool(

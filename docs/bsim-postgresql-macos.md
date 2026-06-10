@@ -271,7 +271,7 @@ uv run ghidra-mcp \
 
 `--bsim-password`または`--bsim-password-env`を使う場合、BSim URLにユーザー名がなければOSユーザー名を使います。別ユーザーで接続する場合は`postgresql://user@host/database`の形で明示してください。MCP側では`postgresql://`、`elastic://`、`https://`、`file:`のBSim URL schemeを受け付けます。返却値やエラー内のBSim URLは`postgresql://***:***@...`のようにマスクされます。
 
-MCPのBSim toolは、小さいprimitiveを組み合わせて使う前提です。`get_bsim_database_status`はDB metadata、executable count、PostgreSQL server version、Ghidra version、client側のGhidra install pathを返します。`bsim_query_target`と`bsim_query_function`の結果には、検索条件を示す`query` provenanceと、`bsim_load_matched_executable`へそのまま渡せる`matched_ref`が含まれます。`matched_ref`には`matched_ref_version: 1`が入り、load時には必須キーが検証されます。
+MCPのBSim toolは、小さいprimitiveを組み合わせて使う前提です。`get_bsim_database_status`はDB metadata、executable count、PostgreSQL server version、Ghidra version、client側のGhidra install pathを返します。`bsim_add_executable_category`は実行ファイルカテゴリをDBに追加し、`bsim_update_executable_metadata`は既存executable recordのカテゴリ値を`md5`または実行ファイル名で後追い更新します。`bsim_query_target`と`bsim_query_function`の結果には、検索条件を示す`query` provenanceと、`bsim_load_matched_executable`へそのまま渡せる`matched_ref`が含まれます。`matched_ref`には`matched_ref_version: 1`が入り、load時には必須キーが検証されます。
 
 実測結果:
 
@@ -293,6 +293,19 @@ config templateについて:
 
 検索やDB管理でfilterしやすいように、実行ファイルカテゴリを追加します。
 
+MCPで追加する場合:
+
+```json
+{"category": "FAMILY"}
+{"category": "SOURCE"}
+{"category": "TRUST_LEVEL"}
+{"category": "ORIGIN"}
+```
+
+上記を`bsim_add_executable_category`へ渡します。`--bsim-url`をMCP起動時に指定していない場合は、各呼び出しで`bsim_url`も渡してください。
+
+Ghidra付属CLIで追加する場合:
+
 ```bash
 "$GHIDRA_HOME/support/bsim" addexecategory postgresql://localhost/malware_curated FAMILY
 "$GHIDRA_HOME/support/bsim" addexecategory postgresql://localhost/malware_curated SOURCE
@@ -310,7 +323,21 @@ config templateについて:
 注意点:
 
 - カテゴリを追加するだけでは、各Programに値は入りません。
-- 値を投入するには、Ghidra script、Program properties、または解析パイプライン側のmetadata付与を別途用意します。
+- 新規登録前に値を入れる場合は、targetを開いて`bsim_set_target_metadata`を呼んでから`bsim_register_target`を呼びます。
+- 登録済みrecordを後から更新する場合は、`bsim_update_executable_metadata`に`md5`または`name`と`categories`を渡します。未指定カテゴリは既存値を保持し、渡したカテゴリだけ置換します。値に`null`または空配列を渡すと、そのカテゴリをクリアします。
+
+登録済みrecordを更新する例:
+
+```json
+{
+  "md5": "0123456789abcdef0123456789abcdef",
+  "categories": {
+    "FAMILY": "Emotet",
+    "SOURCE": "internal_analysis",
+    "TRUST_LEVEL": "confirmed"
+  }
+}
+```
 
 ## 9. Ghidra Projectへのimportと解析
 

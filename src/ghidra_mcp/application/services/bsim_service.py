@@ -19,6 +19,8 @@ from .target_service import TargetService
 
 BSIM_MATCHED_REF_VERSION = 1
 _BSIM_CODE_RE = re.compile(r"^BSIM_[A-Z0-9_]+(?::|$)")
+_BSIM_CATEGORY_TYPE_RE = re.compile(r"^[A-Za-z0-9 ._:/()]+$")
+_BSIM_MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 _BSIM_SUPPORTED_URL_SCHEMES = frozenset({"postgresql", "elastic", "https", "file"})
 _MAX_BSIM_LIST_LIMIT = 10_000
 _MAX_BSIM_MATCHES_PER_FUNCTION = 1_000
@@ -83,11 +85,52 @@ def _classify_bsim_message(message: str, *, default_code: str = "BSIM_OPERATION_
 
 def _raise_classified_bsim_error(exc: Exception, *, default_code: str = "BSIM_OPERATION_FAILED") -> NoReturn:
     message = _classify_bsim_message(str(exc), default_code=default_code)
-    if message.startswith("BSIM_FUNCTION_NOT_FOUND:"):
+    if message == "BSIM_FUNCTION_NOT_FOUND" or message.startswith("BSIM_FUNCTION_NOT_FOUND:"):
+        raise LookupError(message) from exc
+    if message == "BSIM_EXECUTABLE_NOT_FOUND" or message.startswith("BSIM_EXECUTABLE_NOT_FOUND:"):
         raise LookupError(message) from exc
     if isinstance(exc, ValueError):
         raise ValueError(message) from exc
     raise RuntimeError(message) from exc
+
+
+def _validate_executable_category_name(category: object) -> str:
+    text = str(category).strip()
+    if not text:
+        raise ValueError("BSIM_EXECUTABLE_CATEGORY_INVALID: category must not be empty")
+    if _BSIM_CATEGORY_TYPE_RE.fullmatch(text) is None:
+        raise ValueError(
+            "BSIM_EXECUTABLE_CATEGORY_INVALID: category contains unsupported characters"
+        )
+    return text
+
+
+def _iter_category_values(value: object) -> list[object]:
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return list(value)
+    return [value]
+
+
+def _normalize_metadata_categories(categories: dict[str, object]) -> dict[str, list[str]]:
+    if not isinstance(categories, dict) or not categories:
+        raise ValueError("BSIM_EXECUTABLE_METADATA_INVALID: categories must be a non-empty object")
+
+    normalized: dict[str, list[str]] = {}
+    for key, raw_value in categories.items():
+        category = _validate_executable_category_name(key)
+        values: list[str] = []
+        seen: set[str] = set()
+        if raw_value is not None:
+            for item in _iter_category_values(raw_value):
+                if item is None:
+                    continue
+                text = str(item).strip()
+                if not text or text in seen:
+                    continue
+                values.append(text)
+                seen.add(text)
+        normalized[category] = values
+    return normalized
 
 
 def _resolve_config_password(config: BsimConfig) -> str | None:
@@ -433,6 +476,31 @@ class BsimService:
     def list_bsim_categories(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         return self.list_categories(bsim_url=bsim_url)
 
+    def add_executable_category(
+        self,
+        *,
+        category: str,
+        bsim_url: str | None = None,
+    ) -> dict[str, Any]:
+        resolved = self._resolve_bsim_url(bsim_url)
+        normalized_category = _validate_executable_category_name(category)
+        result = self._call_bsim(
+            lambda: self._java_backend.add_executable_category(
+                resolved,
+                category=normalized_category,
+            ),
+            default_code="BSIM_ADD_EXECUTABLE_CATEGORY_FAILED",
+        )
+        return self._mask_response_url(result, resolved)
+
+    def bsim_add_executable_category(
+        self,
+        *,
+        category: str,
+        bsim_url: str | None = None,
+    ) -> dict[str, Any]:
+        return self.add_executable_category(category=category, bsim_url=bsim_url)
+
     def list_executables(
         self,
         *,
@@ -499,6 +567,48 @@ class BsimService:
         name: str | None = None,
     ) -> dict[str, Any]:
         return self.get_executable(bsim_url=bsim_url, md5=md5, name=name)
+
+    def update_executable_metadata(
+        self,
+        *,
+        categories: dict[str, object],
+        bsim_url: str | None = None,
+        md5: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        resolved = self._resolve_bsim_url(bsim_url)
+        normalized_categories = _normalize_metadata_categories(categories)
+        normalized_md5 = self._text(md5)
+        normalized_name = self._text(name)
+        if normalized_md5 is None and normalized_name is None:
+            raise ValueError("BSIM_EXECUTABLE_LOOKUP_REQUIRED: md5 or name is required")
+        if normalized_md5 is not None and _BSIM_MD5_RE.fullmatch(normalized_md5) is None:
+            raise ValueError("BSIM_EXECUTABLE_LOOKUP_INVALID: md5 must be a 32-character hexadecimal string")
+        result = self._call_bsim(
+            lambda: self._java_backend.update_executable_metadata(
+                resolved,
+                categories=normalized_categories,
+                md5=normalized_md5,
+                name=normalized_name,
+            ),
+            default_code="BSIM_UPDATE_EXECUTABLE_METADATA_FAILED",
+        )
+        return self._mask_response_url(result, resolved)
+
+    def bsim_update_executable_metadata(
+        self,
+        *,
+        categories: dict[str, object],
+        bsim_url: str | None = None,
+        md5: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        return self.update_executable_metadata(
+            categories=categories,
+            bsim_url=bsim_url,
+            md5=md5,
+            name=name,
+        )
 
     def query_target(
         self,

@@ -237,6 +237,17 @@ class ServiceRegistryAdapter:
     def list_bsim_categories(self, *, bsim_url: str | None = None):
         return self._bsim_service.list_bsim_categories(bsim_url=bsim_url)
 
+    def bsim_add_executable_category(
+        self,
+        *,
+        category: str,
+        bsim_url: str | None = None,
+    ):
+        return self._bsim_service.bsim_add_executable_category(
+            category=category,
+            bsim_url=bsim_url,
+        )
+
     def list_bsim_executables(
         self,
         *,
@@ -264,6 +275,21 @@ class ServiceRegistryAdapter:
         name: str | None = None,
     ):
         return self._bsim_service.get_bsim_executable(bsim_url=bsim_url, md5=md5, name=name)
+
+    def bsim_update_executable_metadata(
+        self,
+        *,
+        categories: dict[str, object],
+        bsim_url: str | None = None,
+        md5: str | None = None,
+        name: str | None = None,
+    ):
+        return self._bsim_service.bsim_update_executable_metadata(
+            categories=categories,
+            bsim_url=bsim_url,
+            md5=md5,
+            name=name,
+        )
 
     def bsim_query_target(
         self,
