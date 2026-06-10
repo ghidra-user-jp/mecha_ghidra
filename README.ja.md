@@ -23,12 +23,8 @@ PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開す�
 3. サーバーを起動（Streamable HTTP）
    ```bash
    uv run ghidra-mcp \
-        --project-location /Users/samsepi0l/ghidra_project.gpr \
-        --domain-path /main \
-       --transport http \
-       --mcp-host 127.0.0.1 \
-       --mcp-port 8081 \
-        --mcp-path /mcp
+       --project-location /Users/samsepi0l/ghidra_project.gpr \
+       --transport http
    ```
 
 運用パターンや shared project 認証を含む詳細は [利用ガイド](docs/usage.ja.md) を参照してください。
