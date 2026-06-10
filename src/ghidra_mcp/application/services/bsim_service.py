@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, NoReturn, TypeVar
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+from ghidra_mcp.domain import DomainError
 from ghidra_mcp.infrastructure.bsim import BsimJavaBackend, mask_bsim_url
 
 from .core_command_service import CoreCommandService
@@ -19,6 +20,11 @@ from .target_service import TargetService
 
 BSIM_MATCHED_REF_VERSION = 1
 _BSIM_CODE_RE = re.compile(r"^BSIM_[A-Z0-9_]+(?::|$)")
+_BSIM_GENERIC_CODE_PREFIXES = (
+    "BSIM_DATABASE_INIT_FAILED:",
+    "BSIM_QUERY_FAILED:",
+    "BSIM_CLI_FAILED:",
+)
 _BSIM_CATEGORY_TYPE_RE = re.compile(r"^[A-Za-z0-9 ._:/()]+$")
 _BSIM_MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 _BSIM_SUPPORTED_URL_SCHEMES = frozenset({"postgresql", "elastic", "https", "file"})
@@ -33,8 +39,6 @@ class BsimConfig:
     bsim_url: str | None = None
     bsim_password: str | None = None
     bsim_password_env: str | None = None
-    work_dir: str | None = None
-    command_timeout: int = 300
     ghidra_install_dir: str | None = None
 
 
@@ -61,22 +65,30 @@ def _bsim_message(code: str, message: str) -> str:
 
 def _classify_bsim_message(message: str, *, default_code: str = "BSIM_OPERATION_FAILED") -> str:
     text = str(message).strip() or "unknown error"
-    lower = text.lower()
-    has_specific_code = _BSIM_CODE_RE.match(text) and not text.startswith(
-        ("BSIM_DATABASE_INIT_FAILED:", "BSIM_QUERY_FAILED:", "BSIM_CLI_FAILED:")
-    )
+    has_specific_code = _BSIM_CODE_RE.match(text) and not text.startswith(_BSIM_GENERIC_CODE_PREFIXES)
     if has_specific_code:
         return text
+    # Backend/headless errors arrive wrapped in a generic prefix (e.g.
+    # "BSIM_QUERY_FAILED: ..."). Strip that wrapper so the keyword rules below can
+    # promote it to a more specific code; otherwise _bsim_message would see the
+    # existing prefix and return the text unchanged, defeating reclassification.
+    for prefix in _BSIM_GENERIC_CODE_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip() or "unknown error"
+            break
+    lower = text.lower()
     if "function not found" in lower:
         return _bsim_message("BSIM_FUNCTION_NOT_FOUND", text)
     if "password" in lower or "authentication" in lower or "auth failed" in lower:
         return _bsim_message("BSIM_AUTHENTICATION_FAILED", text)
     if (
-        "connection refused" in lower
+        "refused" in lower
         or "could not connect" in lower
+        or "connection to" in lower
         or "timed out" in lower
         or "timeout" in lower
         or "unknown host" in lower
+        or "no route to host" in lower
         or "unreachable" in lower
     ):
         return _bsim_message("BSIM_DATABASE_UNREACHABLE", text)
@@ -171,10 +183,8 @@ def _bsim_url_with_password(bsim_url: str, password: str | None) -> str:
         return bsim_url
     parts = urlsplit(bsim_url)
     if not parts.scheme or not parts.netloc:
-        raise ValueError(
-            "BSIM_URL_INVALID: --bsim-password requires a network BSim URL such as "
-            "postgresql://user@host/database"
-        )
+        # file:/local databases take no network credentials; leave them as-is.
+        return bsim_url
     if parts.password is not None:
         raise ValueError(
             "BSIM_PASSWORD_CONFIG_INVALID: bsim_url already contains a password; "
@@ -200,6 +210,10 @@ def _validate_bsim_url(bsim_url: str) -> str:
     if scheme in {"postgresql", "elastic", "https"} and not parts.netloc:
         raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL requires a host")
     if scheme in {"postgresql", "elastic", "https"}:
+        try:
+            parts.port
+        except ValueError as exc:
+            raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL has an invalid port") from exc
         path = parts.path.strip("/")
         if not path:
             raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL requires a database name")
@@ -320,10 +334,15 @@ def _validate_matched_ref(matched_ref: dict[str, object]) -> _MatchedRef:
         raise ValueError("BSIM_INVALID_MATCHED_REF: matched_ref must be an object")
 
     raw_version = matched_ref.get("matched_ref_version")
-    try:
-        version = int(str(raw_version))
-    except (TypeError, ValueError):
+    if isinstance(raw_version, bool):
         version = None
+    else:
+        try:
+            number = float(raw_version)
+        except (TypeError, ValueError):
+            version = None
+        else:
+            version = int(number) if number.is_integer() else None
     if version != BSIM_MATCHED_REF_VERSION:
         raise ValueError(
             "BSIM_INVALID_MATCHED_REF: matched_ref.matched_ref_version must be "
@@ -391,11 +410,20 @@ class BsimService:
         self._loaded_match_index: dict[str, str] = {}
 
     def _resolve_bsim_url(self, bsim_url: str | None = None) -> str:
-        resolved = (bsim_url or self._config.bsim_url or "").strip()
+        override = (bsim_url or "").strip()
+        configured = (self._config.bsim_url or "").strip()
+        resolved = override or configured
         if not resolved:
             raise ValueError("BSIM_URL_REQUIRED: set --bsim-url or pass bsim_url")
         _validate_bsim_url(resolved)
-        return _validate_bsim_url(_bsim_url_with_password(resolved, _resolve_config_password(self._config)))
+        # The server-configured password belongs to the configured --bsim-url only.
+        # A per-call bsim_url that targets a different database must carry its own
+        # credentials; never forward the configured password to an arbitrary host.
+        if not override or override == configured:
+            password = _resolve_config_password(self._config)
+            if password is not None:
+                resolved = _bsim_url_with_password(resolved, password)
+        return resolved
 
     @staticmethod
     def _mask_response_url(payload: dict[str, Any], bsim_url: str) -> dict[str, Any]:
@@ -439,6 +467,11 @@ class BsimService:
     def _call_bsim(operation: Callable[[], _T], *, default_code: str = "BSIM_OPERATION_FAILED") -> _T:
         try:
             return operation()
+        except DomainError:
+            # Structured runtime errors (SESSION_NOT_FOUND, PROJECT_LOCKED, ...) already
+            # carry a code/retryable payload; let them through so the presentation layer
+            # renders the same envelope it does for every other tool.
+            raise
         except Exception as exc:
             _raise_classified_bsim_error(exc, default_code=default_code)
 
@@ -756,12 +789,55 @@ class BsimService:
             max_results=max_results,
         )
 
-    def set_target_metadata(self, target: str, *, categories: dict[str, object]) -> dict[str, Any]:
+    def set_target_metadata(
+        self,
+        target: str,
+        *,
+        categories: dict[str, object],
+        bsim_url: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(categories, dict) or not categories:
+            raise ValueError("BSIM_TARGET_METADATA_INVALID: categories must be a non-empty object")
+        # When a BSim URL is available, validate the category names against the database's
+        # configured categories. GenSignatures only ingests options whose names match the
+        # configured (case-sensitive) categories, so an unconfigured/miscased name would
+        # otherwise be stored on the program and silently dropped at registration.
+        resolved = (bsim_url or self._config.bsim_url or "").strip()
+        if resolved:
+            resolved_url = self._resolve_bsim_url(bsim_url)
+            configured = self._call_bsim(
+                lambda: self._java_backend.list_categories(resolved_url),
+                default_code="BSIM_LIST_CATEGORIES_FAILED",
+            )
+            configured_names = {str(item) for item in (configured.get("items") or [])}
+            requested: list[str] = []
+            seen: set[str] = set()
+            for key in categories:
+                text = str(key).strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    requested.append(text)
+            unknown = sorted(name for name in requested if name not in configured_names)
+            if unknown:
+                raise ValueError(
+                    "BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED: "
+                    + ", ".join(unknown)
+                    + "; call bsim_add_executable_category first"
+                )
         return self._core_command_service.call(
             "bsim_set_target_metadata",
             {"categories": categories},
             target,
         )
+
+    def bsim_set_target_metadata(
+        self,
+        target: str,
+        *,
+        categories: dict[str, object],
+        bsim_url: str | None = None,
+    ) -> dict[str, Any]:
+        return self.set_target_metadata(target, categories=categories, bsim_url=bsim_url)
 
     def register_target(self, target: str, *, bsim_url: str | None = None) -> dict[str, Any]:
         resolved = self._resolve_bsim_url(bsim_url)
@@ -897,8 +973,14 @@ class BsimService:
         expected_identity: tuple[str, str] | None,
     ) -> bool:
         item_domain = _normalize_domain_path(self._text(item.get("domain_path")))
-        if item_domain != domain_path or expected_identity is None:
+        if item_domain != domain_path:
             return False
+        if expected_identity is None:
+            # Remote ghidra:// refs have no computable local project identity, so the
+            # domain path is the only signal we have. Match on it alone (the pre-hardening
+            # behavior) rather than rejecting every target, which would make the
+            # "load it manually and retry" workaround permanently fail.
+            return True
         item_project_location = self._text(item.get("project_location"))
         if not item_project_location:
             return False

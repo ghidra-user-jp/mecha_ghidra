@@ -69,6 +69,20 @@ def _text_or_none(value) -> str | None:  # noqa: ANN001
     return text or None
 
 
+def _format_address(value) -> str:  # noqa: ANN001
+    # Ghidra's FunctionDescription.getAddress() returns a signed Java long; mask to
+    # unsigned 64-bit so high addresses do not render as "0x-..." strings.
+    return "0x%x" % (int(value) & 0xFFFFFFFFFFFFFFFF)
+
+
+def _name_matches_exactly(record_name, *, name) -> bool:  # noqa: ANN001
+    # BSim's QueryExeInfo name filter is a case-insensitive substring (ILIKE) match, so
+    # re-check the name exactly to avoid acting on an unintended record. md5 is filtered
+    # exactly server-side for full 32-char values (and as a prefix otherwise), so it
+    # needs no re-check here -- re-checking would break legitimate md5-prefix lookups.
+    return name is None or str(record_name) == name
+
+
 def _server_info_to_dict(server_info) -> dict[str, Any]:  # noqa: ANN001
     if server_info is None:
         return {}
@@ -257,7 +271,7 @@ class BsimJavaBackend:
             query = classes["QueryExeInfo"]()
             query.limit = int(limit)
             query.filterExeName = name
-            query.filterMd5 = md5
+            query.filterMd5 = md5.lower() if md5 else md5
             query.filterArch = arch
             query.filterCompilerName = compiler
             query.fillinCategories = True
@@ -267,11 +281,13 @@ class BsimJavaBackend:
                 message = "unknown error" if last_error is None else str(last_error.message)
                 raise RuntimeError(f"BSIM_QUERY_FAILED: {message}")
             items = [_executable_to_dict(record) for record in _iter_java_items(response.records)]
+            # recordCount reflects the returned page size, not a true total, so a full page
+            # means more rows may exist; report that rather than claiming completeness.
             return {
                 "items": items,
                 "count": len(items),
-                "record_count": int(response.recordCount),
-                "truncated": bool(int(response.recordCount) > len(items)),
+                "record_count": len(items),
+                "truncated": len(items) >= int(limit),
             }
 
     def get_executable(
@@ -283,8 +299,8 @@ class BsimJavaBackend:
     ) -> dict[str, Any]:
         if not md5 and not name:
             raise ValueError("md5 or name is required")
-        result = self.list_executables(bsim_url, name=name, md5=md5, limit=2)
-        items = result["items"]
+        result = self.list_executables(bsim_url, name=name, md5=md5, limit=100)
+        items = [item for item in result["items"] if _name_matches_exactly(item.get("name"), name=name)]
         if not items:
             raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
         if len(items) > 1:
@@ -312,8 +328,8 @@ class BsimJavaBackend:
                 )
 
             query = classes["QueryExeInfo"]()
-            query.limit = 2
-            query.filterMd5 = md5
+            query.limit = 100
+            query.filterMd5 = md5.lower() if md5 else md5
             query.filterExeName = name
             query.fillinCategories = True
             response = database.query(query)
@@ -322,10 +338,16 @@ class BsimJavaBackend:
                 message = "unknown error" if last_error is None else str(last_error.message)
                 raise RuntimeError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
 
-            records = list(_iter_java_items(response.records))
+            # The name filter is a case-insensitive substring (ILIKE) match server-side, so
+            # narrow to records whose identity matches exactly before mutating anything.
+            records = [
+                record
+                for record in _iter_java_items(response.records)
+                if _name_matches_exactly(record.getNameExec(), name=name)
+            ]
             if not records:
                 raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
-            if int(response.recordCount) > 1 or len(records) > 1:
+            if len(records) > 1:
                 raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
 
             source_record = records[0]
@@ -356,7 +378,7 @@ class BsimJavaBackend:
                 {
                     "executable_md5": str(func.getExecutableRecord().getMd5()),
                     "name": str(func.getFunctionName()),
-                    "address": "0x%x" % int(func.getAddress()),
+                    "address": _format_address(func.getAddress()),
                 }
                 for func in _iter_java_items(update_response.badfunc)
             ]

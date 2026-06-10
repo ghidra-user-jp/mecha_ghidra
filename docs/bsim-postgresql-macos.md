@@ -323,7 +323,7 @@ Ghidra付属CLIで追加する場合:
 注意点:
 
 - カテゴリを追加するだけでは、各Programに値は入りません。
-- 新規登録前に値を入れる場合は、targetを開いて`bsim_set_target_metadata`を呼んでから`bsim_register_target`を呼びます。
+- 新規登録前に値を入れる場合は、targetを開いて`bsim_set_target_metadata`を呼んでから`bsim_register_target`を呼びます。`categories`の値はProgram Informationに1カテゴリ1値として保存されるため、スカラ値（文字列など）のみ指定できます。複数値が必要な場合は登録後に`bsim_update_executable_metadata`で設定します。`--bsim-url`（または`bsim_url`引数）が利用可能な場合、カテゴリ名はDBの設定済みカテゴリと照合され、未設定・大小文字違いの名前は`BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED`で即座に拒否されます（登録時に黙って捨てられることはありません）。
 - 登録済みrecordを後から更新する場合は、`bsim_update_executable_metadata`に`md5`または`name`と`categories`を渡します。未指定カテゴリは既存値を保持し、渡したカテゴリだけ置換します。値に`null`または空配列を渡すと、そのカテゴリをクリアします。
 
 登録済みrecordを更新する例:

@@ -341,6 +341,19 @@ class ServiceRegistryAdapter:
     ):
         return self._bsim_service.bsim_load_matched_executable(matched_ref=matched_ref, target=target)
 
+    def bsim_set_target_metadata(
+        self,
+        target: str,
+        *,
+        categories: dict[str, object],
+        bsim_url: str | None = None,
+    ):
+        return self._bsim_service.bsim_set_target_metadata(
+            target,
+            categories=categories,
+            bsim_url=bsim_url,
+        )
+
     def bsim_register_target(self, target: str, *, bsim_url: str | None = None):
         return self._bsim_service.bsim_register_target(target, bsim_url=bsim_url)
 

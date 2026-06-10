@@ -503,6 +503,7 @@ def _registry_tool(
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     idempotent_hint: bool | None = None,
+    checkout_required: bool = False,
 ) -> ToolSpec:
     return _tool(
         name=name,
@@ -524,6 +525,7 @@ def _registry_tool(
         omit_falsey_keys=omit_falsey_keys,
         description=description,
         idempotent_hint=idempotent_hint,
+        checkout_required=checkout_required,
     )
 
 
@@ -858,14 +860,21 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         idempotent_hint=True,
     ),
-    _core_tool(
+    _registry_tool(
         "bsim_set_target_metadata",
+        method_name="bsim_set_target_metadata",
         category_tag=ToolCategoryTag.BSIM,
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(("categories", dict[str, object], ...),),
+        input_fields=(
+            ("categories", dict[str, object], ...),
+            _BSIM_URL_FIELD,
+        ),
+        include_none_keys=("bsim_url",),
         description=(
-            "Set BSim executable metadata categories on the loaded target program before registration."
+            "Set BSim executable metadata categories on the loaded target program before registration. "
+            "When a BSim URL is available the category names are validated against the configured "
+            "database categories so unconfigured names fail fast instead of being dropped at registration."
         ),
         idempotent_hint=True,
         checkout_required=True,
@@ -1618,10 +1627,15 @@ def get_public_tool_names() -> set[str]:
 
 def get_checkout_required_tool_names(specs: dict[str, ToolSpec] | None = None) -> set[str]:
     available_specs = _TOOL_SPECS if specs is None else specs
+    # Checkout enforcement keys on the core command name. CORE_COMMAND tools expose it
+    # directly as command_or_method; REGISTRY_METHOD tools that wrap a core command (e.g.
+    # bsim_set_target_metadata) use a method_name identical to that core command, so they
+    # contribute the same name here.
     return {
         spec.command_or_method
         for spec in available_specs.values()
-        if spec.executor_kind == ExecutorKind.CORE_COMMAND and spec.checkout_required
+        if spec.checkout_required
+        and spec.executor_kind in (ExecutorKind.CORE_COMMAND, ExecutorKind.REGISTRY_METHOD)
     }
 
 

@@ -717,6 +717,7 @@ def test_typed_input_models_for_function_listing_slice():
         "bsim_set_target_metadata",
         {
             "categories": (dict[str, object], ...),
+            "bsim_url": (str | None, None),
         },
     )
 

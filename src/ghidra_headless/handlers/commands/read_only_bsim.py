@@ -32,10 +32,22 @@ def _iter_items(items):
             yield item
         return
     try:
-        for item in items:
+        python_iter = iter(items)
+    except TypeError:
+        python_iter = None
+    if python_iter is not None:
+        # Only the iter() acquisition may fail for a non-iterable; do not wrap the
+        # consumption loop, otherwise a mid-iteration error silently truncates the
+        # result and the caller reports a partial list as complete.
+        for item in python_iter:
             yield item
-    except Exception:
         return
+    if callable(next_item):
+        while True:
+            try:
+                yield next_item()
+            except StopIteration:
+                break
 
 
 def _domain_path(program):
@@ -56,7 +68,16 @@ def _category_map(record):
     return result
 
 
+def _format_address(value):
+    # FunctionDescription.getAddress() is a signed Java long; mask to unsigned 64-bit
+    # so high addresses do not render as "0x-..." strings.
+    return "0x%x" % (int(value) & 0xFFFFFFFFFFFFFFFF)
+
+
 def _matched_domain_path(record):
+    # ExecutableRecord.getPath() is always the containing folder and never includes the
+    # program name, so always append it. (A folder whose basename happens to equal the
+    # program name must not collapse to the folder path.)
     raw_path = record.getPath()
     name = str(record.getNameExec())
     if raw_path is None or not str(raw_path).strip():
@@ -64,8 +85,6 @@ def _matched_domain_path(record):
     path = pathlib.PurePosixPath(str(raw_path))
     if not path.is_absolute():
         path = pathlib.PurePosixPath("/") / path
-    if path.name == name:
-        return path.as_posix()
     return (path / name).as_posix()
 
 
@@ -80,7 +99,7 @@ def _matched_ref(function_description):
         "ghidra_url": None if ghidra_url is None else str(ghidra_url),
         "repository": None if repository is None else str(repository),
         "domain_path": _matched_domain_path(record),
-        "address": "0x%x" % int(function_description.getAddress()),
+        "address": _format_address(function_description.getAddress()),
         "name": str(function_description.getFunctionName()),
         "is_library": bool(record.isLibrary()),
         "categories": _category_map(record),
@@ -91,7 +110,7 @@ def _query_ref(ctx, target, function_description):
     return {
         "target": target,
         "domain_path": _domain_path(ctx.program),
-        "address": "0x%x" % int(function_description.getAddress()),
+        "address": _format_address(function_description.getAddress()),
         "name": str(function_description.getFunctionName()),
     }
 

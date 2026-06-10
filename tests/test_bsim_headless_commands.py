@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from ghidra_headless.handlers.commands.read_only_bsim import _rows_to_result
+import pytest
+
+from ghidra_headless.handlers.commands.read_only_bsim import (
+    _format_address,
+    _iter_items,
+    _matched_domain_path,
+    _rows_to_result,
+)
 
 
 class FakeDomainFile:
@@ -99,3 +106,64 @@ def test_bsim_rows_are_versioned_and_stably_sorted_before_limit():
         "cccccccccccccccccccccccccccccccc",
     ]
     assert result["matches"][0]["matched_ref"]["matched_ref_version"] == 1
+
+
+class _PathRecord:
+    def __init__(self, *, path, name):
+        self._path = path
+        self._name = name
+
+    def getPath(self):
+        return self._path
+
+    def getNameExec(self):
+        return self._name
+
+
+def test_matched_domain_path_always_appends_program_name():
+    # Folder basename equals the program name (one-folder-per-sample layout); the path
+    # must not collapse to the folder.
+    record = _PathRecord(path="/emotet", name="emotet")
+    assert _matched_domain_path(record) == "/emotet/emotet"
+
+
+def test_matched_domain_path_joins_folder_and_name():
+    record = _PathRecord(path="/samples", name="old.exe")
+    assert _matched_domain_path(record) == "/samples/old.exe"
+
+
+def test_matched_domain_path_handles_missing_folder():
+    record = _PathRecord(path=None, name="x")
+    assert _matched_domain_path(record) == "/x"
+
+
+def test_format_address_masks_signed_long():
+    # Ghidra returns getAddress() as a signed Java long; the high-bit case must not
+    # render as a negative "0x-..." string.
+    assert _format_address(0x401000) == "0x401000"
+    assert _format_address(-2) == "0xfffffffffffffffe"
+
+
+def test_iter_items_propagates_mid_iteration_errors():
+    def _exploding():
+        yield 1
+        yield 2
+        raise RuntimeError("boom")
+
+    collected = []
+    with pytest.raises(RuntimeError, match="boom"):
+        for item in _iter_items(_exploding()):
+            collected.append(item)
+
+    assert collected == [1, 2]
+
+
+def test_iter_items_supports_bare_next_iterator():
+    class _BareNext:
+        def __init__(self):
+            self._values = iter([10, 20])
+
+        def next(self):
+            return next(self._values)
+
+    assert list(_iter_items(_BareNext())) == [10, 20]

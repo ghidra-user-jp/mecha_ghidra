@@ -192,16 +192,6 @@ def parse_args(argv: list[str]):
         help="Environment variable name holding the BSim database password",
     )
     parser.add_argument(
-        "--bsim-work-dir",
-        help="Working directory for BSim helper processes that need scratch space",
-    )
-    parser.add_argument(
-        "--bsim-command-timeout",
-        type=int,
-        default=300,
-        help="Timeout in seconds for BSim helper processes",
-    )
-    parser.add_argument(
         "--tool-profile",
         default=ToolProfile.DEFAULT.value,
         choices=_enum_choices(ToolProfile),
@@ -339,8 +329,6 @@ def main(argv: list[str] | None = None) -> int:
             bsim_url=args.bsim_url,
             bsim_password=args.bsim_password,
             bsim_password_env=args.bsim_password_env,
-            work_dir=args.bsim_work_dir,
-            command_timeout=args.bsim_command_timeout,
             ghidra_install_dir=ghidra_path,
         ),
     )
