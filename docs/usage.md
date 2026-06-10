@@ -113,23 +113,7 @@ This creates:
 - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
 - `dist/ghidra_*_mac_x86_64_decompiler.zip`
 
-The overlay archive preserves the exact path `Ghidra/Features/Decompiler/os/<platform>/{decompile,sleigh}` so it can be unpacked directly into an existing Ghidra install. The patched ZIPs are intended for the matching platform: ARM Linux Docker/direct installs, Apple Silicon macOS, or Intel macOS.
-
-GitHub releases publish two user-facing ZIP assets:
-
-- `ghidra_12.1_decompiler_natives_all.zip`: ready-to-use Ghidra 12.1 distribution with the native decompiler files already installed.
-- `ghidra_decompiler_natives_all.zip`: overlay ZIP containing only the added native decompiler files for an existing Ghidra 12.1 install.
-
-The included native decompiler paths are:
-
-- `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
-- `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
-- `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
-- `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
-- `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
-- `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
-
-The release body explains which ZIP to use and lists those added paths. For the normal repository snapshot, use GitHub's built-in `Source code (zip)` / `Source code (tar.gz)` links.
+GitHub releases publish both a ready-to-use `ghidra_12.1.2_decompiler_natives_all.zip` Ghidra bundle and a smaller `ghidra_decompiler_natives_all.zip` overlay containing the added `linux_arm_64` `decompile` / `sleigh` paths. The upstream Ghidra 12.1.2 ZIP already includes the macOS decompiler binaries.
 
 ### Docker Path Sharing
 
@@ -166,7 +150,7 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - If the project does not exist yet, `create_project` can create an empty local `.gpr/.rep` before `register_target`, `import_program`, or `load_project_program`. It refuses existing projects unless `overwrite=true`.
 - Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
 - In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis; use `analyze_program` or `reanalyze_program` when you need an explicit analysis pass.
-- After mutating tools such as `rename_function_by_address`, call `save_project_program(target="default")` to persist changes into `.gpr/.rep`. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
+- After mutating tools such as `rename_function`, call `save_project_program(target="default")` to persist changes into `.gpr/.rep`. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 - Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
 - Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
 - `delete_shared_project_file` always requires an explicit `domain_path` plus `confirm` equal to the normalized path; it refuses loaded files, active checkouts, and private files unless `allow_private=true`.

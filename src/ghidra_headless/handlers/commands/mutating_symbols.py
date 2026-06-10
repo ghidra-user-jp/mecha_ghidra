@@ -13,34 +13,24 @@ def _bookmark_to_dict(bookmark):
     }
 
 
-def rename_function(params, *, ensure_context, find_function_by_name, txn, source_type):
+def rename_function(params, *, ensure_context, get_address, find_function_by_name, txn, source_type):
     ctx = ensure_context()
+    address_text = params.get("address")
     old_name = params.get("oldName")
-    new_name = params.get("newName")
-    if not old_name or not new_name:
-        raise ValueError("oldName and newName are required")
-    function = find_function_by_name(ctx, old_name)
-    if function is None:
-        raise LookupError("Function not found: %s" % old_name)
-
-    def _rename():
-        function.setName(new_name, source_type.USER_DEFINED)
-        return True
-
-    txn(ctx, "Rename function", _rename)
-    return {"name": function.getName(), "entry": str(function.getEntryPoint())}
-
-
-def rename_function_by_address(params, *, ensure_context, get_address, txn, source_type):
-    ctx = ensure_context()
-    address_text = params.get("function_address")
-    new_name = params.get("new_name") or params.get("newName")
-    if not address_text or not new_name:
-        raise ValueError("function_address and new_name are required")
-    address = get_address(ctx, address_text)
-    function = ctx.function_manager.getFunctionContaining(address)
-    if function is None:
-        raise LookupError("No function found for address: %s" % address_text)
+    new_name = params.get("newName") or params.get("new_name")
+    if not new_name:
+        raise ValueError("newName is required")
+    if address_text:
+        address = get_address(ctx, address_text)
+        function = ctx.function_manager.getFunctionContaining(address)
+        if function is None:
+            raise LookupError("No function found for address: %s" % address_text)
+    else:
+        if not old_name:
+            raise ValueError("address or oldName is required")
+        function = find_function_by_name(ctx, old_name)
+        if function is None:
+            raise LookupError("Function not found: %s" % old_name)
 
     def _rename():
         function.setName(new_name, source_type.USER_DEFINED)

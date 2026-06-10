@@ -7,10 +7,10 @@ ARG GHIDRA_DIST_URL
 ARG GHIDRA_DIST_SHA256
 ARG GHIDRA_DECOMPILER_NATIVES_URL
 ARG GHIDRA_DECOMPILER_NATIVES_SHA256
-ARG GHIDRA_DIST_URL_AMD64_DEFAULT=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1_build/ghidra_12.1_PUBLIC_20260513.zip
-ARG GHIDRA_DIST_SHA256_AMD64_DEFAULT=aa5cbcbbf48f41ca185fce900e19592f1ade4cd5994eb6e0ede468dac8a6f302
-ARG GHIDRA_DECOMPILER_NATIVES_URL_ARM64_DEFAULT=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.2-rc.1/ghidra_decompiler_natives_all.zip
-ARG GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64_DEFAULT=4ef6afb1b73d954cb7e3ee2d780f4bb321f04b68b97769f9b0405e33e43f14e5
+ARG GHIDRA_DIST_URL_AMD64_DEFAULT=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
+ARG GHIDRA_DIST_SHA256_AMD64_DEFAULT=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
+ARG GHIDRA_DECOMPILER_NATIVES_URL_ARM64_DEFAULT=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v0.1.2-rc.2/ghidra_decompiler_natives_all.zip
+ARG GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64_DEFAULT=9ed04bbe8eb7d47d8f48eeed0aaecdddaf58e4ee26ac70f781b5ee4cb5bcd6b3
 
 ENV DEBIAN_FRONTEND=noninteractive \
     GHIDRA_INSTALL_DIR=/opt/ghidra \

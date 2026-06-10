@@ -3,7 +3,7 @@
 from __future__ import absolute_import, print_function
 
 from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
-from ghidra.program.model.data import CategoryPath, DataUtilities, EnumDataType, StructureDataType
+from ghidra.program.model.data import CategoryPath, DataUtilities, StructureDataType
 from ghidra.program.model.listing import CodeUnit
 from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
@@ -16,9 +16,7 @@ from ghidra_headless.handlers.core_command_registry import (
     COMMAND_TO_IMPL,
 )
 from ghidra_headless.handlers.core_helpers import (
-    _apply_members_to_struct,
     _analyze_program,
-    _build_class_category_path,
     _build_signature_parser,
     _collect,
     _component_length,
@@ -30,9 +28,7 @@ from ghidra_headless.handlers.core_helpers import (
     _describe_struct,
     _dt_manager,
     _find_data_type_by_name,
-    _ensure_class_struct,
     _find_function_by_name,
-    _find_ghidra_class,
     _get_address,
     _get_enum_datatype,
     _get_struct_datatype,
@@ -44,10 +40,8 @@ from ghidra_headless.handlers.core_helpers import (
     _parse_clear_data_mode,
     _parse_data_type,
     _requires_full_param_commit,
-    _resolve_namespace,
     _safe_call,
     _to_int,
-    _to_int_auto,
     _txn,
 )
 from ghidra_headless.handlers.core_runtime import (
@@ -91,17 +85,10 @@ _PROFILE_DEPENDENCIES = {
     "get_struct_datatype": _get_struct_datatype,
     "hexdump": _hexdump,
     "decode_hex_bytes": _decode_hex_bytes,
-    "enum_data_type": EnumDataType,
-    "to_int_auto": _to_int_auto,
     "get_enum_datatype": _get_enum_datatype,
     "describe_enum": _describe_enum,
     "parse_clear_data_mode": _parse_clear_data_mode,
     "data_utilities": DataUtilities,
-    "resolve_namespace": _resolve_namespace,
-    "find_ghidra_class": _find_ghidra_class,
-    "build_class_category_path": _build_class_category_path,
-    "apply_members_to_struct": _apply_members_to_struct,
-    "ensure_class_struct": _ensure_class_struct,
     "task_monitor": TaskMonitor,
 }
 

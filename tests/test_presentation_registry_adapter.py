@@ -14,7 +14,6 @@ from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
 
 _LIST_CORE_COMMANDS = {
-    "list_methods",
     "list_functions",
     "list_classes",
     "search_functions_by_name",
@@ -46,7 +45,7 @@ class RecordingCoreService:
         self.calls.append((command, dict(params), target))
         if command in _LIST_CORE_COMMANDS:
             return []
-        if command in {"decompile_function", "decompile_function_by_address"}:
+        if command == "decompile_function":
             return "void main(void) {}"
         if command == "get_bytes":
             return "90"
@@ -315,6 +314,10 @@ def _required_raw_args(spec_name: str) -> dict[str, Any]:
     for key, field in spec.input_model.model_fields.items():
         if field.is_required():
             raw[key] = _sample_for_field(key, field.annotation)
+    if spec_name == "decompile_function":
+        raw["name"] = "main"
+    if spec_name == "rename_function":
+        raw["oldName"] = "old_fn"
     return raw
 
 

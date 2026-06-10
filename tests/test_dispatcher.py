@@ -230,9 +230,6 @@ def test_dispatch_tool_validation_error():
     ("spec_name", "raw_args"),
     [
         ("search_functions_by_name", {"offset": 0, "limit": 5}),
-        ("get_function_by_address", {}),
-        ("decompile_function", {}),
-        ("decompile_function_by_address", {}),
         ("disassemble_function", {}),
         ("get_callee", {}),
         ("get_xrefs_to", {"offset": 0, "limit": 10}),
@@ -244,7 +241,7 @@ def test_dispatch_tool_validation_error():
         ("get_struct", {}),
         ("get_enum", {}),
         ("rename_function", {"oldName": "old_only"}),
-        ("rename_function_by_address", {"function_address": "0x1"}),
+        ("rename_function", {"address": "0x1"}),
         ("rename_data", {"address": "0x1"}),
         ("rename_variable", {"functionName": "main", "oldName": "old"}),
         ("set_decompiler_comment", {"address": "0x1"}),
@@ -254,12 +251,6 @@ def test_dispatch_tool_validation_error():
         ("create_struct", {}),
         ("add_struct_members", {"struct_name": "S"}),
         ("clear_struct", {}),
-        ("create_enum", {}),
-        ("add_enum_values", {"enum_name": "E"}),
-        ("remove_enum_values", {"enum_name": "E"}),
-        ("create_class", {}),
-        ("add_class_members", {"class_name": "C"}),
-        ("remove_class_members", {"class_name": "C"}),
         ("remove_struct_members", {"struct_name": "S"}),
         ("set_global_data_type", {"address": "0x1"}),
         ("set_bytes", {"address": "0x1"}),
@@ -287,9 +278,10 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
     ("spec_name", "raw_args"),
     [
         ("search_functions_by_name", {"query": 123, "offset": 0, "limit": 5}),
-        ("get_function_by_address", {"address": 123}),
+        ("get_function", {"address": 123}),
+        ("get_function", {"name": 123}),
         ("decompile_function", {"name": 123}),
-        ("decompile_function_by_address", {"address": 123}),
+        ("decompile_function", {"address": 123}),
         ("disassemble_function", {"address": 123}),
         ("get_callee", {"address": 123}),
         ("get_xrefs_to", {"address": "0x1", "offset": "x", "limit": 10}),
@@ -307,7 +299,7 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("get_struct", {"name": 123, "category": None}),
         ("get_enum", {"name": 123, "category": None}),
         ("rename_function", {"oldName": "old", "newName": 1}),
-        ("rename_function_by_address", {"function_address": 1, "new_name": "new"}),
+        ("rename_function", {"address": 1, "newName": "new"}),
         ("rename_data", {"address": 1, "newName": "new"}),
         ("rename_variable", {"functionName": "main", "oldName": "old", "newName": 1}),
         ("set_decompiler_comment", {"address": "0x1", "comment": 1}),
@@ -317,12 +309,6 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("create_struct", {"name": "S", "size": "x"}),
         ("add_struct_members", {"struct_name": "S", "members": "bad"}),
         ("clear_struct", {"struct_name": 1}),
-        ("create_enum", {"name": "E", "values": "bad"}),
-        ("add_enum_values", {"enum_name": "E", "values": "bad"}),
-        ("remove_enum_values", {"enum_name": "E", "values": "bad"}),
-        ("create_class", {"name": "C", "members": "bad"}),
-        ("add_class_members", {"class_name": "C", "members": "bad"}),
-        ("remove_class_members", {"class_name": "C", "members": "bad"}),
         ("remove_struct_members", {"struct_name": "S", "members": "bad"}),
         ("set_global_data_type", {"address": "0x1", "data_type": "int", "length": "x"}),
         ("set_bytes", {"address": "0x1", "bytes": 1}),
@@ -707,13 +693,6 @@ def test_dispatch_tool_validates_output_after_result_adapter(monkeypatch):
     ("spec_name", "raw_args", "override", "expected_exc", "expected_message"),
     [
         (
-            "list_methods",
-            {"offset": 0, "limit": 3},
-            {"call_result": {"bad": "shape"}},
-            ValueError,
-            "list_methods output validation failed",
-        ),
-        (
             "get_bytes",
             {"address": "0x401000", "size": 8},
             {"call_result": {"bad": "shape"}},
@@ -766,8 +745,6 @@ def test_dispatch_tool_raises_output_validation_error_for_incompatible_result(
 ):
     class BadOutputRegistry(DummyRegistry):
         def call(self, command, params, target):
-            if command == "list_methods" and "call_result" in override:
-                return override["call_result"]
             if command == "get_bytes" and "call_result" in override:
                 return override["call_result"]
             return super().call(command, params, target)

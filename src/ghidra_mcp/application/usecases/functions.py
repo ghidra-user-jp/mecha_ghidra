@@ -8,13 +8,11 @@ from ghidra_mcp.infrastructure.ghidra_adapter.core_gateway import CoreGateway
 
 
 FUNCTION_COMMANDS: tuple[str, ...] = (
-    "list_methods",
     "list_functions",
     "list_classes",
     "search_functions_by_name",
-    "get_function_by_address",
+    "get_function",
     "decompile_function",
-    "decompile_function_by_address",
     "disassemble_function",
     "disassemble_range",
     "create_function",

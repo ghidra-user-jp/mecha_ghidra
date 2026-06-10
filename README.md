@@ -59,7 +59,7 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 ## Key Features
 
 - **Function and symbol operations**: list functions, decompile, rename, retrieve xrefs, and more.
-- **Data-type editing**: create/update/delete structs, enums, and class-like data types.
+- **Data-type editing**: create/update/delete structs and inspect enums.
 - **Memory access**: read/search/write bytes and apply global data types.
 - **Comments**: set disassembly/decompiler comments.
 - **PyGhidra-based runtime**: calls Ghidra APIs directly from CPython (not Jython).
@@ -85,16 +85,14 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 
 #### Function Analysis
 
-- `list_methods` - List methods (with pagination)
 - `list_functions` - List functions
 - `list_classes` - List classes
 - `list_namespaces` - List namespaces (with pagination)
 - `search_functions_by_name` - Partial-match search by function name
-- `decompile_function` - Get C-like pseudocode by function name
-- `decompile_function_by_address` - Get C-like pseudocode by address
+- `decompile_function` - Get C-like pseudocode by function name or address (`address` wins if both are set)
 - `disassemble_function` - Get disassembly for a function
 - `disassemble_range` - Get disassembly for an address range
-- `get_function_by_address` - Get function metadata by address
+- `get_function` - Get function metadata by name or address (`address` wins if both are set)
 - `create_function` - Create a function at an address
 - `delete_function` - Delete a function by address
 - `analyze_program` - Run analysis when the program is marked unanalyzed
@@ -117,8 +115,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 
 #### Symbol and Comment Editing
 
-- `rename_function` - Rename a function (by old name)
-- `rename_function_by_address` - Rename a function (by address)
+- `rename_function` - Rename a function by old name or address (`address` wins if both are set)
 - `rename_variable` - Rename a local variable or argument
 - `rename_data` - Rename a data label
 - `set_function_prototype` - Set function prototype
@@ -131,7 +128,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 - `list_bookmarks` - List bookmarks
 - `delete_bookmark` - Delete a bookmark by ID or by address/type/category
 
-After mutating tools such as `rename_function_by_address`, call `save_project_program(target="default")` to persist edits into the Ghidra project. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
+After mutating tools such as `rename_function`, call `save_project_program(target="default")` to persist edits into the Ghidra project. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 
 #### Data Type Operations
 
@@ -143,14 +140,7 @@ After mutating tools such as `rename_function_by_address`, call `save_project_pr
 - `get_struct` - Get struct definition
 - `list_data_types` - List program data types
 - `rename_data_type` - Rename a data type
-- `create_enum` - Create enum
-- `add_enum_values` - Add enum values
-- `remove_enum_values` - Remove enum values
-- `delete_enum` - Delete an enum data type
 - `get_enum` - Get enum definition
-- `create_class` - Create GhidraClass namespace and backing struct
-- `add_class_members` - Add members to class-like data type
-- `remove_class_members` - Remove members from class-like data type
 
 #### Shared Project Sync (`shared_sync` category)
 
