@@ -255,6 +255,10 @@ class FakeSyncService:
         return {"diffs": []}
 
 
+class FakeBsimService:
+    pass
+
+
 @pytest.fixture
 def adapter() -> tuple[cli.ServiceRegistryAdapter, FakeCoreCommandService, FakeTargetService, FakeSyncService]:
     core = FakeCoreCommandService()
@@ -265,6 +269,7 @@ def adapter() -> tuple[cli.ServiceRegistryAdapter, FakeCoreCommandService, FakeT
             core_command_service=core,
             target_service=target,
             sync_service=sync,
+            bsim_service=FakeBsimService(),
         ),
         core,
         target,
@@ -821,11 +826,13 @@ def test_get_registry_keeps_empty_selected_specs(monkeypatch):
         registered_specs,
         core_accessor,
         checkout_required_commands,
+        bsim_config,
         dispatcher_provider,
         registry_provider,
     ):
         captured["registered_specs"] = dict(registered_specs)
         captured["checkout_required_commands"] = set(checkout_required_commands)
+        captured["bsim_config"] = bsim_config
         return types.SimpleNamespace(
             registry=sentinel_registry,
             runtime=types.SimpleNamespace(mcp=sentinel_mcp),
@@ -854,6 +861,39 @@ def test_resolve_tool_specs_from_args_defaults_to_default_profile():
 
     assert set(resolved) == set(expected)
     assert "get_project_sync_status" not in resolved
+
+
+def test_parse_args_accepts_bsim_password_options():
+    args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--bsim-url",
+            "postgresql://user@localhost/bsim",
+            "--bsim-password",
+            "secret",
+        ]
+    )
+
+    assert args.bsim_url == "postgresql://user@localhost/bsim"
+    assert args.bsim_password == "secret"
+    assert args.bsim_password_env is None
+
+    env_args = cli.parse_args(
+        [
+            "--project-location",
+            "/tmp/sample.gpr",
+            "--domain-path",
+            "/main",
+            "--bsim-password-env",
+            "BSIM_PASSWORD",
+        ]
+    )
+
+    assert env_args.bsim_password is None
+    assert env_args.bsim_password_env == "BSIM_PASSWORD"
 
 
 def test_resolve_tool_specs_from_args_explicit_default_matches_no_args():

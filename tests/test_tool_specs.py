@@ -57,6 +57,14 @@ def test_tool_specs_include_expected_tags():
     assert specs["undo_checkout_project_program"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
     assert specs["undo_checkout_project_program"].operation_level == ToolOperationLevel.STANDARD
 
+    assert specs["bsim_query_target"].category_tag == ToolCategoryTag.BSIM
+    assert specs["bsim_query_target"].safety_tag == ToolSafetyTag.READ_ONLY
+    assert specs["bsim_query_target"].operation_level == ToolOperationLevel.STANDARD
+
+    assert specs["bsim_register_target"].category_tag == ToolCategoryTag.BSIM
+    assert specs["bsim_register_target"].safety_tag == ToolSafetyTag.WRITE
+    assert specs["bsim_register_target"].operation_level == ToolOperationLevel.STANDARD
+
 
 def test_core_command_spec_keys_are_consumed_by_handlers():
     supported = set(COMMAND_NAMES)
@@ -100,6 +108,29 @@ def test_shared_sync_specs_are_tagged_as_shared_sync_category():
         "terminate_project_program_checkout",
         "delete_shared_project_file",
         "reload_project_program",
+    }
+
+
+def test_bsim_specs_are_tagged_as_bsim_category():
+    specs = get_all_tool_specs()
+    bsim_names = {
+        name
+        for name, spec in specs.items()
+        if spec.category_tag == ToolCategoryTag.BSIM
+    }
+
+    assert bsim_names == {
+        "get_bsim_database_status",
+        "list_bsim_categories",
+        "bsim_add_executable_category",
+        "list_bsim_executables",
+        "get_bsim_executable",
+        "bsim_update_executable_metadata",
+        "bsim_query_target",
+        "bsim_query_function",
+        "bsim_load_matched_executable",
+        "bsim_set_target_metadata",
+        "bsim_register_target",
     }
 
 
@@ -630,6 +661,64 @@ def test_typed_input_models_for_function_listing_slice():
             "domain_path": (str | None, None),
         },
     )
+    _assert_fields(
+        "get_bsim_database_status",
+        {
+            "bsim_url": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "bsim_add_executable_category",
+        {
+            "bsim_url": (str | None, None),
+            "category": (str, ...),
+        },
+    )
+    _assert_fields(
+        "list_bsim_executables",
+        {
+            "bsim_url": (str | None, None),
+            "name": (str | None, None),
+            "md5": (str | None, None),
+            "arch": (str | None, None),
+            "compiler": (str | None, None),
+            "limit": (int, 100),
+        },
+    )
+    _assert_fields(
+        "bsim_update_executable_metadata",
+        {
+            "bsim_url": (str | None, None),
+            "categories": (dict[str, object], ...),
+            "md5": (str | None, None),
+            "name": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "bsim_query_function",
+        {
+            "bsim_url": (str | None, None),
+            "address": (str | None, None),
+            "function_name": (str | None, None),
+            "similarity_threshold": (float, 0.7),
+            "significance_threshold": (float, 0.0),
+            "matches_per_function": (int, 10),
+            "max_results": (int, 100),
+        },
+    )
+    _assert_fields(
+        "bsim_load_matched_executable",
+        {
+            "matched_ref": (dict[str, object], ...),
+            "target": (str | None, None),
+        },
+    )
+    _assert_fields(
+        "bsim_set_target_metadata",
+        {
+            "categories": (dict[str, object], ...),
+        },
+    )
 
 
 def test_registry_and_shared_sync_adapters_are_configured():
@@ -688,6 +777,7 @@ def test_checkout_required_tools_are_declared_on_specs():
         "set_bytes",
         "add_bookmark",
         "delete_bookmark",
+        "bsim_set_target_metadata",
     }
 
 
@@ -878,6 +968,15 @@ def test_all_output_models_are_strict_and_typed():
             "target": (str, ...),
             "program": (str, ...),
             "reloaded": (bool, ...),
+        },
+        "bsim_load_matched_executable": {
+            "status": (str, ...),
+            "target": (str, ...),
+            "program": (str, ...),
+            "matched_function_address": (str | None, None),
+            "matched_function_name": (str | None, None),
+            "executable_md5": (str | None, None),
+            "matched_ref_version": (int, 1),
         },
     }
 

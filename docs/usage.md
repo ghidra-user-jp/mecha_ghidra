@@ -78,7 +78,9 @@ In this compose setup, the server starts with `--project-location /data/projects
 - If ARM64 starts without the overlay, Docker now fails fast during build instead of failing later inside `decompile_function`.
 - If you want a custom Ghidra distribution, provide both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`. For a custom ARM64 overlay, provide both `GHIDRA_DECOMPILER_NATIVES_URL` and `GHIDRA_DECOMPILER_NATIVES_SHA256`.
 
-### ARM64 Docker Build
+### Native Decompiler Artifacts
+
+The repository ships dedicated build paths for the Ghidra native decompiler binaries that upstream distributions may not include for every host platform.
 
 For Linux ARM64 or Apple Silicon Docker builds, `DOCKER_PLATFORM=linux/arm64` is now enough to use the upstream official Ghidra distribution with the default decompiler natives overlay.
 
@@ -96,13 +98,11 @@ GHIDRA_DECOMPILER_NATIVES_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
-For direct artifact generation, run:
+For direct artifact generation, run the command for the target platform:
 
-```bash
-./scripts/build_linux_arm64_decompiler.sh
-./scripts/build_decompiler_natives.sh --platform mac_arm_64
-./scripts/build_decompiler_natives.sh --platform mac_x86_64
-```
+- `./scripts/build_linux_arm64_decompiler.sh`: builds `linux_arm_64` native `decompile` and `sleigh`.
+- `./scripts/build_decompiler_natives.sh --platform mac_arm_64`: builds the Apple Silicon macOS decompiler binaries.
+- `./scripts/build_decompiler_natives.sh --platform mac_x86_64`: builds the Intel macOS decompiler binaries.
 
 This creates:
 

@@ -9,7 +9,7 @@ from ghidra_mcp.application.usecases.datatypes import DATATYPE_COMMANDS
 from ghidra_mcp.application.usecases.functions import FUNCTION_COMMANDS
 from ghidra_mcp.application.usecases.memory import MEMORY_COMMANDS
 from ghidra_mcp.application.usecases.symbols import SYMBOL_COMMANDS
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_all_tool_specs, get_tool_spec
+from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolCategoryTag, get_all_tool_specs, get_tool_spec
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
 
@@ -232,6 +232,16 @@ class RecordingService:
                     "ranges_truncated": False,
                     "warnings": None,
                 }
+            if name == "bsim_load_matched_executable":
+                return {
+                    "status": "already_loaded",
+                    "target": kwargs.get("target") or "bsim_match",
+                    "program": kwargs["matched_ref"].get("domain_path") or "/matched",
+                    "matched_function_address": kwargs["matched_ref"].get("address"),
+                    "matched_function_name": kwargs["matched_ref"].get("name"),
+                    "executable_md5": kwargs["matched_ref"].get("executable_md5"),
+                    "matched_ref_version": kwargs["matched_ref"].get("matched_ref_version", 1),
+                }
             return {"service": self.label, "method": name}
 
         return _method
@@ -320,10 +330,12 @@ def test_service_registry_adapter_routes_all_tools(tool_name: str):
     core = RecordingCoreService()
     target = RecordingService("target")
     sync = RecordingService("sync")
+    bsim = RecordingService("bsim")
     adapter = cli.ServiceRegistryAdapter(
         core_command_service=core,
         target_service=target,
         sync_service=sync,
+        bsim_service=bsim,
     )
 
     dispatch_tool(tool_name, raw_args, target_name, registry=adapter)
@@ -334,15 +346,19 @@ def test_service_registry_adapter_routes_all_tools(tool_name: str):
         assert core.calls == [(spec.command_or_method, validated, target_name)]
         assert target.calls == []
         assert sync.calls == []
+        assert bsim.calls == []
         return
 
     expected_kwargs = {**validated, **spec.static_kwargs}
 
     if spec.executor_kind == ExecutorKind.REGISTRY_METHOD:
         assert core.calls == []
+        expected_service = bsim if spec.category_tag == ToolCategoryTag.BSIM else target
+        other_service = target if spec.category_tag == ToolCategoryTag.BSIM else bsim
         assert sync.calls == []
-        assert len(target.calls) == 1
-        method_name, args, kwargs = target.calls[0]
+        assert other_service.calls == []
+        assert len(expected_service.calls) == 1
+        method_name, args, kwargs = expected_service.calls[0]
         assert method_name == spec.command_or_method
         if spec.include_target:
             assert args
@@ -359,6 +375,7 @@ def test_service_registry_adapter_routes_all_tools(tool_name: str):
     assert spec.executor_kind == ExecutorKind.SHARED_SYNC_METHOD
     assert core.calls == []
     assert target.calls == []
+    assert bsim.calls == []
     assert len(sync.calls) == 1
     method_name, args, kwargs = sync.calls[0]
     assert method_name == spec.command_or_method
@@ -375,10 +392,12 @@ def test_service_registry_adapter_create_session_requires_domain_path():
     core = RecordingCoreService()
     target = RecordingService("target")
     sync = RecordingService("sync")
+    bsim = RecordingService("bsim")
     adapter = cli.ServiceRegistryAdapter(
         core_command_service=core,
         target_service=target,
         sync_service=sync,
+        bsim_service=bsim,
     )
 
     with pytest.raises(ValueError, match="domain_path is required"):
@@ -389,10 +408,12 @@ def test_service_registry_adapter_forwards_close_remove_flag():
     core = RecordingCoreService()
     target = RecordingService("target")
     sync = RecordingService("sync")
+    bsim = RecordingService("bsim")
     adapter = cli.ServiceRegistryAdapter(
         core_command_service=core,
         target_service=target,
         sync_service=sync,
+        bsim_service=bsim,
     )
 
     dispatch_tool("close_session_and_remove_program", {}, "fw", registry=adapter)
@@ -404,10 +425,12 @@ def test_service_registry_adapter_passes_domain_path_none_for_shared_sync_defaul
     core = RecordingCoreService()
     target = RecordingService("target")
     sync = RecordingService("sync")
+    bsim = RecordingService("bsim")
     adapter = cli.ServiceRegistryAdapter(
         core_command_service=core,
         target_service=target,
         sync_service=sync,
+        bsim_service=bsim,
     )
 
     dispatch_tool("get_project_sync_status", {}, "fw", registry=adapter)

@@ -22,6 +22,7 @@ import pyghidra.core as pycore
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from ghidra_mcp.application.services.bsim_service import BsimConfig
 from ghidra_mcp.contracts.tool_spec import (
     ToolCategoryTag,
     ToolOperationLevel,
@@ -52,6 +53,7 @@ _core_module = None
 _PASSWORD_CLIENT_AUTHENTICATOR_CLASS = None
 _CLIENT_UTIL_CLASS = None
 _registry = None
+_bsim_config = BsimConfig()
 mcp = FastMCP("GhidraMCP Headless")
 
 _ALL_TOOL_SPECS = get_all_tool_specs()
@@ -82,15 +84,21 @@ def _client_util_class():
     return _CLIENT_UTIL_CLASS
 
 
-def _get_registry(selected_specs: dict[str, ToolSpec] | None = None) -> ServiceRegistryAdapter:
-    global _registry, mcp
+def _get_registry(
+    selected_specs: dict[str, ToolSpec] | None = None,
+    bsim_config: BsimConfig | None = None,
+) -> ServiceRegistryAdapter:
+    global _registry, _bsim_config, mcp
     if selected_specs is None and _registry is not None:
         return _registry
+    if bsim_config is not None:
+        _bsim_config = bsim_config
     effective_specs = _DEFAULT_TOOL_SPECS if selected_specs is None else selected_specs
     bundle = create_cli_runtime(
         registered_specs=effective_specs,
         core_accessor=lambda: _core(),
         checkout_required_commands=get_checkout_required_tool_names(effective_specs),
+        bsim_config=_bsim_config,
         dispatcher_provider=lambda: dispatch_tool,
         registry_provider=lambda: _registry,
     )
@@ -171,6 +179,28 @@ def parse_args(argv: list[str]):
     parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="SSE/Streamable HTTP host (unused for stdio)")
     parser.add_argument("--mcp-port", type=int, help="SSE/Streamable HTTP port (unused for stdio)")
     parser.add_argument("--mcp-path", type=str, default="/mcp", help="Streamable HTTP path (e.g. /mcp)")
+    parser.add_argument(
+        "--bsim-url",
+        help="Default BSim database URL used by BSim tools when bsim_url is omitted",
+    )
+    parser.add_argument(
+        "--bsim-password",
+        help="BSim database password. Prefer --bsim-password-env for persistent configurations.",
+    )
+    parser.add_argument(
+        "--bsim-password-env",
+        help="Environment variable name holding the BSim database password",
+    )
+    parser.add_argument(
+        "--bsim-work-dir",
+        help="Working directory for BSim helper processes that need scratch space",
+    )
+    parser.add_argument(
+        "--bsim-command-timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for BSim helper processes",
+    )
     parser.add_argument(
         "--tool-profile",
         default=ToolProfile.DEFAULT.value,
@@ -302,7 +332,18 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
 
     selected_specs = resolve_tool_specs_from_args(args)
-    registry = _get_registry(selected_specs)
+    ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
+    registry = _get_registry(
+        selected_specs,
+        bsim_config=BsimConfig(
+            bsim_url=args.bsim_url,
+            bsim_password=args.bsim_password,
+            bsim_password_env=args.bsim_password_env,
+            work_dir=args.bsim_work_dir,
+            command_timeout=args.bsim_command_timeout,
+            ghidra_install_dir=ghidra_path,
+        ),
+    )
 
     logger.info(
         "Starting PyGhidra MCP server with %d tools (profile=%s)",
@@ -310,7 +351,6 @@ def main(argv: list[str] | None = None) -> int:
         args.tool_profile,
     )
 
-    ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
     if ghidra_path:
         os.environ["GHIDRA_INSTALL_DIR"] = ghidra_path
         try:

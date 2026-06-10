@@ -8,6 +8,7 @@ from typing import Any, Callable
 from mcp.types import CallToolResult, TextContent
 
 from ghidra_mcp.application.services.core_command_service import CoreCommandService
+from ghidra_mcp.application.services.bsim_service import BsimConfig, BsimService
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.application.services.sync_service import SyncService
 from ghidra_mcp.application.services.target_service import TargetService
@@ -42,10 +43,12 @@ class ServiceRegistryAdapter:
         core_command_service: CoreCommandService,
         target_service: TargetService,
         sync_service: SyncService,
+        bsim_service: BsimService,
     ) -> None:
         self._core_command_service = core_command_service
         self._target_service = target_service
         self._sync_service = sync_service
+        self._bsim_service = bsim_service
 
     # core command path
     def call(self, command: str, params: dict[str, Any], target: str):
@@ -227,6 +230,120 @@ class ServiceRegistryAdapter:
             domain_path=domain_path,
         )
 
+    # bsim path
+    def get_bsim_database_status(self, *, bsim_url: str | None = None):
+        return self._bsim_service.get_bsim_database_status(bsim_url=bsim_url)
+
+    def list_bsim_categories(self, *, bsim_url: str | None = None):
+        return self._bsim_service.list_bsim_categories(bsim_url=bsim_url)
+
+    def bsim_add_executable_category(
+        self,
+        *,
+        category: str,
+        bsim_url: str | None = None,
+    ):
+        return self._bsim_service.bsim_add_executable_category(
+            category=category,
+            bsim_url=bsim_url,
+        )
+
+    def list_bsim_executables(
+        self,
+        *,
+        bsim_url: str | None = None,
+        name: str | None = None,
+        md5: str | None = None,
+        arch: str | None = None,
+        compiler: str | None = None,
+        limit: int = 100,
+    ):
+        return self._bsim_service.list_bsim_executables(
+            bsim_url=bsim_url,
+            name=name,
+            md5=md5,
+            arch=arch,
+            compiler=compiler,
+            limit=limit,
+        )
+
+    def get_bsim_executable(
+        self,
+        *,
+        bsim_url: str | None = None,
+        md5: str | None = None,
+        name: str | None = None,
+    ):
+        return self._bsim_service.get_bsim_executable(bsim_url=bsim_url, md5=md5, name=name)
+
+    def bsim_update_executable_metadata(
+        self,
+        *,
+        categories: dict[str, object],
+        bsim_url: str | None = None,
+        md5: str | None = None,
+        name: str | None = None,
+    ):
+        return self._bsim_service.bsim_update_executable_metadata(
+            categories=categories,
+            bsim_url=bsim_url,
+            md5=md5,
+            name=name,
+        )
+
+    def bsim_query_target(
+        self,
+        target: str,
+        *,
+        bsim_url: str | None = None,
+        similarity_threshold: float = 0.7,
+        significance_threshold: float = 0.0,
+        matches_per_function: int = 10,
+        max_results: int = 500,
+    ):
+        return self._bsim_service.bsim_query_target(
+            target,
+            bsim_url=bsim_url,
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=max_results,
+        )
+
+    def bsim_query_function(
+        self,
+        target: str,
+        *,
+        bsim_url: str | None = None,
+        address: str | None = None,
+        function_name: str | None = None,
+        similarity_threshold: float = 0.7,
+        significance_threshold: float = 0.0,
+        matches_per_function: int = 10,
+        max_results: int = 100,
+    ):
+        return self._bsim_service.bsim_query_function(
+            target,
+            bsim_url=bsim_url,
+            address=address,
+            function_name=function_name,
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=max_results,
+        )
+
+    def bsim_load_matched_executable(
+        self,
+        *,
+        matched_ref: dict[str, object],
+        target: str | None = None,
+    ):
+        return self._bsim_service.bsim_load_matched_executable(matched_ref=matched_ref, target=target)
+
+    def bsim_register_target(self, target: str, *, bsim_url: str | None = None):
+        return self._bsim_service.bsim_register_target(target, bsim_url=bsim_url)
+
     def has_targets(self) -> bool:
         return self._target_service.has_targets()
 
@@ -242,6 +359,7 @@ class CLIRuntimeBundle:
     lock_manager: LockManager
     target_service: TargetService
     sync_service: SyncService
+    bsim_service: BsimService
     core_command_service: CoreCommandService
 
 
@@ -250,6 +368,7 @@ def create_cli_runtime(
     registered_specs: dict[str, ToolSpec],
     core_accessor: Callable[[], Any],
     checkout_required_commands: set[str],
+    bsim_config: BsimConfig | None = None,
     dispatcher_provider: Callable[[], Callable[..., Any]] | None = None,
     registry_provider: Callable[[], Any] | None = None,
 ) -> CLIRuntimeBundle:
@@ -264,10 +383,16 @@ def create_cli_runtime(
     sync_service = SyncService(runtime_backend, lock_manager=lock_manager)
     core_gateway = CoreGateway(_RuntimeBackendCoreExecutor(runtime_backend))
     core_command_service = CoreCommandService(core_gateway)
+    bsim_service = BsimService(
+        core_command_service=core_command_service,
+        target_service=target_service,
+        config=bsim_config,
+    )
     registry = ServiceRegistryAdapter(
         core_command_service=core_command_service,
         target_service=target_service,
         sync_service=sync_service,
+        bsim_service=bsim_service,
     )
     effective_dispatcher_provider = dispatcher_provider or (lambda: dispatch_tool)
     effective_registry_provider = registry_provider or (lambda: registry)
@@ -283,6 +408,7 @@ def create_cli_runtime(
         lock_manager=lock_manager,
         target_service=target_service,
         sync_service=sync_service,
+        bsim_service=bsim_service,
         core_command_service=core_command_service,
     )
 

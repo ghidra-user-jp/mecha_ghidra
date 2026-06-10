@@ -78,7 +78,9 @@ Ghidra をホストへ個別インストールせずに試したい場合は、�
 - ARM64 overlay が無い状態なら、`decompile_function` 実行時に遅れて壊れる代わりに Docker build 時点で fail-fast します。
 - 独自の Ghidra 配布物を使う場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定してください。独自の ARM64 overlay を使う場合は、`GHIDRA_DECOMPILER_NATIVES_URL` と `GHIDRA_DECOMPILER_NATIVES_SHA256` も両方指定してください。
 
-### ARM64 Docker build
+### native decompiler 配布物
+
+このリポジトリには、upstream 配布物に含まれない場合がある Ghidra native decompiler を生成して配布する専用導線があります。
 
 Linux ARM64 や Apple Silicon で Docker を native 実行したい場合は、`DOCKER_PLATFORM=linux/arm64` だけで upstream 公式 Ghidra 配布物に既定の decompiler natives overlay を重ねて使えます。
 
@@ -96,13 +98,11 @@ GHIDRA_DECOMPILER_NATIVES_SHA256=<release-asset-sha256> \
 docker compose build
 ```
 
-配布物を自前で生成したい場合は次を実行します。
+配布物を自前で生成したい場合は、対象 platform に合わせて次を実行します。
 
-```bash
-./scripts/build_linux_arm64_decompiler.sh
-./scripts/build_decompiler_natives.sh --platform mac_arm_64
-./scripts/build_decompiler_natives.sh --platform mac_x86_64
-```
+- `./scripts/build_linux_arm64_decompiler.sh`: `linux_arm_64` 用の native `decompile` / `sleigh` をビルドします。
+- `./scripts/build_decompiler_natives.sh --platform mac_arm_64`: Apple Silicon macOS 用の native `decompile` / `sleigh` をビルドします。
+- `./scripts/build_decompiler_natives.sh --platform mac_x86_64`: Intel macOS 用の native `decompile` / `sleigh` をビルドします。
 
 生成物:
 

@@ -6,6 +6,10 @@ from ghidra_headless.handlers.commands import (
     add_bookmark,
     add_struct_members,
     analyze_program,
+    bsim_query_function,
+    bsim_query_target,
+    bsim_register_target,
+    bsim_set_target_metadata,
     clear_struct,
     create_function,
     create_struct,
@@ -96,6 +100,16 @@ COMMAND_NAMES = (
     "delete_function",
     "analyze_program",
     "reanalyze_program",
+    "bsim_query_target",
+    "bsim_query_function",
+    "bsim_set_target_metadata",
+    "bsim_register_target",
+)
+
+INTERNAL_COMMAND_NAMES = (
+    "bsim_query_target",
+    "bsim_query_function",
+    "bsim_register_target",
 )
 
 COMMAND_TO_IMPL = {
@@ -144,6 +158,10 @@ COMMAND_TO_IMPL = {
     "delete_function": delete_function,
     "analyze_program": analyze_program,
     "reanalyze_program": reanalyze_program,
+    "bsim_query_target": bsim_query_target,
+    "bsim_query_function": bsim_query_function,
+    "bsim_set_target_metadata": bsim_set_target_metadata,
+    "bsim_register_target": bsim_register_target,
 }
 
 COMMAND_DEP_KEYS = {
@@ -192,6 +210,26 @@ COMMAND_DEP_KEYS = {
     "delete_function": ("address",),
     "analyze_program": (),
     "reanalyze_program": (),
+    "bsim_query_target": (
+        "bsim_url",
+        "query_target",
+        "similarity_threshold",
+        "significance_threshold",
+        "matches_per_function",
+        "max_results",
+    ),
+    "bsim_query_function": (
+        "bsim_url",
+        "query_target",
+        "address",
+        "function_name",
+        "similarity_threshold",
+        "significance_threshold",
+        "matches_per_function",
+        "max_results",
+    ),
+    "bsim_set_target_metadata": ("categories",),
+    "bsim_register_target": ("bsim_url", "query_target"),
 }
 
 # command -> dependency profile for keyword argument injection into command impl.
@@ -315,11 +353,16 @@ COMMAND_PROFILE = {
     "delete_function": ("ensure_context", "get_address", "txn"),
     "analyze_program": ("ensure_context", "analyze_program_impl"),
     "reanalyze_program": ("ensure_context", "analyze_program_impl"),
+    "bsim_query_target": ("ensure_context",),
+    "bsim_query_function": ("ensure_context", "get_address", "find_function_by_name"),
+    "bsim_set_target_metadata": ("ensure_context", "txn"),
+    "bsim_register_target": ("ensure_context",),
 }
 
 
 __all__ = [
     "COMMAND_NAMES",
+    "INTERNAL_COMMAND_NAMES",
     "COMMAND_TO_IMPL",
     "COMMAND_DEP_KEYS",
     "COMMAND_PROFILE",
