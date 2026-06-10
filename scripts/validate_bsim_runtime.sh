@@ -59,9 +59,9 @@ if [[ -z "${GHIDRA_BSIM_PASSWORD:-}" && -z "${GHIDRA_BSIM_PASSWORD_ENV:-}" ]]; t
     exit 2
   fi
   printf "BSim password: " > /dev/tty
-  stty -echo < /dev/tty
-  IFS= read -r BSIM_RUNTIME_PASSWORD < /dev/tty
-  stty echo < /dev/tty
+  # read -s suppresses echo without leaving the terminal in a broken state if the
+  # prompt is aborted (Ctrl-C/EOF), unlike a manual `stty -echo` with no restore trap.
+  IFS= read -rs BSIM_RUNTIME_PASSWORD < /dev/tty
   printf "\n" > /dev/tty
   export BSIM_RUNTIME_PASSWORD
   export GHIDRA_BSIM_PASSWORD_ENV=BSIM_RUNTIME_PASSWORD
@@ -88,11 +88,16 @@ run_pytest() {
   output_file="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/bsim-runtime-pytest.XXXXXX")"
 
   set +e
-  "${UV_BIN}" run pytest "$@" 2>&1 | /usr/bin/tee "${output_file}"
+  "${UV_BIN}" run --extra test pytest "$@" 2>&1 | /usr/bin/tee "${output_file}"
   status="${PIPESTATUS[0]}"
   set -e
 
-  if [[ "${status}" -eq 138 ]] && /usr/bin/grep -Eq '[0-9]+ passed' "${output_file}"; then
+  # Exit 138 (SIGBUS) is a known PyGhidra JVM-teardown crash. Only treat it as success
+  # when pytest reported passes AND no failures/errors; otherwise a real test failure
+  # that also crashes at teardown would be masked.
+  if [[ "${status}" -eq 138 ]] \
+    && /usr/bin/grep -Eq '[0-9]+ passed' "${output_file}" \
+    && ! /usr/bin/grep -Eq '[0-9]+ (failed|error)' "${output_file}"; then
     echo "warning: pytest exited 138 after reporting success; treating this as PyGhidra teardown noise" >&2
     /bin/rm -f "${output_file}"
     return 0

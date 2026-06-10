@@ -110,6 +110,7 @@ INTERNAL_COMMAND_NAMES = (
     "bsim_query_target",
     "bsim_query_function",
     "bsim_register_target",
+    "bsim_set_target_metadata",
 )
 
 COMMAND_TO_IMPL = {

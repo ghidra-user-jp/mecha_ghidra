@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from ghidra_mcp.application.services.bsim_service import BsimConfig, BsimService
+from ghidra_mcp.domain import DomainError, ErrorCode
 
 
 class FakeCoreCommandService:
@@ -613,3 +614,226 @@ def test_bsim_url_required_has_error_code():
 
     with pytest.raises(ValueError, match="BSIM_URL_REQUIRED"):
         service.get_database_status()
+
+
+def test_bsim_configured_password_not_injected_into_foreign_per_call_url():
+    service, core, _target = _service(
+        bsim_url="postgresql://user@localhost/bsim",
+        bsim_password="secret",
+    )
+
+    service.query_function(
+        "fw",
+        bsim_url="postgresql://user@evil.example.com/other",
+        address="0x401000",
+    )
+
+    # The server password belongs to --bsim-url only; it must not be forwarded to a
+    # different host supplied per call.
+    assert core.calls[0][1]["bsim_url"] == "postgresql://user@evil.example.com/other"
+
+
+def test_bsim_per_call_file_url_allowed_when_password_configured():
+    service, core, _target = _service(
+        bsim_url="postgresql://user@localhost/bsim",
+        bsim_password="secret",
+    )
+
+    result = service.list_executables(bsim_url="file:/tmp/local_bsim")
+
+    assert result["bsim_url"] == "file:/tmp/local_bsim"
+    assert core.calls == []  # list_executables uses the java backend, not a core command
+
+
+def test_bsim_per_call_url_keeps_its_own_password():
+    service, core, _target = _service(
+        bsim_url="postgresql://user@localhost/bsim",
+        bsim_password="secret",
+    )
+
+    service.query_function(
+        "fw",
+        bsim_url="postgresql://u2:own@other-host/db2",
+        address="0x401000",
+    )
+
+    assert core.calls[0][1]["bsim_url"] == "postgresql://u2:own@other-host/db2"
+
+
+def test_bsim_invalid_port_raises_coded_url_error():
+    service, _core, _target = _service(bsim_url="postgresql://user@localhost:5432a/bsim")
+
+    with pytest.raises(ValueError, match="BSIM_URL_INVALID"):
+        service.get_database_status()
+
+
+def test_bsim_status_reclassifies_prefixed_authentication_error():
+    class AuthFailBackend(FakeJavaBackend):
+        def get_database_status(self, bsim_url: str):
+            raise RuntimeError(
+                "BSIM_DATABASE_INIT_FAILED: FATAL: password authentication failed for user \"x\""
+            )
+
+    core = FakeCoreCommandService()
+    service = BsimService(
+        core_command_service=core,
+        target_service=FakeTargetService(),  # type: ignore[arg-type]
+        config=BsimConfig(bsim_url="postgresql://user:secret@localhost/bsim"),
+        java_backend=AuthFailBackend(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="BSIM_AUTHENTICATION_FAILED"):
+        service.get_database_status()
+
+
+def test_bsim_status_reclassifies_prefixed_unreachable_error():
+    class UnreachableBackend(FakeJavaBackend):
+        def get_database_status(self, bsim_url: str):
+            raise RuntimeError("BSIM_DATABASE_INIT_FAILED: Connection to localhost:5432 refused")
+
+    core = FakeCoreCommandService()
+    service = BsimService(
+        core_command_service=core,
+        target_service=FakeTargetService(),  # type: ignore[arg-type]
+        config=BsimConfig(bsim_url="postgresql://user:secret@localhost/bsim"),
+        java_backend=UnreachableBackend(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="BSIM_DATABASE_UNREACHABLE"):
+        service.get_database_status()
+
+
+def test_bsim_query_preserves_structured_domain_error():
+    service, core, _target = _service()
+    core.errors["bsim_query_target"] = DomainError(
+        code=ErrorCode.SESSION_NOT_FOUND,
+        message="Session 'fw' is not initialized",
+    )
+
+    with pytest.raises(DomainError) as excinfo:
+        service.query_target("fw")
+
+    assert excinfo.value.code is ErrorCode.SESSION_NOT_FOUND
+
+
+@pytest.mark.parametrize("version", [1, "1", 1.0, "1.0"])
+def test_bsim_load_matched_executable_accepts_integral_version(version):
+    service, _core, _target = _service()
+
+    result = service.load_matched_executable(
+        matched_ref={
+            "matched_ref_version": version,
+            "executable_md5": "0123456789abcdef0123456789abcdef",
+            "executable_name": "old.exe",
+            "project_location": "/tmp/history.gpr",
+            "domain_path": "/samples/old.exe",
+            "address": "0x402000",
+            "name": "match_func",
+        }
+    )
+
+    assert result["status"] == "loaded"
+
+
+@pytest.mark.parametrize("version", [1.5, "1.5", "abc", None, True])
+def test_bsim_load_matched_executable_rejects_non_version_one(version):
+    service, _core, _target = _service()
+
+    with pytest.raises(ValueError, match="BSIM_INVALID_MATCHED_REF"):
+        service.load_matched_executable(
+            matched_ref={
+                "matched_ref_version": version,
+                "executable_md5": "0123456789abcdef0123456789abcdef",
+                "executable_name": "old.exe",
+                "project_location": "/tmp/history.gpr",
+                "domain_path": "/samples/old.exe",
+                "address": "0x402000",
+                "name": "match_func",
+            }
+        )
+
+
+class _CategoriesBackend(FakeJavaBackend):
+    def __init__(self, items: list[str]) -> None:
+        super().__init__()
+        self._items = items
+
+    def list_categories(self, bsim_url: str):
+        return {"items": list(self._items)}
+
+
+def test_bsim_set_target_metadata_rejects_unconfigured_category():
+    core = FakeCoreCommandService()
+    service = BsimService(
+        core_command_service=core,
+        target_service=FakeTargetService(),  # type: ignore[arg-type]
+        config=BsimConfig(bsim_url="postgresql://user:secret@localhost/bsim"),
+        java_backend=_CategoriesBackend(["FAMILY", "SOURCE"]),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED"):
+        service.bsim_set_target_metadata("fw", categories={"Famly": "Emotet"})
+    assert core.calls == []
+
+
+def test_bsim_set_target_metadata_allows_configured_category():
+    core = FakeCoreCommandService()
+    service = BsimService(
+        core_command_service=core,
+        target_service=FakeTargetService(),  # type: ignore[arg-type]
+        config=BsimConfig(bsim_url="postgresql://user:secret@localhost/bsim"),
+        java_backend=_CategoriesBackend(["FAMILY", "SOURCE"]),  # type: ignore[arg-type]
+    )
+
+    result = service.bsim_set_target_metadata("fw", categories={"FAMILY": "Emotet"})
+
+    assert result["status"] == "ok"
+    assert core.calls == [("bsim_set_target_metadata", {"categories": {"FAMILY": "Emotet"}}, "fw")]
+
+
+def test_bsim_set_target_metadata_skips_validation_without_url():
+    core = FakeCoreCommandService()
+    service = BsimService(
+        core_command_service=core,
+        target_service=FakeTargetService(),  # type: ignore[arg-type]
+        config=BsimConfig(bsim_url=""),
+        java_backend=FakeJavaBackend(),  # type: ignore[arg-type]
+    )
+
+    result = service.bsim_set_target_metadata("fw", categories={"AnyKey": "value"})
+
+    assert result["status"] == "ok"
+    assert core.calls == [("bsim_set_target_metadata", {"categories": {"AnyKey": "value"}}, "fw")]
+
+
+def test_bsim_load_matched_executable_reuses_loaded_remote_ref_target():
+    target = FakeTargetService()
+    target.targets.append(
+        {
+            "target": "manual_session",
+            "project_location": None,
+            "project_name": None,
+            "domain_path": "/samples/remote.exe",
+        }
+    )
+    service, _core, target = _service(target_service=target)
+
+    # A matched_ref from a server-ingested corpus carries only a remote ghidra:// URL,
+    # so project identity cannot be computed. After the user manually loads the program,
+    # a retry must reuse the loaded target instead of failing again.
+    result = service.load_matched_executable(
+        matched_ref={
+            "matched_ref_version": 1,
+            "executable_md5": "deadbeefcafebabedeadbeefcafebabe",
+            "executable_name": "remote.exe",
+            "repository": "ghidra://server/repo",
+            "domain_path": "/samples/remote.exe",
+            "address": "0x401000",
+            "name": "entry",
+        },
+        target="manual_session",
+    )
+
+    assert result["status"] == "already_loaded"
+    assert result["target"] == "manual_session"
+    assert target.created == []

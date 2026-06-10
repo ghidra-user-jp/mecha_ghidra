@@ -2,6 +2,20 @@
 
 from __future__ import absolute_import, print_function
 
+import re
+
+
+_CATEGORY_NAME_RE = re.compile(r"^[A-Za-z0-9 ._:/()]+$")
+
+
+def _metadata_value_text(value):
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        raise ValueError(
+            "BSIM_TARGET_METADATA_INVALID: category values must be scalar; register the "
+            "target first, then use bsim_update_executable_metadata for multiple values"
+        )
+    return str(value).strip()
+
 
 def _ghidra_url_class():
     from ghidra.framework.protocol.ghidra import GhidraURL
@@ -65,10 +79,15 @@ def bsim_set_target_metadata(params, *, ensure_context, txn):
         for key, value in categories.items():
             text_key = str(key).strip()
             if not text_key:
-                raise ValueError("metadata category names must not be empty")
+                raise ValueError("BSIM_TARGET_METADATA_INVALID: metadata category names must not be empty")
+            if _CATEGORY_NAME_RE.match(text_key) is None:
+                raise ValueError(
+                    "BSIM_TARGET_METADATA_INVALID: category name contains unsupported characters: %s"
+                    % text_key
+                )
             if value is None:
                 continue
-            text_value = str(value).strip()
+            text_value = _metadata_value_text(value)
             if not text_value:
                 continue
             options.setString(text_key, text_value)
