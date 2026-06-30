@@ -382,15 +382,36 @@ class RuntimeTargetLifecycle:
                         f"requested={resolved_domain_path}, active={active_domain_path}"
                     )
 
-            saved = handle.save_program(session.get_program())
+            runtime_dirty = self._store.is_dirty_program(name, resolved_domain_path)
+            saved = handle.save_program(session.get_program(), force=runtime_dirty)
             with self._store.registry_lock.write_lock():
-                self._store.clear_dirty_program(name, resolved_domain_path)
+                if not runtime_dirty or self._save_cleared_runtime_dirty_locked(
+                    handle,
+                    resolved_domain_path,
+                    saved=bool(saved),
+                ):
+                    self._store.clear_dirty_program(name, resolved_domain_path)
             return {
                 "status": "ok",
                 "target": name,
                 "program": resolved_domain_path,
                 "saved": bool(saved),
             }
+
+    @staticmethod
+    def _save_cleared_runtime_dirty_locked(handle, domain_path: str, *, saved: bool) -> bool:  # noqa: ANN001
+        if not saved:
+            return False
+        try:
+            status = handle.get_sync_status(domain_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("failed to refresh sync status after runtime-dirty save: %s", exc)
+            return False
+        if not status.get("is_versioned"):
+            return True
+        if not status.get("is_checked_out"):
+            return True
+        return bool(status.get("modified_since_checkout"))
 
     def close_session(self, name: str, *, remove_program: bool = False) -> None:
         with self._target_operation(name):

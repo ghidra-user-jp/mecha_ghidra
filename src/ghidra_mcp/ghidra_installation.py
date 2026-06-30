@@ -51,6 +51,14 @@ def decompiler_binary_path(
     return Path(install_dir) / "Ghidra" / "Features" / "Decompiler" / "os" / platform_dir / binary_name
 
 
+def _is_executable_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if platform.system().lower() == "windows":
+        return True
+    return (path.stat().st_mode & 0o111) != 0
+
+
 def validate_linux_arm64_decompiler_install(
     install_dir: str | Path | None,
     *,
@@ -74,7 +82,7 @@ def validate_linux_arm64_decompiler_install(
             system_name=system_name,
             machine_name=machine_name,
         )
-        if binary_path is None or not binary_path.is_file() or (binary_path.stat().st_mode & 0o111) == 0:
+        if binary_path is None or not _is_executable_file(binary_path):
             if binary_path is not None:
                 missing.append(binary_path)
 

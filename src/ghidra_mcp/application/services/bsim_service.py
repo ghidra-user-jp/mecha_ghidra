@@ -479,6 +479,8 @@ class BsimService:
         configured = self._text(self._config.ghidra_install_dir) or self._text(os.environ.get("GHIDRA_INSTALL_DIR"))
         if configured is None:
             return None
+        if configured.startswith("/") and "\\" not in configured:
+            return pathlib.PurePosixPath(configured).as_posix()
         return str(pathlib.Path(configured).expanduser())
 
     def get_database_status(self, *, bsim_url: str | None = None) -> dict[str, Any]:

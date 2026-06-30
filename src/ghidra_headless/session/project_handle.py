@@ -484,13 +484,13 @@ class ProjectHandle:
                     f"{self._project_close_error_text(project_close_error)}"
                 ) from project_close_error
 
-    def save_program(self, program) -> bool:
+    def save_program(self, program, *, force: bool = False) -> bool:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
             if program is None:
                 raise ValueError("program is required")
-            if not self._program_needs_save(program):
+            if not force and not self._program_needs_save(program):
                 return False
             try:
                 self.project.save(program)

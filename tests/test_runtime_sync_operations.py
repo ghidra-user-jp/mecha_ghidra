@@ -6,14 +6,21 @@ import pytest
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.infrastructure.ghidra_adapter.runtime.core_execution import RuntimeCoreExecution
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.sync_operations import RuntimeSyncOperations
+from ghidra_mcp.infrastructure.ghidra_adapter.runtime.target_lifecycle import RuntimeTargetLifecycle
 
 
 class _DummyCore:
     def __init__(self) -> None:
         self.initialized: list[tuple[object, str]] = []
         self.removed: list[str] = []
+        self.executed: list[tuple[str, dict, str]] = []
+
+    def execute(self, command: str, params: dict, *, key: str):
+        self.executed.append((command, params, key))
+        return {"status": "ok", "command": command}
 
     def initialize(self, program, key: str):  # noqa: ANN001
         self.initialized.append((program, key))
@@ -188,6 +195,12 @@ class _FakeHandle:
 
     def get_sync_status(self, domain_path: str):  # noqa: ARG002
         return dict(self._status)
+
+    def save_program(self, program, *, force: bool = False):  # noqa: ANN001
+        if not force and not bool(program.isChanged()):
+            return False
+        self.project.save(program)
+        return True
 
     def refresh_project_data(self, *, force: bool = True):  # noqa: ARG002
         self.refresh_project_data_calls += 1
@@ -1611,6 +1624,50 @@ def test_sync_status_reports_runtime_marked_dirty_without_side_effects(monkeypat
     assert store.sessions["fw"] is session
 
 
+@pytest.mark.parametrize(
+    ("command", "params"),
+    [
+        ("set_decompiler_comment", {"address": "0x401000", "comment": "memo"}),
+        ("set_disassembly_comment", {"address": "0x401000", "comment": "memo"}),
+        (
+            "set_function_prototype",
+            {"function_address": "0x401000", "prototype": "void FUN_401000(void)"},
+        ),
+        (
+            "add_bookmark",
+            {"address": "0x401000", "type": "Info", "category": "Analysis", "comment": "memo"},
+        ),
+    ],
+)
+def test_mutating_commands_mark_shared_program_dirty_for_sync_status(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    params: dict,
+):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch)
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_checked_out": True,
+            "modified_since_checkout": False,
+            "can_checkin": False,
+        }
+    )
+    execution = RuntimeCoreExecution(
+        store=store,
+        checkout_required_commands={command},
+        normalize_result=lambda value: value,
+    )
+
+    execute_result = execution.call(command, params, target="fw")
+    status = sync.get_project_sync_status("fw", domain_path="/main")
+
+    assert execute_result == {"status": "ok", "command": command}
+    assert core.executed == [(command, params, "fw")]
+    assert store.is_dirty_program("fw", "/main")
+    assert status["modified_since_checkout"] is True
+    assert status["can_checkin"] is True
+
+
 def test_sync_status_reports_loaded_owner_changes_for_registered_only_target(monkeypatch: pytest.MonkeyPatch):
     sync, store, core, handle = _build_sync_runtime(
         monkeypatch,
@@ -1682,6 +1739,30 @@ def test_commit_refreshes_runtime_marked_dirty_status_before_checkin(monkeypatch
     assert result["status"] == "ok"
     assert result["new_version"] == 2
     assert handle.project.saved == 2
+
+
+def test_save_then_commit_preserves_runtime_dirty_until_versioned_status_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_StaleStatusHandle,
+        session_cls=_FakeSession,
+    )
+    assert isinstance(handle, _StaleStatusHandle)
+    handle.mark_active_change()
+    store.mark_dirty_program("fw", "/main")
+    lifecycle = RuntimeTargetLifecycle(store=store)
+
+    save_result = lifecycle.save_project_program("fw", domain_path="/main")
+    status_after_save = sync.get_project_sync_status("fw", domain_path="/main")
+    commit_result = sync.commit_project_program("fw", "rename functions", auto_checkout=False, domain_path="/main")
+
+    assert save_result == {"status": "ok", "target": "fw", "program": "/main", "saved": True}
+    assert status_after_save["modified_since_checkout"] is True
+    assert status_after_save["can_checkin"] is True
+    assert commit_result["status"] == "ok"
+    assert commit_result["new_version"] == 2
 
 
 def test_commit_not_modified_active_program_does_not_try_to_save(monkeypatch: pytest.MonkeyPatch):

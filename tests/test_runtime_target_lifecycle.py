@@ -200,10 +200,12 @@ class _FakeProjectHandle:
     def get_sync_status(self, domain_path: str):  # noqa: ARG002
         return dict(self.sync_status)
 
-    def save_program(self, program) -> bool:  # noqa: ANN001
+    def save_program(self, program, *, force: bool = False) -> bool:  # noqa: ANN001
         if _FakeProjectHandle.fail_save:
             raise RuntimeError("SAVE_FAILED: failed to save program: disk full")
         self.save_calls.append(program.getDomainFile().getPathname())
+        if force:
+            return True
         return bool(_FakeProjectHandle.save_result)
 
     def is_closed(self) -> bool:
@@ -1427,12 +1429,49 @@ def test_target_lifecycle_save_project_program_saves_active_and_clears_dirty(mon
     assert not store.is_dirty_program("fw", "/main")
 
 
-def test_target_lifecycle_save_project_program_clean_noop_clears_dirty(monkeypatch: pytest.MonkeyPatch):
+def test_target_lifecycle_save_project_program_runtime_dirty_forces_save_and_clears_dirty(
+    monkeypatch: pytest.MonkeyPatch,
+):
     _FakeProjectHandle.save_result = False
     lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
     _FakeProjectHandle.save_result = False
     lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
     store.mark_dirty_program("fw", "/main")
+
+    result = lifecycle.save_project_program("fw", domain_path="/main")
+
+    assert result == {"status": "ok", "target": "fw", "program": "/main", "saved": True}
+    assert not store.is_dirty_program("fw", "/main")
+
+
+def test_target_lifecycle_save_project_program_keeps_dirty_until_versioned_status_updates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _FakeProjectHandle.save_result = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    _FakeProjectHandle.save_result = False
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle_locked("fw")
+    handle.sync_status.update(
+        {
+            "is_versioned": True,
+            "is_checked_out": True,
+            "modified_since_checkout": False,
+        }
+    )
+    store.mark_dirty_program("fw", "/main")
+
+    result = lifecycle.save_project_program("fw", domain_path="/main")
+
+    assert result == {"status": "ok", "target": "fw", "program": "/main", "saved": True}
+    assert store.is_dirty_program("fw", "/main")
+
+
+def test_target_lifecycle_save_project_program_clean_noop_does_not_set_dirty(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.save_result = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    _FakeProjectHandle.save_result = False
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
 
     result = lifecycle.save_project_program("fw", domain_path="/main")
 

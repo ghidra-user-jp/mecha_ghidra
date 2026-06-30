@@ -195,6 +195,15 @@ def test_save_program_skips_clean_program(monkeypatch):
     assert handle.project.saved == []
 
 
+def test_save_program_force_saves_clean_program(monkeypatch):
+    handle = build_handle(monkeypatch)
+    program = DummyProgram("/folder/app", changed=False)
+
+    assert handle.save_program(program, force=True) is True
+
+    assert handle.project.saved == [program]
+
+
 def test_save_program_surfaces_save_failed(monkeypatch):
     handle = build_handle(monkeypatch)
 
