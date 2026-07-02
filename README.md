@@ -65,6 +65,7 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 - **PyGhidra-based runtime**: calls Ghidra APIs directly from CPython (not Jython).
 - **Multi-target management**: hold multiple sessions in one process and switch by target name.
 - **Project operations**: create local projects with `create_project`, list programs with `list_project_programs`, import new binaries with `import_program`, and switch loaded programs with `load_project_program`.
+- **Context-efficient large results**: tool results beyond a size threshold are returned as a short preview plus a `result_id`; the full payload stays server-side and is fetched on demand with `read_result` / `search_result` (see [Large Result Compaction](#large-result-compaction)).
 
 FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to MCP clients through `ghidra_mcp.cli`. For full CLI options, run `uv run ghidra-mcp --help`.
 
@@ -158,6 +159,13 @@ After mutating tools such as `rename_function`, call `save_project_program(targe
 - `delete_shared_project_file` - Delete an unloaded shared-project file after `confirm` matches `domain_path`
 - `reload_project_program` - Reload currently opened program
 
+#### Large Result Retrieval
+
+Registered while `--large-result-mode resource` (the default) is active:
+
+- `read_result` - Read a slice of a stored large tool result (page with `offset_chars` / `limit_chars` until `has_more` is false)
+- `search_result` - Regex-search a stored large tool result; returns match offsets (usable as `read_result` offsets) with surrounding context
+
 See the [Usage Guide](docs/usage.md) for detailed workflows and constraints.
 
 ### Tool Exposure Controls
@@ -243,6 +251,34 @@ uv run ghidra-mcp \
     --enable-tool rename_function \
     --disable-tool set_bytes
 ```
+
+### Large Result Compaction
+
+Local LLMs slow down as context grows, and most of that growth comes from large tool
+outputs such as decompiled code and long listings. To keep agent contexts small, tool
+results larger than a threshold are not returned inline. Instead the tool returns:
+
+- a text preview (cut at a line boundary) followed by concrete instructions for fetching the rest,
+- a `result_id` and an MCP resource link (`ghidra://results/{result_id}`),
+- `structuredContent` metadata (`size_chars`, `mime_type`, `result_type`, `item_count`, ...).
+
+The full payload is kept in an in-memory LRU store on the server and can be accessed three ways:
+
+- `read_result(result_id, offset_chars, limit_chars)` - paged reads; works with tools-only MCP clients
+- `search_result(result_id, pattern, context_chars, max_matches)` - regex search; returned offsets feed straight into `read_result`
+- `resources/read` on `ghidra://results/{result_id}` - for clients with MCP resource support
+
+Results at or below the threshold, error results, and empty-list results are returned
+inline, unchanged. Repeated identical results reuse the same `result_id`
+(content-addressed), so a looping agent does not grow the store.
+
+Flags:
+
+- `--large-result-mode {resource,inline}` (default `resource`): `inline` restores the previous behavior of always returning full payloads.
+- `--large-result-threshold-chars N` (default `12000`): compaction threshold.
+- `--large-result-preview-chars N` (default `4000`): preview size.
+- `--result-cache-max-entries N` (default `512`) / `--result-cache-max-bytes N` (default `134217728`): LRU store budget. Reading an evicted `result_id` returns an error asking to re-run the original tool.
+- `--tool-description-mode {full,short,none}` (default `full`): `tools/list` description verbosity. `short` prefers a spec's `short_description` and falls back to the first sentence. Full per-tool documentation is always available as MCP resources at `ghidra://docs/tools` and `ghidra://docs/tools/{tool_name}`.
 
 ## License
 

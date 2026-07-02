@@ -35,6 +35,7 @@ from ghidra_mcp.contracts.tool_spec import (
 )
 from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
 from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter, create_cli_runtime
+from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.tool_registry import build_tool_functions
 from ghidra_mcp.presentation.transport import (
     configure_mcp_for_sse as _configure_mcp_for_sse,
@@ -87,6 +88,7 @@ def _client_util_class():
 def _get_registry(
     selected_specs: dict[str, ToolSpec] | None = None,
     bsim_config: BsimConfig | None = None,
+    presentation_config: ToolPresentationConfig | None = None,
 ) -> ServiceRegistryAdapter:
     global _registry, _bsim_config, mcp
     if selected_specs is None and _registry is not None:
@@ -94,14 +96,17 @@ def _get_registry(
     if bsim_config is not None:
         _bsim_config = bsim_config
     effective_specs = _DEFAULT_TOOL_SPECS if selected_specs is None else selected_specs
-    bundle = create_cli_runtime(
-        registered_specs=effective_specs,
-        core_accessor=lambda: _core(),
-        checkout_required_commands=get_checkout_required_tool_names(effective_specs),
-        bsim_config=_bsim_config,
-        dispatcher_provider=lambda: dispatch_tool,
-        registry_provider=lambda: _registry,
-    )
+    runtime_kwargs = {
+        "registered_specs": effective_specs,
+        "core_accessor": lambda: _core(),
+        "checkout_required_commands": get_checkout_required_tool_names(effective_specs),
+        "bsim_config": _bsim_config,
+        "dispatcher_provider": lambda: dispatch_tool,
+        "registry_provider": lambda: _registry,
+    }
+    if presentation_config is not None:
+        runtime_kwargs["presentation_config"] = presentation_config
+    bundle = create_cli_runtime(**runtime_kwargs)
     _registry = bundle.registry
     mcp = bundle.runtime.mcp
     return _registry
@@ -233,8 +238,59 @@ def parse_args(argv: list[str]):
         choices=_TOOL_NAMES,
         help="Remove a specific tool after all other filtering. Highest priority (repeatable).",
     )
+    parser.add_argument(
+        "--tool-description-mode",
+        default="full",
+        choices=["short", "full", "none"],
+        help=(
+            "Control MCP tool description verbosity. Existing descriptions are already "
+            "terse, so 'full' is the default; 'short' only helps once specs carry "
+            "long descriptions with short_description overrides."
+        ),
+    )
+    parser.add_argument(
+        "--large-result-mode",
+        default="resource",
+        choices=["resource", "inline"],
+        help="Return large tool results as MCP resources or inline payloads.",
+    )
+    parser.add_argument(
+        "--large-result-threshold-chars",
+        type=int,
+        default=12000,
+        help="Character threshold for moving large tool results to MCP resources.",
+    )
+    parser.add_argument(
+        "--large-result-preview-chars",
+        type=int,
+        default=4000,
+        help="Preview character count for resource-backed large tool results.",
+    )
+    parser.add_argument(
+        "--result-cache-max-entries",
+        type=int,
+        default=512,
+        help="Maximum in-memory result resources retained by the MCP server.",
+    )
+    parser.add_argument(
+        "--result-cache-max-bytes",
+        type=int,
+        default=134217728,
+        help="Maximum total bytes of in-memory result resources retained by the MCP server.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Log level")
     return parser.parse_args(argv)
+
+
+def presentation_config_from_args(args) -> ToolPresentationConfig:
+    return ToolPresentationConfig(
+        description_mode=args.tool_description_mode,
+        large_result_mode=args.large_result_mode,
+        large_result_threshold_chars=args.large_result_threshold_chars,
+        large_result_preview_chars=args.large_result_preview_chars,
+        result_cache_max_entries=args.result_cache_max_entries,
+        result_cache_max_bytes=args.result_cache_max_bytes,
+    )
 
 
 def resolve_tool_specs_from_args(args) -> dict[str, ToolSpec]:
@@ -322,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
 
     selected_specs = resolve_tool_specs_from_args(args)
+    presentation_config = presentation_config_from_args(args)
     ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
     registry = _get_registry(
         selected_specs,
@@ -331,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             bsim_password_env=args.bsim_password_env,
             ghidra_install_dir=ghidra_path,
         ),
+        presentation_config=presentation_config,
     )
 
     logger.info(

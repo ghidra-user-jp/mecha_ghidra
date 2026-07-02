@@ -8,7 +8,9 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_tool_spec
+from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.error_mapper import map_exception
+from ghidra_mcp.presentation.result_resources import ResultResourceStore, maybe_compact_tool_result
 
 
 def _status_target_ok(result: Any, target: str) -> dict[str, Any]:
@@ -112,6 +114,8 @@ def dispatch_tool(
     target: str,
     *,
     registry,
+    presentation_config: ToolPresentationConfig | None = None,
+    result_store: ResultResourceStore | None = None,
 ) -> Any:
     spec = get_tool_spec(spec_name)
     params = _validate_raw_args(spec_name, spec.input_model, raw_args)
@@ -150,8 +154,15 @@ def dispatch_tool(
     if result_adapter is not None:
         result = result_adapter(result, target)
     result = _validate_output(spec_name, spec.output_model, result)
-
-    return normalize_empty_list_result(result) if spec.empty_list_policy == "normalize" else result
+    if spec.empty_list_policy == "normalize":
+        result = normalize_empty_list_result(result)
+    return maybe_compact_tool_result(
+        tool_name=spec_name,
+        target=target,
+        result=result,
+        config=presentation_config or ToolPresentationConfig(),
+        store=result_store,
+    )
 
 
 __all__ = [

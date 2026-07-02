@@ -13,6 +13,7 @@ from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.application.services.sync_service import SyncService
 from ghidra_mcp.application.services.target_service import TargetService
 from ghidra_mcp.contracts.tool_spec import ToolSpec
+from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.infrastructure import CoreGateway, LockManager, RuntimeBackend
 from ghidra_mcp.presentation.mcp_server import MCPServerRuntime, create_mcp_server
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
@@ -382,6 +383,7 @@ def create_cli_runtime(
     core_accessor: Callable[[], Any],
     checkout_required_commands: set[str],
     bsim_config: BsimConfig | None = None,
+    presentation_config: ToolPresentationConfig | None = None,
     dispatcher_provider: Callable[[], Callable[..., Any]] | None = None,
     registry_provider: Callable[[], Any] | None = None,
 ) -> CLIRuntimeBundle:
@@ -413,6 +415,7 @@ def create_cli_runtime(
         specs=registered_specs,
         registry_provider=effective_registry_provider,
         dispatcher_provider=effective_dispatcher_provider,
+        presentation_config=presentation_config,
     )
     return CLIRuntimeBundle(
         registry=registry,

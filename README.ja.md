@@ -65,6 +65,7 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 - **PyGhidra ベース**: Jython ではなく CPython 上で Ghidra API を直接呼び出します。
 - **複数ターゲット管理**: 同一プロセスで複数セッションを保持し、ターゲット名で切り替えながら解析できます。
 - **プロジェクト操作**: `create_project` でローカル project を作成し、`list_project_programs` でプログラム一覧取得、`import_program` で新規バイナリ追加、`load_project_program` で既存プログラムへ切り替えできます。
+- **コンテキスト効率の良い大型結果**: 閾値を超えるツール結果は短いプレビューと `result_id` として返し、全文はサーバ側に保持して `read_result` / `search_result` で必要な分だけ取得できます（詳細は[大型結果の圧縮](#大型結果の圧縮)）。
 
 FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、MCP クライアントからは `ghidra_mcp.cli` を通じて利用できます。詳しいオプションは `uv run ghidra-mcp --help` を参照してください。
 
@@ -158,6 +159,13 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `delete_shared_project_file` - `confirm` が `domain_path` と一致した未ロードの shared project file を削除
 - `reload_project_program` - 現在プログラムを再ロード
 
+#### Large Result Retrieval
+
+`--large-result-mode resource`（デフォルト）のときに登録されます。
+
+- `read_result` - 保存済み大型結果のスライスを読む（`offset_chars` / `limit_chars` で `has_more` が false になるまでページング）
+- `search_result` - 保存済み大型結果を正規表現で検索。マッチ位置（`read_result` の offset にそのまま使用可）と前後コンテキストを返す
+
 詳細な運用フローや制約事項は [利用ガイド](docs/usage.ja.md) を参照してください。
 
 ### ツール公開制御
@@ -243,6 +251,30 @@ uv run ghidra-mcp \
     --enable-tool rename_function \
     --disable-tool set_bytes
 ```
+
+### 大型結果の圧縮
+
+ローカル LLM はコンテキストが伸びるほど減速し、その主因はデコンパイル結果や長大な一覧といった大型のツール出力です。エージェントのコンテキストを小さく保つため、閾値を超えるツール結果はインラインで返さず、次の形で返します。
+
+- テキストプレビュー（行境界で切断）と、続きを取得する具体的な手順
+- `result_id` と MCP resource link（`ghidra://results/{result_id}`）
+- `structuredContent` のメタデータ（`size_chars`、`mime_type`、`result_type`、`item_count` など）
+
+全文はサーバ内のインメモリ LRU ストアに保持され、次の 3 通りでアクセスできます。
+
+- `read_result(result_id, offset_chars, limit_chars)` - ページング読み取り。tools のみ対応の MCP クライアントでも動作
+- `search_result(result_id, pattern, context_chars, max_matches)` - 正規表現検索。返される offset はそのまま `read_result` に渡せます
+- `ghidra://results/{result_id}` への `resources/read` - MCP resource 対応クライアント向け
+
+閾値以下の結果・エラー結果・空リスト結果は従来どおりそのまま返します。同一内容の結果はコンテンツアドレスで同じ `result_id` を再利用するため、エージェントが同じ呼び出しを繰り返してもストアは膨張しません。
+
+フラグ:
+
+- `--large-result-mode {resource,inline}`（デフォルト `resource`）: `inline` で従来どおり全文を返す挙動に戻せます。
+- `--large-result-threshold-chars N`（デフォルト `12000`）: 圧縮の発動閾値。
+- `--large-result-preview-chars N`（デフォルト `4000`）: プレビューのサイズ。
+- `--result-cache-max-entries N`（デフォルト `512`）/ `--result-cache-max-bytes N`（デフォルト `134217728`）: LRU ストアの予算。破棄済み `result_id` を読むと元のツールの再実行を促すエラーを返します。
+- `--tool-description-mode {full,short,none}`（デフォルト `full`）: `tools/list` の説明文の詳細度。`short` は spec の `short_description` を優先し、なければ先頭文にフォールバックします。各ツールの完全なドキュメントは MCP resource（`ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}`）からいつでも取得できます。
 
 ## ライセンス
 
