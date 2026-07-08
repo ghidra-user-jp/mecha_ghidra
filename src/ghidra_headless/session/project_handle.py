@@ -447,11 +447,23 @@ class ProjectHandle:
     def release_program(self, program, *, save: bool = True, remove_program: bool = False) -> None:
         with self._lock:
             if self._closed:
-                return
+                # Never a silent success: the project is gone, so nothing can be
+                # saved and the program was already force-closed with it.
+                raise RuntimeError(
+                    "SESSION_CLOSE_FAILED: project is already closed; the program was "
+                    "closed without saving"
+                )
             domain_path = path_utils._domain_path(program)
             if domain_path is None:
                 raise RuntimeError("Failed to resolve path of program to remove")
             domain_key = path_utils._parse_domain_path(self.project, domain_path)
+            if domain_key not in self._open_programs:
+                # Guard against double release: a second release for the same
+                # program would decrement the refcount again and close the
+                # project out from under the remaining sessions.
+                raise RuntimeError(
+                    f"PROGRAM_NOT_OPEN: program '{domain_path}' is not open in this project handle"
+                )
             remove_error = None
             project_close_error = None
             try:
@@ -518,6 +530,15 @@ class ProjectHandle:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            if self._refcount > 0:
+                # Closing the project force-closes every open program without
+                # saving; callers must close the owning sessions first.
+                raise RuntimeError(
+                    f"PROJECT_CLOSE_REJECTED: {self._refcount} program session(s) are "
+                    "still open for this project; close them first"
+                )
             self._close_project_locked()
 
     # ------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Optional, TYPE_CHECKING, Dict
 
 from .path_utils import _domain_path
@@ -22,6 +23,7 @@ class ProgramSession:
         self.flat_api = flat_api
         self.program = program
         self.project_handle: Optional["ProjectHandle"] = project_handle
+        self._close_lock = threading.Lock()
 
     def get_program(self):
         if self.program is None:
@@ -34,23 +36,28 @@ class ProgramSession:
         return self.project_handle
 
     def close(self, *, save: bool = True, remove_program: bool = False) -> None:
-        if self.project_handle is None:
-            raise RuntimeError("Session is already closed")
+        # Serialize concurrent closes: without the lock two callers can both pass
+        # the closed check and double-release the program, decrementing the
+        # project handle's refcount twice and closing the project out from under
+        # any other session that shares it.
+        with self._close_lock:
+            if self.project_handle is None:
+                raise RuntimeError("Session is already closed")
 
-        def _mark_closed() -> None:
-            self.project_handle = None
-            self.flat_api = None
-            self.program = None
+            def _mark_closed() -> None:
+                self.project_handle = None
+                self.flat_api = None
+                self.program = None
 
-        try:
-            self.project_handle.release_program(self.program, save=save, remove_program=remove_program)
-        except Exception as exc:
-            message = str(exc)
-            if message.startswith("SESSION_CLOSE_FAILED:") or message.startswith("REMOVE_PROGRAM_FAILED:"):
-                _mark_closed()
-            raise
+            try:
+                self.project_handle.release_program(self.program, save=save, remove_program=remove_program)
+            except Exception as exc:
+                message = str(exc)
+                if message.startswith("SESSION_CLOSE_FAILED:") or message.startswith("REMOVE_PROGRAM_FAILED:"):
+                    _mark_closed()
+                raise
 
-        _mark_closed()
+            _mark_closed()
 
     def to_dict(self) -> Dict[str, Optional[str]]:
         project_name: Optional[str] = None

@@ -2006,3 +2006,55 @@ def test_post_process_imported_program_closes_when_flat_api_init_fails(monkeypat
 
     assert handle.project.saved == []
     assert handle.project.closed == [imported_program]
+
+
+def test_release_program_rejects_double_release(monkeypatch):
+    handle = build_handle(monkeypatch)
+    first = handle.open_program("/folder/app")
+    handle.open_program("/folder/other")
+    program = first.get_program()
+
+    handle.release_program(program, save=False)
+    assert handle._refcount == 1
+
+    # A second release of the same program must not decrement the refcount again
+    # and close the project out from under the remaining session.
+    with pytest.raises(RuntimeError, match="PROGRAM_NOT_OPEN"):
+        handle.release_program(program, save=False)
+
+    assert handle._refcount == 1
+    assert handle.is_closed() is False
+
+
+def test_release_program_after_project_close_raises(monkeypatch):
+    handle = build_handle(monkeypatch)
+    opened = handle.open_program("/folder/app")
+    program = opened.get_program()
+    handle._closed = True
+
+    # Silent success here would report save=True as done while the data was
+    # discarded with the project.
+    with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED: project is already closed"):
+        handle.release_program(program, save=True)
+
+
+def test_project_handle_close_rejected_while_sessions_open(monkeypatch):
+    handle = build_handle(monkeypatch)
+    opened = handle.open_program("/folder/app")
+
+    with pytest.raises(RuntimeError, match="PROJECT_CLOSE_REJECTED"):
+        handle.close()
+    assert handle.is_closed() is False
+
+    opened.close()
+    handle.close()
+    assert handle.is_closed() is True
+
+
+def test_program_session_second_close_raises_already_closed(monkeypatch):
+    handle = build_handle(monkeypatch)
+    opened = handle.open_program("/folder/app")
+    opened.close()
+
+    with pytest.raises(RuntimeError, match="Session is already closed"):
+        opened.close()
