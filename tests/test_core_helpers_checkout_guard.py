@@ -15,7 +15,13 @@ def _import_core_helpers(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setitem(sys.modules, name, mod)
         return mod
 
-    module("jpype")
+    try:
+        import jpype  # noqa: F401
+    except ImportError:
+        # Only stub jpype when it is genuinely absent: replacing the real module
+        # breaks pyghidra imports (`from jpype import JConversion`) triggered by
+        # the core_helpers import chain.
+        module("jpype")
     ghidra = module("ghidra", package=True)
     ghidra_app = module("ghidra.app", package=True)
     ghidra_app_decompiler = module("ghidra.app.decompiler")

@@ -22,10 +22,17 @@ def list_classes(params, *, context, to_int, iter_namespaces, safe_call):
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
 
+    def _is_class(namespace):
+        # Ghidra's Namespace has no isClass(); class-ness is carried by the
+        # namespace symbol's SymbolType ("Class").
+        symbol = safe_call(namespace, "getSymbol")
+        symbol_type = safe_call(symbol, "getSymbolType") if symbol is not None else None
+        return symbol_type is not None and str(symbol_type) == "Class"
+
     def _to_entry(namespace):
         return {
             "name": namespace.getName(True),
-            "isClass": bool(safe_call(namespace, "isClass")) or False,
+            "isClass": _is_class(namespace),
         }
 
     items = []

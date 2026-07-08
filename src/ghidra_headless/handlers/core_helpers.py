@@ -92,17 +92,22 @@ def _iter_items(items):
             return
 
     try:
-        for item in items:
+        python_iter = iter(items)
+    except TypeError:
+        python_iter = None
+    if python_iter is not None:
+        # Only the iter() acquisition may fail for a non-iterable; do not wrap the
+        # consumption loop, otherwise a mid-iteration error silently truncates the
+        # result and the caller reports a partial list as complete.
+        for item in python_iter:
             yield item
         return
-    except Exception:
-        pass
 
     if callable(next_item):
         while True:
             try:
                 yield next_item()
-            except Exception:
+            except StopIteration:
                 break
 
 
