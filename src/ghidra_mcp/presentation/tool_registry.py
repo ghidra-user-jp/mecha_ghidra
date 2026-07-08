@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from mcp.types import ToolAnnotations
 
+from ghidra_mcp.contracts.tool_models import PayloadToolOutputModel
 from ghidra_mcp.contracts.tool_spec import (
     ExecutorKind,
     ToolSafetyTag,
@@ -132,6 +133,24 @@ def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
     return schema
 
 
+def public_output_schema(spec: ToolSpec) -> dict[str, Any]:
+    """Return a JSON schema matching the client-visible result shape.
+
+    List/scalar/map output models validate through an internal
+    ``{"payload": ...}`` wrapper that dispatch_tool never returns to clients;
+    publishing the wrapper verbatim would recreate on the output side the
+    schema drift public_input_schema fixes for inputs.
+    """
+    schema = dict(spec.output_model.model_json_schema())
+    if not issubclass(spec.output_model, PayloadToolOutputModel):
+        return schema
+    payload_schema = dict(schema.get("properties", {}).get("payload", {}))
+    if "$defs" in schema:
+        payload_schema["$defs"] = schema["$defs"]
+    payload_schema["title"] = schema.get("title", payload_schema.get("title"))
+    return payload_schema
+
+
 def _build_callable(
     spec: ToolSpec,
     *,
@@ -189,16 +208,33 @@ def _cap_length(text: str) -> str:
     return text[: _SHORT_DESCRIPTION_MAX_CHARS - 3].rstrip() + "..."
 
 
+def _ends_with_abbreviation(candidate: str) -> bool:
+    lowered = candidate.lower()
+    for abbr in _SENTENCE_ABBREVIATIONS:
+        if not lowered.endswith(abbr):
+            continue
+        # Require a word boundary before the abbreviation so sentence-final
+        # words that merely share the suffix ("transactional." vs "al.",
+        # "piano." vs "no.") are not misread as abbreviations.
+        boundary = len(lowered) - len(abbr) - 1
+        if boundary < 0 or not lowered[boundary].isalnum():
+            return True
+    return False
+
+
 def _first_sentence_or_truncate(text: str) -> str:
     normalized = " ".join(text.split())
     if not normalized:
         return ""
     # Take the first real sentence, skipping terminators that belong to a known
-    # abbreviation (so "... e.g. 0x40, ..." is not cut at "e.g."). Always cap the
-    # result so a single long sentence cannot blow past the short-mode bound.
-    for match in re.finditer(r"[.!?。！？](?:\s|$)", normalized):
+    # abbreviation (so "... e.g. 0x40, ..." is not cut at "e.g."). CJK
+    # terminators end a sentence on their own — Japanese never puts a space
+    # after 。/！/？ — while ASCII ones need trailing whitespace or end-of-text.
+    # Always cap the result so a single long sentence cannot blow past the
+    # short-mode bound.
+    for match in re.finditer(r"[.!?](?:\s|$)|[。！？]", normalized):
         candidate = normalized[: match.end()].strip()
-        if any(candidate.lower().endswith(abbr) for abbr in _SENTENCE_ABBREVIATIONS):
+        if _ends_with_abbreviation(candidate):
             continue
         return _cap_length(candidate)
     return _cap_length(normalized)
@@ -310,6 +346,7 @@ __all__ = [
     "ToolRegistry",
     "build_tool_functions",
     "public_input_schema",
+    "public_output_schema",
     "public_parameter_names",
     "register_tool_functions",
     "select_tool_description",

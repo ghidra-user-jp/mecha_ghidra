@@ -128,6 +128,30 @@ def test_short_description_skips_abbreviations():
     assert out == "Set bytes at addr, e.g. 0x401000, using a hex string."
 
 
+def test_short_description_abbreviation_needs_word_boundary():
+    from ghidra_mcp.presentation.tool_registry import _first_sentence_or_truncate
+
+    # "transactional." merely ends with the "al." suffix — it is a real
+    # sentence boundary, not an abbreviation like "et al.".
+    text = "The operation is transactional. Later sentences must not leak in."
+    assert _first_sentence_or_truncate(text) == "The operation is transactional."
+
+    text = "See Smith et al. for details on the algorithm. Second sentence."
+    assert (
+        _first_sentence_or_truncate(text)
+        == "See Smith et al. for details on the algorithm."
+    )
+
+
+def test_short_description_handles_cjk_sentences_without_trailing_space():
+    from ghidra_mcp.presentation.tool_registry import _first_sentence_or_truncate
+
+    # Japanese never puts a space after 。so the terminator alone must end the
+    # sentence instead of falling through to a 180-char hard cut.
+    text = "指定した関数を逆コンパイルします。大きな出力はresult_idとして保存されます。" * 5
+    assert _first_sentence_or_truncate(text) == "指定した関数を逆コンパイルします。"
+
+
 def test_short_mode_never_exceeds_cap_for_any_spec():
     from ghidra_mcp.presentation.tool_registry import _SHORT_DESCRIPTION_MAX_CHARS
 
@@ -308,14 +332,22 @@ def test_call_tool_end_to_end_preserves_resource_link():
     assert result.structuredContent["truncated"] is True
 
 
+def _call_result_tool(runtime, name, arguments):
+    # read_result/search_result are registered with structured_output=False so
+    # each response is delivered once, as JSON text; parse that single copy.
+    content = _run(runtime.mcp.call_tool(name, arguments))
+    assert len(content) == 1
+    return content, json.loads(content[0].text)
+
+
 def test_read_result_pages_through_stored_result():
     runtime = _compacted_decompile_runtime()
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
     meta = compacted.structuredContent
     full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
 
-    content, first = _run(
-        runtime.mcp.call_tool("read_result", {"result_id": meta["result_id"], "limit_chars": 10})
+    content, first = _call_result_tool(
+        runtime, "read_result", {"result_id": meta["result_id"], "limit_chars": 10}
     )
     assert first["chunk"] == full_text[:10]
     assert first["chunk_chars"] == 10
@@ -323,22 +355,18 @@ def test_read_result_pages_through_stored_result():
     assert first["has_more"] is True
     assert first["next_offset_chars"] == 10
     assert first["mime_type"] == "text/x-c"
-    # Tools-only clients read the same payload from the text mirror.
-    assert json.loads(content[0].text) == first
 
-    _, second = _run(
-        runtime.mcp.call_tool(
-            "read_result",
-            {"result_id": meta["result_id"], "offset_chars": 10, "limit_chars": 10},
-        )
+    _, second = _call_result_tool(
+        runtime,
+        "read_result",
+        {"result_id": meta["result_id"], "offset_chars": 10, "limit_chars": 10},
     )
     assert second["chunk"] == full_text[10:20]
 
-    _, tail = _run(
-        runtime.mcp.call_tool(
-            "read_result",
-            {"result_id": meta["result_id"], "offset_chars": len(full_text)},
-        )
+    _, tail = _call_result_tool(
+        runtime,
+        "read_result",
+        {"result_id": meta["result_id"], "offset_chars": len(full_text)},
     )
     assert tail["chunk"] == ""
     assert tail["has_more"] is False
@@ -350,14 +378,16 @@ def test_read_result_clamps_limit_to_threshold():
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
     meta = compacted.structuredContent
 
-    _, sliced = _run(
-        runtime.mcp.call_tool(
-            "read_result",
-            {"result_id": meta["result_id"], "limit_chars": 500_000},
-        )
+    content, sliced = _call_result_tool(
+        runtime,
+        "read_result",
+        {"result_id": meta["result_id"], "limit_chars": 500_000},
     )
 
-    assert sliced["chunk_chars"] == 40
+    # The raw cap is the threshold (40); JSON escaping of the embedded chunk
+    # may trim a few more chars so the delivered chunk stays within it.
+    assert 0 < sliced["chunk_chars"] <= 40
+    assert len(json.dumps(sliced["chunk"], ensure_ascii=False)) - 2 <= 40
     assert sliced["has_more"] is True
 
 
@@ -381,16 +411,15 @@ def test_search_result_returns_matches_with_usable_offsets():
     meta = compacted.structuredContent
     full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
 
-    _, found = _run(
-        runtime.mcp.call_tool(
-            "search_result",
-            {
-                "result_id": meta["result_id"],
-                "pattern": r"return 0;",
-                "context_chars": 10,
-                "max_matches": 5,
-            },
-        )
+    _, found = _call_result_tool(
+        runtime,
+        "search_result",
+        {
+            "result_id": meta["result_id"],
+            "pattern": r"return 0;",
+            "context_chars": 10,
+            "max_matches": 5,
+        },
     )
 
     assert found["match_count"] == 20
@@ -410,20 +439,23 @@ def test_search_result_caps_snippets_at_response_budget():
     runtime = _compacted_decompile_runtime()  # threshold (= response budget) of 40 chars
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
 
-    _, found = _run(
-        runtime.mcp.call_tool(
-            "search_result",
-            {
-                "result_id": compacted.structuredContent["result_id"],
-                "pattern": r"return 0;",
-                "context_chars": 10,
-                "max_matches": 20,
-            },
-        )
+    _, found = _call_result_tool(
+        runtime,
+        "search_result",
+        {
+            "result_id": compacted.structuredContent["result_id"],
+            "pattern": r"return 0;",
+            "context_chars": 10,
+            "max_matches": 20,
+        },
     )
 
     assert found["match_count"] == 20
     assert 0 < found["matches_shown"] < 20
+    # Only the first (guaranteed) snippet may exceed the budget; the rest are
+    # admitted strictly within it, so the accumulated snippet chars stay put.
+    snippet_chars = [len(match["context"]) for match in found["matches"]]
+    assert sum(snippet_chars[1:]) <= 40
 
 
 def test_search_result_invalid_regex_is_error():
@@ -563,8 +595,26 @@ def test_store_byte_budget_evicts_oldest_but_keeps_newest():
     with pytest.raises(KeyError, match="re-run the original tool"):
         store.get(first.result_id)
 
-    oversized = store.add(**_store_entry_kwargs("c" * 500))
-    assert store.get(oversized.result_id).size_chars == 500
+    # A single payload larger than the whole budget is refused outright —
+    # caching it would exceed the operator-configured memory cap — and the
+    # existing entries stay untouched.
+    assert store.add(**_store_entry_kwargs("c" * 500)) is None
+    assert store.get(second.result_id).text == "b" * 60
+
+
+def test_payload_over_cache_budget_is_delivered_inline():
+    store = ResultResourceStore(max_entries=8, max_bytes=100)
+    payload = "x" * 500
+
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="fw",
+        result=payload,
+        config=ToolPresentationConfig(large_result_threshold_chars=50, large_result_preview_chars=25),
+        store=store,
+    )
+
+    assert result is payload
 
 
 def test_empty_list_normalization_is_not_resourceized():
@@ -670,6 +720,32 @@ def test_tool_docs_apply_public_name_overrides_no_raw_names_leak():
     assert "bytes" not in xb["input_schema"]["properties"]
 
 
+def test_tool_docs_output_schema_matches_client_visible_shape():
+    from ghidra_mcp.presentation.tool_registry import public_output_schema
+
+    # list tools deliver a bare JSON array — the {"payload": ...} validation
+    # wrapper must not leak into the published schema.
+    list_schema = public_output_schema(get_tool_spec("list_functions"))
+    assert list_schema.get("type") == "array"
+    assert "payload" not in list_schema.get("properties", {})
+
+    # scalar tools deliver the bare value (str, or [] normalized upstream).
+    scalar_schema = public_output_schema(get_tool_spec("decompile_function"))
+    assert "payload" not in scalar_schema.get("properties", {})
+    assert "anyOf" in scalar_schema or scalar_schema.get("type") == "string"
+
+    # typed output models are delivered as-is and keep their object schema.
+    typed_schema = public_output_schema(get_tool_spec("create_session"))
+    assert typed_schema["type"] == "object"
+    assert "status" in typed_schema["properties"]
+
+    runtime = _runtime_for_specs({"list_functions": get_tool_spec("list_functions")})
+    detail = json.loads(
+        _run(runtime.mcp.read_resource("ghidra://docs/tools/list_functions"))[0].content
+    )
+    assert detail["output_schema"] == list_schema
+
+
 def test_public_input_schema_target_semantics_match_signature():
     # CORE_COMMAND: target optional with a default; REGISTRY/SHARED_SYNC: target required.
     core_schema = public_input_schema(get_tool_spec("rename_function"))
@@ -763,6 +839,58 @@ def test_compaction_decision_uses_delivered_indent2_size():
     assert inline is data
 
 
+def test_tuple_result_is_stored_as_json_like_a_list():
+    store = ResultResourceStore(max_entries=4)
+    payload = tuple({"name": f"f_{i}", "addr": f"0x{i:x}"} for i in range(50))
+
+    result = maybe_compact_tool_result(
+        tool_name="list_functions",
+        target="fw",
+        result=payload,
+        config=ToolPresentationConfig(large_result_threshold_chars=80, large_result_preview_chars=30),
+        store=store,
+    )
+
+    meta = result.structuredContent
+    assert meta["result_type"] == "list"
+    assert meta["mime_type"] == "application/json"
+    assert meta["item_count"] == 50
+    # The stored payload must be parseable JSON, not a Python repr.
+    stored = json.loads(store.read_text(meta["result_id"]))
+    assert stored[0]["name"] == "f_0"
+
+
+def test_non_string_dict_keys_do_not_fail_the_tool_call():
+    import enum
+
+    class Color(enum.Enum):
+        RED = "red"
+
+    store = ResultResourceStore(max_entries=4)
+    small = {Color.RED: 1}
+
+    # Small results stay inline; the size probe must not raise TypeError.
+    inline = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=small,
+        config=ToolPresentationConfig(large_result_threshold_chars=12000),
+        store=store,
+    )
+    assert inline is small
+
+    big = {Color.RED: ["x" * 40 for _ in range(20)]}
+    compacted = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=big,
+        config=ToolPresentationConfig(large_result_threshold_chars=50, large_result_preview_chars=25),
+        store=store,
+    )
+    stored = json.loads(store.read_text(compacted.structuredContent["result_id"]))
+    assert set(stored) == {"red"}
+
+
 # --- #2: search_result must guard against ReDoS / event-loop hangs ---
 
 
@@ -808,8 +936,8 @@ def test_search_result_allows_normal_patterns_after_hardening():
     runtime = _compacted_decompile_runtime()
     rid = _decompile_result_id(runtime)
     for good in [r"return 0;", r"return \d+;", r"int \w+\(", r"\bvoid\b"]:
-        _, found = _run(
-            runtime.mcp.call_tool("search_result", {"result_id": rid, "pattern": good})
+        _, found = _call_result_tool(
+            runtime, "search_result", {"result_id": rid, "pattern": good}
         )
         assert found["match_count"] >= 1, good
 
@@ -821,7 +949,7 @@ def test_search_result_allows_quantifier_patterns_on_benign_text():
     runtime = _compacted_decompile_runtime()
     rid = _decompile_result_id(runtime)
     for pattern in [r"(0x[0-9a-f]+) *=", r"(\w+) +\+=", r"(\w+\s*)+", r"(a+)+"]:
-        _, found = _run(
-            runtime.mcp.call_tool("search_result", {"result_id": rid, "pattern": pattern})
+        _, found = _call_result_tool(
+            runtime, "search_result", {"result_id": rid, "pattern": pattern}
         )
         assert found["match_count"] >= 0, pattern

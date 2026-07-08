@@ -528,13 +528,16 @@ class ProjectHandle:
         with self._lock:
             return self._closed
 
-    def close(self) -> None:
+    def close(self, *, force: bool = False) -> None:
         with self._lock:
             if self._closed:
                 return
-            if self._refcount > 0:
+            if self._refcount > 0 and not force:
                 # Closing the project force-closes every open program without
-                # saving; callers must close the owning sessions first.
+                # saving; callers must close the owning sessions first. Rollback
+                # and shutdown paths reclaiming a handle whose program release
+                # already failed pass force=True — for them, rejecting the close
+                # would leave the project wedged until the process restarts.
                 raise RuntimeError(
                     f"PROJECT_CLOSE_REJECTED: {self._refcount} program session(s) are "
                     "still open for this project; close them first"

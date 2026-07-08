@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -15,8 +16,12 @@ from mcp.server.fastmcp.resources import FunctionResource
 from mcp.server.fastmcp.resources.templates import ResourceTemplate
 from mcp.types import CallToolResult, ResourceLink, TextContent, ToolAnnotations
 from pydantic import PrivateAttr
+from pydantic_core import to_json
 
 from ghidra_mcp.presentation.config import ToolPresentationConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 RESULT_RESOURCE_PREFIX = "ghidra://results/"
@@ -78,8 +83,13 @@ class ResultResourceStore:
         mime_type: str,
         result_type: str,
         item_count: int | None,
-    ) -> StoredToolResult:
+    ) -> StoredToolResult | None:
         encoded = text.encode("utf-8", errors="replace")
+        if len(encoded) > self._max_bytes:
+            # A single payload larger than the whole cache budget can never be
+            # retained without exceeding the operator-configured memory cap;
+            # refuse to cache it instead of silently blowing past the cap.
+            return None
         payload_hash = hashlib.sha256(encoded).hexdigest()
         # Content-addressed id: repeating the same call reuses the stored entry
         # instead of duplicating it, and the URI stays stable across turns.
@@ -155,6 +165,15 @@ def _is_normalized_empty_list_result(result: CallToolResult) -> bool:
     return isinstance(item, TextContent) and item.text == "[]"
 
 
+def _json_text(value: Any, *, indent: int | None = None) -> str:
+    # pydantic_core.to_json is the serializer FastMCP delivers inline results
+    # with: unlike json.dumps(default=str) it also stringifies non-string dict
+    # keys (enums, Java objects) instead of raising TypeError, and serializes
+    # pydantic models structurally instead of as repr strings — so the stored
+    # payload matches what inline delivery would have produced.
+    return to_json(value, fallback=str, indent=indent).decode("utf-8")
+
+
 def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, int | None]:
     if isinstance(result, str):
         mime_type = "text/x-c" if tool_name == "decompile_function" else "text/plain"
@@ -167,15 +186,15 @@ def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, in
         ):
             return result.content[0].text, "text/plain", "call_tool_result_text", None
         return (
-            json.dumps(result.model_dump(mode="json", by_alias=True), ensure_ascii=False, default=str),
+            _json_text(result.model_dump(mode="json", by_alias=True)),
             "application/json",
             "call_tool_result",
             len(result.content),
         )
-    if isinstance(result, list):
-        return json.dumps(result, ensure_ascii=False, default=str), "application/json", "list", len(result)
+    if isinstance(result, (list, tuple)):
+        return _json_text(result), "application/json", "list", len(result)
     if isinstance(result, dict):
-        return json.dumps(result, ensure_ascii=False, default=str), "application/json", "dict", None
+        return _json_text(result), "application/json", "dict", None
     return str(result), "text/plain", type(result).__name__, None
 
 
@@ -196,7 +215,12 @@ def _delivered_inline_size(result: Any, *, tool_name: str) -> int:
         return len(text)
     if isinstance(result, (list, tuple)):
         return sum(_delivered_inline_size(item, tool_name=tool_name) for item in result)
-    return len(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return len(_json_text(result, indent=2))
+
+
+def _embedded_json_chars(text: str) -> int:
+    """Chars ``text`` occupies once embedded as a JSON string (sans quotes)."""
+    return len(json.dumps(text, ensure_ascii=False)) - 2
 
 
 def _preview_slice(text: str, limit: int) -> str:
@@ -235,16 +259,26 @@ def maybe_compact_tool_result(
     config: ToolPresentationConfig,
     store: ResultResourceStore | None,
 ) -> Any:
-    if config.large_result_mode == "inline":
+    if store is None or config.large_result_mode == "inline":
         return result
     if isinstance(result, CallToolResult):
         if result.isError or _is_normalized_empty_list_result(result):
             return result
-    if _delivered_inline_size(result, tool_name=tool_name) <= config.large_result_threshold_chars:
-        return result
-    if store is None:
-        return result
     text, mime_type, result_type, item_count = _serialize_result(result, tool_name=tool_name)
+    threshold = config.large_result_threshold_chars
+    if isinstance(result, (str, CallToolResult)):
+        # FastMCP delivers exactly the serialized text for these.
+        if len(text) <= threshold:
+            return result
+    else:
+        # The compact text minus list separators lower-bounds the delivered
+        # indent=2 size, so payloads already over the threshold in compact form
+        # skip the expensive full re-serialization of the probe.
+        separators = item_count + 1 if isinstance(result, (list, tuple)) else 0
+        if len(text) - separators <= threshold and (
+            _delivered_inline_size(result, tool_name=tool_name) <= threshold
+        ):
+            return result
 
     entry = store.add(
         tool=tool_name,
@@ -254,6 +288,10 @@ def maybe_compact_tool_result(
         result_type=result_type,
         item_count=item_count,
     )
+    if entry is None:
+        # Larger than the whole cache budget: caching would break the
+        # operator-configured memory cap, so deliver the payload inline.
+        return result
     preview = _preview_slice(text, config.large_result_preview_chars)
     metadata = {
         "tool": tool_name,
@@ -298,8 +336,25 @@ def register_result_resources(mcp, *, store: ResultResourceStore) -> None:
     ).bind_store(store)
     # FastMCP's public resource decorator stores a static mime_type on templates.
     # The result template needs per-entry MIME types, so register this small
-    # ResourceTemplate subclass directly with the SDK's resource manager.
-    mcp._resource_manager._templates[template.uri_template] = template  # noqa: SLF001
+    # ResourceTemplate subclass directly with the SDK's resource manager. The
+    # mcp dependency pin is open (<2), so guard the private attributes and fall
+    # back to the public decorator (static text/plain MIME type) instead of
+    # crashing server startup if a future release renames them.
+    resource_manager = getattr(mcp, "_resource_manager", None)
+    templates = getattr(resource_manager, "_templates", None)
+    if isinstance(templates, dict):
+        templates[template.uri_template] = template
+        return
+    logger.warning(
+        "FastMCP private resource-template registry is unavailable; registering "
+        "ghidra://results/{result_id} with a static text/plain MIME type instead"
+    )
+    mcp.resource(
+        "ghidra://results/{result_id}",
+        name="ghidra_tool_result",
+        description="Full payload for a truncated Ghidra MCP tool result.",
+        mime_type="text/plain",
+    )(_read_result_resource)
 
 
 def _get_entry(store: ResultResourceStore, result_id: str) -> StoredToolResult:
@@ -319,8 +374,12 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
     """
     annotations = ToolAnnotations(readOnlyHint=True, idempotentHint=True)
 
+    # structured_output=False keeps FastMCP from delivering every response
+    # twice (indent=2 JSON text plus a structuredContent duplicate), which
+    # would defeat the size cap these tools exist to enforce.
     @mcp.tool(
         annotations=annotations,
+        structured_output=False,
         description=(
             "Read a slice of a stored large tool result. Use the result_id from a "
             "truncated tool result, then page with offset_chars/limit_chars until "
@@ -330,10 +389,17 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
     def read_result(result_id: str, offset_chars: int = 0, limit_chars: int = 4000) -> dict[str, Any]:
         entry = _get_entry(store, result_id)
         offset = max(0, offset_chars)
-        # Cap slices below the compaction threshold so a read_result response can
-        # never itself qualify as a "large result".
+        # Cap slices at the compaction threshold, measured as delivered: the
+        # response embeds the chunk as a JSON string, so escaping (newlines,
+        # quotes) inflates its size. Trim until the embedded cost fits; the
+        # fixed metadata fields only add a small constant on top.
         limit = max(1, min(limit_chars, config.large_result_threshold_chars))
         chunk = entry.text[offset : offset + limit]
+        while len(chunk) > 1:
+            excess = _embedded_json_chars(chunk) - config.large_result_threshold_chars
+            if excess <= 0:
+                break
+            chunk = chunk[: max(1, len(chunk) - excess)]
         next_offset = offset + len(chunk)
         has_more = next_offset < entry.size_chars
         return {
@@ -351,6 +417,7 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
 
     @mcp.tool(
         annotations=annotations,
+        structured_output=False,
         description=(
             "Search a stored large tool result with a Python regex. Returns matches "
             "with character offsets (usable as read_result offset_chars) and "
@@ -395,6 +462,11 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
                 context_end = min(len(entry.text), end + context)
                 context_end = min(context_end, context_start + 2 * context + _SEARCH_MATCH_DISPLAY_MAX_CHARS)
                 snippet = entry.text[context_start:context_end]
+                if matches and used_chars + len(snippet) > budget:
+                    # Admitting this snippet would blow the response budget by up
+                    # to 2*context + 500 chars; only the first match may exceed it
+                    # so a tiny budget still returns something actionable.
+                    continue
                 used_chars += len(snippet)
                 matches.append(
                     {

@@ -2051,6 +2051,18 @@ def test_project_handle_close_rejected_while_sessions_open(monkeypatch):
     assert handle.is_closed() is True
 
 
+def test_project_handle_force_close_reclaims_leaked_refcount(monkeypatch):
+    handle = build_handle(monkeypatch)
+    handle.open_program("/folder/app")
+
+    # Rollback paths reclaim a handle whose program release failed: the
+    # refcount is still nonzero and no live session remains to release it, so
+    # a rejected close would wedge the target until the server restarts.
+    handle.close(force=True)
+
+    assert handle.is_closed() is True
+
+
 def test_program_session_second_close_raises_already_closed(monkeypatch):
     handle = build_handle(monkeypatch)
     opened = handle.open_program("/folder/app")

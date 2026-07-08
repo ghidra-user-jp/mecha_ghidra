@@ -61,6 +61,8 @@ mcp = FastMCP("GhidraMCP Headless")
 _ALL_TOOL_SPECS = get_all_tool_specs()
 _DEFAULT_TOOL_SPECS = filter_tool_specs(specs=_ALL_TOOL_SPECS, profile=ToolProfile.DEFAULT)
 _TOOL_NAMES = sorted(_ALL_TOOL_SPECS)
+# Single source of truth for presentation defaults: the config dataclass.
+_PRESENTATION_DEFAULTS = ToolPresentationConfig()
 
 
 def _core():
@@ -241,7 +243,7 @@ def parse_args(argv: list[str]):
     )
     parser.add_argument(
         "--tool-description-mode",
-        default="full",
+        default=_PRESENTATION_DEFAULTS.description_mode,
         choices=["short", "full", "none"],
         help=(
             "Control MCP tool description verbosity. Existing descriptions are already "
@@ -251,32 +253,32 @@ def parse_args(argv: list[str]):
     )
     parser.add_argument(
         "--large-result-mode",
-        default="resource",
+        default=_PRESENTATION_DEFAULTS.large_result_mode,
         choices=["resource", "inline"],
         help="Return large tool results as MCP resources or inline payloads.",
     )
     parser.add_argument(
         "--large-result-threshold-chars",
         type=int,
-        default=12000,
+        default=_PRESENTATION_DEFAULTS.large_result_threshold_chars,
         help="Character threshold for moving large tool results to MCP resources.",
     )
     parser.add_argument(
         "--large-result-preview-chars",
         type=int,
-        default=4000,
+        default=_PRESENTATION_DEFAULTS.large_result_preview_chars,
         help="Preview character count for resource-backed large tool results.",
     )
     parser.add_argument(
         "--result-cache-max-entries",
         type=int,
-        default=512,
+        default=_PRESENTATION_DEFAULTS.result_cache_max_entries,
         help="Maximum in-memory result resources retained by the MCP server.",
     )
     parser.add_argument(
         "--result-cache-max-bytes",
         type=int,
-        default=134217728,
+        default=_PRESENTATION_DEFAULTS.result_cache_max_bytes,
         help="Maximum total bytes of in-memory result resources retained by the MCP server.",
     )
     parser.add_argument("--log-level", default="INFO", help="Log level")

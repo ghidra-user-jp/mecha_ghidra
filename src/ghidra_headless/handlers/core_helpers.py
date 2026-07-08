@@ -109,6 +109,21 @@ def _iter_items(items):
                 yield next_item()
             except StopIteration:
                 break
+            except Exception as exc:
+                # Java-style iterators exposing next() without hasNext signal
+                # exhaustion with java.util.NoSuchElementException (mapped by
+                # jpype), not StopIteration; any other error must propagate so
+                # a mid-iteration failure does not truncate the result.
+                if _is_java_no_such_element(exc):
+                    break
+                raise
+
+
+def _is_java_no_such_element(exc):
+    return any(
+        getattr(cls, "__name__", "") == "NoSuchElementException"
+        for cls in type(exc).__mro__
+    )
 
 
 def _json_safe(value):

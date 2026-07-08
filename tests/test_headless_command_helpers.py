@@ -70,8 +70,34 @@ def _import_core_helpers(monkeypatch: pytest.MonkeyPatch):
     ):
         setattr(ghidra_program_model_data, name, _Dummy)
 
-    sys.modules.pop("ghidra_headless.handlers.core_helpers", None)
-    return importlib.import_module("ghidra_headless.handlers.core_helpers")
+    original = sys.modules.pop("ghidra_headless.handlers.core_helpers", None)
+    fresh = importlib.import_module("ghidra_headless.handlers.core_helpers")
+    # The fresh import is bound to the stub ghidra.*/jpype modules above, which
+    # vanish at monkeypatch teardown. Un-cache it (and restore any previously
+    # imported real module, including the parent-package attribute the import
+    # machinery set) so later tests do not silently reuse the stub-bound module.
+    handlers_pkg = sys.modules.get("ghidra_headless.handlers")
+    if original is not None:
+        sys.modules["ghidra_headless.handlers.core_helpers"] = original
+        if handlers_pkg is not None:
+            handlers_pkg.core_helpers = original
+    else:
+        sys.modules.pop("ghidra_headless.handlers.core_helpers", None)
+        if handlers_pkg is not None and getattr(handlers_pkg, "core_helpers", None) is fresh:
+            del handlers_pkg.core_helpers
+    return fresh
+
+
+def test_import_core_helpers_does_not_pollute_sys_modules(monkeypatch: pytest.MonkeyPatch):
+    original = sys.modules.get("ghidra_headless.handlers.core_helpers")
+
+    fresh = _import_core_helpers(monkeypatch)
+
+    # The stub-bound module must not stay cached for later tests (its ghidra.*
+    # dependencies vanish at monkeypatch teardown); any pre-existing real
+    # import must be restored.
+    assert sys.modules.get("ghidra_headless.handlers.core_helpers") is not fresh
+    assert sys.modules.get("ghidra_headless.handlers.core_helpers") is original
 
 
 def test_iter_items_propagates_mid_iteration_errors(monkeypatch: pytest.MonkeyPatch):
@@ -103,6 +129,33 @@ def test_iter_items_supports_bare_next_iterator(monkeypatch: pytest.MonkeyPatch)
             return next(self._values)
 
     assert list(core_helpers._iter_items(_BareNext())) == [10, 20]
+
+
+def test_iter_items_bare_next_treats_java_no_such_element_as_end(monkeypatch: pytest.MonkeyPatch):
+    core_helpers = _import_core_helpers(monkeypatch)
+
+    # jpype maps java.util.NoSuchElementException to a Python class of the same
+    # name; a bare-next iterator raising it has ended, not failed.
+    class NoSuchElementException(Exception):
+        pass
+
+    class _BareNextJava:
+        def __init__(self):
+            self._values = [10, 20]
+
+        def next(self):
+            if not self._values:
+                raise NoSuchElementException()
+            return self._values.pop(0)
+
+    assert list(core_helpers._iter_items(_BareNextJava())) == [10, 20]
+
+    class _ExplodingBareNext:
+        def next(self):
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        list(core_helpers._iter_items(_ExplodingBareNext()))
 
 
 def test_iter_items_supports_java_style_iterator(monkeypatch: pytest.MonkeyPatch):

@@ -220,7 +220,7 @@ class _FakeProjectHandle:
     def get_project_name(self) -> str:
         return self._name
 
-    def close(self) -> None:
+    def close(self, *, force: bool = False) -> None:  # noqa: ARG002
         self._closed = True
 
 
@@ -350,7 +350,7 @@ class _ProjectLockingFakeProjectHandle(_FakeProjectHandle):
 
 
 class _FailingProjectCloseHandle(_FakeProjectHandle):
-    def close(self) -> None:
+    def close(self, *, force: bool = False) -> None:  # noqa: ARG002
         raise RuntimeError("project close failed")
 
 

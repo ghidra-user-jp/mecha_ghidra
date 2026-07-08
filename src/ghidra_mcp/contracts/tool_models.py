@@ -19,6 +19,16 @@ class ToolOutputModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class PayloadToolOutputModel(ToolOutputModel):
+    """Validation-only wrapper around a single ``payload`` field.
+
+    dispatch_tool validates list/scalar/map results through this wrapper but
+    returns the bare payload, so no client-visible result ever carries the
+    ``{"payload": ...}`` shape. Anything published to clients must unwrap it —
+    see ``public_output_schema``.
+    """
+
+
 def create_optional_any_input_model(model_name: str, field_names: tuple[str, ...]) -> type[ToolInputModel]:
     fields = {name: (Any, None) for name in field_names}
     return create_model(model_name, __base__=ToolInputModel, **fields)
@@ -38,8 +48,12 @@ def create_typed_output_model(
     return create_model(model_name, __base__=ToolOutputModel, **field_defs)
 
 
+def _create_payload_output_model(model_name: str, payload_type: Any) -> type[ToolOutputModel]:
+    return create_model(model_name, __base__=PayloadToolOutputModel, payload=(payload_type, ...))
+
+
 def create_list_output_model(model_name: str, item_type: type[Any] = object) -> type[ToolOutputModel]:
-    return create_typed_output_model(model_name, {"payload": (list[item_type], ...)})
+    return _create_payload_output_model(model_name, list[item_type])
 
 
 def create_map_output_model(
@@ -49,7 +63,7 @@ def create_map_output_model(
     allow_empty_list: bool = False,
 ) -> type[ToolOutputModel]:
     payload_type = dict[str, value_type] | list[object] if allow_empty_list else dict[str, value_type]
-    return create_typed_output_model(model_name, {"payload": (payload_type, ...)})
+    return _create_payload_output_model(model_name, payload_type)
 
 
 def create_scalar_output_model(
@@ -59,10 +73,11 @@ def create_scalar_output_model(
     allow_empty_list: bool = False,
 ) -> type[ToolOutputModel]:
     payload_type = scalar_type | list[object] if allow_empty_list else scalar_type
-    return create_typed_output_model(model_name, {"payload": (payload_type, ...)})
+    return _create_payload_output_model(model_name, payload_type)
 
 
 __all__ = [
+    "PayloadToolOutputModel",
     "ToolInputModel",
     "ToolOutputModel",
     "create_typed_output_model",

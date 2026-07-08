@@ -78,7 +78,6 @@ class ToolSpec:
     omit_falsey_keys: frozenset[str] = field(default_factory=frozenset)
     description: str | None = None
     short_description: str | None = None
-    docs: str | None = None
     idempotent_hint: bool | None = None
     checkout_required: bool = False
 
@@ -414,7 +413,6 @@ def _tool(
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     short_description: str | None = None,
-    docs: str | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
 ) -> ToolSpec:
@@ -446,7 +444,6 @@ def _tool(
         omit_falsey_keys=frozenset(omit_falsey_keys),
         description=description,
         short_description=short_description,
-        docs=docs,
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -467,7 +464,6 @@ def _core_tool(
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     short_description: str | None = None,
-    docs: str | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
 ) -> ToolSpec:
@@ -487,7 +483,6 @@ def _core_tool(
         omit_falsey_keys=omit_falsey_keys,
         description=description,
         short_description=short_description,
-        docs=docs,
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -513,7 +508,6 @@ def _registry_tool(
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     short_description: str | None = None,
-    docs: str | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
 ) -> ToolSpec:
@@ -537,7 +531,6 @@ def _registry_tool(
         omit_falsey_keys=omit_falsey_keys,
         description=description,
         short_description=short_description,
-        docs=docs,
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -554,7 +547,6 @@ def _shared_sync_tool(
     description: str | None = None,
     include_none_keys: Iterable[str] = (),
     short_description: str | None = None,
-    docs: str | None = None,
     idempotent_hint: bool | None = None,
 ) -> ToolSpec:
     return _tool(
@@ -569,7 +561,6 @@ def _shared_sync_tool(
         include_none_keys=include_none_keys,
         description=description,
         short_description=short_description,
-        docs=docs,
         idempotent_hint=idempotent_hint,
     )
 

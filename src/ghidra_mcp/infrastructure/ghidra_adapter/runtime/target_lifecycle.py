@@ -442,7 +442,9 @@ class RuntimeTargetLifecycle:
                 if close_errors and self._handle_has_live_sessions_locked(handle):
                     continue
                 try:
-                    handle.close()
+                    # force: a session close that failed above may have leaked a
+                    # refcount; shutdown must still reclaim the project.
+                    handle.close(force=True)
                 except Exception as handle_exc:
                     logger.warning("failed to close project handle during close_all: %s", handle_exc)
                     handle_errors.append((handle.get_key(), handle_exc))
@@ -923,7 +925,11 @@ class RuntimeTargetLifecycle:
 
         if allow_handle_close and not handle.is_closed() and not self._handle_has_live_sessions_locked(handle):
             try:
-                handle.close()
+                # force: the failed session's program release may itself have
+                # failed, leaving a nonzero refcount with no live session that
+                # could ever release it — a plain close would reject and wedge
+                # the target until the server restarts.
+                handle.close(force=True)
             except Exception as handle_exc:  # noqa: BLE001
                 handle_close_error = RuntimeError(
                     "PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback "
@@ -956,7 +962,9 @@ class RuntimeTargetLifecycle:
         cleanup_error = None
         if not handle.is_closed() and not self._handle_has_live_sessions_locked(handle):
             try:
-                handle.close()
+                # force: see _cleanup_failed_session_locked — a leaked refcount
+                # from a failed open/release must not wedge the target.
+                handle.close(force=True)
             except Exception as handle_exc:  # noqa: BLE001
                 cleanup_error = RuntimeError(
                     "PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback "
