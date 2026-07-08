@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, NoReturn, TypeVar
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
-from ghidra_mcp.domain import DomainError
+from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.infrastructure.bsim import BsimJavaBackend, mask_bsim_url
 
 from .core_command_service import CoreCommandService
@@ -467,10 +467,17 @@ class BsimService:
     def _call_bsim(operation: Callable[[], _T], *, default_code: str = "BSIM_OPERATION_FAILED") -> _T:
         try:
             return operation()
-        except DomainError:
+        except DomainError as exc:
             # Structured runtime errors (SESSION_NOT_FOUND, PROJECT_LOCKED, ...) already
             # carry a code/retryable payload; let them through so the presentation layer
-            # renders the same envelope it does for every other tool.
+            # renders the same envelope it does for every other tool. Core-command BSim
+            # failures, however, reach us pre-wrapped by RuntimeBackend._invoke as the
+            # generic OPERATION_FAILED with the headless message intact; without
+            # reclassification the same database outage would surface as
+            # BSIM_DATABASE_UNREACHABLE via the Java-backend path but as an opaque
+            # OPERATION_FAILED via the core-command path.
+            if exc.code is ErrorCode.OPERATION_FAILED:
+                _raise_classified_bsim_error(exc, default_code=default_code)
             raise
         except Exception as exc:
             _raise_classified_bsim_error(exc, default_code=default_code)

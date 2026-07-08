@@ -591,6 +591,31 @@ def test_bsim_query_function_classifies_function_lookup_errors():
         service.query_function("fw", function_name="missing_func")
 
 
+def test_bsim_query_function_classifies_runtime_wrapped_lookup_errors():
+    # Production wiring never delivers raw headless exceptions here:
+    # RuntimeBackend._invoke pre-wraps them as DomainError(OPERATION_FAILED,
+    # message=<original headless message>). Classification must still fire.
+    service, core, _target = _service()
+    core.errors["bsim_query_function"] = DomainError(
+        code=ErrorCode.OPERATION_FAILED,
+        message="Function not found: missing_func",
+    )
+
+    with pytest.raises(LookupError, match="BSIM_FUNCTION_NOT_FOUND"):
+        service.query_function("fw", function_name="missing_func")
+
+
+def test_bsim_register_classifies_runtime_wrapped_connection_errors():
+    service, core, _target = _service()
+    core.errors["bsim_register_target"] = DomainError(
+        code=ErrorCode.OPERATION_FAILED,
+        message="BSIM_DATABASE_INIT_FAILED: Connection to localhost:5432 refused",
+    )
+
+    with pytest.raises(RuntimeError, match="BSIM_DATABASE_UNREACHABLE"):
+        service.register_target("fw")
+
+
 def test_bsim_database_status_classifies_authentication_errors():
     class AuthFailBackend(FakeJavaBackend):
         def get_database_status(self, bsim_url: str):
