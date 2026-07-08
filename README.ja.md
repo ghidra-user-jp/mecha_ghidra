@@ -256,7 +256,7 @@ uv run ghidra-mcp \
 
 ローカル LLM はコンテキストが伸びるほど減速し、その主因はデコンパイル結果や長大な一覧といった大型のツール出力です。エージェントのコンテキストを小さく保つため、閾値を超えるツール結果はインラインで返さず、次の形で返します。
 
-- テキストプレビュー（行境界で切断）と、続きを取得する具体的な手順
+- プレビューと、続きを取得する具体的な手順 — テキスト結果は冒頭部分（行境界で切断）、リスト結果は先頭の完全なアイテムを有効な JSON として表示
 - `result_id` と MCP resource link（`ghidra://results/{result_id}`）
 - `structuredContent` のメタデータ（`size_chars`、`mime_type`、`result_type`、`item_count` など）
 
@@ -272,7 +272,7 @@ uv run ghidra-mcp \
 
 - `--large-result-mode {resource,inline}`（デフォルト `resource`）: `inline` で従来どおり全文を返す挙動に戻せます。
 - `--large-result-threshold-chars N`（デフォルト `12000`）: 圧縮の発動閾値。
-- `--large-result-preview-chars N`（デフォルト `4000`）: プレビューのサイズ。
+- `--large-result-preview-chars N`（デフォルト `4000`）: プレビューの予算。テキスト結果は全額、JSON リスト結果は 1/4（数件の完全なアイテムでスキーマが伝わるため）、dict と `CallToolResult` 全体ダンプは 1/2 を使います。
 - `--result-cache-max-entries N`（デフォルト `512`）/ `--result-cache-max-bytes N`（デフォルト `134217728`）: LRU ストアの予算。破棄済み `result_id` を読むと元のツールの再実行を促すエラーを返します。
 - `--tool-description-mode {full,short,none}`（デフォルト `full`）: `tools/list` の説明文の詳細度。`short` は spec の `short_description` を優先し、なければ先頭文にフォールバックします。各ツールの完全なドキュメントは MCP resource（`ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}`）からいつでも取得できます。
 

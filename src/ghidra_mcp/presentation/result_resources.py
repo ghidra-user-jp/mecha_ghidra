@@ -223,6 +223,47 @@ def _embedded_json_chars(text: str) -> int:
     return len(json.dumps(text, ensure_ascii=False)) - 2
 
 
+# Preview budgets by result type, as fractions of the configured
+# large_result_preview_chars. Text payloads (e.g. decompiled C) front-load
+# meaning, so they get the full budget; homogeneous JSON lists only need a few
+# complete example items to convey their schema; structured dicts sit between.
+_PREVIEW_BUDGET_SCALE: dict[str, float] = {
+    "list": 0.25,
+    "dict": 0.5,
+    "call_tool_result": 0.5,
+}
+
+
+def _preview_budget(result_type: str, configured_chars: int) -> int:
+    return int(configured_chars * _PREVIEW_BUDGET_SCALE.get(result_type, 1.0))
+
+
+def _list_preview(items, budget: int) -> tuple[str, int, int] | None:
+    """Preview the first complete items of a list result, as valid JSON.
+
+    Returns ``(preview, covered_chars, shown_items)`` where ``covered_chars``
+    is the prefix of the stored compact JSON the preview corresponds to (the
+    read_result continuation offset), or None when not even one item fits —
+    callers then fall back to a plain prefix slice.
+    """
+    if budget <= 2:
+        return None
+    parts: list[str] = []
+    used = 2  # "[" and "]"
+    for item in items:
+        piece = _json_text(item)
+        cost = len(piece) + (1 if parts else 0)
+        if used + cost > budget:
+            break
+        parts.append(piece)
+        used += cost
+    if not parts:
+        return None
+    # The stored text is "[" + ",".join(all pieces) + "]"; the preview covers
+    # its first `used - 1` chars (the closing bracket stands in for the comma).
+    return "[" + ",".join(parts) + "]", used - 1, len(parts)
+
+
 def _preview_slice(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
@@ -236,11 +277,17 @@ def _preview_slice(text: str, limit: int) -> str:
     return text[:limit]
 
 
-def _truncation_notice(entry: StoredToolResult, preview: str) -> str:
+def _truncation_notice(
+    entry: StoredToolResult,
+    preview: str,
+    *,
+    preview_desc: str,
+    continue_offset: int,
+) -> str:
     lines = [
-        f"[{entry.tool}] result is {entry.size_chars:,} chars; showing the first {len(preview):,}.",
+        f"[{entry.tool}] result is {entry.size_chars:,} chars; {preview_desc}.",
         (
-            f"Continue with read_result(result_id='{entry.result_id}', offset_chars={len(preview)}) "
+            f"Continue with read_result(result_id='{entry.result_id}', offset_chars={continue_offset}) "
             f"or find specific content with search_result(result_id='{entry.result_id}', pattern='...')."
         ),
         f"Clients with MCP resource support can read the full payload at {entry.uri}.",
@@ -292,7 +339,15 @@ def maybe_compact_tool_result(
         # Larger than the whole cache budget: caching would break the
         # operator-configured memory cap, so deliver the payload inline.
         return result
-    preview = _preview_slice(text, config.large_result_preview_chars)
+    budget = _preview_budget(result_type, config.large_result_preview_chars)
+    preview = _preview_slice(text, budget)
+    preview_desc = f"showing the first {len(preview):,}"
+    continue_offset = len(preview)
+    if isinstance(result, (list, tuple)):
+        item_preview = _list_preview(result, budget)
+        if item_preview is not None:
+            preview, continue_offset, shown_items = item_preview
+            preview_desc = f"showing the first {shown_items} of {item_count} items"
     metadata = {
         "tool": tool_name,
         "target": target,
@@ -309,7 +364,15 @@ def maybe_compact_tool_result(
         content=[
             # The preview must live in the text block: many clients only surface
             # `content` to the model, so structuredContent-only data is invisible.
-            TextContent(type="text", text=_truncation_notice(entry, preview)),
+            TextContent(
+                type="text",
+                text=_truncation_notice(
+                    entry,
+                    preview,
+                    preview_desc=preview_desc,
+                    continue_offset=continue_offset,
+                ),
+            ),
             ResourceLink(
                 type="resource_link",
                 name=f"{tool_name} result",

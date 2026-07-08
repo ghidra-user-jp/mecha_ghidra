@@ -258,7 +258,7 @@ Local LLMs slow down as context grows, and most of that growth comes from large 
 outputs such as decompiled code and long listings. To keep agent contexts small, tool
 results larger than a threshold are not returned inline. Instead the tool returns:
 
-- a text preview (cut at a line boundary) followed by concrete instructions for fetching the rest,
+- a preview followed by concrete instructions for fetching the rest — text payloads show their first lines (cut at a line boundary), list results show the first complete items as valid JSON,
 - a `result_id` and an MCP resource link (`ghidra://results/{result_id}`),
 - `structuredContent` metadata (`size_chars`, `mime_type`, `result_type`, `item_count`, ...).
 
@@ -276,7 +276,7 @@ Flags:
 
 - `--large-result-mode {resource,inline}` (default `resource`): `inline` restores the previous behavior of always returning full payloads.
 - `--large-result-threshold-chars N` (default `12000`): compaction threshold.
-- `--large-result-preview-chars N` (default `4000`): preview size.
+- `--large-result-preview-chars N` (default `4000`): preview budget. Text payloads use the full budget; JSON list results use a quarter of it (a few complete example items convey the schema), dicts and full `CallToolResult` dumps use half.
 - `--result-cache-max-entries N` (default `512`) / `--result-cache-max-bytes N` (default `134217728`): LRU store budget. Reading an evicted `result_id` returns an error asking to re-run the original tool.
 - `--tool-description-mode {full,short,none}` (default `full`): `tools/list` description verbosity. `short` prefers a spec's `short_description` and falls back to the first sentence. Full per-tool documentation is always available as MCP resources at `ghidra://docs/tools` and `ghidra://docs/tools/{tool_name}`.
 

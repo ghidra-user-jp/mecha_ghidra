@@ -566,6 +566,66 @@ def test_call_tool_result_with_structured_content_is_fully_serialized():
     assert stored["structuredContent"] == {"answer": 42}
 
 
+def test_preview_budget_scales_by_result_type():
+    from ghidra_mcp.presentation.result_resources import _preview_budget
+
+    # Text payloads front-load meaning and keep the full configured budget;
+    # homogeneous lists only need a few example items; dicts sit between.
+    assert _preview_budget("string", 4000) == 4000
+    assert _preview_budget("call_tool_result_text", 4000) == 4000
+    assert _preview_budget("list", 4000) == 1000
+    assert _preview_budget("dict", 4000) == 2000
+    assert _preview_budget("call_tool_result", 4000) == 2000
+
+
+def test_list_preview_shows_complete_items_as_valid_json():
+    store = ResultResourceStore(max_entries=4)
+    data = [{"name": f"fn_{i:04d}", "entry": f"0x{i:06x}"} for i in range(3000)]
+
+    result = maybe_compact_tool_result(
+        tool_name="list_functions",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(),  # preview 4000 -> list budget 1000
+        store=store,
+    )
+
+    notice = result.content[0].text
+    preview = notice.split("----- preview -----\n", 1)[1]
+    items = json.loads(preview)  # complete items, parseable as-is
+    assert 0 < len(items) < len(data)
+    assert items == data[: len(items)]
+    assert len(preview) <= 1000
+    assert f"showing the first {len(items)} of 3000 items" in notice
+
+    # The advertised continuation offset resumes exactly after the previewed
+    # items in the stored compact JSON.
+    stored = store.read_text(result.structuredContent["result_id"])
+    offset = int(notice.split("offset_chars=", 1)[1].split(")", 1)[0])
+    assert stored[:offset] + "]" == preview
+
+
+def test_list_preview_falls_back_to_prefix_when_one_item_exceeds_budget():
+    store = ResultResourceStore(max_entries=4)
+    data = [{"blob": "x" * 500} for _ in range(40)]
+
+    result = maybe_compact_tool_result(
+        tool_name="list_functions",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=1000, large_result_preview_chars=100
+        ),
+        store=store,
+    )
+
+    notice = result.content[0].text
+    preview = notice.split("----- preview -----\n", 1)[1]
+    stored = store.read_text(result.structuredContent["result_id"])
+    assert len(preview) <= 25  # list budget: a quarter of 100
+    assert preview == stored[: len(preview)]
+
+
 def test_preview_prefers_line_boundary():
     text = "line one\nline two\nline three\n"
 
