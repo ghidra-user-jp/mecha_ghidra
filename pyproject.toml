@@ -9,10 +9,10 @@ description = "PyGhidra ベースの Ghidra MCP サーバー"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2,<3",
     "mcp>=1.27.2,<2",
     "pyghidra>=2.0.0",
     "fasteners>=0.19",
+    "pydantic>=2.11,<3",
     "regex>=2024.4.16",
 ]
 
