@@ -279,7 +279,14 @@ def parse_args(argv: list[str]):
         help="Maximum total bytes of in-memory result resources retained by the MCP server.",
     )
     parser.add_argument("--log-level", default="INFO", help="Log level")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    try:
+        # Surface presentation-config range/cross-field errors as a standard
+        # argparse usage error (exit 2) instead of an unhandled traceback.
+        presentation_config_from_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def presentation_config_from_args(args) -> ToolPresentationConfig:

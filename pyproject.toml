@@ -13,6 +13,7 @@ dependencies = [
     "mcp>=1.27.2,<2",
     "pyghidra>=2.0.0",
     "fasteners>=0.19",
+    "regex>=2024.4.16",
 ]
 
 [project.scripts]

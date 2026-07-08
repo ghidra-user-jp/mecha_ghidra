@@ -17,6 +17,7 @@ from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentation
 
 
 _SHORT_DESCRIPTION_MAX_CHARS = 180
+_SENTENCE_ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no.", "al.")
 
 
 def _public_name(spec: ToolSpec, raw_key: str) -> str:
@@ -81,6 +82,56 @@ def _build_raw_args(spec: ToolSpec, bound: inspect.BoundArguments) -> tuple[dict
     return raw_args, target
 
 
+def public_parameter_names(spec: ToolSpec) -> list[str]:
+    """Return the public parameter names a client actually calls the tool with.
+
+    This is the authoritative public signature: it applies public_name_overrides
+    and includes the injected ``target`` exactly as _build_signature does, so it
+    cannot drift from the registered MCP tool.
+    """
+    return list(_build_signature(spec).parameters.keys())
+
+
+def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
+    """Return a JSON schema matching the tool's public (registered) parameters.
+
+    ``spec.input_model.model_json_schema()`` uses the raw internal field names and
+    omits the injected ``target``; publishing it verbatim makes doc-driven calls
+    fail validation. Remap property/required names through public_name_overrides
+    and inject ``target`` with the same semantics as _build_signature.
+    """
+    schema = dict(spec.input_model.model_json_schema())
+    raw_props: dict[str, Any] = schema.get("properties", {})
+    raw_required = schema.get("required", [])
+
+    properties: dict[str, Any] = {
+        _public_name(spec, raw_key): prop for raw_key, prop in raw_props.items()
+    }
+    required = [_public_name(spec, raw_key) for raw_key in raw_required]
+
+    if spec.include_target:
+        target_prop = {
+            "type": "string",
+            "title": "Target",
+            "description": "Target session name.",
+        }
+        if spec.executor_kind == ExecutorKind.CORE_COMMAND:
+            # Optional: _build_signature gives target a "default" default.
+            properties["target"] = {**target_prop, "default": "default"}
+        else:
+            # REGISTRY_METHOD / SHARED_SYNC_METHOD: target is required and leads.
+            properties = {"target": target_prop, **properties}
+            if "target" not in required:
+                required.insert(0, "target")
+
+    schema["properties"] = properties
+    if required:
+        schema["required"] = required
+    elif "required" in schema:
+        del schema["required"]
+    return schema
+
+
 def _build_callable(
     spec: ToolSpec,
     *,
@@ -132,16 +183,25 @@ def build_tool_functions(
     return tools
 
 
+def _cap_length(text: str) -> str:
+    if len(text) <= _SHORT_DESCRIPTION_MAX_CHARS:
+        return text
+    return text[: _SHORT_DESCRIPTION_MAX_CHARS - 3].rstrip() + "..."
+
+
 def _first_sentence_or_truncate(text: str) -> str:
     normalized = " ".join(text.split())
     if not normalized:
         return ""
-    sentence = re.match(r"^.*?[.!?。！？](?:\s|$)", normalized)
-    if sentence:
-        return sentence.group(0).strip()
-    if len(normalized) <= _SHORT_DESCRIPTION_MAX_CHARS:
-        return normalized
-    return normalized[: _SHORT_DESCRIPTION_MAX_CHARS - 3].rstrip() + "..."
+    # Take the first real sentence, skipping terminators that belong to a known
+    # abbreviation (so "... e.g. 0x40, ..." is not cut at "e.g."). Always cap the
+    # result so a single long sentence cannot blow past the short-mode bound.
+    for match in re.finditer(r"[.!?。！？](?:\s|$)", normalized):
+        candidate = normalized[: match.end()].strip()
+        if any(candidate.lower().endswith(abbr) for abbr in _SENTENCE_ABBREVIATIONS):
+            continue
+        return _cap_length(candidate)
+    return _cap_length(normalized)
 
 
 def select_tool_description(spec: ToolSpec, mode: ToolDescriptionMode) -> str | None:
@@ -249,6 +309,8 @@ class ToolRegistry:
 __all__ = [
     "ToolRegistry",
     "build_tool_functions",
+    "public_input_schema",
+    "public_parameter_names",
     "register_tool_functions",
     "select_tool_description",
     "tool_annotations_for_spec",

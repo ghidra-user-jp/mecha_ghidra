@@ -14,11 +14,16 @@ from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
 from ghidra_mcp.presentation.result_resources import (
     ResultResourceStore,
+    _delivered_inline_size,
     _preview_slice,
     maybe_compact_tool_result,
 )
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
-from ghidra_mcp.presentation.tool_registry import select_tool_description
+from ghidra_mcp.presentation.tool_registry import (
+    public_input_schema,
+    public_parameter_names,
+    select_tool_description,
+)
 
 
 def _run(coro):
@@ -98,6 +103,38 @@ def test_tool_description_mode_short_uses_explicit_short_description():
 
     assert tools["create_session"].description == "Open one Ghidra target session."
     assert tools["create_session"].description != base_spec.description
+
+
+def test_short_description_caps_long_single_sentence():
+    from ghidra_mcp.presentation.tool_registry import (
+        _SHORT_DESCRIPTION_MAX_CHARS,
+        _first_sentence_or_truncate,
+    )
+
+    # One sentence (terminator only at the very end), well over the cap.
+    long_sentence = "Do the thing " * 30 + "now."
+    out = _first_sentence_or_truncate(long_sentence)
+
+    assert len(out) <= _SHORT_DESCRIPTION_MAX_CHARS
+    assert out.endswith("...")
+
+
+def test_short_description_skips_abbreviations():
+    from ghidra_mcp.presentation.tool_registry import _first_sentence_or_truncate
+
+    text = "Set bytes at addr, e.g. 0x401000, using a hex string. Destructive."
+    out = _first_sentence_or_truncate(text)
+
+    assert out == "Set bytes at addr, e.g. 0x401000, using a hex string."
+
+
+def test_short_mode_never_exceeds_cap_for_any_spec():
+    from ghidra_mcp.presentation.tool_registry import _SHORT_DESCRIPTION_MAX_CHARS
+
+    for name in cli._ALL_TOOL_SPECS:
+        short = select_tool_description(get_tool_spec(name), "short")
+        if short is not None:
+            assert len(short) <= _SHORT_DESCRIPTION_MAX_CHARS, name
 
 
 def test_tool_description_mode_full_uses_existing_description():
@@ -421,6 +458,7 @@ def test_large_result_inline_mode_returns_original_payload():
         config=ToolPresentationConfig(
             large_result_mode="inline",
             large_result_threshold_chars=40,
+            large_result_preview_chars=25,
         ),
     )
 
@@ -441,7 +479,7 @@ def test_error_call_tool_result_is_not_resourceized():
         tool_name="decompile_function",
         target="fw",
         result=error_result,
-        config=ToolPresentationConfig(large_result_threshold_chars=10),
+        config=ToolPresentationConfig(large_result_threshold_chars=10, large_result_preview_chars=5),
         store=store,
     )
 
@@ -486,7 +524,7 @@ def test_call_tool_result_with_structured_content_is_fully_serialized():
         tool_name="custom_tool",
         target="fw",
         result=call_result,
-        config=ToolPresentationConfig(large_result_threshold_chars=20),
+        config=ToolPresentationConfig(large_result_threshold_chars=20, large_result_preview_chars=12),
         store=store,
     )
 
@@ -532,7 +570,7 @@ def test_store_byte_budget_evicts_oldest_but_keeps_newest():
 def test_empty_list_normalization_is_not_resourceized():
     runtime = _runtime_for_specs(
         {"list_functions": get_tool_spec("list_functions")},
-        config=ToolPresentationConfig(large_result_threshold_chars=1),
+        config=ToolPresentationConfig(large_result_threshold_chars=1, large_result_preview_chars=1),
         registry=type("EmptyRegistry", (), {"call": lambda self, command, params, target: []})(),
     )
 
@@ -588,3 +626,202 @@ def test_docs_resource_respects_profile_filtering():
 
     assert "list_targets" not in names
     assert all(get_tool_spec(name).safety_tag.value == "read_only" for name in names)
+
+
+# --- #1: doc resources must describe the public (registered) tool interface ---
+
+
+def test_tool_docs_publish_public_param_names_matching_registered_tools():
+    specs = {
+        name: get_tool_spec(name)
+        for name in ("rename_function", "search_bytes", "list_functions", "set_bytes")
+    }
+    runtime = _runtime_for_specs(specs)
+    registered = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
+
+    for name in specs:
+        detail = json.loads(
+            _run(runtime.mcp.read_resource(f"ghidra://docs/tools/{name}"))[0].content
+        )
+        doc_props = set(detail["input_schema"]["properties"])
+        real_props = set(registered[name].inputSchema["properties"])
+        # The documented schema and signature must match what the tool accepts.
+        assert doc_props == real_props, name
+        assert set(detail["public_signature"]) == real_props, name
+        assert "target" in doc_props, name
+
+
+def test_tool_docs_apply_public_name_overrides_no_raw_names_leak():
+    specs = {name: get_tool_spec(name) for name in ("rename_function", "search_bytes", "set_bytes")}
+    runtime = _runtime_for_specs(specs)
+
+    rf = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/rename_function"))[0].content)
+    rf_props = rf["input_schema"]["properties"]
+    assert {"new_name", "old_name"} <= set(rf_props)
+    assert "newName" not in rf_props and "oldName" not in rf_props
+    assert "new_name" in rf["input_schema"]["required"]
+
+    sb = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/search_bytes"))[0].content)
+    assert "pattern" in sb["input_schema"]["properties"]
+    assert "bytes" not in sb["input_schema"]["properties"]
+
+    xb = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/set_bytes"))[0].content)
+    assert "bytes_hex" in xb["input_schema"]["properties"]
+    assert "bytes" not in xb["input_schema"]["properties"]
+
+
+def test_public_input_schema_target_semantics_match_signature():
+    # CORE_COMMAND: target optional with a default; REGISTRY/SHARED_SYNC: target required.
+    core_schema = public_input_schema(get_tool_spec("rename_function"))
+    assert core_schema["properties"]["target"]["default"] == "default"
+    assert "target" not in core_schema.get("required", [])
+
+    sync_spec = get_tool_spec("get_project_sync_status")
+    sync_schema = public_input_schema(sync_spec)
+    assert "target" in sync_schema["properties"]
+    assert "target" in sync_schema["required"]
+    assert public_parameter_names(sync_spec)[0] == "target"
+
+
+# --- #3: preview must not exceed threshold (else compaction can inflate) ---
+
+
+def test_preview_larger_than_threshold_is_rejected():
+    with pytest.raises(ValueError, match="large_result_preview_chars must be <="):
+        ToolPresentationConfig(
+            large_result_threshold_chars=12000, large_result_preview_chars=20000
+        )
+    # Equal is allowed; the shipped defaults are internally consistent.
+    ToolPresentationConfig(large_result_threshold_chars=100, large_result_preview_chars=100)
+    defaults = ToolPresentationConfig()
+    assert defaults.large_result_preview_chars <= defaults.large_result_threshold_chars
+
+
+def test_cli_exits_on_preview_larger_than_threshold(capsys):
+    # #7: config errors surface as an argparse usage error (exit 2), not a traceback.
+    with pytest.raises(SystemExit) as excinfo:
+        cli.parse_args(
+            ["--large-result-threshold-chars", "100", "--large-result-preview-chars", "200"]
+        )
+    assert excinfo.value.code == 2
+    assert "large_result_preview_chars must be <=" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--large-result-threshold-chars", "0"),
+        ("--large-result-preview-chars", "-1"),
+        ("--result-cache-max-entries", "0"),
+        ("--result-cache-max-bytes", "0"),
+    ],
+)
+def test_cli_exits_on_out_of_range_numeric_flag(flag, value):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.parse_args([flag, value])
+    assert excinfo.value.code == 2
+
+
+# --- #4: compaction decision must use the delivered (indent=2) size ---
+
+
+def test_compaction_decision_uses_delivered_indent2_size():
+    data = [{"name": f"func_{i}", "addr": f"0x{i:08x}", "note": "n" * 20} for i in range(30)]
+    compact_len = len(json.dumps(data, ensure_ascii=False, default=str))
+    delivered = _delivered_inline_size(data, tool_name="list_functions")
+    # The gap is the whole point: FastMCP delivers indent=2, which is larger.
+    assert compact_len < delivered
+
+    store = ResultResourceStore(max_entries=4)
+    # Threshold sits above the compact size but below the delivered size. Measuring
+    # compact (the old bug) would send this inline over-cap; measuring delivered compacts it.
+    threshold = (compact_len + delivered) // 2
+    result = maybe_compact_tool_result(
+        tool_name="list_functions",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=threshold,
+            large_result_preview_chars=min(200, threshold),
+        ),
+        store=store,
+    )
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["truncated"] is True
+
+    # Above the delivered size: returned inline, untouched.
+    inline = maybe_compact_tool_result(
+        tool_name="list_functions",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=delivered + 100,
+            large_result_preview_chars=200,
+        ),
+        store=store,
+    )
+    assert inline is data
+
+
+# --- #2: search_result must guard against ReDoS / event-loop hangs ---
+
+
+def _decompile_result_id(runtime):
+    return runtime.tools["decompile_function"](name="main", target="fw").structuredContent["result_id"]
+
+
+def test_search_result_times_out_on_catastrophic_pattern(monkeypatch):
+    from ghidra_mcp.presentation import result_resources
+
+    monkeypatch.setattr(result_resources, "_SEARCH_TIMEOUT_SECONDS", 0.05)
+
+    class LongRunRegistry:
+        def call(self, command, params, target):  # noqa: ARG002
+            # Long alphanumeric runs occur naturally in decompiled output and are
+            # exactly what catastrophic patterns blow up on.
+            return "int main(void) {\n" + ("a" * 64 + "\n") * 4 + "}\n"
+
+    runtime = _runtime_for_specs(
+        {"decompile_function": get_tool_spec("decompile_function")},
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=40, large_result_preview_chars=25
+        ),
+        registry=LongRunRegistry(),
+    )
+    rid = _decompile_result_id(runtime)
+    # (a+)+x is deliberately absent: the regex engine optimizes single-char-class
+    # nesting and finishes it instantly, so only genuinely exponential patterns
+    # exercise the timeout.
+    for bad in [r"(a|a)+x", r"((a|a)+)+$"]:
+        with pytest.raises(ToolError, match="timed out"):
+            _run(runtime.mcp.call_tool("search_result", {"result_id": rid, "pattern": bad}))
+
+
+def test_search_result_rejects_overlong_pattern():
+    runtime = _compacted_decompile_runtime()
+    rid = _decompile_result_id(runtime)
+    with pytest.raises(ToolError, match="too long"):
+        _run(runtime.mcp.call_tool("search_result", {"result_id": rid, "pattern": "a" * 600}))
+
+
+def test_search_result_allows_normal_patterns_after_hardening():
+    runtime = _compacted_decompile_runtime()
+    rid = _decompile_result_id(runtime)
+    for good in [r"return 0;", r"return \d+;", r"int \w+\(", r"\bvoid\b"]:
+        _, found = _run(
+            runtime.mcp.call_tool("search_result", {"result_id": rid, "pattern": good})
+        )
+        assert found["match_count"] >= 1, good
+
+
+def test_search_result_allows_quantifier_patterns_on_benign_text():
+    # Safe-but-quantifier-heavy patterns (including ones a static ReDoS screen
+    # would reject, like a group quantifier followed by a whitespace quantifier)
+    # must run: the timeout, not pattern shape, is the safety boundary.
+    runtime = _compacted_decompile_runtime()
+    rid = _decompile_result_id(runtime)
+    for pattern in [r"(0x[0-9a-f]+) *=", r"(\w+) +\+=", r"(\w+\s*)+", r"(a+)+"]:
+        _, found = _run(
+            runtime.mcp.call_tool("search_result", {"result_id": rid, "pattern": pattern})
+        )
+        assert found["match_count"] >= 0, pattern

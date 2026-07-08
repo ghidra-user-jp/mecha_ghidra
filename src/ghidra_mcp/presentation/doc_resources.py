@@ -6,6 +6,8 @@ from typing import Any
 
 from ghidra_mcp.contracts.tool_spec import ToolSpec
 from ghidra_mcp.presentation.tool_registry import (
+    public_input_schema,
+    public_parameter_names,
     select_tool_description,
     tool_annotations_for_spec,
 )
@@ -46,8 +48,8 @@ def tool_docs_detail(spec: ToolSpec) -> dict[str, Any]:
         "category": _enum_value(spec.category_tag),
         "safety_tag": _enum_value(spec.safety_tag),
         "operation_level": _enum_value(spec.operation_level),
-        "public_signature": list(spec.public_signature),
-        "input_schema": spec.input_model.model_json_schema(),
+        "public_signature": public_parameter_names(spec),
+        "input_schema": public_input_schema(spec),
         "output_schema": spec.output_model.model_json_schema(),
         "annotations": _annotation_payload(spec),
         "checkout_required": spec.checkout_required,

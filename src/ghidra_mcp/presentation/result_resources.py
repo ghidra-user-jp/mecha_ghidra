@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
+
+import regex
 
 from mcp.server.fastmcp.resources import FunctionResource
 from mcp.server.fastmcp.resources.templates import ResourceTemplate
@@ -23,6 +25,23 @@ _SEARCH_CONTEXT_MAX_CHARS = 2000
 _SEARCH_MATCH_DISPLAY_MAX_CHARS = 500
 _SEARCH_MAX_MATCHES_CAP = 100
 _SEARCH_SCAN_CAP = 10_000
+_SEARCH_MAX_PATTERN_CHARS = 512
+
+# search_result runs a client-supplied regex inline on the server's event loop
+# (FastMCP calls sync tools directly, and CPython regex engines hold the GIL), so
+# a catastrophic-backtracking pattern would hang the whole server. Static pattern
+# screening cannot draw that line reliably — it both misses dangerous patterns
+# (e.g. "(a|a)+x") and rejects safe ones (e.g. "(\w+) +=") — so matching runs on
+# the third-party `regex` engine, which enforces a hard per-step timeout, plus an
+# overall scan deadline between matches.
+_SEARCH_TIMEOUT_SECONDS = 1.0
+
+
+def _validate_search_pattern(pattern: str) -> None:
+    if len(pattern) > _SEARCH_MAX_PATTERN_CHARS:
+        raise ValueError(
+            f"Search pattern too long ({len(pattern)} chars; max {_SEARCH_MAX_PATTERN_CHARS})."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +179,26 @@ def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, in
     return str(result), "text/plain", type(result).__name__, None
 
 
+def _delivered_inline_size(result: Any, *, tool_name: str) -> int:
+    """Chars FastMCP would put in context if this result were returned inline.
+
+    The compaction decision must reflect what the client actually receives.
+    FastMCP re-serializes non-string results with pydantic_core.to_json(indent=2)
+    (per item for lists), which is ~1.6-1.8x larger than compact json.dumps. We
+    still *store* the compact form (cheaper to page), but we *decide* on the
+    indent=2 size so results are not silently delivered inline over the cap.
+    """
+    if isinstance(result, str):
+        return len(result)
+    if isinstance(result, CallToolResult):
+        # FastMCP passes CallToolResult through unchanged.
+        text, *_ = _serialize_result(result, tool_name=tool_name)
+        return len(text)
+    if isinstance(result, (list, tuple)):
+        return sum(_delivered_inline_size(item, tool_name=tool_name) for item in result)
+    return len(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
 def _preview_slice(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
@@ -201,11 +240,11 @@ def maybe_compact_tool_result(
     if isinstance(result, CallToolResult):
         if result.isError or _is_normalized_empty_list_result(result):
             return result
-    text, mime_type, result_type, item_count = _serialize_result(result, tool_name=tool_name)
-    if len(text) <= config.large_result_threshold_chars:
+    if _delivered_inline_size(result, tool_name=tool_name) <= config.large_result_threshold_chars:
         return result
     if store is None:
         return result
+    text, mime_type, result_type, item_count = _serialize_result(result, tool_name=tool_name)
 
     entry = store.add(
         tool=tool_name,
@@ -325,9 +364,10 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
         max_matches: int = 20,
     ) -> dict[str, Any]:
         entry = _get_entry(store, result_id)
+        _validate_search_pattern(pattern)
         try:
-            compiled = re.compile(pattern)
-        except re.error as exc:
+            compiled = regex.compile(pattern)
+        except regex.error as exc:
             raise ValueError(f"Invalid regex pattern: {exc}") from exc
         context = max(0, min(context_chars, _SEARCH_CONTEXT_MAX_CHARS))
         shown_limit = max(1, min(max_matches, _SEARCH_MAX_MATCHES_CAP))
@@ -336,30 +376,40 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
         used_chars = 0
         match_count = 0
         scan_truncated = False
-        for found in compiled.finditer(entry.text):
-            if match_count >= _SEARCH_SCAN_CAP:
-                scan_truncated = True
-                break
-            match_count += 1
-            if len(matches) >= shown_limit or used_chars >= budget:
-                continue
-            start, end = found.span()
-            matched = found.group(0)
-            if len(matched) > _SEARCH_MATCH_DISPLAY_MAX_CHARS:
-                matched = matched[:_SEARCH_MATCH_DISPLAY_MAX_CHARS]
-            context_start = max(0, start - context)
-            context_end = min(len(entry.text), end + context)
-            context_end = min(context_end, context_start + 2 * context + _SEARCH_MATCH_DISPLAY_MAX_CHARS)
-            snippet = entry.text[context_start:context_end]
-            used_chars += len(snippet)
-            matches.append(
-                {
-                    "offset_chars": start,
-                    "match": matched,
-                    "context_offset_chars": context_start,
-                    "context": snippet,
-                }
-            )
+        # The per-step timeout bounds a single matching step; the deadline bounds
+        # the whole scan when every step is slow but succeeds.
+        deadline = time.monotonic() + _SEARCH_TIMEOUT_SECONDS
+        try:
+            for found in compiled.finditer(entry.text, timeout=_SEARCH_TIMEOUT_SECONDS):
+                if match_count >= _SEARCH_SCAN_CAP or time.monotonic() >= deadline:
+                    scan_truncated = True
+                    break
+                match_count += 1
+                if len(matches) >= shown_limit or used_chars >= budget:
+                    continue
+                start, end = found.span()
+                matched = found.group(0)
+                if len(matched) > _SEARCH_MATCH_DISPLAY_MAX_CHARS:
+                    matched = matched[:_SEARCH_MATCH_DISPLAY_MAX_CHARS]
+                context_start = max(0, start - context)
+                context_end = min(len(entry.text), end + context)
+                context_end = min(context_end, context_start + 2 * context + _SEARCH_MATCH_DISPLAY_MAX_CHARS)
+                snippet = entry.text[context_start:context_end]
+                used_chars += len(snippet)
+                matches.append(
+                    {
+                        "offset_chars": start,
+                        "match": matched,
+                        "context_offset_chars": context_start,
+                        "context": snippet,
+                    }
+                )
+        except TimeoutError as exc:
+            raise ValueError(
+                f"Search timed out after {_SEARCH_TIMEOUT_SECONDS:g}s — the pattern is "
+                "too expensive for the stored text (e.g. catastrophic backtracking). "
+                "Simplify the pattern or page through the payload with read_result."
+            ) from exc
         return {
             "result_id": entry.result_id,
             "pattern": pattern,
