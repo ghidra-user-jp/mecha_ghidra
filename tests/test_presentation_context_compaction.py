@@ -391,6 +391,18 @@ def test_read_result_clamps_limit_to_threshold():
     assert sliced["has_more"] is True
 
 
+def test_read_result_default_page_tracks_threshold():
+    runtime = _compacted_decompile_runtime()  # threshold 40 -> default page 13
+    compacted = runtime.tools["decompile_function"](name="main", target="fw")
+    meta = compacted.structuredContent
+    full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
+
+    _, page = _call_result_tool(runtime, "read_result", {"result_id": meta["result_id"]})
+
+    assert page["chunk_chars"] == 13
+    assert page["chunk"] == full_text[:13]
+
+
 def test_read_result_unknown_id_is_actionable_error():
     runtime = _compacted_decompile_runtime()
 
@@ -456,6 +468,27 @@ def test_search_result_caps_snippets_at_response_budget():
     # admitted strictly within it, so the accumulated snippet chars stay put.
     snippet_chars = [len(match["context"]) for match in found["matches"]]
     assert sum(snippet_chars[1:]) <= 40
+
+
+def test_search_result_count_only_with_zero_max_matches():
+    runtime = _compacted_decompile_runtime()
+    compacted = runtime.tools["decompile_function"](name="main", target="fw")
+
+    content, found = _call_result_tool(
+        runtime,
+        "search_result",
+        {
+            "result_id": compacted.structuredContent["result_id"],
+            "pattern": r"return 0;",
+            "max_matches": 0,
+        },
+    )
+
+    assert found["match_count"] == 20
+    assert found["matches_shown"] == 0
+    assert found["matches"] == []
+    # A count-only query costs a small constant, not snippet budget.
+    assert len(content[0].text) < 400
 
 
 def test_search_result_invalid_regex_is_error():
@@ -570,11 +603,12 @@ def test_preview_budget_scales_by_result_type():
     from ghidra_mcp.presentation.result_resources import _preview_budget
 
     # Text payloads front-load meaning and keep the full configured budget;
-    # homogeneous lists only need a few example items; dicts sit between.
+    # JSON containers only need a few example items/entries; full
+    # CallToolResult dumps sit between.
     assert _preview_budget("string", 4000) == 4000
     assert _preview_budget("call_tool_result_text", 4000) == 4000
     assert _preview_budget("list", 4000) == 1000
-    assert _preview_budget("dict", 4000) == 2000
+    assert _preview_budget("dict", 4000) == 1000
     assert _preview_budget("call_tool_result", 4000) == 2000
 
 
@@ -603,6 +637,32 @@ def test_list_preview_shows_complete_items_as_valid_json():
     stored = store.read_text(result.structuredContent["result_id"])
     offset = int(notice.split("offset_chars=", 1)[1].split(")", 1)[0])
     assert stored[:offset] + "]" == preview
+
+
+def test_dict_preview_shows_complete_entries_as_valid_json():
+    store = ResultResourceStore(max_entries=4)
+    data = {f"segment_{i:03d}": {"start": f"0x{i:06x}", "perms": "rwx"} for i in range(400)}
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(),  # preview 4000 -> dict budget 1000
+        store=store,
+    )
+
+    notice = result.content[0].text
+    preview = notice.split("----- preview -----\n", 1)[1]
+    entries = json.loads(preview)  # complete entries, parseable as-is
+    assert 0 < len(entries) < len(data)
+    assert all(data[key] == value for key, value in entries.items())
+    assert len(preview) <= 1000
+    assert f"showing the first {len(entries)} of 400 entries" in notice
+    assert result.structuredContent["item_count"] == 400
+
+    stored = store.read_text(result.structuredContent["result_id"])
+    offset = int(notice.split("offset_chars=", 1)[1].split(")", 1)[0])
+    assert stored[:offset] + "}" == preview
 
 
 def test_list_preview_falls_back_to_prefix_when_one_item_exceeds_budget():

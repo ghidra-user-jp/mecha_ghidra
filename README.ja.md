@@ -163,8 +163,8 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 
 `--large-result-mode resource`（デフォルト）のときに登録されます。
 
-- `read_result` - 保存済み大型結果のスライスを読む（`offset_chars` / `limit_chars` で `has_more` が false になるまでページング）
-- `search_result` - 保存済み大型結果を正規表現で検索。マッチ位置（`read_result` の offset にそのまま使用可）と前後コンテキストを返す
+- `read_result` - 保存済み大型結果のスライスを読む（`offset_chars` / `limit_chars` で `has_more` が false になるまでページング。`limit_chars` のデフォルトは圧縮閾値の 1/3）
+- `search_result` - 保存済み大型結果を正規表現で検索。マッチ位置（`read_result` の offset にそのまま使用可）と前後コンテキストを返す。`max_matches=0` でスニペットなしの件数のみ取得
 
 詳細な運用フローや制約事項は [利用ガイド](docs/usage.ja.md) を参照してください。
 
@@ -256,7 +256,7 @@ uv run ghidra-mcp \
 
 ローカル LLM はコンテキストが伸びるほど減速し、その主因はデコンパイル結果や長大な一覧といった大型のツール出力です。エージェントのコンテキストを小さく保つため、閾値を超えるツール結果はインラインで返さず、次の形で返します。
 
-- プレビューと、続きを取得する具体的な手順 — テキスト結果は冒頭部分（行境界で切断）、リスト結果は先頭の完全なアイテムを有効な JSON として表示
+- プレビューと、続きを取得する具体的な手順 — テキスト結果は冒頭部分（行境界で切断）、リスト・dict 結果は先頭の完全なアイテム/エントリを有効な JSON として表示
 - `result_id` と MCP resource link（`ghidra://results/{result_id}`）
 - `structuredContent` のメタデータ（`size_chars`、`mime_type`、`result_type`、`item_count` など）
 
@@ -272,7 +272,7 @@ uv run ghidra-mcp \
 
 - `--large-result-mode {resource,inline}`（デフォルト `resource`）: `inline` で従来どおり全文を返す挙動に戻せます。
 - `--large-result-threshold-chars N`（デフォルト `12000`）: 圧縮の発動閾値。
-- `--large-result-preview-chars N`（デフォルト `4000`）: プレビューの予算。テキスト結果は全額、JSON リスト結果は 1/4（数件の完全なアイテムでスキーマが伝わるため）、dict と `CallToolResult` 全体ダンプは 1/2 を使います。
+- `--large-result-preview-chars N`（デフォルト `4000`）: プレビューの予算。テキスト結果は全額、JSON リスト・dict 結果は 1/4（数件の完全なアイテム/エントリでスキーマが伝わるため）、`CallToolResult` 全体ダンプは 1/2 を使います。
 - `--result-cache-max-entries N`（デフォルト `512`）/ `--result-cache-max-bytes N`（デフォルト `134217728`）: LRU ストアの予算。破棄済み `result_id` を読むと元のツールの再実行を促すエラーを返します。
 - `--tool-description-mode {full,short,none}`（デフォルト `full`）: `tools/list` の説明文の詳細度。`short` は spec の `short_description` を優先し、なければ先頭文にフォールバックします。各ツールの完全なドキュメントは MCP resource（`ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}`）からいつでも取得できます。
 

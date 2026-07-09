@@ -194,7 +194,8 @@ def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, in
     if isinstance(result, (list, tuple)):
         return _json_text(result), "application/json", "list", len(result)
     if isinstance(result, dict):
-        return _json_text(result), "application/json", "dict", None
+        # item_count counts top-level entries, mirroring list semantics.
+        return _json_text(result), "application/json", "dict", len(result)
     return str(result), "text/plain", type(result).__name__, None
 
 
@@ -225,11 +226,12 @@ def _embedded_json_chars(text: str) -> int:
 
 # Preview budgets by result type, as fractions of the configured
 # large_result_preview_chars. Text payloads (e.g. decompiled C) front-load
-# meaning, so they get the full budget; homogeneous JSON lists only need a few
-# complete example items to convey their schema; structured dicts sit between.
+# meaning, so they get the full budget; JSON lists and dicts only need a few
+# complete example items/entries to convey their schema. Full CallToolResult
+# dumps are heterogeneous (content blocks plus metadata), so they sit between.
 _PREVIEW_BUDGET_SCALE: dict[str, float] = {
     "list": 0.25,
-    "dict": 0.5,
+    "dict": 0.25,
     "call_tool_result": 0.5,
 }
 
@@ -238,20 +240,19 @@ def _preview_budget(result_type: str, configured_chars: int) -> int:
     return int(configured_chars * _PREVIEW_BUDGET_SCALE.get(result_type, 1.0))
 
 
-def _list_preview(items, budget: int) -> tuple[str, int, int] | None:
-    """Preview the first complete items of a list result, as valid JSON.
+def _container_preview(pieces, open_char: str, close_char: str, budget: int) -> tuple[str, int, int] | None:
+    """Assemble a valid-JSON preview from pre-serialized container pieces.
 
-    Returns ``(preview, covered_chars, shown_items)`` where ``covered_chars``
+    Returns ``(preview, covered_chars, shown_pieces)`` where ``covered_chars``
     is the prefix of the stored compact JSON the preview corresponds to (the
-    read_result continuation offset), or None when not even one item fits —
+    read_result continuation offset), or None when not even one piece fits —
     callers then fall back to a plain prefix slice.
     """
     if budget <= 2:
         return None
     parts: list[str] = []
-    used = 2  # "[" and "]"
-    for item in items:
-        piece = _json_text(item)
+    used = 2  # the enclosing pair of brackets/braces
+    for piece in pieces:
         cost = len(piece) + (1 if parts else 0)
         if used + cost > budget:
             break
@@ -259,9 +260,24 @@ def _list_preview(items, budget: int) -> tuple[str, int, int] | None:
         used += cost
     if not parts:
         return None
-    # The stored text is "[" + ",".join(all pieces) + "]"; the preview covers
-    # its first `used - 1` chars (the closing bracket stands in for the comma).
-    return "[" + ",".join(parts) + "]", used - 1, len(parts)
+    # The stored text is open + ",".join(all pieces) + close; the preview
+    # covers its first `used - 1` chars (the closer stands in for the comma).
+    return open_char + ",".join(parts) + close_char, used - 1, len(parts)
+
+
+def _list_preview(items, budget: int) -> tuple[str, int, int] | None:
+    """Preview the first complete items of a list result, as valid JSON."""
+    return _container_preview((_json_text(item) for item in items), "[", "]", budget)
+
+
+def _dict_preview(mapping: dict, budget: int) -> tuple[str, int, int] | None:
+    """Preview the first complete top-level entries of a dict result.
+
+    Each piece is serialized as a single-entry object with the braces stripped,
+    so keys are stringified exactly as in the stored payload.
+    """
+    pieces = (_json_text({key: value})[1:-1] for key, value in mapping.items())
+    return _container_preview(pieces, "{", "}", budget)
 
 
 def _preview_slice(text: str, limit: int) -> str:
@@ -343,11 +359,16 @@ def maybe_compact_tool_result(
     preview = _preview_slice(text, budget)
     preview_desc = f"showing the first {len(preview):,}"
     continue_offset = len(preview)
+    container_preview = noun = None
     if isinstance(result, (list, tuple)):
-        item_preview = _list_preview(result, budget)
-        if item_preview is not None:
-            preview, continue_offset, shown_items = item_preview
-            preview_desc = f"showing the first {shown_items} of {item_count} items"
+        container_preview = _list_preview(result, budget)
+        noun = "items"
+    elif isinstance(result, dict):
+        container_preview = _dict_preview(result, budget)
+        noun = "entries"
+    if container_preview is not None:
+        preview, continue_offset, shown = container_preview
+        preview_desc = f"showing the first {shown} of {item_count} {noun}"
     metadata = {
         "tool": tool_name,
         "target": target,
@@ -446,12 +467,19 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
         description=(
             "Read a slice of a stored large tool result. Use the result_id from a "
             "truncated tool result, then page with offset_chars/limit_chars until "
-            "has_more is false."
+            "has_more is false. limit_chars defaults to a third of the server's "
+            "compaction threshold and is capped at the threshold."
         ),
     )
-    def read_result(result_id: str, offset_chars: int = 0, limit_chars: int = 4000) -> dict[str, Any]:
+    def read_result(
+        result_id: str, offset_chars: int = 0, limit_chars: int | None = None
+    ) -> dict[str, Any]:
         entry = _get_entry(store, result_id)
         offset = max(0, offset_chars)
+        # Default page: a third of the threshold, so operators tuning the
+        # threshold get a proportionate page size without a second knob.
+        if limit_chars is None:
+            limit_chars = max(1, config.large_result_threshold_chars // 3)
         # Cap slices at the compaction threshold, measured as delivered: the
         # response embeds the chunk as a JSON string, so escaping (newlines,
         # quotes) inflates its size. Trim until the embedded cost fits; the
@@ -484,7 +512,8 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
         description=(
             "Search a stored large tool result with a Python regex. Returns matches "
             "with character offsets (usable as read_result offset_chars) and "
-            "surrounding context."
+            "surrounding context. Pass max_matches=0 to count matches without "
+            "returning snippets."
         ),
     )
     def search_result(
@@ -500,7 +529,9 @@ def register_result_tools(mcp, *, store: ResultResourceStore, config: ToolPresen
         except regex.error as exc:
             raise ValueError(f"Invalid regex pattern: {exc}") from exc
         context = max(0, min(context_chars, _SEARCH_CONTEXT_MAX_CHARS))
-        shown_limit = max(1, min(max_matches, _SEARCH_MAX_MATCHES_CAP))
+        # max_matches=0 is a count-only query: scan and report match_count
+        # without spending response budget on snippets.
+        shown_limit = min(max(max_matches, 0), _SEARCH_MAX_MATCHES_CAP)
         budget = config.large_result_threshold_chars
         matches: list[dict[str, Any]] = []
         used_chars = 0
