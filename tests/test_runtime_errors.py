@@ -85,6 +85,36 @@ def test_to_domain_error_maps_add_to_version_control_required_prefix():
     }
 
 
+def test_to_domain_error_maps_checkout_unavailable_and_hijacked_program_prefixes():
+    cases = (
+        ("CHECKOUT_UNAVAILABLE: exclusive checkout refused", ErrorCode.CHECKOUT_UNAVAILABLE),
+        ("HIJACKED_PROGRAM: local file shadows repository", ErrorCode.HIJACKED_PROGRAM),
+    )
+
+    for message, expected in cases:
+        err = to_domain_error(
+            RuntimeError(message),
+            operation="checkout_project_program",
+            target="fw",
+            domain_path="/main",
+        )
+
+        assert err.code == expected
+        assert err.retryable is False
+
+
+def test_to_domain_error_maps_reopen_failure_as_non_retryable():
+    err = to_domain_error(
+        RuntimeError("REOPEN_FAILED: remote operation may already have completed"),
+        operation="commit_project_program",
+        target="fw",
+        domain_path="/main",
+    )
+
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.retryable is False
+
+
 def test_to_domain_error_maps_save_failed_prefix():
     err = to_domain_error(
         RuntimeError("SAVE_FAILED: failed to save program before close: disk full"),
@@ -152,6 +182,49 @@ def test_to_domain_error_maps_sync_status_unavailable_as_sync_failure():
         "cause_type": "RuntimeError",
         "cause_message": message,
     }
+
+
+def test_to_domain_error_marks_pre_operation_sync_refresh_failures_retryable():
+    messages = (
+        "SYNC_REFRESH_FAILED: repository refresh failed",
+        "REPOSITORY_CONNECT_FAILED: server unavailable",
+        "PROJECT_DATA_REFRESH_FAILED: repository disconnected",
+    )
+
+    for message in messages:
+        err = to_domain_error(
+            RuntimeError(message),
+            operation="checkout_project_program",
+            target="fw",
+            domain_path="/main",
+        )
+
+        assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+        assert err.retryable is True
+        assert err.details and err.details["cause_message"] == message
+
+
+def test_to_domain_error_maps_missing_program_message_prefixes():
+    cases = (
+        ("Program not found: /main", "get_project_sync_status"),
+        ("Domain file not found: /main", "delete_shared_project_file"),
+    )
+
+    for message, operation in cases:
+        err = to_domain_error(
+            RuntimeError(message),
+            operation=operation,
+            target="fw",
+            domain_path="/main",
+        )
+
+        assert err.code == ErrorCode.PROGRAM_NOT_FOUND
+        assert err.retryable is False
+        assert err.details == {
+            "operation": operation,
+            "target": "fw",
+            "domain_path": "/main",
+        }
 
 
 def test_to_domain_error_maps_project_lock_and_redacts_paths():

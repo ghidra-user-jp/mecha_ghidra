@@ -26,10 +26,11 @@
   - `dist/ghidra_*_mac_x86_64_decompiler.zip`
   - ローカル検証用の対応する `.sha256`
 - GitHub Actions の `.github/workflows/release-decompiler-natives.yml` では、release 用 Linux ARM64 decompiler overlay を native hosted runner `ubuntu-24.04-arm` 上でビルドします。upstream 公式 Ghidra 12.1.2 ZIP には `mac_arm_64` と `mac_x86_64` の decompiler binaries が含まれています。
-- tag push と GitHub release publish では、release build 完了後に release asset を公開します。手動 workflow 実行では release 公開はせず、workflow artifact としてアップロードします。
+- version tag push では Python の test/package gate と native build の完了後に GitHub release asset を公開します。手動 workflow 実行では release 公開はせず、workflow artifact としてアップロードします。同じtagを再実行した場合は、既存release notesを置換せずassetだけを更新します。
 - GitHub release へは、利用者向け ZIP asset を 2 つ publish します。
   - `ghidra_12.1.2_decompiler_natives_all.zip`: Linux ARM64 decompiler ファイルを追加済みの、そのまま使える Ghidra 12.1.2 配布物
   - `ghidra_decompiler_natives_all.zip`: 既存の Ghidra 12.1.2 install へ追加する Linux ARM64 decompiler ファイルだけの overlay ZIP
+- release tagからtest済みの `ghidra_mcp` wheel と source distribution も同じGitHub releaseへ添付します。PyPIへの公開はrelease ownerが別途実施します。
 - release overlay が追加する native decompiler path は次のとおりです。
   - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
   - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`

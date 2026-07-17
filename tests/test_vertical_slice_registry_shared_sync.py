@@ -118,6 +118,7 @@ from ghidra_mcp import cli
                 "domain_path": "/folder/app",
                 "confirm": "/folder/app",
                 "allow_private": False,
+                "allow_non_atomic_versioned_delete": False,
             },
             "fw",
         ),

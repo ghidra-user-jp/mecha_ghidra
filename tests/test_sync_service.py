@@ -107,6 +107,7 @@ class DummyRuntime:
         confirm: str,
         expected_latest_version: int | None = None,
         allow_private: bool = False,
+        allow_non_atomic_versioned_delete: bool = False,
     ):
         self.calls.append(
             (
@@ -117,6 +118,7 @@ class DummyRuntime:
                     "confirm": confirm,
                     "expected_latest_version": expected_latest_version,
                     "allow_private": allow_private,
+                    "allow_non_atomic_versioned_delete": allow_non_atomic_versioned_delete,
                 },
             )
         )

@@ -15,6 +15,9 @@ from . import java_bindings, path_utils, sync_utils
 
 logger = logging.getLogger(__name__)
 
+_VERSION_DIFF_MAX_RANGE_LIMIT = 10_000
+_VERSION_DIFF_TIMEOUT_SECONDS = 60
+
 
 class _ImportedProgramCloseError(RuntimeError):
     pass
@@ -118,6 +121,70 @@ class ProjectHandle:
 
     def get_key(self) -> tuple[str, str]:
         return self.key
+
+    def get_shared_project_url(self) -> Optional[str]:
+        """Return the server-backed project URL without changing repository state."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Project is closed")
+            is_repository_project = self.is_repository_project_from_metadata(
+                self.project_location,
+                self.project_name,
+            )
+            try:
+                project_data = self.project.getProjectData()
+                get_shared_url = getattr(project_data, "getSharedProjectURL", None)
+                if get_shared_url is None:
+                    if is_repository_project:
+                        raise RuntimeError(
+                            "SYNC_STATUS_UNAVAILABLE: ProjectData.getSharedProjectURL is unavailable"
+                        )
+                    return None
+                shared_url = get_shared_url()
+            except Exception as exc:  # noqa: BLE001
+                if str(exc).startswith("SYNC_STATUS_UNAVAILABLE:"):
+                    raise
+                raise RuntimeError(
+                    "SYNC_STATUS_UNAVAILABLE: failed to resolve shared project URL: "
+                    f"{exc}"
+                ) from exc
+            if shared_url is None:
+                if is_repository_project:
+                    raise RuntimeError(
+                        "SYNC_STATUS_UNAVAILABLE: shared project URL is unavailable"
+                    )
+                return None
+            normalized_url = str(shared_url).strip()
+            if not normalized_url:
+                if is_repository_project:
+                    raise RuntimeError(
+                        "SYNC_STATUS_UNAVAILABLE: shared project URL is empty"
+                    )
+                return None
+            return normalized_url
+
+    def get_domain_file_id(self, domain_path: str) -> Optional[str]:
+        """Return Ghidra's stable file ID for a domain file, when available."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Project is closed")
+            domain_file = self._get_domain_file_locked(domain_path)
+            get_file_id = getattr(domain_file, "getFileID", None)
+            if get_file_id is None:
+                raise RuntimeError(
+                    "SYNC_STATUS_UNAVAILABLE: DomainFile.getFileID is unavailable"
+                )
+            try:
+                file_id = get_file_id()
+            except Exception as exc:
+                raise RuntimeError(
+                    "SYNC_STATUS_UNAVAILABLE: failed to read DomainFile file ID: "
+                    f"{exc}"
+                ) from exc
+            if file_id is None:
+                return None
+            normalized_id = str(file_id).strip()
+            return normalized_id or None
 
     def open_program(self, domain_path: Optional[str] = None) -> ProgramSession:
         with self._lock:
@@ -281,6 +348,10 @@ class ProjectHandle:
             normalized_range_limit = int(range_limit)
             if normalized_range_limit < 0:
                 raise ValueError("range_limit must be >= 0")
+            if normalized_range_limit > _VERSION_DIFF_MAX_RANGE_LIMIT:
+                raise ValueError(
+                    f"range_limit must be <= {_VERSION_DIFF_MAX_RANGE_LIMIT}"
+                )
 
             domain_file = self._get_domain_file_locked(domain_path)
             if not bool(sync_utils._required_call(domain_file, "isVersioned")):
@@ -311,55 +382,82 @@ class ProjectHandle:
             if source_version == target_version:
                 return result
 
-            monitor = java_bindings._console_monitor()
-            from_consumer = java_bindings._java_object()
-            to_consumer = java_bindings._java_object()
+            monitor = java_bindings._timeout_task_monitor(
+                timeout_seconds=_VERSION_DIFF_TIMEOUT_SECONDS
+            )
+            from_consumer = None
+            to_consumer = None
             from_program = None
             to_program = None
             try:
-                from_program = domain_file.getReadOnlyDomainObject(from_consumer, source_version, monitor)
-                to_program = domain_file.getReadOnlyDomainObject(to_consumer, target_version, monitor)
-                if from_program is None or to_program is None:
-                    raise RuntimeError(
-                        f"VERSION_LOAD_FAILED: failed to open version {source_version} or {target_version}"
-                    )
-                program_diff = java_bindings._program_diff_class()(from_program, to_program)
-                differences = program_diff.getDifferences(monitor)
+                try:
+                    from_consumer = java_bindings._java_object()
+                    to_consumer = java_bindings._java_object()
+                    from_program = domain_file.getReadOnlyDomainObject(from_consumer, source_version, monitor)
+                    to_program = domain_file.getReadOnlyDomainObject(to_consumer, target_version, monitor)
+                    if from_program is None or to_program is None:
+                        raise RuntimeError(
+                            f"VERSION_LOAD_FAILED: failed to open version {source_version} or {target_version}"
+                        )
+                    program_diff = java_bindings._program_diff_class()(from_program, to_program)
+                    differences = program_diff.getDifferences(monitor)
 
-                type_counts = sync_utils._collect_diff_type_counts(program_diff, differences, monitor)
-                ranges, truncated = sync_utils._collect_diff_ranges(differences, limit=normalized_range_limit)
-                warnings = program_diff.getWarnings()
-                result.update(
-                    {
-                        "total_diff_addresses": int(differences.getNumAddresses()) if differences is not None else 0,
-                        "total_diff_ranges": int(differences.getNumAddressRanges()) if differences is not None else 0,
-                        "diff_types": type_counts,
-                        "ranges": ranges,
-                        "ranges_truncated": truncated,
-                        "warnings": None if warnings is None else str(warnings),
-                    }
-                )
+                    type_counts = sync_utils._collect_diff_type_counts(program_diff, differences, monitor)
+                    ranges, truncated = sync_utils._collect_diff_ranges(differences, limit=normalized_range_limit)
+                    warnings = program_diff.getWarnings()
+                    result.update(
+                        {
+                            "total_diff_addresses": int(differences.getNumAddresses()) if differences is not None else 0,
+                            "total_diff_ranges": int(differences.getNumAddressRanges()) if differences is not None else 0,
+                            "diff_types": type_counts,
+                            "ranges": ranges,
+                            "ranges_truncated": truncated,
+                            "warnings": None if warnings is None else str(warnings),
+                        }
+                    )
+                except Exception as exc:
+                    if bool(monitor.didTimeout()):
+                        raise RuntimeError(
+                            "VERSION_DIFF_TIMEOUT: version diff exceeded "
+                            f"{_VERSION_DIFF_TIMEOUT_SECONDS} seconds"
+                        ) from exc
+                    raise
+                if bool(monitor.didTimeout()):
+                    raise RuntimeError(
+                        "VERSION_DIFF_TIMEOUT: version diff exceeded "
+                        f"{_VERSION_DIFF_TIMEOUT_SECONDS} seconds"
+                    )
                 return result
             finally:
                 sync_utils._release_domain_object(from_program, from_consumer)
                 sync_utils._release_domain_object(to_program, to_consumer)
+                try:
+                    monitor.finished()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("failed to finish version diff timeout monitor: %s", exc)
 
     def refresh_project_data(self, *, force: bool = True) -> None:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is closed")
-            self._ensure_repository_connected_locked(required=False)
             self._refresh_project_data_locked(force=force)
 
     def _refresh_project_data_locked(self, *, force: bool = True) -> None:
+        repository_connected = self._ensure_repository_connected_locked(required=True)
         data = self.project.getProjectData()
         refresh = getattr(data, "refresh", None)
         if refresh is None:
+            if repository_connected:
+                raise RuntimeError(
+                    "PROJECT_DATA_REFRESH_FAILED: shared ProjectData.refresh is unavailable"
+                )
             return
         try:
             refresh(bool(force))
         except Exception as exc:
             raise RuntimeError(f"PROJECT_DATA_REFRESH_FAILED: failed to refresh project data: {exc}") from exc
+        if repository_connected:
+            self._verify_repository_connected_after_refresh_locked()
 
     def checkout_program(self, domain_path: str, *, exclusive: bool = False) -> bool:
         with self._lock:
@@ -565,6 +663,7 @@ class ProjectHandle:
         if domain_file is None:
             raise RuntimeError(f"Domain file not found: {domain_path}")
         content_type = None
+        was_hijacked = bool(sync_utils._safe_call(domain_file, "isHijacked"))
         try:
             content_type = domain_file.getContentType()
         except Exception as exc:
@@ -576,10 +675,44 @@ class ProjectHandle:
         try:
             self._refresh_project_data_locked(force=True)
         except Exception as exc:
-            logger.debug("failed to refresh project data after domain file delete: %s", exc)
+            raise RuntimeError(
+                "DELETE_POSTCONDITION_FAILED: domain file delete returned, but project data "
+                f"refresh failed for {domain_path}: {exc}"
+            ) from exc
+        try:
+            remaining_file = self.project.getProjectData().getFile(domain_path)
+        except Exception as exc:
+            raise RuntimeError(
+                "DELETE_POSTCONDITION_FAILED: domain file delete returned, but path absence "
+                f"could not be verified for {domain_path}: {exc}"
+            ) from exc
+        if remaining_file is None and was_hijacked:
+            raise RuntimeError(
+                "DELETE_POSTCONDITION_FAILED: hijacked shadow was deleted, but the repository "
+                f"file was not revealed: {domain_path}"
+            )
+        if remaining_file is not None:
+            if not was_hijacked:
+                raise RuntimeError(
+                    "DELETE_POSTCONDITION_FAILED: domain file delete returned, but the path still "
+                    f"exists: {domain_path}"
+                )
+            try:
+                revealed_status = sync_utils._sync_status_from_domain_file(remaining_file)
+            except Exception as exc:
+                raise RuntimeError(
+                    "DELETE_POSTCONDITION_FAILED: hijacked shadow was deleted, but the revealed "
+                    f"repository state could not be verified for {domain_path}: {exc}"
+                ) from exc
+            if revealed_status.get("is_hijacked") or not revealed_status.get("is_versioned"):
+                raise RuntimeError(
+                    "DELETE_POSTCONDITION_FAILED: hijacked shadow was deleted, but a versioned "
+                    f"repository file was not revealed: {domain_path}"
+                )
         return {
             "domain_path": domain_path,
             "content_type": None if content_type is None else str(content_type),
+            "deleted_verified": True,
         }
 
     def _delete_program_locked(self, domain_path: str) -> None:
@@ -632,12 +765,26 @@ class ProjectHandle:
         if is_connected is None:
             return True
         try:
-            if bool(is_connected()):
-                return True
+            connected = bool(is_connected())
         except Exception as exc:
             raise RuntimeError(
                 f"REPOSITORY_CONNECT_FAILED: failed to query repository connection state: {exc}"
             ) from exc
+        if connected:
+            verify_connection = getattr(repository, "verifyConnection", None)
+            if verify_connection is None:
+                return True
+            try:
+                verified = bool(verify_connection())
+            except Exception as exc:
+                raise RuntimeError(
+                    f"REPOSITORY_CONNECT_FAILED: failed to verify repository connection: {exc}"
+                ) from exc
+            if verified:
+                return True
+            raise RuntimeError(
+                "REPOSITORY_CONNECT_FAILED: repository connection verification failed"
+            )
 
         connect = getattr(repository, "connect", None)
         if connect is None:
@@ -655,6 +802,41 @@ class ProjectHandle:
         if not connected:
             raise RuntimeError("REPOSITORY_CONNECT_FAILED: repository is not connected after connect()")
         return True
+
+    def _verify_repository_connected_after_refresh_locked(self) -> None:
+        repository = self._get_repository_adapter_locked()
+        if repository is None:
+            raise RuntimeError(
+                "PROJECT_DATA_REFRESH_FAILED: repository adapter became unavailable during refresh"
+            )
+        is_connected = getattr(repository, "isConnected", None)
+        if is_connected is None:
+            return
+        try:
+            connected = bool(is_connected())
+        except Exception as exc:
+            raise RuntimeError(
+                "PROJECT_DATA_REFRESH_FAILED: failed to verify repository connection after refresh: "
+                f"{exc}"
+            ) from exc
+        if not connected:
+            raise RuntimeError(
+                "PROJECT_DATA_REFRESH_FAILED: repository disconnected during project data refresh"
+            )
+        verify_connection = getattr(repository, "verifyConnection", None)
+        if verify_connection is None:
+            return
+        try:
+            verified = bool(verify_connection())
+        except Exception as exc:
+            raise RuntimeError(
+                "PROJECT_DATA_REFRESH_FAILED: failed to verify repository connection after refresh: "
+                f"{exc}"
+            ) from exc
+        if not verified:
+            raise RuntimeError(
+                "PROJECT_DATA_REFRESH_FAILED: repository connection verification failed after refresh"
+            )
 
     def _get_repository_adapter_locked(self):
         project = None

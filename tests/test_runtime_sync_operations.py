@@ -227,6 +227,8 @@ class _FakeHandle:
         self._status["modified_since_checkout"] = False
         self._status["can_merge"] = False
         self._status["is_latest_version"] = True
+        if self._status.get("latest_version") is not None:
+            self._status["version"] = self._status["latest_version"]
 
     def terminate_checkout_program(self, domain_path: str, checkout_id: int):  # noqa: ARG002
         return None
@@ -319,6 +321,294 @@ class _FailingRefreshHandle(_FakeHandle):
         raise RuntimeError("repository refresh failed")
 
 
+class _CheckoutRefusedHandle(_FakeHandle):
+    def checkout_program(self, domain_path: str, *, exclusive: bool = False):  # noqa: ARG002
+        self.checkout_calls += 1
+        return False
+
+
+class _SharedIdentityHandle(_FakeHandle):
+    def __init__(
+        self,
+        project_location: str,
+        project_name: str,
+        *,
+        shared_url: str = "ghidra://localhost/mecha_sync_test",
+        file_id: str = "shared-file-id-main",
+    ) -> None:
+        super().__init__(project_location, project_name)
+        self._shared_url = shared_url
+        self._file_id = file_id
+
+    def get_shared_project_url(self) -> str:
+        return self._shared_url
+
+    def get_domain_file_id(self, domain_path: str) -> str:
+        assert domain_path == "/main"
+        return self._file_id
+
+
+class _VersionedDomainFile(_FakeDomainFile):
+    def __init__(self, path: str, version: int) -> None:
+        super().__init__(path)
+        self._version = version
+
+    def getVersion(self) -> int:
+        return self._version
+
+
+class _VersionedProgram(_FakeProgram):
+    def __init__(self, path: str, version: int) -> None:
+        super().__init__(path)
+        self._version = version
+
+    def getDomainFile(self):
+        return _VersionedDomainFile(self._path, self._version)
+
+
+class _VersionedSession(_FakeSession):
+    def __init__(self, handle, path: str, version: int | None = None):  # noqa: ANN001
+        super().__init__(handle, path)
+        self._version = int(version if version is not None else handle.loaded_version)
+
+    def get_program(self):
+        return _VersionedProgram(self._path, self._version)
+
+
+class _RemoteAdvanceHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.loaded_version = 1
+        self.open_program_calls = 0
+
+    def refresh_project_data(self, *, force: bool = True):  # noqa: ARG002
+        super().refresh_project_data(force=force)
+        self._status.update(
+            {
+                "version": 2,
+                "latest_version": 2,
+                "is_latest_version": True,
+            }
+        )
+
+    def open_program(self, domain_path: str):
+        self.open_program_calls += 1
+        self.loaded_version = int(self._status["version"])
+        return _VersionedSession(self, domain_path)
+
+
+class _HijackedRecoveryHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self._status.update(
+            {
+                "is_versioned": False,
+                "is_hijacked": True,
+                "can_add_to_repository": False,
+                "can_checkout": False,
+                "can_checkin": False,
+                "version": None,
+                "latest_version": None,
+                "is_latest_version": None,
+            }
+        )
+        self.discarded_hijacks = 0
+
+    def delete_domain_file(self, domain_path: str):
+        self.discarded_hijacks += 1
+        self._status.update(
+            {
+                "is_versioned": True,
+                "is_hijacked": False,
+                "can_checkout": True,
+                "version": 4,
+                "latest_version": 4,
+                "is_latest_version": True,
+            }
+        )
+        return {"domain_path": domain_path, "content_type": "Program"}
+
+
+class _FailPostCheckoutStatusHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.fail_status = False
+
+    def get_sync_status(self, domain_path: str):  # noqa: ARG002
+        if self.fail_status:
+            raise RuntimeError("repository disconnected after checkout")
+        return super().get_sync_status(domain_path)
+
+    def checkout_program(self, domain_path: str, *, exclusive: bool = False):
+        result = super().checkout_program(domain_path, exclusive=exclusive)
+        self.fail_status = True
+        return result
+
+
+class _FailPostCommitStatusHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.fail_status = False
+        self._status.update(
+            {
+                "is_checked_out": True,
+                "modified_since_checkout": True,
+                "can_checkin": True,
+            }
+        )
+
+    def get_sync_status(self, domain_path: str):  # noqa: ARG002
+        if self.fail_status:
+            raise RuntimeError("repository disconnected after commit")
+        return super().get_sync_status(domain_path)
+
+    def commit_program(self, domain_path: str, message: str, *, keep_checked_out: bool = False):
+        super().commit_program(domain_path, message, keep_checked_out=keep_checked_out)
+        self.fail_status = True
+
+
+class _FailCommitPrecheckRefreshHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.commit_calls = 0
+        self._status.update(
+            {
+                "is_checked_out": True,
+                "modified_since_checkout": True,
+                "can_checkin": True,
+            }
+        )
+
+    def refresh_project_data(self, *, force: bool = True):  # noqa: ARG002
+        self.refresh_project_data_calls += 1
+        if self.refresh_project_data_calls == 2:
+            raise RuntimeError("repository disconnected before commit")
+
+    def commit_program(self, domain_path: str, message: str, *, keep_checked_out: bool = False):
+        self.commit_calls += 1
+        return super().commit_program(
+            domain_path,
+            message,
+            keep_checked_out=keep_checked_out,
+        )
+
+
+class _FailPullNoopRefreshHandle(_FakeHandle):
+    def refresh_project_data(self, *, force: bool = True):  # noqa: ARG002
+        self.refresh_project_data_calls += 1
+        if self.refresh_project_data_calls == 2:
+            raise RuntimeError("repository disconnected during no-op pull")
+
+
+class _FailPostUndoStatusHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.fail_status = False
+        self._status.update(
+            {
+                "is_checked_out": True,
+                "modified_since_checkout": True,
+            }
+        )
+
+    def get_sync_status(self, domain_path: str):  # noqa: ARG002
+        if self.fail_status:
+            raise RuntimeError("repository disconnected after undo checkout")
+        return super().get_sync_status(domain_path)
+
+    def undo_checkout_program(self, domain_path: str, *, keep: bool = False):
+        super().undo_checkout_program(domain_path, keep=keep)
+        self.fail_status = True
+
+
+class _StaleAfterUndoHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self._status.update(
+            {
+                "is_checked_out": True,
+                "modified_since_checkout": True,
+                "version": 1,
+                "latest_version": 2,
+                "is_latest_version": False,
+            }
+        )
+
+    def undo_checkout_program(self, domain_path: str, *, keep: bool = False):
+        super().undo_checkout_program(domain_path, keep=keep)
+        self._status.update(
+            {
+                "version": 1,
+                "latest_version": 2,
+                "is_latest_version": False,
+            }
+        )
+
+
+class _MergeStateAfterUndoHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self._status.update(
+            {
+                "is_checked_out": True,
+                "can_merge": True,
+                "version": 1,
+                "latest_version": 2,
+                "is_latest_version": False,
+            }
+        )
+
+    def undo_checkout_program(self, domain_path: str, *, keep: bool = False):
+        super().undo_checkout_program(domain_path, keep=keep)
+        self._status.update(
+            {
+                "is_checked_out": False,
+                "can_merge": True,
+                "version": 1,
+                "latest_version": 2,
+                "is_latest_version": False,
+            }
+        )
+
+
+class _CheckoutStateAfterUndoHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self._status.update(
+            {
+                "is_checked_out": True,
+                "can_merge": True,
+                "version": 1,
+                "latest_version": 2,
+                "is_latest_version": False,
+            }
+        )
+
+    def undo_checkout_program(self, domain_path: str, *, keep: bool = False):
+        super().undo_checkout_program(domain_path, keep=keep)
+        self._status.update(
+            {
+                "is_checked_out": True,
+                "can_merge": False,
+                "version": 2,
+                "latest_version": 2,
+                "is_latest_version": True,
+            }
+        )
+
+
+class _PersistentlyStaleHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self._status.update(
+            {
+                "version": 1,
+                "latest_version": 2,
+                "is_latest_version": False,
+            }
+        )
+
+
 class _UnversionedAddableHandle(_FakeHandle):
     def __init__(self, project_location: str, project_name: str) -> None:
         super().__init__(project_location, project_name)
@@ -353,6 +643,25 @@ class _UnversionedAddableHandle(_FakeHandle):
                 "is_latest_version": True,
             }
         )
+
+
+class _FailPostAddStatusHandle(_UnversionedAddableHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.fail_status = False
+
+    def get_sync_status(self, domain_path: str):  # noqa: ARG002
+        if self.fail_status:
+            raise RuntimeError("repository disconnected after add")
+        return super().get_sync_status(domain_path)
+
+    def add_program_to_version_control(self, domain_path: str, comment: str, *, keep_checked_out: bool = False):
+        super().add_program_to_version_control(
+            domain_path,
+            comment,
+            keep_checked_out=keep_checked_out,
+        )
+        self.fail_status = True
 
 
 class _ExternallyVersionedOnReopenHandle(_UnversionedAddableHandle):
@@ -418,6 +727,7 @@ class _UndoKeepHandle(_FakeHandle):
         self.program_reports_changed = False
         self.saved_before_keep = False
         self.kept_local_changes = False
+        self.undo_keep_values: list[bool] = []
 
     def mark_active_change(self) -> None:
         self._status["is_checked_out"] = True
@@ -427,9 +737,17 @@ class _UndoKeepHandle(_FakeHandle):
         self.kept_local_changes = False
 
     def undo_checkout_program(self, domain_path: str, *, keep: bool = False):  # noqa: ARG002
+        was_modified_since_checkout = bool(self._status.get("modified_since_checkout"))
+        self.undo_keep_values.append(bool(keep))
         super().undo_checkout_program(domain_path, keep=keep)
         self._status["is_checked_out"] = False
-        self.kept_local_changes = bool(keep and self.saved_before_keep and self.active_program_changed)
+        self.kept_local_changes = bool(
+            keep
+            and (
+                was_modified_since_checkout
+                or (self.saved_before_keep and self.active_program_changed)
+            )
+        )
         self.active_program_changed = False
         self.program_reports_changed = False
 
@@ -469,6 +787,11 @@ class _TerminateCheckoutHandle(_FakeHandle):
 
     def terminate_checkout_program(self, domain_path: str, checkout_id: int):  # noqa: ARG002
         self.terminated_checkout_ids.append(int(checkout_id))
+        self._status["checkouts"] = [
+            item
+            for item in self._status.get("checkouts", [])
+            if int(item.get("checkout_id")) != int(checkout_id)
+        ]
         if int(checkout_id) == 7:
             self.needs_reopen_after_terminate = True
             self._status.update(
@@ -505,6 +828,21 @@ class _TerminateCheckoutHandle(_FakeHandle):
                 }
             )
         return _FakeSession(self, domain_path)
+
+
+class _FailPostTerminateStatusHandle(_TerminateCheckoutHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.fail_status = False
+
+    def get_sync_status(self, domain_path: str):  # noqa: ARG002
+        if self.fail_status:
+            raise RuntimeError("repository disconnected after terminate")
+        return super().get_sync_status(domain_path)
+
+    def terminate_checkout_program(self, domain_path: str, checkout_id: int):
+        self.terminated_checkout_ids.append(int(checkout_id))
+        self.fail_status = True
 
 
 class _CleanCheckedOutHandle(_FakeHandle):
@@ -597,6 +935,274 @@ def _build_sync_runtime(
     store.target_projects["fw"] = handle.get_key()
     store.project_handles[handle.get_key()] = handle
     return RuntimeSyncOperations(store=store), store, core, handle
+
+
+@pytest.mark.parametrize(
+    ("handle_cls", "operation", "expected_operation"),
+    [
+        (
+            _FailPostCheckoutStatusHandle,
+            lambda sync: sync.checkout_project_program("fw", domain_path="/main"),
+            "checkout_project_program",
+        ),
+        (
+            _FailPostAddStatusHandle,
+            lambda sync: sync.add_project_program_to_version_control("fw", "initial", domain_path="/main"),
+            "add_project_program_to_version_control",
+        ),
+        (
+            _FailPostCommitStatusHandle,
+            lambda sync: sync.commit_project_program(
+                "fw",
+                "change",
+                auto_checkout=False,
+                domain_path="/main",
+            ),
+            "commit_project_program",
+        ),
+        (
+            _FailPostUndoStatusHandle,
+            lambda sync: sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main"),
+            "pull_project_program.discard_local_changes",
+        ),
+        (
+            _FailPostUndoStatusHandle,
+            lambda sync: sync.undo_checkout_project_program("fw", domain_path="/main"),
+            "undo_checkout_project_program",
+        ),
+        (
+            _FailPostTerminateStatusHandle,
+            lambda sync: sync.terminate_project_program_checkout("fw", checkout_id=4, domain_path="/main"),
+            "terminate_project_program_checkout",
+        ),
+    ],
+)
+def test_sync_side_effect_postcondition_failure_is_non_retryable_partial_success(
+    monkeypatch: pytest.MonkeyPatch,
+    handle_cls,
+    operation,
+    expected_operation: str,
+):
+    sync, _store, _core, _handle = _build_sync_runtime(monkeypatch, handle_cls=handle_cls)
+
+    with pytest.raises(DomainError) as exc_info:
+        operation(sync)
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": expected_operation,
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_commit_precheck_refresh_failure_is_not_reported_as_completed_commit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_FailCommitPrecheckRefreshHandle,
+    )
+    assert isinstance(handle, _FailCommitPrecheckRefreshHandle)
+
+    with pytest.raises(RuntimeError, match="repository disconnected before commit") as exc_info:
+        sync.commit_project_program(
+            "fw",
+            "change",
+            auto_checkout=False,
+            domain_path="/main",
+        )
+
+    assert not isinstance(exc_info.value, DomainError)
+    assert handle.commit_calls == 0
+
+
+def test_checkout_postcondition_requires_successful_repository_refresh(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+
+    def refresh_project_data(*, force: bool = True):  # noqa: ARG001
+        handle.refresh_project_data_calls += 1
+        if handle.checkout_calls:
+            raise RuntimeError("repository disconnected after checkout")
+
+    monkeypatch.setattr(handle, "refresh_project_data", refresh_project_data)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.checkout_project_program("fw", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "checkout_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.refresh_project_data_calls == 2
+
+
+def test_auto_checkout_postcondition_mismatch_is_partial_success(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    monkeypatch.setattr(handle, "checkout_program", lambda *_args, **_kwargs: True)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "commit_project_program.auto_checkout",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_auto_checkout_rollback_postcondition_mismatch_is_partial_success(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_ExternallyVersionedOnReopenHandle,
+    )
+    monkeypatch.setattr(handle, "undo_checkout_program", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "commit_project_program.rollback_auto_checkout",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_add_postcondition_rejects_success_without_versioned_state(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_UnversionedAddableHandle,
+    )
+    monkeypatch.setattr(handle, "add_program_to_version_control", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.add_project_program_to_version_control("fw", "initial", domain_path="/main")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "add_project_program_to_version_control",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_commit_postcondition_rejects_success_without_version_advance(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_checked_out": True,
+            "modified_since_checkout": True,
+            "can_checkin": True,
+        }
+    )
+    monkeypatch.setattr(handle, "commit_program", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=False, domain_path="/main")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "commit_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_undo_postcondition_rejects_success_while_still_checked_out(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status["is_checked_out"] = True  # noqa: SLF001
+    monkeypatch.setattr(handle, "undo_checkout_program", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.undo_checkout_project_program("fw", domain_path="/main")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "undo_checkout_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_terminate_postcondition_rejects_success_while_checkout_id_remains(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_TerminateCheckoutHandle,
+    )
+    store.sessions.pop("fw")
+    monkeypatch.setattr(
+        handle,
+        "terminate_checkout_program",
+        lambda _domain_path, checkout_id: handle.terminated_checkout_ids.append(int(checkout_id)),
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.terminate_project_program_checkout("fw", checkout_id=4, domain_path="/main")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "terminate_project_program_checkout",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_delete_postcondition_rejects_unverified_path_removal(monkeypatch: pytest.MonkeyPatch):
+    sync, store, _core, handle = _build_sync_runtime(monkeypatch)
+    store.sessions.pop("fw")
+    monkeypatch.setattr(
+        handle,
+        "delete_domain_file",
+        lambda domain_path: {
+            "domain_path": domain_path,
+            "content_type": "Program",
+            "deleted_verified": False,
+        },
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.delete_shared_project_file(
+            "fw",
+            domain_path="/main",
+            confirm="/main",
+            expected_latest_version=1,
+            allow_non_atomic_versioned_delete=True,
+        )
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "delete_shared_project_file",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_pull_noop_refresh_failure_is_not_reported_as_completed_operation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_FailPullNoopRefreshHandle,
+    )
+    assert isinstance(handle, _FailPullNoopRefreshHandle)
+    store.sessions.pop("fw")
+
+    with pytest.raises(RuntimeError, match="repository disconnected during no-op pull") as exc_info:
+        sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+    assert not isinstance(exc_info.value, DomainError)
 
 
 def test_pull_abort_on_local_changes(monkeypatch: pytest.MonkeyPatch):
@@ -736,6 +1342,31 @@ def test_add_to_version_control_reopen_failure_exposes_none_result_completion(mo
     assert core.removed == ["fw"]
 
 
+def test_partial_operation_error_survives_a_second_reopen_failure(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_FailPostUndoStatusHandle,
+        session_cls=_ClosingSession,
+    )
+    handle.fail_reopen = True
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.REOPEN_FAILED
+    assert err.retryable is False
+    assert err.details is not None
+    assert err.details["operation"] == "pull_project_program.discard_local_changes"
+    assert err.details["operation_completed"] is True
+    assert err.details["partial_success"] is True
+    assert "repository disconnected after undo checkout" in err.details["operation_error"]
+    assert handle.undo_checkout_calls == 1
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
+    assert "fw" not in store.sessions
+    assert core.removed == ["fw"]
+
+
 def test_pull_abort_unsaved_active_changes_does_not_try_to_save(monkeypatch: pytest.MonkeyPatch):
     sync, _store, _core, handle = _build_sync_runtime(
         monkeypatch,
@@ -787,6 +1418,199 @@ def test_pull_follows_latest_by_dropping_stale_checkout_instead_of_merging(monke
     assert handle._status["can_merge"] is False  # noqa: SLF001
 
 
+def test_pull_discard_reports_following_latest_when_local_changes_and_remote_advance_coexist(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_checked_out": True,
+            "modified_since_checkout": True,
+            "can_merge": True,
+            "is_latest_version": False,
+            "latest_version": 2,
+        }
+    )
+
+    result = sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    assert result["discarded_local_changes"] is True
+    assert result["followed_latest"] is True
+    assert result["updated"] is True
+    assert handle.undo_checkout_calls == 1
+
+
+def test_pull_discard_fails_closed_when_undo_does_not_follow_latest(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_StaleAfterUndoHandle,
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "pull_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.undo_checkout_calls == 1
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "handle_cls",
+    [_MergeStateAfterUndoHandle, _CheckoutStateAfterUndoHandle],
+)
+def test_pull_fails_closed_when_checkout_drop_postcondition_remains_active(
+    monkeypatch: pytest.MonkeyPatch,
+    handle_cls,
+):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=handle_cls,
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "pull_project_program.follow_latest",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.undo_checkout_calls == 1
+
+
+def test_pull_discard_local_changes_preserves_partial_when_merge_state_remains(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_MergeStateAfterUndoHandle,
+    )
+    handle._status["modified_since_checkout"] = True  # noqa: SLF001
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    assert exc_info.value.details == {
+        "operation": "pull_project_program.discard_local_changes",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.undo_checkout_calls == 1
+
+
+def test_pull_clean_reload_fails_closed_when_program_remains_stale(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, _handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_PersistentlyStaleHandle,
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+    assert exc_info.value.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert exc_info.value.details == {
+        "operation": "pull_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+def test_pull_unloaded_noop_stale_state_is_retryable_precondition_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, _handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_PersistentlyStaleHandle,
+    )
+    store.sessions.pop("fw")
+
+    with pytest.raises(DomainError, match="FOLLOW_LATEST_FAILED") as exc_info:
+        sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is True
+    assert err.details == {
+        "operation": "pull_project_program",
+        "operation_completed": False,
+        "partial_success": False,
+    }
+
+
+def test_pull_reopens_clean_unchecked_out_program_after_remote_version_advance(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_RemoteAdvanceHandle,
+        session_cls=_VersionedSession,
+    )
+    assert isinstance(handle, _RemoteAdvanceHandle)
+    original_session = store.sessions["fw"]
+
+    result = sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+    assert result["status"] == "ok"
+    assert result["updated"] is True
+    assert result["followed_latest"] is True
+    assert result["reloaded"] is True
+    assert result["version"] == 2
+    assert handle.open_program_calls == 1
+    assert store.sessions["fw"] is not original_session
+    assert store.sessions["fw"].get_program().getDomainFile().getVersion() == 2
+    assert core.initialized and core.initialized[-1][1] == "fw"
+
+
+def test_pull_hijacked_program_aborts_without_explicit_discard(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_HijackedRecoveryHandle,
+    )
+    assert isinstance(handle, _HijackedRecoveryHandle)
+
+    with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
+        sync.pull_project_program("fw", on_local_changes="abort", domain_path="/main")
+
+    assert handle.discarded_hijacks == 0
+
+
+def test_pull_hijacked_program_discards_local_shadow_and_reopens_repository_version(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_HijackedRecoveryHandle,
+    )
+    assert isinstance(handle, _HijackedRecoveryHandle)
+    original_session = store.sessions["fw"]
+
+    result = sync.pull_project_program("fw", on_local_changes="discard", domain_path="/main")
+
+    assert result["status"] == "ok"
+    assert result["updated"] is True
+    assert result["discarded_hijacked_file"] is True
+    assert result["discarded_local_changes"] is True
+    assert result["followed_latest"] is True
+    assert result["version"] == 4
+    assert handle.discarded_hijacks == 1
+    assert store.sessions["fw"] is not original_session
+    assert core.initialized and core.initialized[-1][1] == "fw"
+
+
 def test_pull_rejects_unsafe_merge_when_merge_is_required_without_checkout(monkeypatch: pytest.MonkeyPatch):
     sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
     handle._status["is_checked_out"] = False  # noqa: SLF001
@@ -810,6 +1634,33 @@ def test_commit_aborts_on_conflict_by_default(monkeypatch: pytest.MonkeyPatch):
 
     assert handle.undo_checkout_calls == 0
     assert handle.merge_calls == 0
+
+
+def test_commit_rolls_back_auto_checkout_when_conflict_is_detected(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_checked_out": False,
+            "can_checkout": True,
+            "can_merge": True,
+            "is_latest_version": False,
+            "latest_version": 2,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="UNSAFE_MERGE_REQUIRED"):
+        sync.commit_project_program(
+            "fw",
+            "rename functions",
+            auto_checkout=True,
+            domain_path="/main",
+        )
+
+    assert handle.checkout_calls == 1
+    assert handle.undo_checkout_calls == 1
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
 
 
 def test_commit_abort_on_conflict_does_not_save_unsaved_active_changes(monkeypatch: pytest.MonkeyPatch):
@@ -847,12 +1698,44 @@ def test_commit_discards_conflict_only_when_requested(monkeypatch: pytest.Monkey
         domain_path="/main",
     )
 
-    assert result["status"] == "noop"
+    assert result["status"] == "ok"
     assert result["reason"] == "conflict_discarded"
+    assert result["committed"] is False
+    assert result["conflict_discarded"] is True
     assert result["discarded_local_changes"] is False
     assert result["merged"] is False
     assert handle.undo_checkout_calls == 1
     assert handle.merge_calls == 0
+
+
+def test_commit_conflict_discard_fails_closed_when_checkout_drop_remains_stale(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_StaleAfterUndoHandle,
+    )
+    handle._status["can_merge"] = True  # noqa: SLF001
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program(
+            "fw",
+            "rename functions",
+            auto_checkout=False,
+            on_conflict="discard",
+            domain_path="/main",
+        )
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "commit_project_program.discard_conflict",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.undo_checkout_calls == 1
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
 
 
 def test_commit_discard_on_conflict_does_not_save_unsaved_active_changes(monkeypatch: pytest.MonkeyPatch):
@@ -875,8 +1758,10 @@ def test_commit_discard_on_conflict_does_not_save_unsaved_active_changes(monkeyp
         domain_path="/main",
     )
 
-    assert result["status"] == "noop"
+    assert result["status"] == "ok"
     assert result["reason"] == "conflict_discarded"
+    assert result["committed"] is False
+    assert result["conflict_discarded"] is True
     assert result["discarded_local_changes"] is True
     assert result["merged"] is False
     assert handle.project.saved == 0
@@ -952,7 +1837,38 @@ def test_undo_checkout_keep_without_changes_reopens_original_program(monkeypatch
     assert result["checked_out"] is False
     assert store.session_domain_path(store.sessions["fw"]) == "/main"
     assert handle.kept_local_changes is False
+    assert handle.undo_keep_values == [False]
+    assert not any(path.startswith("/main.keep") for path in handle.program_paths)
     assert core.initialized and core.initialized[-1][1] == "fw"
+
+
+def test_undo_checkout_keep_reports_preserved_path_for_unloaded_program(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_UndoKeepPathHandle,
+    )
+    assert isinstance(handle, _UndoKeepPathHandle)
+    store.sessions.pop("fw")
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_checked_out": True,
+            "modified_since_checkout": True,
+        }
+    )
+
+    result = sync.undo_checkout_project_program(
+        "fw",
+        discard_local_changes=False,
+        domain_path="/main",
+    )
+
+    assert result["status"] == "ok"
+    assert result["checked_out"] is False
+    assert result["kept_program"] == "/main.keep"
+    assert handle.undo_keep_values == [True]
+    assert "/main.keep" in handle.program_paths
 
 
 def test_undo_checkout_discard_changes_does_not_save_active_program(monkeypatch: pytest.MonkeyPatch):
@@ -981,6 +1897,92 @@ def test_checkout_reloads_active_program_and_rebinds_context(monkeypatch: pytest
     assert store.sessions["fw"] is not None
     assert handle.project.saved == 0
     assert handle._status["is_checked_out"] is True  # noqa: SLF001
+
+
+def test_checkout_reopen_failure_reports_completed_remote_checkout(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_ClosingSession)
+    handle.fail_reopen = True
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.checkout_project_program("fw", exclusive=False, domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "checkout_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.checkout_calls == 1
+    assert handle._status["is_checked_out"] is True  # noqa: SLF001
+    assert "fw" not in store.sessions
+    assert core.removed == ["fw"]
+
+
+def test_auto_checkout_reopen_failure_reports_completed_remote_checkout(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_ClosingSession)
+    handle.fail_reopen = True
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "rename functions", auto_checkout=True, domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "commit_project_program.auto_checkout",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.checkout_calls == 1
+    assert handle._status["is_checked_out"] is True  # noqa: SLF001
+    assert handle._status["version"] == 1  # noqa: SLF001
+    assert "fw" not in store.sessions
+    assert core.removed == ["fw"]
+
+
+def test_checkout_close_failure_reports_completed_remote_checkout(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        session_cls=_FailingCloseSession,
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.checkout_project_program("fw", exclusive=False, domain_path="/main")
+
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "checkout_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert handle.checkout_calls == 1
+    assert handle._status["is_checked_out"] is True  # noqa: SLF001
+
+
+def test_checkout_refusal_is_reported_as_error(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_CheckoutRefusedHandle,
+    )
+
+    with pytest.raises(RuntimeError, match="CHECKOUT_UNAVAILABLE"):
+        sync.checkout_project_program("fw", exclusive=True, domain_path="/main")
+
+    assert handle.checkout_calls == 1
+    assert core.initialized == []
+
+
+def test_checkout_reports_effective_exclusive_state(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, _handle = _build_sync_runtime(monkeypatch)
+
+    result = sync.checkout_project_program("fw", exclusive=True, domain_path="/main")
+
+    assert result["checked_out"] is True
+    assert result["exclusive"] is True
 
 
 def test_add_to_version_control_then_checkout_reloads_and_checks_out(monkeypatch: pytest.MonkeyPatch):
@@ -1021,7 +2023,7 @@ def test_checkout_refreshes_loaded_program_after_external_add_to_version_control
     assert result["status"] == "ok"
     assert result["checked_out"] is True
     assert result["already_checked_out"] is False
-    assert handle.refresh_project_data_calls == 1
+    assert handle.refresh_project_data_calls == 2
     assert handle.open_program_calls == 1
     assert handle._status["is_checked_out"] is True  # noqa: SLF001
     assert store.sessions["fw"] is not original_session
@@ -1065,6 +2067,16 @@ def test_mutating_sync_refresh_failure_aborts_before_operation(monkeypatch: pyte
     assert handle.checkout_calls == 0
 
 
+def test_mutating_sync_requires_refresh_capability(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    monkeypatch.setattr(handle, "refresh_project_data", None)
+
+    with pytest.raises(RuntimeError, match="SYNC_REFRESH_FAILED"):
+        sync.checkout_project_program("fw", domain_path="/main")
+
+    assert handle.checkout_calls == 0
+
+
 def test_add_to_version_control_noops_after_external_add_to_version_control(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1094,17 +2106,28 @@ def test_add_to_version_control_noops_after_external_add_to_version_control(
 
 
 @pytest.mark.parametrize(
-    "operation",
+    ("operation", "expected_refreshes"),
     [
-        lambda sync: sync.commit_project_program("fw", "rename functions", auto_checkout=True, domain_path="/main"),
-        lambda sync: sync.pull_project_program("fw", domain_path="/main"),
-        lambda sync: sync.get_version_history("fw", domain_path="/main"),
-        lambda sync: sync.get_version_diff("fw", from_version=1, to_version=1, domain_path="/main"),
+        (
+            lambda sync: sync.commit_project_program(
+                "fw", "rename functions", auto_checkout=True, domain_path="/main"
+            ),
+            4,
+        ),
+        (lambda sync: sync.pull_project_program("fw", domain_path="/main"), 2),
+        (lambda sync: sync.get_version_history("fw", domain_path="/main"), 1),
+        (
+            lambda sync: sync.get_version_diff(
+                "fw", from_version=1, to_version=1, domain_path="/main"
+            ),
+            1,
+        ),
     ],
 )
 def test_versioned_sync_operations_refresh_project_data_after_external_add_to_version_control(
     monkeypatch: pytest.MonkeyPatch,
     operation,
+    expected_refreshes: int,
 ):
     sync, _store, _core, handle = _build_sync_runtime(
         monkeypatch,
@@ -1114,7 +2137,7 @@ def test_versioned_sync_operations_refresh_project_data_after_external_add_to_ve
     result = operation(sync)
 
     assert isinstance(result, dict)
-    assert handle.refresh_project_data_calls == 1
+    assert handle.refresh_project_data_calls == expected_refreshes
     assert handle.add_calls == 0
 
 
@@ -1132,7 +2155,7 @@ def test_checkout_reopens_loaded_program_when_external_add_requires_reopen(
     assert result["status"] == "ok"
     assert result["checked_out"] is True
     assert result["already_checked_out"] is False
-    assert handle.refresh_project_data_calls == 1
+    assert handle.refresh_project_data_calls == 2
     assert handle.open_program_calls == 2
     assert handle._status["is_checked_out"] is True  # noqa: SLF001
     assert store.sessions["fw"] is not original_session
@@ -1152,12 +2175,13 @@ def test_commit_reopens_loaded_program_when_external_add_requires_reopen(
 
     assert result["status"] == "noop"
     assert result["reason"] == "not_modified"
-    assert result["checked_out"] is True
-    assert handle.refresh_project_data_calls == 1
-    assert handle.open_program_calls == 2
+    assert result["checked_out"] is False
+    assert handle.refresh_project_data_calls == 4
+    assert handle.open_program_calls == 3
     assert handle.checkout_calls == 1
+    assert handle.undo_checkout_calls == 1
     assert store.sessions["fw"] is not original_session
-    assert [key for _program, key in core.initialized] == ["fw", "fw"]
+    assert [key for _program, key in core.initialized] == ["fw", "fw", "fw"]
 
 
 def test_checkout_does_not_refresh_unversioned_dirty_loaded_program(monkeypatch: pytest.MonkeyPatch):
@@ -1288,9 +2312,17 @@ def test_sync_reopen_init_failure_preserves_reopened_session_when_close_fails(mo
 
     core.initialize = fail_initialize
 
-    with pytest.raises(RuntimeError, match="REOPEN_FAILED"):
+    with pytest.raises(DomainError) as exc_info:
         sync.checkout_project_program("fw", exclusive=False, domain_path="/main")
 
+    err = exc_info.value
+    assert err.code == ErrorCode.SYNC_OPERATION_FAILED
+    assert err.retryable is False
+    assert err.details == {
+        "operation": "checkout_project_program",
+        "operation_completed": True,
+        "partial_success": True,
+    }
     assert store.sessions["fw"] is handle.reopened_sessions[-1]
     assert "fw" in store.locks
     assert store.target_projects["fw"] == handle.get_key()
@@ -1464,6 +2496,128 @@ def test_terminate_checkout_rejects_active_checkout_loaded_by_other_target(monke
     assert core.initialized == []
 
 
+def test_terminate_checkout_fails_closed_for_missing_local_checkout_status(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_TerminateCheckoutHandle,
+    )
+    assert isinstance(handle, _TerminateCheckoutHandle)
+    handle._status["checkout_status"] = None  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: inconsistent checkout state"):
+        sync.terminate_project_program_checkout("fw", checkout_id=7, domain_path="/main")
+
+    assert handle.terminated_checkout_ids == []
+    assert handle._status["is_checked_out"] is True  # noqa: SLF001
+
+
+def test_terminate_checkout_rejects_active_checkout_loaded_from_another_local_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, loaded_handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_TerminateCheckoutHandle,
+    )
+    assert isinstance(loaded_handle, _TerminateCheckoutHandle)
+    loaded_handle.get_shared_project_url = lambda: "ghidra://localhost/mecha_sync_test"  # type: ignore[attr-defined]
+    remote_handle = _SharedIdentityHandle("/tmp/cache-b", "sample-b")
+    remote_handle._status.update(  # noqa: SLF001
+        {
+            "checkout_status": None,
+            "is_checked_out": False,
+            "checkouts": [{"checkout_id": 7, "user": "mecha_ghidra"}],
+        }
+    )
+    store.target_projects["fw-cache-b"] = remote_handle.get_key()
+    store.locks["fw-cache-b"] = threading.RLock()
+    store.project_handles[remote_handle.get_key()] = remote_handle
+
+    with pytest.raises(RuntimeError, match="UNSAFE_ACTIVE_CHECKOUT_TERMINATE"):
+        sync.terminate_project_program_checkout("fw-cache-b", checkout_id=7, domain_path="/main")
+
+    assert loaded_handle.terminated_checkout_ids == []
+    assert core.initialized == []
+
+
+def test_terminate_checkout_rejects_dns_alias_cache_with_matching_file_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, loaded_handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_TerminateCheckoutHandle,
+    )
+    assert isinstance(loaded_handle, _TerminateCheckoutHandle)
+    loaded_handle.get_shared_project_url = lambda: "ghidra://repo-a.example/mecha_sync_test"  # type: ignore[attr-defined]
+    loaded_handle.get_domain_file_id = lambda _path: "stable-repository-file-id"  # type: ignore[attr-defined]
+
+    remote_handle = _SharedIdentityHandle(
+        "/tmp/cache-b",
+        "sample-b",
+        shared_url="ghidra://repo-b.example/mecha_sync_test",
+        file_id="stable-repository-file-id",
+    )
+    remote_handle._status.update(  # noqa: SLF001
+        {
+            "checkout_status": None,
+            "is_checked_out": False,
+            "checkouts": [{"checkout_id": 7, "user": "mecha_ghidra"}],
+        }
+    )
+    store.target_projects["fw-cache-b"] = remote_handle.get_key()
+    store.locks["fw-cache-b"] = threading.RLock()
+    store.project_handles[remote_handle.get_key()] = remote_handle
+
+    with pytest.raises(RuntimeError, match="UNSAFE_ACTIVE_CHECKOUT_TERMINATE"):
+        sync.terminate_project_program_checkout("fw-cache-b", checkout_id=7, domain_path="/main")
+
+    assert loaded_handle.terminated_checkout_ids == []
+    assert core.initialized == []
+
+
+def test_terminate_checkout_refreshes_other_local_cache_before_owner_check(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, loaded_handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_SharedIdentityHandle,
+    )
+    loaded_handle._status.update(  # noqa: SLF001
+        {
+            "checkout_status": None,
+            "is_checked_out": False,
+        }
+    )
+
+    def refresh_loaded(*, force: bool = True):  # noqa: ARG001
+        loaded_handle.refresh_project_data_calls += 1
+        loaded_handle._status.update(  # noqa: SLF001
+            {
+                "checkout_status": {"checkout_id": 7},
+                "is_checked_out": True,
+            }
+        )
+
+    monkeypatch.setattr(loaded_handle, "refresh_project_data", refresh_loaded)
+    remote_handle = _SharedIdentityHandle("/tmp/cache-b", "sample-b")
+    remote_handle._status.update(  # noqa: SLF001
+        {
+            "checkout_status": None,
+            "is_checked_out": False,
+            "checkouts": [{"checkout_id": 7, "user": "mecha_ghidra"}],
+        }
+    )
+    store.target_projects["fw-cache-b"] = remote_handle.get_key()
+    store.locks["fw-cache-b"] = threading.RLock()
+    store.project_handles[remote_handle.get_key()] = remote_handle
+
+    with pytest.raises(RuntimeError, match="UNSAFE_ACTIVE_CHECKOUT_TERMINATE"):
+        sync.terminate_project_program_checkout("fw-cache-b", checkout_id=7, domain_path="/main")
+
+    assert loaded_handle.refresh_project_data_calls == 1
+
+
 def test_delete_shared_project_file_deletes_registered_unloaded_versioned_file(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1475,6 +2629,7 @@ def test_delete_shared_project_file_deletes_registered_unloaded_versioned_file(
         domain_path="main",
         confirm="/main",
         expected_latest_version=1,
+        allow_non_atomic_versioned_delete=True,
     )
 
     assert result == {
@@ -1487,6 +2642,7 @@ def test_delete_shared_project_file_deletes_registered_unloaded_versioned_file(
         "was_versioned": True,
         "version": 1,
         "latest_version": 1,
+        "atomic_version_guard": False,
     }
     assert handle.deleted_domain_files == ["/main"]
     assert "/main" not in handle.program_paths
@@ -1497,6 +2653,40 @@ def test_delete_shared_project_file_requires_confirmation(monkeypatch: pytest.Mo
 
     with pytest.raises(ValueError, match="confirm must exactly match"):
         sync.delete_shared_project_file("fw", domain_path="main", confirm="main")
+
+    assert handle.deleted_domain_files == []
+
+
+def test_delete_shared_project_file_refuses_non_atomic_versioned_delete_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(monkeypatch)
+    store.sessions.pop("fw")
+
+    with pytest.raises(RuntimeError, match="UNSAFE_VERSIONED_DELETE"):
+        sync.delete_shared_project_file(
+            "fw",
+            domain_path="/main",
+            confirm="/main",
+            expected_latest_version=1,
+        )
+
+    assert handle.deleted_domain_files == []
+
+
+def test_delete_shared_project_file_opt_in_requires_expected_version(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(monkeypatch)
+    store.sessions.pop("fw")
+
+    with pytest.raises(ValueError, match="expected_latest_version is required"):
+        sync.delete_shared_project_file(
+            "fw",
+            domain_path="/main",
+            confirm="/main",
+            allow_non_atomic_versioned_delete=True,
+        )
 
     assert handle.deleted_domain_files == []
 
@@ -1519,6 +2709,210 @@ def test_delete_shared_project_file_rejects_loaded_program(monkeypatch: pytest.M
     }
     assert handle.deleted_domain_files == []
     assert core.initialized == []
+
+
+def test_delete_shared_project_file_rejects_loaded_program_from_another_local_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, loaded_handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_SharedIdentityHandle,
+    )
+    # Host names are case-insensitive and an omitted Ghidra port means 13100.
+    # These two cache URLs must therefore identify the same repository.
+    loaded_handle._shared_url = "ghidra://LOCALHOST:13100/mecha_sync_test/"  # noqa: SLF001
+    remote_handle = _SharedIdentityHandle("/tmp/cache-b", "sample-b")
+    store.target_projects["fw-cache-b"] = remote_handle.get_key()
+    store.locks["fw-cache-b"] = threading.RLock()
+    store.project_handles[remote_handle.get_key()] = remote_handle
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.delete_shared_project_file(
+            "fw-cache-b",
+            domain_path="/main",
+            confirm="/main",
+        )
+
+    assert exc_info.value.code == ErrorCode.TARGET_ALREADY_LOADED
+    assert exc_info.value.details and exc_info.value.details["owner_target"] == "fw"
+    assert remote_handle.deleted_domain_files == []
+    assert core.initialized == []
+
+
+def test_delete_rejects_dns_alias_cache_with_matching_file_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, loaded_handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_SharedIdentityHandle,
+    )
+    loaded_handle._shared_url = "ghidra://repo-a.example/mecha_sync_test"  # noqa: SLF001
+    loaded_handle._file_id = "stable-repository-file-id"  # noqa: SLF001
+    remote_handle = _SharedIdentityHandle(
+        "/tmp/cache-b",
+        "sample-b",
+        shared_url="ghidra://repo-b.example/mecha_sync_test",
+        file_id="stable-repository-file-id",
+    )
+    store.target_projects["fw-cache-b"] = remote_handle.get_key()
+    store.locks["fw-cache-b"] = threading.RLock()
+    store.project_handles[remote_handle.get_key()] = remote_handle
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.delete_shared_project_file(
+            "fw-cache-b",
+            domain_path="/main",
+            confirm="/main",
+        )
+
+    assert exc_info.value.code == ErrorCode.TARGET_ALREADY_LOADED
+    assert exc_info.value.details and exc_info.value.details["owner_target"] == "fw"
+    assert remote_handle.deleted_domain_files == []
+    assert core.initialized == []
+
+
+@pytest.mark.parametrize(
+    ("first_url", "second_url"),
+    [
+        ("ghidra://LOCALHOST/repository/", "ghidra://localhost:13100/repository"),
+        ("ghidra://127.0.0.1/repository", "ghidra://[::1]:13100/repository/"),
+        ("GHIDRA://Server.Example./repository", "ghidra://server.example:13100/repository"),
+    ],
+)
+def test_shared_project_identity_canonicalizes_safe_url_aliases(first_url: str, second_url: str):
+    first = _SharedIdentityHandle("/tmp/cache-a", "sample-a", shared_url=first_url)
+    second = _SharedIdentityHandle("/tmp/cache-b", "sample-b", shared_url=second_url)
+
+    assert RuntimeSyncOperations._handles_share_project_identity(first, second) is True
+
+
+def test_delete_fails_closed_when_shared_project_identity_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, loaded_handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_SharedIdentityHandle,
+    )
+
+    def fail_shared_url():
+        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: shared project URL is unavailable")
+
+    monkeypatch.setattr(loaded_handle, "get_shared_project_url", fail_shared_url)
+    remote_handle = _SharedIdentityHandle("/tmp/cache-b", "sample-b")
+    store.target_projects["fw-cache-b"] = remote_handle.get_key()
+    store.locks["fw-cache-b"] = threading.RLock()
+    store.project_handles[remote_handle.get_key()] = remote_handle
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
+        sync.delete_shared_project_file(
+            "fw-cache-b",
+            domain_path="/main",
+            confirm="/main",
+        )
+
+    assert remote_handle.deleted_domain_files == []
+
+
+def test_delete_blocks_late_session_creation_after_loaded_target_guard(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, _handle = _build_sync_runtime(monkeypatch)
+    store.sessions.pop("fw")
+    lifecycle = RuntimeTargetLifecycle(store=store)
+    guard_reached = threading.Event()
+    release_guard = threading.Event()
+    create_attempted = threading.Event()
+    create_entered = threading.Event()
+    errors: list[BaseException] = []
+
+    original_guard = sync._find_loaded_target_across_shared_project_locked  # noqa: SLF001
+
+    def blocking_guard(*, handle, domain_path):  # noqa: ANN001
+        guard_reached.set()
+        if not release_guard.wait(timeout=2):
+            raise AssertionError("timed out waiting to release delete guard")
+        return original_guard(handle=handle, domain_path=domain_path)
+
+    def fake_create_session(name, project_location, *, project_name, domain_path):  # noqa: ANN001, ARG001
+        create_entered.set()
+        return object()
+
+    monkeypatch.setattr(sync, "_find_loaded_target_across_shared_project_locked", blocking_guard)
+    monkeypatch.setattr(lifecycle, "_create_session_locked", fake_create_session)
+
+    def run_delete() -> None:
+        try:
+            sync.delete_shared_project_file(
+                "fw",
+                domain_path="/main",
+                confirm="/main",
+                expected_latest_version=1,
+                allow_non_atomic_versioned_delete=True,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def run_create() -> None:
+        create_attempted.set()
+        try:
+            lifecycle.create_session(
+                "late-cache",
+                "/tmp/cache-b",
+                project_name="sample-b",
+                domain_path="/main",
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    delete_thread = threading.Thread(target=run_delete)
+    create_thread = threading.Thread(target=run_create)
+    delete_thread.start()
+    assert guard_reached.wait(timeout=2)
+    create_thread.start()
+    assert create_attempted.wait(timeout=2)
+    assert not create_entered.wait(timeout=0.1)
+
+    release_guard.set()
+    delete_thread.join(timeout=2)
+    create_thread.join(timeout=2)
+
+    assert not delete_thread.is_alive()
+    assert not create_thread.is_alive()
+    assert errors == []
+    assert create_entered.is_set()
+
+
+def test_terminate_checkout_uses_global_writer_lock(monkeypatch: pytest.MonkeyPatch):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_TerminateCheckoutHandle,
+    )
+    assert isinstance(handle, _TerminateCheckoutHandle)
+    store.sessions.pop("fw")
+
+    class TrackingOperationLock:
+        def __init__(self, delegate) -> None:  # noqa: ANN001
+            self.delegate = delegate
+            self.read_calls = 0
+            self.write_calls = 0
+
+        def read_lock(self):
+            self.read_calls += 1
+            return self.delegate.read_lock()
+
+        def write_lock(self):
+            self.write_calls += 1
+            return self.delegate.write_lock()
+
+    tracking_lock = TrackingOperationLock(store.operation_lock)
+    store.operation_lock = tracking_lock
+
+    result = sync.terminate_project_program_checkout("fw", checkout_id=4, domain_path="/main")
+
+    assert result["status"] == "ok"
+    assert handle.terminated_checkout_ids == [4]
+    assert tracking_lock.write_calls == 1
+    assert tracking_lock.read_calls == 0
 
 
 def test_delete_shared_project_file_fails_closed_when_loaded_target_inspection_fails(
@@ -1557,6 +2951,7 @@ def test_delete_shared_project_file_rejects_stale_expected_version(monkeypatch: 
             domain_path="/main",
             confirm="/main",
             expected_latest_version=1,
+            allow_non_atomic_versioned_delete=True,
         )
 
     assert handle.deleted_domain_files == []
@@ -1581,7 +2976,28 @@ def test_delete_shared_project_file_requires_allow_private_for_unversioned_file(
     assert result["status"] == "ok"
     assert result["was_versioned"] is False
     assert result["latest_version"] is None
+    assert result["atomic_version_guard"] is True
     assert handle.deleted_domain_files == ["/main"]
+
+
+def test_delete_shared_project_file_refuses_hijacked_file_even_with_allow_private(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_HijackedRecoveryHandle,
+    )
+    store.sessions.pop("fw")
+
+    with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
+        sync.delete_shared_project_file(
+            "fw",
+            domain_path="/main",
+            confirm="/main",
+            allow_private=True,
+        )
+
+    assert handle.discarded_hijacks == 0
 
 
 def test_sync_status_reports_active_checked_out_changes_without_side_effects(monkeypatch: pytest.MonkeyPatch):

@@ -1,14 +1,14 @@
 <img src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" />
 
-[English](README.md) | [日本語](README.ja.md)
+[English](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/README.md) | [日本語](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/README.ja.md)
 
 # Mecha Ghidra - Headless Ghidra MCP for Ghidra Server
 Mecha Ghidra is a Python package that exposes Ghidra as a headless MCP server with PyGhidra and FastMCP. It supports analysis and editing in Ghidra projects, multi-target session management, import/load switching, and tag-based shared-project sync workflows for collaborative AI-assisted reverse engineering.
 
 ## Documentation
 
-- [Usage Guide](docs/usage.md) | [日本語](docs/usage.ja.md): setup, shared-project operations, multi-target workflows, and Codex/Claude/Kilocode integration
-- [Development Guide](docs/development.md) | [日本語](docs/development.ja.md): development flow and testing
+- [Usage Guide](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.md) | [日本語](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.ja.md): setup, shared-project operations, multi-target workflows, and Codex/Claude/Kilocode integration
+- [Development Guide](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/development.md) | [日本語](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/development.ja.md): development flow and testing
 
 ## Quick Start
 
@@ -23,11 +23,11 @@ Mecha Ghidra is a Python package that exposes Ghidra as a headless MCP server wi
 3. Start the server (Streamable HTTP)
    ```bash
    uv run ghidra-mcp \
-       --project-location /Users/samsepi0l/ghidra_project.gpr \
+       --project-location /path/to/ghidra_project.gpr \
        --transport http
    ```
 
-For operational patterns and shared-project authentication details, see the [Usage Guide](docs/usage.md).
+For operational patterns and shared-project authentication details, see the [Usage Guide](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.md).
 
 ## Docker Quick Start
 
@@ -48,9 +48,10 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 4. Point your MCP client to `http://127.0.0.1:8081/mcp`
 
 - `docker compose build` is still supported. The bundled compose file defaults to `DOCKER_PLATFORM=linux/amd64`, which is required for the bundled Linux decompiler.
+- The bundled Compose port is published on host loopback only (`127.0.0.1:8081`). Remote exposure requires an explicit port override plus TLS, authentication, and network access controls.
 - When you switch to `linux/arm64`, Docker now uses the upstream official Ghidra distribution plus the bundled mecha_ghidra decompiler natives overlay. If ARM64 starts without the overlay, the build fails early with a clear error instead of failing later inside `decompile_function`.
 - You can still override the Ghidra distribution by setting both `GHIDRA_DIST_URL` and `GHIDRA_DIST_SHA256`. For ARM64 overlay overrides, also set both `GHIDRA_DECOMPILER_NATIVES_URL` and `GHIDRA_DECOMPILER_NATIVES_SHA256`.
-- For native decompiler artifact types, build commands, and release asset selection, see the [Usage Guide](docs/usage.md#native-decompiler-artifacts).
+- For native decompiler artifact types, build commands, and release asset selection, see the [Usage Guide](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.md#native-decompiler-artifacts).
 - `./samples` is shared into the container as `/samples` in read-only mode. Use `/samples/<filename>` with `import_program`.
 - Ghidra project data is persisted in the named volume `ghidra-projects`, and the default project path is `/data/projects/default.gpr`. Create that project once before first use, or mount an existing Ghidra project there.
 - The server starts with project metadata only and no program loaded. Run `import_program(target="default", binary_path="/samples/<filename>")`, then pass the returned `domain_path` to `load_project_program`.
@@ -65,7 +66,7 @@ If you want a Ghidra-bundled setup, use the included `Dockerfile` and `docker-co
 - **PyGhidra-based runtime**: calls Ghidra APIs directly from CPython (not Jython).
 - **Multi-target management**: hold multiple sessions in one process and switch by target name.
 - **Project operations**: create local projects with `create_project`, list programs with `list_project_programs`, import new binaries with `import_program`, and switch loaded programs with `load_project_program`.
-- **Context-efficient large results**: tool results beyond a size threshold are returned as a short preview plus a `result_id`; the full payload stays server-side and is fetched on demand with `read_result` / `search_result` (see [Large Result Compaction](#large-result-compaction)).
+- **Context-efficient large results**: large tool results are replaced by a shorter preview plus a `result_id` when that reduces context; stored payloads are fetched on demand with `read_result` / `search_result` (see [Large Result Compaction](#large-result-compaction)).
 
 FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to MCP clients through `ghidra_mcp.cli`. For full CLI options, run `uv run ghidra-mcp --help`.
 
@@ -156,7 +157,7 @@ After mutating tools such as `rename_function`, call `save_project_program(targe
 - `pull_project_program` - Pull latest state (with optional discard/follow behavior)
 - `undo_checkout_project_program` - Undo checkout (optional local change discard)
 - `terminate_project_program_checkout` - Force-close an existing checkout by checkout ID
-- `delete_shared_project_file` - Delete an unloaded shared-project file after `confirm` matches `domain_path`
+- `delete_shared_project_file` - Delete an unloaded file after `confirm` matches `domain_path`; versioned files additionally require `expected_latest_version` and explicit `allow_non_atomic_versioned_delete=true`
 - `reload_project_program` - Reload currently opened program
 
 #### Large Result Retrieval
@@ -164,9 +165,9 @@ After mutating tools such as `rename_function`, call `save_project_program(targe
 Registered while `--large-result-mode resource` (the default) is active:
 
 - `read_result` - Read a slice of a stored large tool result (page with `offset_chars` / `limit_chars` until `has_more` is false; `limit_chars` defaults to a third of the compaction threshold)
-- `search_result` - Regex-search a stored large tool result; returns match offsets (usable as `read_result` offsets) with surrounding context. `max_matches=0` counts matches without returning snippets
+- `search_result` - Regex-search a stored large tool result; returns at most 100 snippets with up to 2,000 context characters per side, plus match offsets usable as `read_result` offsets. `max_matches=0` counts up to the 10,000-match scan cap without snippets; check `scan_truncated` before treating `match_count` as complete
 
-See the [Usage Guide](docs/usage.md) for detailed workflows and constraints.
+See the [Usage Guide](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.md) for detailed workflows and constraints.
 
 ### Tool Exposure Controls
 
@@ -256,30 +257,43 @@ uv run ghidra-mcp \
 
 Local LLMs slow down as context grows, and most of that growth comes from large tool
 outputs such as decompiled code and long listings. To keep agent contexts small, tool
-results larger than a threshold are not returned inline. Instead the tool returns:
+results larger than a threshold are compacted when the resulting envelope is smaller
+than the inline response. A compacted tool call returns:
 
-- a preview followed by concrete instructions for fetching the rest — text payloads show their first lines (cut at a line boundary), list and dict results show their first complete items/entries as valid JSON,
+- a preview followed by concrete instructions for fetching the rest — text payloads show their first lines (cut at a line boundary). List and dict results show their first complete items/entries as valid JSON when at least one complete item/entry fits the preview budget; otherwise the preview falls back to a raw payload prefix and may not itself be valid JSON,
 - a `result_id` and an MCP resource link (`ghidra://results/{result_id}`),
 - `structuredContent` metadata (`size_chars`, `mime_type`, `result_type`, `item_count`, ...).
 
-The full payload is kept in an in-memory LRU store on the server and can be accessed three ways:
+When it fits the configured cache, the full payload is kept in an in-memory LRU store
+on the server and can be accessed three ways:
 
 - `read_result(result_id, offset_chars, limit_chars)` - paged reads; works with tools-only MCP clients
-- `search_result(result_id, pattern, context_chars, max_matches)` - regex search; returned offsets feed straight into `read_result`
+- `search_result(result_id, pattern, context_chars, max_matches)` - regex search; returns at most 100 snippets with at most 2,000 context characters per side, and its offsets feed straight into `read_result`
 - `resources/read` on `ghidra://results/{result_id}` - for clients with MCP resource support
 
 Results at or below the threshold, error results, and empty-list results are returned
-inline, unchanged. Repeated identical results reuse the same `result_id`
-(content-addressed), so a looping agent does not grow the store.
+inline, unchanged. A result above the threshold also stays inline unless the complete
+preview/resource envelope is smaller than the serialized inline response. If a result
+entry (its UTF-8 payload plus retained metadata) cannot fit in the entire cache byte
+budget, the tool execution still counts as successful, but the full result cannot be
+retained in the cache for later retrieval. When it is smaller than the inline response,
+the server returns a compact `RESULT_TOO_LARGE` result-unavailable notice without the
+original payload; otherwise it preserves the smaller inline result, including its full
+payload. Do not automatically repeat a
+side-effecting tool call in response to this notice; for a safe call, narrow the query or
+increase the byte budget before explicitly running it again. Repeated identical stored
+results reuse the same `result_id` (content-addressed), so a looping agent does not grow
+the store.
 
 Flags:
 
-- `--large-result-mode {resource,inline}` (default `resource`): `inline` restores the previous behavior of always returning full payloads.
-- `--large-result-threshold-chars N` (default `12000`): compaction threshold.
-- `--large-result-preview-chars N` (default `4000`): preview budget. Text payloads use the full budget; JSON list and dict results use a quarter of it (a few complete example items/entries convey the schema), full `CallToolResult` dumps use half.
-- `--result-cache-max-entries N` (default `512`) / `--result-cache-max-bytes N` (default `134217728`): LRU store budget. Reading an evicted `result_id` returns an error asking to re-run the original tool.
+- `--large-result-mode {resource,inline}` (default `resource`): `resource` conditionally compacts eligible large results only when doing so reduces the complete response; `inline` always returns full payloads.
+- `--large-result-threshold-chars N` (default `12000`): successful results above this character threshold are considered for compaction.
+- `--large-result-preview-chars N` (default `4000`): initial preview upper bound. Text payloads use up to the full bound; JSON list and dict results use up to a quarter of it (a few complete example items/entries convey the schema), and full `CallToolResult` dumps use up to half. The preview is reduced further when JSON escaping or response metadata would otherwise exceed the complete-response budget. If no complete list item or dict entry fits, the preview uses a raw prefix instead and may not be valid JSON.
+- `--result-cache-max-entries N` (default `512`) / `--result-cache-max-bytes N` (default `134217728`): LRU store budget; the byte budget accounts for UTF-8 payloads plus retained metadata. Reading an evicted `result_id` warns against automatically re-running the original tool because it may have had side effects; regenerate only when the call is known safe or idempotent. A result entry above the byte budget is not stored and returns a successful `RESULT_TOO_LARGE` result-unavailable notice without its full content only when that notice is smaller; otherwise the inline result is preserved. Do not automatically retry side-effecting calls.
 - `--tool-description-mode {full,short,none}` (default `full`): `tools/list` description verbosity. `short` prefers a spec's `short_description` and falls back to the first sentence. Full per-tool documentation is always available as MCP resources at `ghidra://docs/tools` and `ghidra://docs/tools/{tool_name}`.
 
 ## License
 
-See the bundled LICENSE file for project licensing.
+Licensed under the Apache License, Version 2.0. See the bundled
+[LICENSE](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/LICENSE) file.

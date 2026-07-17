@@ -129,6 +129,7 @@ class SyncRuntimePort(Protocol):
         confirm: str,
         expected_latest_version: int | None = None,
         allow_private: bool = False,
+        allow_non_atomic_versioned_delete: bool = False,
     ) -> dict[str, Any]:
         ...
 

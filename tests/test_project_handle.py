@@ -71,6 +71,88 @@ def build_handle(monkeypatch):
     return handle
 
 
+def test_get_shared_project_url_returns_normalized_string(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class SharedURL:
+        def __str__(self) -> str:
+            return "  ghidra://server/repository  "
+
+    class SharedProjectData:
+        def getSharedProjectURL(self):
+            return SharedURL()
+
+    class SharedProject(DummyProject):
+        def getProjectData(self):
+            return SharedProjectData()
+
+    handle.project = SharedProject()
+
+    assert handle.get_shared_project_url() == "ghidra://server/repository"
+
+
+def test_get_shared_project_url_fails_closed_when_lookup_raises(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class UnavailableProjectData:
+        def getSharedProjectURL(self):
+            raise RuntimeError("repository metadata unavailable")
+
+    class UnavailableProject(DummyProject):
+        def getProjectData(self):
+            return UnavailableProjectData()
+
+    handle.project = UnavailableProject()
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
+        handle.get_shared_project_url()
+
+
+@pytest.mark.parametrize(
+    "shared_url",
+    [None, "   ", RuntimeError("repository metadata unavailable")],
+)
+def test_get_shared_project_url_fails_closed_for_repository_project(monkeypatch, shared_url):
+    handle = build_handle(monkeypatch)
+    monkeypatch.setattr(handle, "is_repository_project_from_metadata", lambda *_args: True)
+
+    class SharedProjectData:
+        def getSharedProjectURL(self):
+            if isinstance(shared_url, Exception):
+                raise shared_url
+            return shared_url
+
+    class SharedProject(DummyProject):
+        def getProjectData(self):
+            return SharedProjectData()
+
+    handle.project = SharedProject()
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
+        handle.get_shared_project_url()
+
+
+def test_get_domain_file_id_returns_normalized_stable_id(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    domain_file = types.SimpleNamespace(getFileID=lambda: "  stable-file-id  ")
+    project_data = types.SimpleNamespace(getFile=lambda path: domain_file if path == "/main" else None)
+    handle.project = types.SimpleNamespace(getProjectData=lambda: project_data)
+
+    assert handle.get_domain_file_id("/main") == "stable-file-id"
+
+
+def test_get_domain_file_id_fails_closed_without_ghidra_api(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    domain_file = object()
+    project_data = types.SimpleNamespace(getFile=lambda _path: domain_file)
+    handle.project = types.SimpleNamespace(getProjectData=lambda: project_data)
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE"):
+        handle.get_domain_file_id("/main")
+
+
 def test_open_program_rejects_duplicates(monkeypatch):
     handle = build_handle(monkeypatch)
 
@@ -372,6 +454,51 @@ def test_sync_status_raises_when_remote_checkout_id_unavailable():
         session.sync_utils._sync_status_from_domain_file(BrokenCheckoutDomainFile())
 
 
+def test_checkout_status_includes_checkout_origin_metadata():
+    class CheckoutStatus:
+        def getCheckoutId(self):
+            return 42
+
+        def getCheckoutType(self):
+            return "NORMAL"
+
+        def getUser(self):
+            return "alice"
+
+        def getCheckoutVersion(self):
+            return 7
+
+        def getCheckoutTime(self):
+            return 1_700_000_000_000
+
+        def getProjectPath(self):
+            return "/Users/alice/project.gpr"
+
+        def getProjectName(self):
+            return "project"
+
+        def getProjectLocation(self):
+            return "/Users/alice"
+
+        def getUserHostName(self):
+            return "analysis-host"
+
+    result = session.sync_utils._to_checkout_status_dict(CheckoutStatus())
+
+    assert result == {
+        "checkout_id": 42,
+        "checkout_type": "NORMAL",
+        "user": "alice",
+        "checkout_version": 7,
+        "checkout_time": 1_700_000_000_000,
+        "checkout_time_iso": "2023-11-14T22:13:20Z",
+        "project_path": "/Users/alice/project.gpr",
+        "project_name": "project",
+        "project_location": "/Users/alice",
+        "user_host_name": "analysis-host",
+    }
+
+
 def test_sync_status_normalizes_unversioned_version_fields():
     class UnversionedDomainFile:
         def getCheckoutStatus(self):
@@ -408,7 +535,7 @@ def test_sync_status_normalizes_unversioned_version_fields():
             pytest.fail("canMerge should not be read for unversioned files")
 
         def isHijacked(self):
-            pytest.fail("isHijacked should not be read for unversioned files")
+            return False
 
         def isLatestVersion(self):
             pytest.fail("isLatestVersion should not be read for unversioned files")
@@ -437,6 +564,119 @@ def test_sync_status_normalizes_unversioned_version_fields():
     assert result["can_add_to_repository"] is True
 
 
+def test_sync_status_reports_hijacked_file_even_when_ghidra_reports_unversioned():
+    class HijackedDomainFile:
+        def getSharedProjectURL(self, _):
+            return "ghidra://server/repository/main"
+
+        def isVersioned(self):
+            return False
+
+        def isHijacked(self):
+            return True
+
+        def canAddToRepository(self):
+            return False
+
+    result = session.sync_utils._sync_status_from_domain_file(HijackedDomainFile())
+
+    assert result["is_versioned"] is False
+    assert result["is_hijacked"] is True
+    assert result["version"] is None
+    assert result["latest_version"] is None
+    assert result["is_latest_version"] is None
+    assert result["can_add_to_repository"] is False
+    assert result["shared_project_url"] == "ghidra://server/repository/main"
+
+
+def test_sync_status_computes_latest_state_from_version_numbers():
+    class CheckoutStatus:
+        def getCheckoutId(self):
+            return 7
+
+    class StaleVersionedDomainFile:
+        def getSharedProjectURL(self, _):
+            return "ghidra://server/repository/main"
+
+        def isVersioned(self):
+            return True
+
+        def getCheckoutStatus(self):
+            return CheckoutStatus()
+
+        def getCheckouts(self):
+            return []
+
+        def getVersion(self):
+            return 3
+
+        def getLatestVersion(self):
+            return 4
+
+        def isLatestVersion(self):
+            pytest.fail("GhidraFile.isLatestVersion must not be used")
+
+        def isCheckedOut(self):
+            return True
+
+        def isCheckedOutExclusive(self):
+            return False
+
+        def modifiedSinceCheckout(self):
+            return False
+
+        def canCheckout(self):
+            return False
+
+        def canCheckin(self):
+            return False
+
+        def canMerge(self):
+            return True
+
+        def isHijacked(self):
+            return False
+
+        def canAddToRepository(self):
+            return False
+
+    result = session.sync_utils._sync_status_from_domain_file(StaleVersionedDomainFile())
+
+    assert result["version"] == 3
+    assert result["latest_version"] == 4
+    assert result["is_latest_version"] is False
+
+
+def test_sync_status_rejects_checked_out_state_without_checkout_status():
+    class InconsistentVersionedDomainFile:
+        def getSharedProjectURL(self, _):
+            return "ghidra://server/repository/main"
+
+        def isVersioned(self):
+            return True
+
+        def getCheckoutStatus(self):
+            return None
+
+        def getCheckouts(self):
+            return []
+
+        def getVersion(self):
+            return 3
+
+        def getLatestVersion(self):
+            return 3
+
+        def isCheckedOut(self):
+            return True
+
+        def isCheckedOutExclusive(self):
+            return False
+
+    with pytest.raises(RuntimeError, match="checkout state is inconsistent"):
+        session.sync_utils._sync_status_from_domain_file(InconsistentVersionedDomainFile())
+
+
 def test_sync_status_raises_when_can_add_to_repository_fails():
     class BrokenCanAddDomainFile:
         def getCheckoutStatus(self):
@@ -458,6 +698,9 @@ def test_sync_status_raises_when_can_add_to_repository_fails():
             return False
 
         def modifiedSinceCheckout(self):
+            return False
+
+        def isHijacked(self):
             return False
 
         def canAddToRepository(self):
@@ -694,6 +937,170 @@ def test_refresh_project_data_invokes_project_data_refresh(monkeypatch):
     assert calls == [True]
 
 
+def test_refresh_project_data_connects_repository_before_refresh(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class Repository:
+        def __init__(self) -> None:
+            self.connected = False
+            self.connect_calls = 0
+            self.connection_checks = 0
+
+        def isConnected(self):
+            self.connection_checks += 1
+            return self.connected
+
+        def connect(self):
+            self.connect_calls += 1
+            self.connected = True
+
+    repository = Repository()
+    refresh_calls: list[tuple[bool, bool]] = []
+
+    class SharedProjectData:
+        def getRepository(self):
+            return repository
+
+        def refresh(self, force):
+            refresh_calls.append((bool(force), repository.connected))
+
+    class SharedProject(DummyProject):
+        def getProjectData(self):
+            return SharedProjectData()
+
+    handle.project = SharedProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: True),
+    )
+
+    handle.refresh_project_data(force=True)
+
+    assert refresh_calls == [(True, True)]
+    assert repository.connect_calls == 1
+    assert repository.connection_checks >= 3
+
+
+def test_refresh_project_data_requires_refresh_method_for_shared_project(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class Repository:
+        def isConnected(self):
+            return True
+
+        def verifyConnection(self):
+            return True
+
+    class SharedProjectData:
+        def getRepository(self):
+            return Repository()
+
+    class SharedProject(DummyProject):
+        def getProjectData(self):
+            return SharedProjectData()
+
+    handle.project = SharedProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: True),
+    )
+
+    with pytest.raises(RuntimeError, match="shared ProjectData.refresh is unavailable"):
+        handle.refresh_project_data(force=True)
+
+
+def test_refresh_project_data_detects_disconnect_swallowed_by_ghidra(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class Repository:
+        def __init__(self) -> None:
+            self.connected = True
+            self.connect_calls = 0
+
+        def isConnected(self):
+            return self.connected
+
+        def connect(self):
+            self.connect_calls += 1
+            self.connected = True
+
+    repository = Repository()
+    refresh_calls: list[bool] = []
+
+    class SharedProjectData:
+        def getRepository(self):
+            return repository
+
+        def refresh(self, force):
+            refresh_calls.append(bool(force))
+            # Ghidra's ProjectData.refresh() can consume the underlying Java
+            # exception while leaving the repository disconnected.
+            repository.connected = False
+
+    class SharedProject(DummyProject):
+        def getProjectData(self):
+            return SharedProjectData()
+
+    handle.project = SharedProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: True),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PROJECT_DATA_REFRESH_FAILED: repository disconnected",
+    ):
+        handle.refresh_project_data(force=True)
+
+    assert refresh_calls == [True]
+    assert repository.connect_calls == 0
+
+
+def test_refresh_project_data_detects_failed_remote_verification_after_swallowed_error(
+    monkeypatch,
+):
+    handle = build_handle(monkeypatch)
+
+    class Repository:
+        def __init__(self) -> None:
+            self.verified = True
+
+        def isConnected(self):
+            return True
+
+        def verifyConnection(self):
+            return self.verified
+
+    repository = Repository()
+
+    class SharedProjectData:
+        def getRepository(self):
+            return repository
+
+        def refresh(self, _force):
+            # Simulate DefaultProjectData.refresh() consuming an I/O failure
+            # without clearing RepositoryAdapter.repository.
+            repository.verified = False
+
+    class SharedProject(DummyProject):
+        def getProjectData(self):
+            return SharedProjectData()
+
+    handle.project = SharedProject()
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "is_repository_project_from_metadata",
+        staticmethod(lambda *_args: True),
+    )
+
+    with pytest.raises(RuntimeError, match="verification failed after refresh"):
+        handle.refresh_project_data(force=True)
+
+
 def test_list_programs_refreshes_project_data_before_sync_summary(monkeypatch):
     handle = build_handle(monkeypatch)
 
@@ -892,7 +1299,7 @@ def test_list_programs_includes_sync_summary(monkeypatch):
             "is_versioned": True,
             "version": 3,
             "latest_version": 4,
-            "is_latest_version": True,
+            "is_latest_version": False,
             "can_add_to_repository": False,
             "sync_status_error": None,
         },
@@ -990,6 +1397,121 @@ def test_delete_program_locked_raises_when_delete_fails(monkeypatch):
         handle._delete_program_locked("/folder/app")
 
 
+def test_delete_domain_file_verifies_path_absence(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class DeletingDomainFile:
+        def __init__(self, project_data) -> None:  # noqa: ANN001
+            self.project_data = project_data
+
+        def getContentType(self):
+            return "Program"
+
+        def delete(self):
+            self.project_data.deleted = True
+
+    class DeletingProjectData:
+        def __init__(self) -> None:
+            self.deleted = False
+            self.domain_file = DeletingDomainFile(self)
+
+        def getFile(self, _domain_path):
+            return None if self.deleted else self.domain_file
+
+    project_data = DeletingProjectData()
+
+    class DeletingProject(DummyProject):
+        def getProjectData(self):
+            return project_data
+
+    handle.project = DeletingProject()
+
+    result = handle.delete_domain_file("/folder/app")
+
+    assert result == {
+        "domain_path": "/folder/app",
+        "content_type": "Program",
+        "deleted_verified": True,
+    }
+
+
+def test_delete_domain_file_fails_closed_when_path_still_exists(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class NoopDomainFile:
+        def getContentType(self):
+            return "Program"
+
+        def delete(self):
+            return None
+
+    domain_file = NoopDomainFile()
+
+    class StaleProjectData:
+        def getFile(self, _domain_path):
+            return domain_file
+
+    class StaleProject(DummyProject):
+        def getProjectData(self):
+            return StaleProjectData()
+
+    handle.project = StaleProject()
+
+    with pytest.raises(RuntimeError, match="DELETE_POSTCONDITION_FAILED:.*path still exists"):
+        handle.delete_domain_file("/folder/app")
+
+
+def test_delete_hijacked_domain_file_verifies_revealed_repository_file(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class RevealedDomainFile:
+        pass
+
+    revealed = RevealedDomainFile()
+
+    class HijackedDomainFile:
+        def __init__(self, project_data) -> None:  # noqa: ANN001
+            self.project_data = project_data
+
+        def isHijacked(self):
+            return True
+
+        def getContentType(self):
+            return "Program"
+
+        def delete(self):
+            self.project_data.revealed = True
+
+    class HijackedProjectData:
+        def __init__(self) -> None:
+            self.revealed = False
+            self.hijacked = HijackedDomainFile(self)
+
+        def getFile(self, _domain_path):
+            return revealed if self.revealed else self.hijacked
+
+    project_data = HijackedProjectData()
+
+    class HijackedProject(DummyProject):
+        def getProjectData(self):
+            return project_data
+
+    handle.project = HijackedProject()
+    monkeypatch.setattr(
+        session.sync_utils,
+        "_sync_status_from_domain_file",
+        lambda domain_file: {
+            "is_versioned": domain_file is revealed,
+            "is_hijacked": False,
+        },
+    )
+
+    result = handle.delete_domain_file("/folder/app")
+
+    assert result["deleted_verified"] is True
+    assert project_data.revealed is True
+
+
 def test_release_program_clears_tracking_when_delete_fails(monkeypatch):
     handle = build_handle(monkeypatch)
     opened = handle.open_program("/folder/app")
@@ -1062,6 +1584,19 @@ def test_get_version_history(monkeypatch):
 
 def test_get_version_diff(monkeypatch):
     handle = build_handle(monkeypatch)
+
+    class DummyTimeoutMonitor:
+        def __init__(self) -> None:
+            self.finished_calls = 0
+
+        def didTimeout(self):
+            return False
+
+        def finished(self):
+            self.finished_calls += 1
+
+    timeout_monitor = DummyTimeoutMonitor()
+    requested_timeouts: list[int] = []
 
     class DummyVersion:
         def __init__(self, version):
@@ -1156,7 +1691,12 @@ def test_get_version_diff(monkeypatch):
     monkeypatch.setattr(handle, "_get_domain_file_locked", lambda _path: domain_file)
     monkeypatch.setattr(session.java_bindings, "_program_diff_class", lambda: DummyProgramDiff)
     monkeypatch.setattr(session.java_bindings, "_program_diff_filter_class", lambda: DummyProgramDiffFilter)
-    monkeypatch.setattr(session.java_bindings, "_console_monitor", lambda: None)
+
+    def fake_timeout_monitor(*, timeout_seconds: int = 60):
+        requested_timeouts.append(timeout_seconds)
+        return timeout_monitor
+
+    monkeypatch.setattr(session.java_bindings, "_timeout_task_monitor", fake_timeout_monitor)
     consumers = []
 
     def fake_consumer():
@@ -1178,8 +1718,101 @@ def test_get_version_diff(monkeypatch):
         {"type": "Functions", "count": 1},
     ]
     assert result["warnings"] == "none"
+    assert requested_timeouts == [60]
+    assert timeout_monitor.finished_calls == 1
     assert domain_file.programs[1].released == [consumers[0]]
     assert domain_file.programs[2].released == [consumers[1]]
+
+
+def test_get_version_diff_rejects_excessive_range_limit(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    with pytest.raises(ValueError, match="range_limit must be <= 10000"):
+        handle.get_version_diff(
+            "/folder/app",
+            from_version=1,
+            to_version=2,
+            range_limit=10_001,
+        )
+
+
+def test_get_version_diff_reports_timeout_and_finishes_monitor(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    class DummyVersion:
+        def __init__(self, version: int) -> None:
+            self._version = version
+
+        def getVersion(self):
+            return self._version
+
+    class DummyProgram:
+        def __init__(self) -> None:
+            self.released: list[object] = []
+
+        def release(self, consumer):
+            self.released.append(consumer)
+
+    class DummyDomainFile:
+        def __init__(self) -> None:
+            self.programs: list[DummyProgram] = []
+
+        def isVersioned(self):
+            return True
+
+        def getVersionHistory(self):
+            return [DummyVersion(1), DummyVersion(2)]
+
+        def getReadOnlyDomainObject(self, _consumer, _version, _monitor):
+            program = DummyProgram()
+            self.programs.append(program)
+            return program
+
+    class TimeoutMonitor:
+        def __init__(self) -> None:
+            self.timed_out = False
+            self.finished_calls = 0
+
+        def didTimeout(self):
+            return self.timed_out
+
+        def finished(self):
+            self.finished_calls += 1
+
+    timeout_monitor = TimeoutMonitor()
+
+    class TimingOutProgramDiff:
+        def __init__(self, _from_program, _to_program) -> None:
+            pass
+
+        def getDifferences(self, monitor):
+            monitor.timed_out = True
+            raise RuntimeError("operation cancelled")
+
+    domain_file = DummyDomainFile()
+    consumers: list[object] = []
+
+    def fake_consumer():
+        consumer = object()
+        consumers.append(consumer)
+        return consumer
+
+    monkeypatch.setattr(handle, "_get_domain_file_locked", lambda _path: domain_file)
+    monkeypatch.setattr(session.java_bindings, "_program_diff_class", lambda: TimingOutProgramDiff)
+    monkeypatch.setattr(
+        session.java_bindings,
+        "_timeout_task_monitor",
+        lambda *, timeout_seconds=60: timeout_monitor,
+    )
+    monkeypatch.setattr(session.java_bindings, "_java_object", fake_consumer)
+
+    with pytest.raises(RuntimeError, match="VERSION_DIFF_TIMEOUT: version diff exceeded 60 seconds"):
+        handle.get_version_diff("/folder/app", from_version=1, to_version=2)
+
+    assert timeout_monitor.finished_calls == 1
+    assert len(domain_file.programs) == 2
+    assert domain_file.programs[0].released == [consumers[0]]
+    assert domain_file.programs[1].released == [consumers[1]]
 
 
 def test_list_programs_from_metadata_parses_program_entries(tmp_path):

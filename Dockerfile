@@ -82,11 +82,11 @@ RUN set -eu; \
     fi; \
     rm -rf /tmp/ghidra
 
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir uv==0.11.2
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md /app/
+COPY pyproject.toml uv.lock README.md LICENSE /app/
 COPY src /app/src
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

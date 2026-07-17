@@ -637,6 +637,7 @@ def test_typed_input_models_for_function_listing_slice():
             "confirm": (str, ...),
             "expected_latest_version": (int | None, None),
             "allow_private": (bool, False),
+            "allow_non_atomic_versioned_delete": (bool, False),
         },
     )
     _assert_fields(
@@ -923,6 +924,8 @@ def test_all_output_models_are_strict_and_typed():
             "is_latest_version": (bool | None, None),
             "discarded_local_changes": (bool | None, None),
             "merged": (bool | None, None),
+            "committed": (bool | None, None),
+            "conflict_discarded": (bool | None, None),
         },
         "pull_project_program": {
             "status": (str, ...),
@@ -931,7 +934,9 @@ def test_all_output_models_are_strict_and_typed():
             "updated": (bool, ...),
             "merged": (bool, ...),
             "discarded_local_changes": (bool, ...),
+            "discarded_hijacked_file": (bool | None, None),
             "followed_latest": (bool, ...),
+            "reloaded": (bool, ...),
             "version": (int | None, ...),
             "latest_version": (int | None, ...),
             "is_latest_version": (bool | None, ...),
@@ -963,6 +968,7 @@ def test_all_output_models_are_strict_and_typed():
             "was_versioned": (bool, ...),
             "version": (int | None, ...),
             "latest_version": (int | None, ...),
+            "atomic_version_guard": (bool, ...),
         },
         "reload_project_program": {
             "status": (str, ...),

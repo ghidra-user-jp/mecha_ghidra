@@ -1,13 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ghidra-mcp"
-version = "0.1.2"
+version = "0.1.4rc1"
 description = "PyGhidra ベースの Ghidra MCP サーバー"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
     "mcp>=1.27.2,<2",
     "pyghidra>=2.0.0",
@@ -15,6 +17,12 @@ dependencies = [
     "pydantic>=2.11,<3",
     "regex>=2024.4.16",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ghidra-user-jp/mecha_ghidra"
+Repository = "https://github.com/ghidra-user-jp/mecha_ghidra"
+Documentation = "https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.md"
+Issues = "https://github.com/ghidra-user-jp/mecha_ghidra/issues"
 
 [project.scripts]
 ghidra-mcp = "ghidra_mcp.cli:main"

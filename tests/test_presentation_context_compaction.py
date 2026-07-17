@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
-from dataclasses import replace
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 
 import pytest
+from mcp.server.fastmcp import Audio, Image
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ResourceLink, TextContent
+from pydantic import BaseModel
 
 from ghidra_mcp.contracts.tool_spec import ToolProfile, filter_tool_specs, get_tool_spec
 from ghidra_mcp.presentation import cli
@@ -14,8 +19,11 @@ from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
 from ghidra_mcp.presentation.result_resources import (
     ResultResourceStore,
+    _call_tool_result_wire_chars,
     _delivered_inline_size,
     _preview_slice,
+    _search_stored_result,
+    _serialize_result,
     maybe_compact_tool_result,
 )
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
@@ -33,7 +41,13 @@ def _run(coro):
 class LargeResultRegistry:
     def call(self, command, params, target):  # noqa: ARG002
         if command == "decompile_function":
-            return "int main(void) {\n" + ("  return 0;\n" * 20) + "}\n"
+            return (
+                "int main(void) {\n"
+                + ("  return 0;\n" * 20)
+                + "}\n/* "
+                + ("x" * 2000)
+                + " */\n"
+            )
         if command == "list_functions":
             return [{"name": f"function_{idx}", "entry": f"0x{idx:x}"} for idx in range(50)]
         return {"status": "ok"}
@@ -268,6 +282,73 @@ def test_result_tools_registered_only_in_resource_mode():
     assert "search_result" not in inline_names
 
 
+def test_search_result_schema_publishes_pattern_length_limit():
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+
+    tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
+
+    for tool_name in ("read_result", "search_result"):
+        result_id_schema = tools[tool_name].inputSchema["properties"]["result_id"]
+        assert result_id_schema["minLength"] == 16
+        assert result_id_schema["maxLength"] == 16
+        assert result_id_schema["pattern"] == "^[0-9a-f]{16}$"
+    properties = tools["search_result"].inputSchema["properties"]
+    assert properties["pattern"]["maxLength"] == 512
+    assert properties["context_chars"]["minimum"] == 0
+    assert properties["context_chars"]["maximum"] == 2000
+    assert properties["max_matches"]["minimum"] == 0
+    assert properties["max_matches"]["maximum"] == 100
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("read_result", {"result_id": "not-a-result-id"}),
+        (
+            "search_result",
+            {"result_id": "not-a-result-id", "pattern": "text"},
+        ),
+    ],
+)
+def test_result_tools_reject_unbounded_or_malformed_result_ids(tool_name, arguments):
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+
+    with pytest.raises(ToolError):
+        _run(runtime.mcp.call_tool(tool_name, arguments))
+
+
+def test_search_result_description_discloses_count_scan_cap():
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+
+    tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
+    description = tools["search_result"].description
+
+    assert "10,000-match scan cap" in description
+    assert "scan_truncated" in description
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"context_chars": 2001},
+        {"context_chars": -1},
+        {"max_matches": 101},
+        {"max_matches": -1},
+    ],
+)
+def test_search_result_rejects_values_outside_published_limits(arguments):
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+    entry = runtime.result_store.add(**_store_entry_kwargs("plain text"))
+
+    with pytest.raises(ToolError):
+        _run(
+            runtime.mcp.call_tool(
+                "search_result",
+                {"result_id": entry.result_id, "pattern": "text", **arguments},
+            )
+        )
+
+
 def test_large_string_result_returns_preview_resource_link_and_readable_resource():
     runtime = _compacted_decompile_runtime()
 
@@ -297,6 +378,41 @@ def test_large_string_result_returns_preview_resource_link_and_readable_resource
     assert f"search_result(result_id='{meta['result_id']}'" in notice
     preview = notice.split("----- preview -----\n", 1)[1]
     assert preview == full_text[: meta["preview_chars"]]
+
+
+def test_unicode_payload_round_trips_with_utf8_cache_accounting():
+    payload = ("解析🔐e\u0301\n" * 2_000) + "終端"
+    store = ResultResourceStore(max_entries=4, max_bytes=1_000_000)
+
+    first = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="ファームウェア🔒",
+        result=payload,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=200,
+            large_result_preview_chars=80,
+        ),
+        store=store,
+    )
+    second = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="ファームウェア🔒",
+        result=payload,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=200,
+            large_result_preview_chars=80,
+        ),
+        store=store,
+    )
+
+    assert isinstance(first, CallToolResult)
+    assert isinstance(second, CallToolResult)
+    assert first.structuredContent["result_id"] == second.structuredContent["result_id"]
+    entry = store.get(first.structuredContent["result_id"])
+    assert entry.text == payload
+    assert entry.size_chars == len(payload)
+    assert entry.size_bytes == len(payload.encode("utf-8"))
+    assert first.structuredContent["size_chars"] == len(payload)
 
 
 def test_large_list_result_is_stored_as_json_resource():
@@ -384,10 +500,11 @@ def test_read_result_clamps_limit_to_threshold():
         {"result_id": meta["result_id"], "limit_chars": 500_000},
     )
 
-    # The raw cap is the threshold (40); JSON escaping of the embedded chunk
-    # may trim a few more chars so the delivered chunk stays within it.
+    # The raw request is capped at the configured threshold. Infrastructure
+    # responses use a 1024-char minimum so metadata remains usable when tests or
+    # operators choose an impractically small threshold.
     assert 0 < sliced["chunk_chars"] <= 40
-    assert len(json.dumps(sliced["chunk"], ensure_ascii=False)) - 2 <= 40
+    assert len(content[0].text) <= 1024
     assert sliced["has_more"] is True
 
 
@@ -406,8 +523,19 @@ def test_read_result_default_page_tracks_threshold():
 def test_read_result_unknown_id_is_actionable_error():
     runtime = _compacted_decompile_runtime()
 
-    with pytest.raises(ToolError, match="re-run the original tool"):
+    with pytest.raises(ToolError, match="Do not automatically re-run"):
         _run(runtime.mcp.call_tool("read_result", {"result_id": "deadbeefdeadbeef"}))
+
+
+def test_store_rejects_malformed_result_id_without_echoing_it():
+    store = ResultResourceStore(max_entries=4)
+    attacker_controlled = "SECRET-" + ("x" * 10_000)
+
+    with pytest.raises(KeyError) as exc_info:
+        store.get(attacker_controlled)
+
+    assert "16 lowercase hexadecimal" in str(exc_info.value)
+    assert attacker_controlled not in str(exc_info.value)
 
 
 def test_search_result_returns_matches_with_usable_offsets():
@@ -415,7 +543,7 @@ def test_search_result_returns_matches_with_usable_offsets():
     runtime = _runtime_for_specs(
         {"decompile_function": get_tool_spec("decompile_function")},
         config=ToolPresentationConfig(
-            large_result_threshold_chars=200,
+            large_result_threshold_chars=1500,
             large_result_preview_chars=25,
         ),
     )
@@ -423,7 +551,7 @@ def test_search_result_returns_matches_with_usable_offsets():
     meta = compacted.structuredContent
     full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
 
-    _, found = _call_result_tool(
+    content, found = _call_result_tool(
         runtime,
         "search_result",
         {
@@ -441,6 +569,9 @@ def test_search_result_returns_matches_with_usable_offsets():
     assert offsets == sorted(offsets)
     first = found["matches"][0]
     assert full_text[first["offset_chars"] : first["offset_chars"] + len("return 0;")] == "return 0;"
+    assert first["end_offset"] == first["offset_chars"] + len("return 0;")
+    assert first["match_chars"] == len("return 0;")
+    assert first["match_truncated"] is False
     assert "return 0;" in first["context"]
     assert first["context"] == full_text[
         first["context_offset_chars"] : first["context_offset_chars"] + len(first["context"])
@@ -451,7 +582,7 @@ def test_search_result_caps_snippets_at_response_budget():
     runtime = _compacted_decompile_runtime()  # threshold (= response budget) of 40 chars
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
 
-    _, found = _call_result_tool(
+    content, found = _call_result_tool(
         runtime,
         "search_result",
         {
@@ -464,10 +595,7 @@ def test_search_result_caps_snippets_at_response_budget():
 
     assert found["match_count"] == 20
     assert 0 < found["matches_shown"] < 20
-    # Only the first (guaranteed) snippet may exceed the budget; the rest are
-    # admitted strictly within it, so the accumulated snippet chars stay put.
-    snippet_chars = [len(match["context"]) for match in found["matches"]]
-    assert sum(snippet_chars[1:]) <= 40
+    assert len(content[0].text) <= 1024
 
 
 def test_search_result_count_only_with_zero_max_matches():
@@ -489,6 +617,23 @@ def test_search_result_count_only_with_zero_max_matches():
     assert found["matches"] == []
     # A count-only query costs a small constant, not snippet budget.
     assert len(content[0].text) < 400
+
+
+def test_search_result_count_only_reports_when_scan_cap_is_reached():
+    store = ResultResourceStore(max_entries=4)
+    entry = store.add(**_store_entry_kwargs("x" * 10_001))
+
+    found = _search_stored_result(
+        entry,
+        pattern="x",
+        context_chars=0,
+        max_matches=0,
+        configured_budget=12_000,
+    )
+
+    assert found["match_count"] == 10_000
+    assert found["matches"] == []
+    assert found["scan_truncated"] is True
 
 
 def test_search_result_invalid_regex_is_error():
@@ -553,7 +698,7 @@ def test_error_call_tool_result_is_not_resourceized():
 
 def test_large_successful_call_tool_result_is_resourceized():
     store = ResultResourceStore(max_entries=4)
-    full_text = "success\n" + ("payload\n" * 20)
+    full_text = "success\n" + ("payload\n" * 300)
     call_result = CallToolResult(
         content=[TextContent(type="text", text=full_text)],
     )
@@ -581,7 +726,7 @@ def test_large_successful_call_tool_result_is_resourceized():
 def test_call_tool_result_with_structured_content_is_fully_serialized():
     store = ResultResourceStore(max_entries=4)
     call_result = CallToolResult(
-        content=[TextContent(type="text", text="x" * 100)],
+        content=[TextContent(type="text", text="x" * 3000)],
         structuredContent={"answer": 42},
     )
 
@@ -597,6 +742,267 @@ def test_call_tool_result_with_structured_content_is_fully_serialized():
     assert meta["result_type"] == "call_tool_result"
     stored = json.loads(store.read_text(meta["result_id"]))
     assert stored["structuredContent"] == {"answer": 42}
+
+
+def test_call_tool_result_metadata_and_content_annotations_are_preserved():
+    store = ResultResourceStore(max_entries=4)
+    call_result = CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text="x" * 4000,
+                annotations={"audience": ["user"], "priority": 0.5},
+                _meta={"block": "preserve"},
+            )
+        ],
+        _meta={"result": "preserve"},
+    )
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=call_result,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=12,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["result_type"] == "call_tool_result"
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert stored["_meta"] == {"result": "preserve"}
+    assert stored["content"][0]["_meta"] == {"block": "preserve"}
+    assert stored["content"][0]["annotations"] == {
+        "audience": ["user"],
+        "priority": 0.5,
+    }
+
+
+def test_single_text_content_is_stored_as_fastmcp_visible_text():
+    store = ResultResourceStore(max_entries=4)
+    content = TextContent(type="text", text="payload\n" * 500)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=content,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=12,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["result_type"] == "text_content"
+    assert store.read_text(result.structuredContent["result_id"]) == content.text
+
+
+def test_annotated_text_content_is_stored_structurally():
+    store = ResultResourceStore(max_entries=4)
+    content = TextContent(
+        type="text",
+        text="payload\n" * 500,
+        annotations={"audience": ["assistant"]},
+        _meta={"source": "analysis"},
+    )
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=content,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=12,
+        ),
+        store=store,
+    )
+
+    assert result.structuredContent["result_type"] == "text_content_block"
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert stored["text"] == content.text
+    assert stored["annotations"]["audience"] == ["assistant"]
+    assert stored["_meta"] == {"source": "analysis"}
+
+
+def test_forward_compatible_text_content_fields_are_preserved():
+    store = ResultResourceStore(max_entries=4)
+    content = TextContent(type="text", text="x" * 4000, future_field="preserve")
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=content,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=12,
+        ),
+        store=store,
+    )
+
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert stored["text"] == content.text
+    assert stored["future_field"] == "preserve"
+
+
+def test_forward_compatible_call_result_fields_are_preserved():
+    store = ResultResourceStore(max_entries=4)
+    original = CallToolResult(
+        content=[TextContent(type="text", text="x" * 4000)],
+        future_outer="preserve",
+    )
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=original,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=12,
+        ),
+        store=store,
+    )
+
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert stored["future_outer"] == "preserve"
+    assert stored["content"][0]["text"] == "x" * 4000
+
+
+@pytest.mark.parametrize(
+    ("helper", "block_type", "mime_type"),
+    [
+        (Image(data=b"i" * 4096, format="png"), "image", "image/png"),
+        (Audio(data=b"a" * 4096, format="wav"), "audio", "audio/wav"),
+    ],
+)
+def test_fastmcp_binary_helpers_are_compacted_as_content_blocks(
+    helper, block_type, mime_type
+):
+    store = ResultResourceStore(max_entries=4)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=helper,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=20,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert stored["type"] == block_type
+    assert stored["mimeType"] == mime_type
+    expected_byte = b"i" if block_type == "image" else b"a"
+    assert base64.b64decode(stored["data"]) == expected_byte * 4096
+
+
+def test_fastmcp_binary_helper_is_converted_exactly_once():
+    class OneShotImage(Image):
+        calls = 0
+
+        def to_image_content(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("image helper converted more than once")
+            return super().to_image_content()
+
+    helper = OneShotImage(data=b"x" * 4096)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=helper,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=20,
+        ),
+        store=ResultResourceStore(max_entries=4),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert helper.calls == 1
+
+
+def test_mixed_content_list_is_stored_as_fastmcp_wire_blocks():
+    store = ResultResourceStore(max_entries=4)
+    result_value = [{"status": "ok"}, Image(data=b"x" * 4096)]
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=result_value,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=20,
+        ),
+        store=store,
+    )
+
+    assert result.structuredContent["result_type"] == "content_blocks"
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert [block["type"] for block in stored] == ["text", "image"]
+    assert json.loads(stored[0]["text"]) == {"status": "ok"}
+    assert base64.b64decode(stored[1]["data"]) == b"x" * 4096
+
+
+def test_pydantic_model_is_stored_as_structural_json_not_repr():
+    class ResultModel(BaseModel):
+        status: str
+        payload: str
+
+    store = ResultResourceStore(max_entries=4)
+    model = ResultModel(status="ok", payload="x" * 4000)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=model,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=12,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["result_type"] == "pydantic_model"
+    assert json.loads(store.read_text(result.structuredContent["result_id"])) == {
+        "status": "ok",
+        "payload": "x" * 4000,
+    }
+
+
+def test_dataclass_is_stored_as_structural_json_not_repr():
+    @dataclass
+    class ResultRecord:
+        status: str
+        payload: str
+
+    store = ResultResourceStore(max_entries=4)
+    record = ResultRecord(status="ok", payload="x" * 4000)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=record,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=12,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["result_type"] == "ResultRecord"
+    assert json.loads(store.read_text(result.structuredContent["result_id"])) == {
+        "status": "ok",
+        "payload": "x" * 4000,
+    }
 
 
 def test_preview_budget_scales_by_result_type():
@@ -665,6 +1071,61 @@ def test_dict_preview_shows_complete_entries_as_valid_json():
     assert stored[:offset] + "}" == preview
 
 
+def test_dict_subclass_preview_uses_the_same_order_as_stored_payload():
+    class ReverseItemsDict(dict):
+        def items(self):
+            return reversed(tuple(super().items()))
+
+    data = ReverseItemsDict(
+        (f"k{index:03d}", "value") for index in range(200)
+    )
+    store = ResultResourceStore(max_entries=4)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=100,
+        ),
+        store=store,
+    )
+
+    notice = result.content[0].text
+    preview = notice.split("----- preview -----\n", 1)[1]
+    stored = store.read_text(result.structuredContent["result_id"])
+    offset = int(notice.split("offset_chars=", 1)[1].split(")", 1)[0])
+    assert list(json.loads(preview)) == ["k000"]
+    assert stored[:offset] + "}" == preview
+
+
+def test_list_subclass_is_materialized_once_for_storage_and_preview():
+    class ReverseList(list):
+        def __iter__(self):
+            return reversed(self)
+
+    data = ReverseList({"name": f"item_{index:03d}"} for index in range(200))
+    store = ResultResourceStore(max_entries=4)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=100,
+        ),
+        store=store,
+    )
+
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    notice = result.content[0].text
+    preview = json.loads(notice.split("----- preview -----\n", 1)[1])
+    assert stored[0] == {"name": "item_199"}
+    assert preview == stored[: len(preview)]
+
+
 def test_list_preview_falls_back_to_prefix_when_one_item_exceeds_budget():
     store = ResultResourceStore(max_entries=4)
     data = [{"blob": "x" * 500} for _ in range(40)]
@@ -705,26 +1166,71 @@ def test_store_deduplicates_identical_payloads():
     assert store.get(first.result_id).text == "a" * 50
 
 
+def test_store_identity_includes_result_metadata():
+    store = ResultResourceStore(max_entries=8, max_bytes=10_000)
+    common = _store_entry_kwargs('[{"name":"main"}]')
+
+    as_list = store.add(**{**common, "result_type": "list", "item_count": 1})
+    as_call_result = store.add(
+        **{**common, "result_type": "call_tool_result", "item_count": 2}
+    )
+
+    assert as_list.result_id != as_call_result.result_id
+    assert store.get(as_list.result_id).result_type == "list"
+    assert store.get(as_call_result.result_id).result_type == "call_tool_result"
+
+
 def test_store_byte_budget_evicts_oldest_but_keeps_newest():
-    store = ResultResourceStore(max_entries=8, max_bytes=100)
+    store = ResultResourceStore(max_entries=8, max_bytes=400)
 
-    first = store.add(**_store_entry_kwargs("a" * 60))
-    second = store.add(**_store_entry_kwargs("b" * 60))
+    first = store.add(**_store_entry_kwargs("a" * 100))
+    second = store.add(**_store_entry_kwargs("b" * 100))
 
-    assert store.get(second.result_id).text == "b" * 60
-    with pytest.raises(KeyError, match="re-run the original tool"):
+    assert store.get(second.result_id).text == "b" * 100
+    with pytest.raises(KeyError, match="Do not automatically re-run"):
         store.get(first.result_id)
 
     # A single payload larger than the whole budget is refused outright —
     # caching it would exceed the operator-configured memory cap — and the
     # existing entries stay untouched.
     assert store.add(**_store_entry_kwargs("c" * 500)) is None
-    assert store.get(second.result_id).text == "b" * 60
+    assert store.get(second.result_id).text == "b" * 100
 
 
-def test_payload_over_cache_budget_is_delivered_inline():
+def test_store_byte_budget_includes_retained_metadata_but_reports_payload_size():
+    store = ResultResourceStore(max_entries=8, max_bytes=512)
+    kwargs = _store_entry_kwargs("x")
+    kwargs["target"] = "target" * 1000
+
+    assert store.add(**kwargs) is None
+
+    entry = store.add(**_store_entry_kwargs("x"))
+    assert entry.size_bytes == 1
+    assert entry.cache_size_bytes > entry.size_bytes
+    assert store._total_bytes == entry.cache_size_bytes
+
+
+def test_store_concurrent_add_and_get_keeps_lru_accounting_consistent():
+    store = ResultResourceStore(max_entries=256, max_bytes=1_000_000)
+
+    def round_trip(index: int) -> str:
+        entry = store.add(**_store_entry_kwargs(f"payload-{index}" * 10))
+        assert entry is not None
+        return store.get(entry.result_id).text
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(executor.map(round_trip, range(200)))
+
+    assert len(results) == 200
+    assert len(store._entries) == 200
+    assert store._total_bytes == sum(
+        entry.cache_size_bytes for entry in store._entries.values()
+    )
+
+
+def test_payload_over_cache_budget_returns_successful_unavailable_result():
     store = ResultResourceStore(max_entries=8, max_bytes=100)
-    payload = "x" * 500
+    payload = "x" * 5000
 
     result = maybe_compact_tool_result(
         tool_name="decompile_function",
@@ -734,7 +1240,432 @@ def test_payload_over_cache_budget_is_delivered_inline():
         store=store,
     )
 
+    assert isinstance(result, CallToolResult)
+    assert result.isError is False
+    assert result.structuredContent["result_unavailable"] is True
+    assert result.structuredContent["operation_succeeded"] is True
+    assert result.structuredContent["size_chars"] == len(payload)
+    assert payload not in result.content[0].text
+    assert "RESULT_TOO_LARGE" in result.content[0].text
+    assert "Do not re-run a non-idempotent tool" in result.content[0].text
+
+
+def test_uncacheable_output_does_not_report_a_completed_mutation_as_failed():
+    calls = 0
+
+    def mutating_dispatcher(name, args, target, *, registry):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return "mutation completed\n" + ("x" * 5_000)
+
+    runtime = create_mcp_server(
+        specs={"set_bytes": get_tool_spec("set_bytes")},
+        registry_provider=lambda: object(),
+        dispatcher_provider=lambda: mutating_dispatcher,
+        presentation_config=ToolPresentationConfig(
+            large_result_threshold_chars=50,
+            large_result_preview_chars=25,
+            result_cache_max_bytes=100,
+        ),
+    )
+
+    result = runtime.tools["set_bytes"](
+        address="0x1000",
+        bytes_hex="90",
+        target="fw",
+    )
+
+    assert calls == 1
+    assert isinstance(result, CallToolResult)
+    assert result.isError is False
+    assert result.structuredContent["operation_succeeded"] is True
+    assert "Do not re-run a non-idempotent tool" in result.content[0].text
+
+
+def test_compaction_exception_returns_completed_result_without_logging_payload(
+    monkeypatch,
+    caplog,
+):
+    from ghidra_mcp.presentation import result_resources
+
+    calls = 0
+    original = "mutation completed\n" + ("x" * 5_000)
+    secret_in_exception = "SECRET_RESULT_FRAGMENT"
+
+    def mutating_dispatcher(name, args, target, *, registry):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return original
+
+    def fail_serialization(*_args, **_kwargs):
+        raise RuntimeError(secret_in_exception)
+
+    monkeypatch.setattr(result_resources, "_serialize_result", fail_serialization)
+    runtime = create_mcp_server(
+        specs={"set_bytes": get_tool_spec("set_bytes")},
+        registry_provider=lambda: object(),
+        dispatcher_provider=lambda: mutating_dispatcher,
+        presentation_config=ToolPresentationConfig(
+            large_result_threshold_chars=50,
+            large_result_preview_chars=25,
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        result = runtime.tools["set_bytes"](
+            address="0x1000",
+            bytes_hex="90",
+            target="fw",
+        )
+
+    assert calls == 1
+    assert result is original
+    assert "RuntimeError" in caplog.text
+    assert secret_in_exception not in caplog.text
+
+
+def test_compaction_does_not_expand_a_small_result():
+    store = ResultResourceStore(max_entries=4)
+    payload = "x" * 11
+
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="fw",
+        result=payload,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=10,
+            large_result_preview_chars=5,
+        ),
+        store=store,
+    )
+
     assert result is payload
+
+
+def test_uncacheable_notice_does_not_expand_a_small_result():
+    store = ResultResourceStore(max_entries=4, max_bytes=5)
+    payload = "x" * 11
+
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="fw",
+        result=payload,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=10,
+            large_result_preview_chars=5,
+        ),
+        store=store,
+    )
+
+    assert result is payload
+
+
+def test_initial_compaction_caps_the_complete_escape_heavy_response():
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="fw",
+        result="\0" * 50_000,
+        config=ToolPresentationConfig(),
+        store=ResultResourceStore(max_bytes=1_000_000),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is False
+    assert _call_tool_result_wire_chars(result) <= 12_000
+    assert result.structuredContent["preview_chars"] < 4_000
+
+
+def test_compaction_compares_inline_and_compact_results_in_wire_units():
+    payload = "\0" * 2_000
+
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="fw",
+        result=payload,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=1_000,
+            large_result_preview_chars=1_000,
+        ),
+        store=ResultResourceStore(max_bytes=1_000_000),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["truncated"] is True
+    assert _call_tool_result_wire_chars(result) < _call_tool_result_wire_chars(
+        CallToolResult(content=[TextContent(type="text", text=payload)])
+    )
+
+
+def test_call_tool_result_wire_size_matches_mcp_transport_serialization():
+    result = CallToolResult(
+        content=[TextContent(type="text", text="payload")],
+        structuredContent={"answer": 42},
+    )
+
+    expected = len(result.model_dump_json(by_alias=True, exclude_none=True))
+
+    assert _call_tool_result_wire_chars(result) == expected
+
+
+def test_compaction_never_replaces_content_blocks_with_a_larger_wire_result():
+    blocks = [TextContent(type="text", text="x") for _ in range(20)]
+    inline_wire = _call_tool_result_wire_chars(CallToolResult(content=blocks))
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=blocks,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=10,
+            large_result_preview_chars=1,
+        ),
+        store=ResultResourceStore(max_entries=4),
+    )
+
+    assert result is blocks
+    assert _call_tool_result_wire_chars(CallToolResult(content=blocks)) == inline_wire
+
+
+def test_threshold_metric_is_identical_for_raw_and_wrapped_content_blocks():
+    blocks = [TextContent(type="text", text="x" * 9) for _ in range(1200)]
+    wrapped = CallToolResult(content=blocks)
+
+    raw_chars = _delivered_inline_size(blocks, tool_name="custom_tool")
+    wrapped_chars = _delivered_inline_size(wrapped, tool_name="custom_tool")
+    assert raw_chars == wrapped_chars == 10_800
+
+    config = ToolPresentationConfig()
+    store = ResultResourceStore(max_entries=4)
+    raw_result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=blocks,
+        config=config,
+        store=store,
+    )
+    wrapped_result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=wrapped,
+        config=config,
+        store=store,
+    )
+
+    assert raw_result is blocks
+    assert wrapped_result is wrapped
+
+
+@pytest.mark.parametrize(
+    "cache_max_bytes,result_unavailable",
+    [(1_000_000, False), (100, True)],
+)
+def test_initial_large_result_response_bounds_escape_heavy_target_metadata(
+    cache_max_bytes,
+    result_unavailable,
+):
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="\0" * 20_000,
+        result="x" * 50_000,
+        config=ToolPresentationConfig(),
+        store=ResultResourceStore(max_bytes=cache_max_bytes),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is False
+    assert result.structuredContent.get("result_unavailable", False) is result_unavailable
+    assert _call_tool_result_wire_chars(result) <= 12_000
+    assert result.structuredContent["metadata_truncated"] is True
+    assert len(result.structuredContent["target"]) < 20_000
+
+
+def test_read_result_fits_escape_heavy_text_without_collapsing_to_one_char():
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+    entry = runtime.result_store.add(**_store_entry_kwargs("\n" * 20_000))
+
+    content, page = _call_result_tool(
+        runtime,
+        "read_result",
+        {"result_id": entry.result_id, "limit_chars": 12_000},
+    )
+
+    assert 5_000 <= page["chunk_chars"] <= 6_000
+    assert len(content[0].text) <= 12_000
+    assert page["has_more"] is True
+
+
+def test_read_result_bounds_escape_heavy_metadata_and_still_makes_progress():
+    runtime = _runtime_for_specs(
+        {"list_targets": get_tool_spec("list_targets")},
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=1,
+            large_result_preview_chars=1,
+        ),
+    )
+    kwargs = _store_entry_kwargs("payload")
+    kwargs["target"] = "\0" * 20_000
+    entry = runtime.result_store.add(**kwargs)
+
+    content, page = _call_result_tool(
+        runtime,
+        "read_result",
+        {"result_id": entry.result_id, "limit_chars": 1},
+    )
+
+    assert len(content[0].text) <= 1024
+    assert page["metadata_truncated"] is True
+    assert page["chunk"] == "p"
+    assert page["next_offset_chars"] == 1
+
+
+def test_search_result_caps_the_complete_escaped_response():
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+    text = "".join('"' * 200 + "MATCH" + '"' * 200 + "z" * 700 for _ in range(20))
+    entry = runtime.result_store.add(**_store_entry_kwargs(text))
+
+    content, found = _call_result_tool(
+        runtime,
+        "search_result",
+        {
+            "result_id": entry.result_id,
+            "pattern": "MATCH",
+            "context_chars": 200,
+            "max_matches": 20,
+        },
+    )
+
+    assert found["match_count"] == 20
+    assert found["matches_shown"] > 0
+    assert len(content[0].text) <= 12_000
+
+
+def test_search_result_bounds_the_echoed_pattern_at_the_minimum_budget():
+    runtime = _runtime_for_specs(
+        {"list_targets": get_tool_spec("list_targets")},
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=1,
+            large_result_preview_chars=1,
+        ),
+    )
+    entry = runtime.result_store.add(**_store_entry_kwargs("plain text"))
+    pattern = "\0" * 512
+
+    content, found = _call_result_tool(
+        runtime,
+        "search_result",
+        {"result_id": entry.result_id, "pattern": pattern},
+    )
+
+    assert len(content[0].text) <= 1024
+    assert found["pattern_truncated"] is True
+    assert pattern.startswith(found["pattern"])
+    assert found["pattern"] != pattern
+
+
+def test_search_result_preserves_the_full_pattern_when_it_fits():
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+    entry = runtime.result_store.add(**_store_entry_kwargs("plain text"))
+    pattern = "a" * 512
+
+    _, found = _call_result_tool(
+        runtime,
+        "search_result",
+        {"result_id": entry.result_id, "pattern": pattern},
+    )
+
+    assert found["pattern"] == pattern
+    assert found["pattern_truncated"] is False
+
+
+def test_search_result_does_not_block_the_event_loop(monkeypatch):
+    from ghidra_mcp.presentation import result_resources
+
+    class Compiled:
+        @staticmethod
+        def finditer(_text, **_kwargs):
+            return iter(())
+
+    def slow_compile(_pattern):
+        time.sleep(0.25)
+        return Compiled()
+
+    monkeypatch.setattr(result_resources.regex, "compile", slow_compile)
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+    entry = runtime.result_store.add(**_store_entry_kwargs("plain text"))
+
+    async def call_and_measure_timer():
+        call = asyncio.create_task(
+            runtime.mcp.call_tool(
+                "search_result",
+                {"result_id": entry.result_id, "pattern": "text"},
+            )
+        )
+        started = time.perf_counter()
+        await asyncio.sleep(0.02)
+        timer_elapsed = time.perf_counter() - started
+        await call
+        return timer_elapsed
+
+    assert _run(call_and_measure_timer()) < 0.15
+
+
+def test_search_result_does_not_copy_the_full_match(monkeypatch):
+    from ghidra_mcp.presentation import result_resources
+
+    class Found:
+        @staticmethod
+        def span():
+            return 0, 10_000_000
+
+        @staticmethod
+        def group(_index=0):
+            raise AssertionError("group() must not be called")
+
+    class Compiled:
+        @staticmethod
+        def finditer(_text, **_kwargs):
+            yield Found()
+
+    monkeypatch.setattr(result_resources.regex, "compile", lambda _pattern: Compiled())
+    store = ResultResourceStore()
+    entry = store.add(**_store_entry_kwargs("x" * 10_000_000))
+
+    result = _search_stored_result(
+        entry,
+        pattern=".*",
+        context_chars=0,
+        max_matches=1,
+        configured_budget=12_000,
+    )
+
+    assert result["matches_shown"] == 1
+    match = result["matches"][0]
+    assert len(match["match"]) == 500
+    assert match["end_offset"] == 10_000_000
+    assert match["match_chars"] == 10_000_000
+    assert match["match_truncated"] is True
+
+
+def test_result_resource_template_does_not_advertise_the_wrong_mime_type():
+    runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
+    templates = _run(runtime.mcp.list_resource_templates())
+    result_template = next(
+        template
+        for template in templates
+        if str(template.uriTemplate) == "ghidra://results/{result_id}"
+    )
+    assert result_template.mimeType is None
+
+    entry = runtime.result_store.add(
+        tool="list_functions",
+        target="fw",
+        text='[{"name":"main"}]',
+        mime_type="application/json",
+        result_type="list",
+        item_count=1,
+    )
+    contents = _run(runtime.mcp.read_resource(entry.uri))
+    assert contents[0].mime_type == "application/json"
 
 
 def test_empty_list_normalization_is_not_resourceized():
@@ -749,6 +1680,54 @@ def test_empty_list_normalization_is_not_resourceized():
     assert isinstance(result, CallToolResult)
     assert result.content[0].text == "[]"
     assert result.structuredContent is None
+
+
+def test_empty_list_text_with_result_metadata_is_not_treated_as_plain_sentinel():
+    original = CallToolResult(
+        content=[TextContent(type="text", text="[]")],
+        _meta={"blob": "x" * 5000},
+    )
+    store = ResultResourceStore(max_entries=4)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=original,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=5,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result is not original
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert stored["content"][0]["text"] == "[]"
+    assert stored["_meta"] == {"blob": "x" * 5000}
+
+
+def test_empty_list_text_with_extension_field_is_not_treated_as_plain_sentinel():
+    original = CallToolResult(
+        content=[TextContent(type="text", text="[]", future_field="x" * 5000)],
+    )
+    store = ResultResourceStore(max_entries=4)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=original,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=20,
+            large_result_preview_chars=5,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result is not original
+    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert stored["content"][0]["future_field"] == "x" * 5000
 
 
 def test_cli_parses_presentation_config_options():
@@ -779,6 +1758,20 @@ def test_cli_parses_presentation_config_options():
         result_cache_max_entries=8,
         result_cache_max_bytes=1024,
     )
+
+
+def test_cli_help_describes_conditional_compaction_and_safe_retry(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "only when the complete response becomes smaller" in help_text
+    assert "bounded first-sentence fallback" in help_text
+    assert "Initial preview character upper bound" in help_text
+    assert "successful result-unavailable notice" in help_text
+    assert "otherwise the inline result is preserved" in help_text
+    assert "do not automatically retry side-effecting calls" in help_text.lower()
 
 
 def test_cli_defaults_match_config_defaults():
@@ -959,6 +1952,57 @@ def test_compaction_decision_uses_delivered_indent2_size():
     assert inline is data
 
 
+def test_compaction_decision_uses_raw_string_item_size_for_lists():
+    # FastMCP emits each top-level string as raw text, without the quotes and
+    # escapes used by the compact JSON stored for resource reads. The compact
+    # representation therefore cannot short-circuit the delivered-size probe.
+    data = [f"{idx:09d}" for idx in range(1200)]
+    threshold = 12000
+    delivered = _delivered_inline_size(data, tool_name="search_bytes")
+
+    compact_text, *_ = _serialize_result(data, tool_name="search_bytes")
+    old_probe = len(compact_text) - (len(data) + 1)
+    assert delivered == 10800
+    assert old_probe == 13200
+
+    result = maybe_compact_tool_result(
+        tool_name="search_bytes",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=threshold,
+            large_result_preview_chars=4000,
+        ),
+        store=ResultResourceStore(max_entries=4),
+    )
+
+    assert result is data
+
+
+def test_nested_call_tool_results_use_fastmcp_list_conversion_size():
+    data = [
+        CallToolResult(
+            content=[TextContent(type="text", text="x" * 100)],
+        )
+        for _ in range(100)
+    ]
+
+    delivered = _delivered_inline_size(data, tool_name="custom_tool")
+    assert delivered > 12_000
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=data,
+        config=ToolPresentationConfig(),
+        store=ResultResourceStore(max_entries=4),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result is not data
+    assert result.structuredContent["result_type"] == "list"
+
+
 def test_tuple_result_is_stored_as_json_like_a_list():
     store = ResultResourceStore(max_entries=4)
     payload = tuple({"name": f"f_{i}", "addr": f"0x{i:x}"} for i in range(50))
@@ -999,7 +2043,7 @@ def test_non_string_dict_keys_do_not_fail_the_tool_call():
     )
     assert inline is small
 
-    big = {Color.RED: ["x" * 40 for _ in range(20)]}
+    big = {Color.RED: ["x" * 40 for _ in range(200)]}
     compacted = maybe_compact_tool_result(
         tool_name="custom_tool",
         target="fw",
@@ -1027,7 +2071,7 @@ def test_search_result_times_out_on_catastrophic_pattern(monkeypatch):
         def call(self, command, params, target):  # noqa: ARG002
             # Long alphanumeric runs occur naturally in decompiled output and are
             # exactly what catastrophic patterns blow up on.
-            return "int main(void) {\n" + ("a" * 64 + "\n") * 4 + "}\n"
+            return "int main(void) {\n" + ("a" * 64 + "\n") * 4 + ("z" * 2000) + "}\n"
 
     runtime = _runtime_for_specs(
         {"decompile_function": get_tool_spec("decompile_function")},

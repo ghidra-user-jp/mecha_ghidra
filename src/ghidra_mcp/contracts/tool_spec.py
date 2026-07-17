@@ -213,6 +213,8 @@ _COMMIT_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("is_latest_version", bool | None, None),
     ("discarded_local_changes", bool | None, None),
     ("merged", bool | None, None),
+    ("committed", bool | None, None),
+    ("conflict_discarded", bool | None, None),
 )
 
 _PULL_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
@@ -222,7 +224,9 @@ _PULL_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("updated", bool, ...),
     ("merged", bool, ...),
     ("discarded_local_changes", bool, ...),
+    ("discarded_hijacked_file", bool | None, None),
     ("followed_latest", bool, ...),
+    ("reloaded", bool, ...),
     ("version", int | None, ...),
     ("latest_version", int | None, ...),
     ("is_latest_version", bool | None, ...),
@@ -257,6 +261,7 @@ _DELETE_SHARED_PROJECT_FILE_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("was_versioned", bool, ...),
     ("version", int | None, ...),
     ("latest_version", int | None, ...),
+    ("atomic_version_guard", bool, ...),
 )
 
 _RELOAD_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
@@ -1541,9 +1546,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("confirm", str, ...),
             ("expected_latest_version", int | None, None),
             ("allow_private", bool, False),
+            ("allow_non_atomic_versioned_delete", bool, False),
         ),
         output_fields=_DELETE_SHARED_PROJECT_FILE_OUTPUT_FIELDS,
-        description="Delete a shared-project file after confirmation and checkout safety checks",
+        description=(
+            "Delete a shared-project file after confirmation and checkout safety checks; "
+            "versioned deletion requires an explicit non-atomic-risk acknowledgement"
+        ),
         idempotent_hint=False,
     ),
     _shared_sync_tool(

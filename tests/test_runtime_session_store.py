@@ -49,6 +49,31 @@ class _FakeSession:
         return _FakeProjectHandle("/tmp/prj", "sample")
 
 
+class _FakeDomainFile:
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def getPathname(self) -> str:
+        return self._path
+
+
+class _FakeProgram:
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def getDomainFile(self):  # noqa: ANN201
+        return _FakeDomainFile(self._path)
+
+
+class _PathSession(_FakeSession):
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self._path = path
+
+    def get_program(self):  # noqa: ANN201
+        return _FakeProgram(self._path)
+
+
 def _build_store() -> tuple[RuntimeSessionStore, _DummyCore]:
     core = _DummyCore()
     state = RuntimeState(
@@ -97,6 +122,75 @@ def test_cleanup_session_removes_entries_and_context():
     assert handle.get_key() not in store.project_handles
     assert core.removed == ["fw"]
     assert session.closed_with == [(True, True)]
+
+
+def test_cleanup_stale_session_preserves_replacement_target_state():
+    store, core = _build_store()
+    stale = _PathSession("/main")
+    replacement = _PathSession("/main")
+    target_lock = threading.RLock()
+    store.sessions["fw"] = replacement
+    store.locks["fw"] = target_lock
+    store.mark_dirty_program("fw", "/main")
+
+    store.cleanup_session(
+        "fw",
+        stale,
+        None,
+        remove_registry_entry=True,
+        remove_context=True,
+    )
+
+    assert stale.closed_with == [(True, False)]
+    assert store.sessions["fw"] is replacement
+    assert store.locks["fw"] is target_lock
+    assert store.is_dirty_program("fw", "/main")
+    assert core.removed == []
+
+
+def test_cleanup_closed_stale_handle_preserves_same_key_replacement():
+    store, _core = _build_store()
+    stale_handle = _FakeProjectHandle("/tmp/prj", "sample")
+    stale_handle._closed = True  # noqa: SLF001
+    replacement_handle = _FakeProjectHandle("/tmp/prj", "sample")
+    store.project_handles[replacement_handle.get_key()] = replacement_handle
+
+    store.cleanup_session(
+        "fw",
+        None,
+        stale_handle,
+        remove_registry_entry=False,
+        remove_context=False,
+    )
+
+    assert store.project_handles[replacement_handle.get_key()] is replacement_handle
+
+
+def test_cleanup_without_registry_removal_preserves_reentrant_replacement_dirty_state():
+    store, core = _build_store()
+    replacement = _PathSession("/main")
+
+    class _ReplacingSession(_PathSession):
+        def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+            super().close(save=save, remove_program=remove_program)
+            with store.registry_lock.write_lock():
+                store.sessions["fw"] = replacement
+
+    stale = _ReplacingSession("/main")
+    store.sessions["fw"] = stale
+    store.mark_dirty_program("fw", "/main")
+
+    store.cleanup_session(
+        "fw",
+        stale,
+        None,
+        remove_registry_entry=False,
+        remove_context=False,
+    )
+
+    assert store.sessions["fw"] is replacement
+    assert store.is_dirty_program("fw", "/main")
+    assert core.removed == []
 
 
 def test_ensure_session_reports_not_loaded_program():

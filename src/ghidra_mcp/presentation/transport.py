@@ -9,6 +9,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+
+
 def normalize_transport(transport: str) -> str:
     return "streamable-http" if transport == "http" else transport
 
@@ -26,35 +29,47 @@ def normalize_host(host: str) -> str:
     return (host or "").strip().lower()
 
 
+def _transport_security_for_hosts(hosts: tuple[str, ...]) -> TransportSecuritySettings:
+    allowed_hosts: list[str] = []
+    allowed_origins: list[str] = []
+    for host in hosts:
+        # Host headers omit the port for a transport's default port and include
+        # it otherwise.  Origin may use HTTPS when a reverse proxy terminates
+        # TLS, even though the backend itself listens over HTTP.
+        allowed_hosts.extend((host, f"{host}:*"))
+        for scheme in ("http", "https"):
+            origin = f"{scheme}://{host}"
+            allowed_origins.extend((origin, f"{origin}:*"))
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 def resolve_transport_security_for_host(host: str) -> TransportSecuritySettings:
     normalized = normalize_host(host)
     if normalized in {"127.0.0.1", "localhost", "::1"}:
-        return TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
-        )
+        return _transport_security_for_hosts(_LOOPBACK_HOSTS)
     if normalized in {"0.0.0.0", "::"}:
-        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        # A wildcard listen address is necessary inside the Docker container,
+        # but it must not imply that every Host/Origin is trusted.  Keep the
+        # listener reachable through the loopback-published Compose port while
+        # rejecting DNS-rebinding and LAN Host headers.  Operators that need
+        # remote access must bind a fixed IP/hostname explicitly.
+        return _transport_security_for_hosts(_LOOPBACK_HOSTS)
     if ":" in normalized and not normalized.startswith("["):
-        host_pattern = f"[{normalized}]:*"
-        origin_pattern = f"http://[{normalized}]:*"
-    else:
-        host_pattern = f"{normalized}:*"
-        origin_pattern = f"http://{normalized}:*"
-    return TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[host_pattern],
-        allowed_origins=[origin_pattern],
-    )
+        normalized = f"[{normalized}]"
+    return _transport_security_for_hosts((normalized,))
 
 
 def configure_transport_security_for_host(*, mcp: FastMCP, host: str, logger: logging.Logger) -> None:
     settings = resolve_transport_security_for_host(host)
-    if not settings.enable_dns_rebinding_protection:
+    if normalize_host(host) in {"0.0.0.0", "::"}:
         logger.warning(
-            "Disabling DNS rebinding protection because mcp-host=%s."
-            " For production, use a fixed host/IP and proper network controls.",
+            "MCP is listening on wildcard host %s, but DNS rebinding protection "
+            "accepts only loopback Host/Origin values. Bind a fixed IP/hostname "
+            "and use TLS plus access controls for intentional remote access.",
             host,
         )
     mcp.settings.transport_security = settings

@@ -79,6 +79,9 @@ class SyncUseCases:
                 confirm=params["confirm"],
                 expected_latest_version=params.get("expected_latest_version"),
                 allow_private=bool(params.get("allow_private", False)),
+                allow_non_atomic_versioned_delete=bool(
+                    params.get("allow_non_atomic_versioned_delete", False)
+                ),
             )
         if command == "reload_project_program":
             return self._sync_gateway.reload_project_program(target, domain_path=params.get("domain_path"))

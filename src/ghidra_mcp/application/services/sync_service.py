@@ -207,6 +207,7 @@ class SyncService:
         confirm: str,
         expected_latest_version: int | None = None,
         allow_private: bool = False,
+        allow_non_atomic_versioned_delete: bool = False,
     ):
         try:
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
@@ -216,6 +217,7 @@ class SyncService:
                     confirm=confirm,
                     expected_latest_version=expected_latest_version,
                     allow_private=allow_private,
+                    allow_non_atomic_versioned_delete=allow_non_atomic_versioned_delete,
                 )
         except Exception as exc:
             raise self._raise_domain_error(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import types
 
 import pytest
+from mcp.server.transport_security import TransportSecurityMiddleware
 
 from ghidra_mcp import cli
 from ghidra_mcp.contracts.tool_spec import ToolProfile, filter_tool_specs, get_all_tool_specs
@@ -208,6 +209,7 @@ class FakeSyncService:
         confirm: str,
         expected_latest_version: int | None = None,
         allow_private: bool = False,
+        allow_non_atomic_versioned_delete: bool = False,
     ):
         self.calls.append(
             (
@@ -218,6 +220,7 @@ class FakeSyncService:
                     "confirm": confirm,
                     "expected_latest_version": expected_latest_version,
                     "allow_private": allow_private,
+                    "allow_non_atomic_versioned_delete": allow_non_atomic_versioned_delete,
                 },
             )
         )
@@ -623,7 +626,16 @@ def test_configure_mcp_for_streamable_http(monkeypatch):
     assert fake_mcp.settings.host == "0.0.0.0"
     assert fake_mcp.settings.port == 9090
     assert fake_mcp.settings.streamable_http_path == "/custom"
-    assert fake_mcp.settings.transport_security.enable_dns_rebinding_protection is False
+    security = fake_mcp.settings.transport_security
+    assert security.enable_dns_rebinding_protection is True
+    assert "127.0.0.1:*" in security.allowed_hosts
+    assert "http://localhost:*" in security.allowed_origins
+
+    middleware = TransportSecurityMiddleware(security)
+    assert middleware._validate_host("127.0.0.1:9090") is True
+    assert middleware._validate_origin("http://localhost:9090") is True
+    assert middleware._validate_host("attacker.example:9090") is False
+    assert middleware._validate_origin("https://attacker.example") is False
 
 
 def test_configure_mcp_for_streamable_http_with_specific_host_enables_rebinding_protection(monkeypatch):
@@ -648,8 +660,13 @@ def test_configure_mcp_for_streamable_http_with_specific_host_enables_rebinding_
 
     security = fake_mcp.settings.transport_security
     assert security.enable_dns_rebinding_protection is True
-    assert security.allowed_hosts == ["172.16.53.129:*"]
-    assert security.allowed_origins == ["http://172.16.53.129:*"]
+    assert security.allowed_hosts == ["172.16.53.129", "172.16.53.129:*"]
+    assert security.allowed_origins == [
+        "http://172.16.53.129",
+        "http://172.16.53.129:*",
+        "https://172.16.53.129",
+        "https://172.16.53.129:*",
+    ]
 
 
 def test_configure_mcp_for_sse_with_loopback_host_keeps_local_security(monkeypatch):

@@ -94,6 +94,9 @@ def test_checkout_guard_fails_closed_when_checkout_state_unavailable(monkeypatch
         def isVersioned(self):
             return True
 
+        def isHijacked(self):
+            return False
+
         def isCheckedOut(self):
             raise RuntimeError("backend unavailable")
 
@@ -102,6 +105,27 @@ def test_checkout_guard_fails_closed_when_checkout_state_unavailable(monkeypatch
             return BrokenDomainFile()
 
     with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.isCheckedOut"):
+        core_helpers._ensure_checkout_for_versioned_program(types.SimpleNamespace(program=Program()))
+
+
+def test_checkout_guard_rejects_hijacked_program_reported_as_unversioned(monkeypatch: pytest.MonkeyPatch):
+    core_helpers = _import_core_helpers(monkeypatch)
+
+    class HijackedDomainFile:
+        def isVersioned(self):
+            return False
+
+        def isHijacked(self):
+            return True
+
+        def isCheckedOut(self):
+            pytest.fail("checkout state must not authorize a hijacked file")
+
+    class Program:
+        def getDomainFile(self):
+            return HijackedDomainFile()
+
+    with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
         core_helpers._ensure_checkout_for_versioned_program(types.SimpleNamespace(program=Program()))
 
 
@@ -191,6 +215,10 @@ def test_high_function_fallback_requires_checkout_before_analysis(monkeypatch: p
             calls.append("isVersioned")
             return True
 
+        def isHijacked(self):
+            calls.append("isHijacked")
+            return False
+
         def isCheckedOut(self):
             calls.append("isCheckedOut")
             return False
@@ -223,4 +251,11 @@ def test_high_function_fallback_requires_checkout_before_analysis(monkeypatch: p
     with pytest.raises(RuntimeError, match="CHECKOUT_REQUIRED"):
         core_helpers._decompile_high_function(ctx, object())
 
-    assert calls == ["openProgram", "decompileFunction", "dispose", "isVersioned", "isCheckedOut"]
+    assert calls == [
+        "openProgram",
+        "decompileFunction",
+        "dispose",
+        "isVersioned",
+        "isHijacked",
+        "isCheckedOut",
+    ]

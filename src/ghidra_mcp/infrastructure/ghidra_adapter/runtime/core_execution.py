@@ -64,28 +64,46 @@ class RuntimeCoreExecution:
                     self._ensure_checkout_for_mutating_command_locked(command, target)
                     result = self._store.core_accessor().execute(command, params or {}, key=target)
                     if command in self._checkout_required_commands:
-                        session = self._store.sessions.get(target)
+                        with self._store.registry_lock.read_lock():
+                            session = self._store.sessions.get(target)
                         if session is not None:
-                            self._store.mark_dirty_program(target, self._store.session_domain_path(session))
+                            domain_path = self._store.session_domain_path(session)
+                            with self._store.registry_lock.write_lock():
+                                if self._store.sessions.get(target) is session:
+                                    self._store.mark_dirty_program(target, domain_path)
                     return self._normalize_result(result)
 
     def _ensure_checkout_for_mutating_command_locked(self, command: str, target: str) -> None:
         if command not in self._checkout_required_commands:
             return
-        session = self._store.sessions.get(target)
+        with self._store.registry_lock.read_lock():
+            session = self._store.sessions.get(target)
         if session is None:
             return
         handle = session.get_project_handle()
         domain_path = self._store.session_domain_path(session)
         self._refresh_project_sync_state_locked(handle, required=True)
         status = handle.get_sync_status(domain_path)
+        if status.get("is_hijacked"):
+            raise RuntimeError(
+                "HIJACKED_PROGRAM: mutating operations are blocked because a private local file "
+                "shadows the repository version; recover it with "
+                "pull_project_program(on_local_changes='discard')"
+            )
         if not status.get("is_versioned"):
             if self._refresh_active_program_sync_state_locked(target, domain_path, status=status):
-                session = self._store.sessions.get(target)
+                with self._store.registry_lock.read_lock():
+                    session = self._store.sessions.get(target)
                 if session is None:
                     return
                 handle = session.get_project_handle()
                 status = handle.get_sync_status(domain_path)
+            if status.get("is_hijacked"):
+                raise RuntimeError(
+                    "HIJACKED_PROGRAM: mutating operations are blocked because a private local file "
+                    "shadows the repository version; recover it with "
+                    "pull_project_program(on_local_changes='discard')"
+                )
             if status.get("is_versioned"):
                 if status.get("is_checked_out"):
                     return
@@ -112,10 +130,12 @@ class RuntimeCoreExecution:
             return False
         if not status.get("can_add_to_repository"):
             return False
-        session = self._store.sessions.get(target)
+        with self._store.registry_lock.read_lock():
+            session = self._store.sessions.get(target)
+            runtime_dirty = self._store.is_dirty_program(target, domain_path)
         if session is None:
             return False
-        if self._store.is_dirty_program(target, domain_path):
+        if runtime_dirty:
             return False
         if self._active_program_is_changed_locked(target, domain_path):
             raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
@@ -128,21 +148,26 @@ class RuntimeCoreExecution:
         try:
             session.close(save=False)
             if self._handle_is_closed(handle):
-                self._store.project_handles.pop(handle.get_key(), None)
+                with self._store.registry_lock.write_lock():
+                    if self._store.project_handles.get(handle.get_key()) is handle:
+                        self._store.project_handles.pop(handle.get_key(), None)
             if not self._handle_is_closed(handle):
                 active_handle = handle
             else:
-                active_handle = self._store.get_or_create_project_handle(project_location, project_name)
+                with self._store.registry_lock.write_lock():
+                    active_handle = self._store.get_or_create_project_handle(project_location, project_name)
             reopened = active_handle.open_program(domain_path)
             try:
                 self._store.core_accessor().initialize(reopened.get_program(), key=target)
-                self._store.sessions[target] = reopened
+                with self._store.registry_lock.write_lock():
+                    self._store.sessions[target] = reopened
                 reopened_session_bound = True
             except Exception as init_error:  # noqa: BLE001
                 try:
                     reopened.close(save=False)
                 except Exception as close_exc:  # noqa: BLE001
-                    self._store.sessions[target] = reopened
+                    with self._store.registry_lock.write_lock():
+                        self._store.sessions[target] = reopened
                     reopened_session_bound = True
                     raise RuntimeError(
                         "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
@@ -152,8 +177,11 @@ class RuntimeCoreExecution:
                 raise
             finally:
                 if active_handle is not None and self._handle_is_closed(active_handle):
-                    self._store.project_handles.pop(active_handle.get_key(), None)
-            self._store.clear_dirty_program(target, domain_path)
+                    with self._store.registry_lock.write_lock():
+                        if self._store.project_handles.get(active_handle.get_key()) is active_handle:
+                            self._store.project_handles.pop(active_handle.get_key(), None)
+            with self._store.registry_lock.write_lock():
+                self._store.clear_dirty_program(target, domain_path)
             return True
         except Exception:
             if not reopened_session_bound and self._session_is_closed(session):
@@ -161,9 +189,11 @@ class RuntimeCoreExecution:
             raise
 
     def _active_program_is_changed_locked(self, target: str, domain_path: str) -> bool:
-        if self._store.is_dirty_program(target, domain_path):
+        with self._store.registry_lock.read_lock():
+            runtime_dirty = self._store.is_dirty_program(target, domain_path)
+            session = self._store.sessions.get(target)
+        if runtime_dirty:
             return True
-        session = self._store.sessions.get(target)
         if session is None:
             return False
         try:
@@ -177,13 +207,15 @@ class RuntimeCoreExecution:
             return True
 
     def _cleanup_reopenable_target_state_locked(self, target: str, *, handle=None) -> None:  # noqa: ANN001
-        self._store.sessions.pop(target, None)
-        self._store.locks.pop(target, None)
-        self._store.target_projects.pop(target, None)
-        self._store.clear_analyzed_loads_for_target(target)
-        self._store.clear_dirty_programs_for_target(target)
-        if handle is not None and self._handle_is_closed(handle):
-            self._store.project_handles.pop(handle.get_key(), None)
+        with self._store.registry_lock.write_lock():
+            self._store.sessions.pop(target, None)
+            self._store.locks.pop(target, None)
+            self._store.target_projects.pop(target, None)
+            if handle is not None and self._handle_is_closed(handle):
+                if self._store.project_handles.get(handle.get_key()) is handle:
+                    self._store.project_handles.pop(handle.get_key(), None)
+            self._store.clear_analyzed_loads_for_target(target)
+            self._store.clear_dirty_programs_for_target(target)
         try:
             self._store.core_accessor().remove_context(target)
         except Exception as remove_exc:  # noqa: BLE001
@@ -208,6 +240,10 @@ class RuntimeCoreExecution:
     def _refresh_project_sync_state_locked(handle, *, required: bool = False) -> bool:  # noqa: ANN001
         refresh_project_data = getattr(handle, "refresh_project_data", None)
         if refresh_project_data is None:
+            if required:
+                raise RuntimeError(
+                    "SYNC_OPERATION_FAILED: project handle does not support required sync refresh"
+                )
             return False
         try:
             refresh_project_data(force=True)

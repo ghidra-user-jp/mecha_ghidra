@@ -246,40 +246,54 @@ def parse_args(argv: list[str]):
         default=_PRESENTATION_DEFAULTS.description_mode,
         choices=["short", "full", "none"],
         help=(
-            "Control MCP tool description verbosity. Existing descriptions are already "
-            "terse, so 'full' is the default; 'short' only helps once specs carry "
-            "long descriptions with short_description overrides."
+            "Control MCP tool description verbosity. 'short' prefers an explicit "
+            "short_description and otherwise uses a bounded first-sentence fallback; "
+            "'none' omits descriptions from tools/list."
         ),
     )
     parser.add_argument(
         "--large-result-mode",
         default=_PRESENTATION_DEFAULTS.large_result_mode,
         choices=["resource", "inline"],
-        help="Return large tool results as MCP resources or inline payloads.",
+        help=(
+            "Use resource-backed compaction for eligible large results only when the "
+            "complete response becomes smaller; 'inline' always returns full payloads."
+        ),
     )
     parser.add_argument(
         "--large-result-threshold-chars",
         type=int,
         default=_PRESENTATION_DEFAULTS.large_result_threshold_chars,
-        help="Character threshold for moving large tool results to MCP resources.",
+        help=(
+            "Consider successful results above this character threshold for "
+            "resource-backed compaction."
+        ),
     )
     parser.add_argument(
         "--large-result-preview-chars",
         type=int,
         default=_PRESENTATION_DEFAULTS.large_result_preview_chars,
-        help="Preview character count for resource-backed large tool results.",
+        help=(
+            "Initial preview character upper bound; the preview may be reduced to keep "
+            "the complete compact response within its response budget."
+        ),
     )
     parser.add_argument(
         "--result-cache-max-entries",
         type=int,
         default=_PRESENTATION_DEFAULTS.result_cache_max_entries,
-        help="Maximum in-memory result resources retained by the MCP server.",
+        help="Maximum number of in-memory result resources retained by the MCP server.",
     )
     parser.add_argument(
         "--result-cache-max-bytes",
         type=int,
         default=_PRESENTATION_DEFAULTS.result_cache_max_bytes,
-        help="Maximum total bytes of in-memory result resources retained by the MCP server.",
+        help=(
+            "Maximum accounted bytes for cached UTF-8 payloads plus retained metadata. "
+            "An entry that cannot fit returns a successful result-unavailable notice "
+            "without its full content when that notice is smaller; otherwise the inline "
+            "result is preserved. Do not automatically retry side-effecting calls."
+        ),
     )
     parser.add_argument("--log-level", default="INFO", help="Log level")
     args = parser.parse_args(argv)

@@ -38,12 +38,22 @@ def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
     if checkout_id is None:
         raise RuntimeError("SYNC_STATUS_UNAVAILABLE: CheckoutStatus.getCheckoutId returned None")
     checkout_type = _safe_call(status, "getCheckoutType")
+    project_path = _safe_call(status, "getProjectPath")
+    project_name = _safe_call(status, "getProjectName")
+    project_location = _safe_call(status, "getProjectLocation")
+    user_host_name = _safe_call(status, "getUserHostName")
+    checkout_time = _safe_call(status, "getCheckoutTime")
     return {
         "checkout_id": checkout_id,
         "checkout_type": None if checkout_type is None else str(checkout_type),
         "user": _safe_call(status, "getUser"),
         "checkout_version": _safe_call(status, "getCheckoutVersion"),
-        "checkout_time": _safe_call(status, "getCheckoutTime"),
+        "checkout_time": checkout_time,
+        "checkout_time_iso": _to_iso8601_utc(checkout_time),
+        "project_path": None if project_path is None else str(project_path),
+        "project_name": None if project_name is None else str(project_name),
+        "project_location": None if project_location is None else str(project_location),
+        "user_host_name": None if user_host_name is None else str(user_host_name),
     }
 
 
@@ -60,16 +70,26 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
                 converted = _to_checkout_status_dict(item)
                 if converted is not None:
                     checkouts_list.append(converted)
-        is_latest_version: bool | None = bool(_required_call(domain_file, "isLatestVersion"))
         version = _required_call(domain_file, "getVersion")
         latest_version = _required_call(domain_file, "getLatestVersion")
+        # GhidraFile.isLatestVersion() always returns true in Ghidra 12.1.2,
+        # including for a stale checkout.  Compare the actual version numbers.
+        is_latest_version: bool | None = int(version) == int(latest_version)
         is_checked_out = bool(_required_call(domain_file, "isCheckedOut"))
         is_checked_out_exclusive = bool(_required_call(domain_file, "isCheckedOutExclusive"))
+        if is_checked_out != (checkout_status is not None):
+            raise RuntimeError(
+                "SYNC_STATUS_UNAVAILABLE: DomainFile checkout state is inconsistent "
+                "(isCheckedOut does not match getCheckoutStatus)"
+            )
+        if is_checked_out_exclusive and not is_checked_out:
+            raise RuntimeError(
+                "SYNC_STATUS_UNAVAILABLE: exclusive checkout reported without an active checkout"
+            )
         modified_since_checkout = bool(_required_call(domain_file, "modifiedSinceCheckout"))
         can_checkout = bool(_required_call(domain_file, "canCheckout"))
         can_checkin = bool(_required_call(domain_file, "canCheckin"))
         can_merge = bool(_required_call(domain_file, "canMerge"))
-        is_hijacked = bool(_required_call(domain_file, "isHijacked"))
     else:
         checkout_status = None
         checkouts_list = []
@@ -82,7 +102,11 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
         can_checkout = False
         can_checkin = False
         can_merge = False
-        is_hijacked = False
+
+    # Ghidra defines a hijacked file as a private local file shadowing a
+    # repository file, and deliberately reports isVersioned() == false for it.
+    # Query this independently so callers can distinguish it from a private file.
+    is_hijacked = bool(_required_call(domain_file, "isHijacked"))
 
     return {
         "is_versioned": is_versioned,

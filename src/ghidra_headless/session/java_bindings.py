@@ -12,6 +12,8 @@ _PROGRAM_DIFF_FILTER_CLASS = None
 _JAVA_OBJECT_CLASS = None
 _GHIDRA_PROGRAM_UTILITIES_CLASS = None
 _GHIDRA_SCRIPT_UTIL_CLASS = None
+_TIMEOUT_TASK_MONITOR_CLASS = None
+_TIME_UNIT_CLASS = None
 
 
 def _flat_program_api_class():
@@ -26,6 +28,23 @@ def _console_monitor():
     if _CONSOLE_MONITOR_CLASS is None:
         _CONSOLE_MONITOR_CLASS = pycore.JClass("ghidra.util.task.ConsoleTaskMonitor")
     return _CONSOLE_MONITOR_CLASS()
+
+
+def _timeout_task_monitor(*, timeout_seconds: int = 60):
+    global _TIMEOUT_TASK_MONITOR_CLASS
+    global _TIME_UNIT_CLASS
+    normalized_timeout = int(timeout_seconds)
+    if normalized_timeout < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    if _TIMEOUT_TASK_MONITOR_CLASS is None:
+        _TIMEOUT_TASK_MONITOR_CLASS = pycore.JClass("ghidra.util.task.TimeoutTaskMonitor")
+    if _TIME_UNIT_CLASS is None:
+        _TIME_UNIT_CLASS = pycore.JClass("java.util.concurrent.TimeUnit")
+    return _TIMEOUT_TASK_MONITOR_CLASS.timeoutIn(
+        normalized_timeout,
+        _TIME_UNIT_CLASS.SECONDS,
+        _console_monitor(),
+    )
 
 
 def _default_checkin_handler_class():

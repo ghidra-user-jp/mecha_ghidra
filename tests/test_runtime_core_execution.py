@@ -106,6 +106,19 @@ class _FailingRefreshHandle(_Handle):
         raise RuntimeError("refresh failed")
 
 
+class _HijackedHandle(_Handle):
+    def refresh_project_data(self, *, force: bool = True):  # noqa: ARG002
+        self.refresh_calls += 1
+        self._status.update(
+            {
+                "is_versioned": False,
+                "is_checked_out": False,
+                "is_hijacked": True,
+                "can_add_to_repository": False,
+            }
+        )
+
+
 class _ReopenVersionedHandle(_Handle):
     def __init__(self) -> None:
         super().__init__()
@@ -219,6 +232,28 @@ def test_mutating_checkout_guard_aborts_when_refresh_fails():
     execution, _store, core = _build_core_execution(handle)
 
     with pytest.raises(RuntimeError, match="SYNC_OPERATION_FAILED"):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert handle.refresh_calls == 1
+    assert core.calls == []
+
+
+def test_mutating_checkout_guard_requires_refresh_capability(monkeypatch: pytest.MonkeyPatch):
+    handle = _Handle()
+    monkeypatch.setattr(handle, "refresh_project_data", None)
+    execution, _store, core = _build_core_execution(handle)
+
+    with pytest.raises(RuntimeError, match="SYNC_OPERATION_FAILED"):
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert core.calls == []
+
+
+def test_mutating_checkout_guard_rejects_hijacked_program():
+    handle = _HijackedHandle()
+    execution, _store, core = _build_core_execution(handle)
+
+    with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1

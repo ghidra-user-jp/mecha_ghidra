@@ -1,14 +1,14 @@
 <img src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" />
 
-[English](README.md) | [日本語](README.ja.md)
+[English](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/README.md) | [日本語](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/README.ja.md)
 
 # Mecha Ghidra — Headless Ghidra MCP for Ghidra Server
 PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開する Python パッケージです。Ghidra プロジェクトの解析・編集に加え、複数ターゲット管理やプログラムの import/load 切り替え、タグベースで制御できる shared project 同期機能を使った AI クライアントとの共同解析まで行えます。
 
 ## ドキュメント
 
-- [利用ガイド](docs/usage.ja.md) | [English](docs/usage.md): セットアップ、shared project 運用、複数ターゲット運用、Kilocode/Roocode 連携
-- [開発ガイド](docs/development.ja.md) | [English](docs/development.md): 開発フロー、テスト実行
+- [利用ガイド](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.ja.md) | [English](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.md): セットアップ、shared project 運用、複数ターゲット運用、Kilocode/Roocode 連携
+- [開発ガイド](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/development.ja.md) | [English](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/development.md): 開発フロー、テスト実行
 
 ## クイックスタート
 
@@ -23,11 +23,11 @@ PyGhidra と FastMCP で Ghidra を headless MCP サーバーとして公開す�
 3. サーバーを起動（Streamable HTTP）
    ```bash
    uv run ghidra-mcp \
-       --project-location /Users/samsepi0l/ghidra_project.gpr \
+       --project-location /path/to/ghidra_project.gpr \
        --transport http
    ```
 
-運用パターンや shared project 認証を含む詳細は [利用ガイド](docs/usage.ja.md) を参照してください。
+運用パターンや shared project 認証を含む詳細は [利用ガイド](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.ja.md) を参照してください。
 
 ## Docker クイックスタート
 
@@ -48,9 +48,10 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 4. MCP クライアントは `http://127.0.0.1:8081/mcp` に接続
 
 - `docker compose build` も引き続き利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、これは同梱 Linux decompiler を動かすために必要です。
+- 同梱 Compose の port は host loopback（`127.0.0.1:8081`）だけに公開されます。外部公開する場合は port 設定を明示的に上書きし、TLS、認証、ネットワークアクセス制御を併用してください。
 - `linux/arm64` を使う場合は、Docker build が upstream 公式 Ghidra 配布物に mecha_ghidra の decompiler natives overlay を重ねます。ARM64 overlay が無い状態なら、`decompile_function` 実行時に遅れて落ちる代わりに build 時点で明確なエラーを返します。
 - Ghidra 配布物を上書きしたい場合は `GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定します。ARM64 overlay も上書きする場合は、`GHIDRA_DECOMPILER_NATIVES_URL` と `GHIDRA_DECOMPILER_NATIVES_SHA256` も両方指定してください。
-- ARM64/macOS 向け native decompiler 配布物の種類、生成方法、release asset の使い分けは [利用ガイド](docs/usage.ja.md#native-decompiler-配布物) を参照してください。
+- ARM64/macOS 向け native decompiler 配布物の種類、生成方法、release asset の使い分けは [利用ガイド](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.ja.md#native-decompiler-%E9%85%8D%E5%B8%83%E7%89%A9) を参照してください。
 - `./samples` はコンテナ内に `/samples` として read-only 共有されます。`import_program` では `/samples/<filename>` を指定してください。
 - Ghidra project は named volume `ghidra-projects` に永続化され、既定の project path は `/data/projects/default.gpr` です。初回利用前に一度その project を作成するか、既存の Ghidra project をそこへ mount してください。
 - 起動直後は program 未ロードの状態です。`import_program(target="default", binary_path="/samples/<filename>")` 実行後、返ってきた `domain_path` を `load_project_program` に渡してください。
@@ -65,7 +66,7 @@ Ghidra 同梱イメージで起動したい場合は、同梱の `Dockerfile` �
 - **PyGhidra ベース**: Jython ではなく CPython 上で Ghidra API を直接呼び出します。
 - **複数ターゲット管理**: 同一プロセスで複数セッションを保持し、ターゲット名で切り替えながら解析できます。
 - **プロジェクト操作**: `create_project` でローカル project を作成し、`list_project_programs` でプログラム一覧取得、`import_program` で新規バイナリ追加、`load_project_program` で既存プログラムへ切り替えできます。
-- **コンテキスト効率の良い大型結果**: 閾値を超えるツール結果は短いプレビューと `result_id` として返し、全文はサーバ側に保持して `read_result` / `search_result` で必要な分だけ取得できます（詳細は[大型結果の圧縮](#大型結果の圧縮)）。
+- **コンテキスト効率の良い大型結果**: コンテキストを実際に削減できる場合、大型のツール結果を短いプレビューと `result_id` に置き換え、保存した全文を `read_result` / `search_result` で必要な分だけ取得できます（詳細は[大型結果の圧縮](#大型結果の圧縮)）。
 
 FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、MCP クライアントからは `ghidra_mcp.cli` を通じて利用できます。詳しいオプションは `uv run ghidra-mcp --help` を参照してください。
 
@@ -156,7 +157,7 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 - `pull_project_program` - 最新状態を取得（必要に応じて破棄/追従）
 - `undo_checkout_project_program` - checkout を取り消し（ローカル変更破棄可）
 - `terminate_project_program_checkout` - 既存 checkout を checkout ID で強制終了
-- `delete_shared_project_file` - `confirm` が `domain_path` と一致した未ロードの shared project file を削除
+- `delete_shared_project_file` - `confirm` が `domain_path` と一致した未ロードファイルを削除（versioned file は `expected_latest_version` と明示的な `allow_non_atomic_versioned_delete=true` も必須）
 - `reload_project_program` - 現在プログラムを再ロード
 
 #### Large Result Retrieval
@@ -164,9 +165,9 @@ FastMCP のツールは `ghidra_headless.handlers.core` にまとめてあり、
 `--large-result-mode resource`（デフォルト）のときに登録されます。
 
 - `read_result` - 保存済み大型結果のスライスを読む（`offset_chars` / `limit_chars` で `has_more` が false になるまでページング。`limit_chars` のデフォルトは圧縮閾値の 1/3）
-- `search_result` - 保存済み大型結果を正規表現で検索。マッチ位置（`read_result` の offset にそのまま使用可）と前後コンテキストを返す。`max_matches=0` でスニペットなしの件数のみ取得
+- `search_result` - 保存済み大型結果を正規表現で検索。最大100件のスニペット、片側最大2,000文字の前後コンテキスト、`read_result` の offset にそのまま使えるマッチ位置を返す。`max_matches=0` では最大10,000件までスニペットなしで数えるため、`match_count` を全件数として扱う前に `scan_truncated` を確認
 
-詳細な運用フローや制約事項は [利用ガイド](docs/usage.ja.md) を参照してください。
+詳細な運用フローや制約事項は [利用ガイド](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/usage.ja.md) を参照してください。
 
 ### ツール公開制御
 
@@ -254,28 +255,29 @@ uv run ghidra-mcp \
 
 ### 大型結果の圧縮
 
-ローカル LLM はコンテキストが伸びるほど減速し、その主因はデコンパイル結果や長大な一覧といった大型のツール出力です。エージェントのコンテキストを小さく保つため、閾値を超えるツール結果はインラインで返さず、次の形で返します。
+ローカル LLM はコンテキストが伸びるほど減速し、その主因はデコンパイル結果や長大な一覧といった大型のツール出力です。エージェントのコンテキストを小さく保つため、閾値を超え、かつ圧縮後の応答の方が小さくなるツール結果を次の形に置き換えます。
 
-- プレビューと、続きを取得する具体的な手順 — テキスト結果は冒頭部分（行境界で切断）、リスト・dict 結果は先頭の完全なアイテム/エントリを有効な JSON として表示
+- プレビューと、続きを取得する具体的な手順 — テキスト結果は冒頭部分（行境界で切断）を表示します。リスト・dict 結果は、完全なアイテム/エントリが 1 つ以上プレビュー予算に収まる場合に限り、先頭の完全なアイテム/エントリを有効な JSON として表示します。1 つも収まらない場合は payload の生の先頭部分にフォールバックするため、プレビュー自体は有効な JSON とは限りません
 - `result_id` と MCP resource link（`ghidra://results/{result_id}`）
 - `structuredContent` のメタデータ（`size_chars`、`mime_type`、`result_type`、`item_count` など）
 
-全文はサーバ内のインメモリ LRU ストアに保持され、次の 3 通りでアクセスできます。
+設定したキャッシュに収まる場合、全文はサーバ内のインメモリ LRU ストアに保持され、次の 3 通りでアクセスできます。
 
 - `read_result(result_id, offset_chars, limit_chars)` - ページング読み取り。tools のみ対応の MCP クライアントでも動作
-- `search_result(result_id, pattern, context_chars, max_matches)` - 正規表現検索。返される offset はそのまま `read_result` に渡せます
+- `search_result(result_id, pattern, context_chars, max_matches)` - 正規表現検索。最大100件のスニペットと片側最大2,000文字のコンテキストを返し、offset はそのまま `read_result` に渡せます
 - `ghidra://results/{result_id}` への `resources/read` - MCP resource 対応クライアント向け
 
-閾値以下の結果・エラー結果・空リスト結果は従来どおりそのまま返します。同一内容の結果はコンテンツアドレスで同じ `result_id` を再利用するため、エージェントが同じ呼び出しを繰り返してもストアは膨張しません。
+閾値以下の結果・エラー結果・空リスト結果は従来どおりそのまま返します。閾値を超えていても、完全なプレビュー/resource 応答の方がシリアライズ後のインライン応答より小さくならない場合は、インラインのままです。結果エントリ（UTF-8 payload と保持するメタデータ）がキャッシュ全体の byte 予算に収まらない場合も、ツールの実行自体は成功扱いですが、後から取得できるようキャッシュへ保持することはできません。通知の方がインライン応答より小さい場合、サーバは元の payload を含めず、結果を取得できないことを示すコンパクトな `RESULT_TOO_LARGE` notice を返します。通知の方が小さくなければ、全文を含むより小さいインライン結果を維持します。この notice を理由に副作用のあるツールを自動再実行しないでください。安全に再実行できる呼び出しでは、クエリを絞るか byte 予算を増やした上で明示的に再実行してください。同一内容の保存済み結果はコンテンツアドレスで同じ `result_id` を再利用するため、エージェントが同じ呼び出しを繰り返してもストアは膨張しません。
 
 フラグ:
 
-- `--large-result-mode {resource,inline}`（デフォルト `resource`）: `inline` で従来どおり全文を返す挙動に戻せます。
-- `--large-result-threshold-chars N`（デフォルト `12000`）: 圧縮の発動閾値。
-- `--large-result-preview-chars N`（デフォルト `4000`）: プレビューの予算。テキスト結果は全額、JSON リスト・dict 結果は 1/4（数件の完全なアイテム/エントリでスキーマが伝わるため）、`CallToolResult` 全体ダンプは 1/2 を使います。
-- `--result-cache-max-entries N`（デフォルト `512`）/ `--result-cache-max-bytes N`（デフォルト `134217728`）: LRU ストアの予算。破棄済み `result_id` を読むと元のツールの再実行を促すエラーを返します。
+- `--large-result-mode {resource,inline}`（デフォルト `resource`）: `resource` は、完全な応答が小さくなる場合に限り対象の大型結果を条件付きで圧縮します。`inline` は常に全 payload を返します。
+- `--large-result-threshold-chars N`（デフォルト `12000`）: この文字数の閾値を超える成功結果を圧縮候補にします。
+- `--large-result-preview-chars N`（デフォルト `4000`）: プレビューの初期上限。テキスト結果は最大で全額、JSON リスト・dict 結果は最大で 1/4（数件の完全なアイテム/エントリでスキーマが伝わるため）、`CallToolResult` 全体ダンプは最大で 1/2 を使います。JSON エスケープや応答メタデータによって完全な応答予算を超える場合は、さらにプレビューを縮小します。完全なリストアイテム/dict エントリが 1 つも収まらない場合は生の先頭部分を使うため、有効な JSON とは限りません。
+- `--result-cache-max-entries N`（デフォルト `512`）/ `--result-cache-max-bytes N`（デフォルト `134217728`）: LRU ストアの予算。byte 予算は UTF-8 payload と保持するメタデータの合計を計上します。破棄済み `result_id` を読むと、元のツールには副作用があった可能性があるため自動再実行せず、安全または冪等と分かる場合だけ再生成するよう案内します。結果エントリが byte 上限を超える場合は保存せず、通知の方が小さい場合だけ全文を含まない成功扱いの `RESULT_TOO_LARGE` result-unavailable notice を返します。そうでなければインライン結果を維持します。副作用のある呼び出しを自動再試行しないでください。
 - `--tool-description-mode {full,short,none}`（デフォルト `full`）: `tools/list` の説明文の詳細度。`short` は spec の `short_description` を優先し、なければ先頭文にフォールバックします。各ツールの完全なドキュメントは MCP resource（`ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}`）からいつでも取得できます。
 
 ## ライセンス
 
-このプロジェクトのライセンスは同梱の LICENSE ファイルを参照してください。
+このプロジェクトは Apache License, Version 2.0 の下で公開されています。詳細は同梱の
+[LICENSE](https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/LICENSE) ファイルを参照してください。

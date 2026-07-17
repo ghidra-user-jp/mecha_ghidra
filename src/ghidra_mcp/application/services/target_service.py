@@ -41,11 +41,15 @@ class TargetService:
             details.update(safe_cause_details(exc))
         elif message.startswith("LOCAL_CHANGES_EXIST"):
             code = ErrorCode.LOCAL_CHANGES_EXIST
+        elif message.startswith("CHECKOUT_UNAVAILABLE"):
+            code = ErrorCode.CHECKOUT_UNAVAILABLE
+        elif message.startswith("HIJACKED_PROGRAM"):
+            code = ErrorCode.HIJACKED_PROGRAM
         elif message.startswith("UNSAFE_PROGRAM_REMOVE"):
             code = ErrorCode.UNSAFE_PROGRAM_REMOVE
         elif message.startswith("REOPEN_FAILED"):
             code = ErrorCode.REOPEN_FAILED
-            retryable = True
+            retryable = False
         elif message.startswith("LOCK_TIMEOUT"):
             code = ErrorCode.LOCK_TIMEOUT
             retryable = True

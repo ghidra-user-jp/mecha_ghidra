@@ -85,7 +85,9 @@ def _iter_items(items):
 
     iterator_fn = getattr(items, "iterator", None)
     if callable(iterator_fn):
-        iterator = _safe_call(items, "iterator")
+        # Do not use _safe_call here: failure to acquire a backend iterator is
+        # an operation failure, not evidence that the collection is empty.
+        iterator = iterator_fn()
         if iterator is not None:
             for item in _iter_items(iterator):
                 yield item
@@ -121,7 +123,8 @@ def _iter_items(items):
 
 def _is_java_no_such_element(exc):
     return any(
-        getattr(cls, "__name__", "") == "NoSuchElementException"
+        getattr(cls, "__name__", "")
+        in {"NoSuchElementException", "java.util.NoSuchElementException"}
         for cls in type(exc).__mro__
     )
 
@@ -237,6 +240,12 @@ def _ensure_checkout_for_versioned_program(ctx):
         return
 
     is_versioned = _required_domain_file_call(domain_file, "isVersioned")
+    is_hijacked = _required_domain_file_call(domain_file, "isHijacked")
+    if bool(is_hijacked):
+        raise RuntimeError(
+            "HIJACKED_PROGRAM: mutating a hijacked shared-project file is not allowed. "
+            "Resolve the hijacked file before retrying"
+        )
     if not bool(is_versioned):
         return
     is_checked_out = _required_domain_file_call(domain_file, "isCheckedOut")

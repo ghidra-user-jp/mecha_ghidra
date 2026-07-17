@@ -29,7 +29,7 @@ This document explains installation and operations for `ghidra-mcp`. For the ful
    ```bash
    uv sync
    ```
-   `uv` automatically creates a virtual environment and installs dependencies from `pyproject.toml` (`requests`, `mcp`, `pyghidra`, etc.).
+   `uv` automatically creates a virtual environment and installs dependencies from `pyproject.toml` (`mcp`, `pyghidra`, `pydantic`, `regex`, etc.).
 
 4. **Set environment variables**
    ```bash
@@ -49,7 +49,7 @@ This document explains installation and operations for `ghidra-mcp`. For the ful
 
 5. **Start the MCP server**
    ```bash
-   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr  --transport http --mcp-host 127.0.0.1 --mcp-port 8081 
+   uv run ghidra-mcp --project-location /path/to/ghidra_project.gpr --transport http --mcp-host 127.0.0.1 --mcp-port 8081
    ```
 
 ## Docker Setup
@@ -138,7 +138,7 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 
 - `--transport http` is recommended for HTTP connectivity. This starts FastMCP in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
 - `--transport sse` is still available for compatibility (`/sse`).
-- If you bind to `--mcp-host 0.0.0.0` (or `::`), protection assumptions differ from local-only mode. Use reverse proxy, TLS, and access controls for external exposure.
+- A wildcard bind (`--mcp-host 0.0.0.0` or `::`) keeps DNS-rebinding protection enabled and accepts only loopback Host/Origin values by default. For intentional remote access, bind a fixed IP/hostname matching the client-facing Host and combine it with TLS, authentication, and network access controls.
 - Tool exposure is controlled by `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, and `--disable-tool`.
 - `shared_sync` is a regular tool category. Add it with `--add-category shared_sync` or use `--tool-profile full` when you need to expose shared-project sync tools for `commit/pull/checkout/delete` operations.
 - No tool flags is equivalent to `--tool-profile default`, which keeps the default tool set and excludes `shared_sync`.
@@ -153,13 +153,13 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - After mutating tools such as `rename_function`, call `save_project_program(target="default")` to persist changes into `.gpr/.rep`. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 - Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
 - Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
-- `delete_shared_project_file` always requires an explicit `domain_path` plus `confirm` equal to the normalized path; it refuses loaded files, active checkouts, and private files unless `allow_private=true`.
+- `delete_shared_project_file` always requires an explicit `domain_path` plus `confirm` equal to the normalized path; it refuses loaded files, active checkouts, and private files unless `allow_private=true`. Ghidra has no atomic compare-and-delete API for a versioned file, so those deletes fail closed unless both `expected_latest_version` and `allow_non_atomic_versioned_delete=true` are supplied after excluding concurrent writers.
 - In shared projects, mutating tools like `rename_*` and `set_*` require `checkout_project_program` beforehand (`CHECKOUT_REQUIRED` error if not checked out).
-- `add_project_program_to_version_control`, `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints.
+- `checkout_project_program`, `add_project_program_to_version_control`, `commit_project_program`, `pull_project_program`, and `undo_checkout_project_program` internally close/reopen only when targeting the currently loaded program, to avoid `DomainFile` in-use constraints and refresh the loaded program object.
 - Due to Ghidra limitations, merge conflict resolution is not supported in headless mode (`checkin/merge` return `requires merge ... not supported in headless mode`).
 - `pull_project_program(on_local_changes="discard")` uses `undoCheckout(keep=False)` for local changes, and if `can_merge=true` on a checked-out program it follows the latest server state by dropping the stale checkout instead of calling `DomainFile.merge()`.
 - When `can_merge=true` but there is no disposable checkout to drop, `pull_project_program` fails with `UNSAFE_MERGE_REQUIRED` instead of invoking Ghidra's PropertyList merge path.
-- `commit_project_program` detects merge conflicts (`can_merge=true`) and now aborts by default with `UNSAFE_MERGE_REQUIRED`; pass `on_conflict="discard"` only when you explicitly want to drop the local checkout and follow the latest server state (`status=noop` / `reason=conflict_discarded`).
+- `commit_project_program` detects merge conflicts (`can_merge=true`) and now aborts by default with `UNSAFE_MERGE_REQUIRED`; pass `on_conflict="discard"` only when you explicitly want to drop the local checkout and follow the latest server state (`status=ok`, `committed=false`, `conflict_discarded=true`).
 - In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
 - The Docker server starts with project metadata only, so create the project with `create_project` on a fresh volume, then import with `import_program` and open it with `load_project_program`.
 
@@ -188,7 +188,7 @@ uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --
 ```bash
 export GHIDRA_SERVER_PASSWORD='your-password'
 uv run ghidra-mcp \
-    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --project-location /path/to/ghidra_project.gpr \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
@@ -197,11 +197,11 @@ uv run ghidra-mcp \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
 ```
 
-You can also pass the password directly:
+You can also pass the password directly, but this can expose it through shell history or process inspection; prefer the environment-variable form above:
 
 ```bash
 uv run ghidra-mcp \
-    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --project-location /path/to/ghidra_project.gpr \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
@@ -278,14 +278,14 @@ If you want to launch directly with `stdio`:
 ```toml
 [mcp_servers.ghidra_headless]
 enabled = true
-command = "/Users/samsepi0l/.local/bin/uv"
+command = "uv"
 args = [
   "--directory",
-  "/Users/samsepi0l/ghidra/GhidraMCP_headless",
+  "/path/to/mecha_ghidra",
   "run",
   "ghidra-mcp",
   "--project-location",
-  "/Users/samsepi0l/ghidra_project.gpr",
+  "/path/to/ghidra_project.gpr",
   "--transport",
   "stdio"
 ]
@@ -310,14 +310,14 @@ Kilocode/Roocode MCP settings can be written as JSON. Example for launching via 
 {
   "mcpServers": {
     "ghidra_headless": {
-      "command": "/Users/samsepi0l/.local/bin/uv",
+      "command": "uv",
       "args": [
         "--directory",
-        "/Users/samsepi0l/GhidraMCP_headless",
+        "/path/to/mecha_ghidra",
         "run",
         "ghidra-mcp",
         "--project-location",
-        "/Users/samsepi0l/ghidra_project.gpr",
+        "/path/to/ghidra_project.gpr",
         "--transport",
         "stdio"
       ],

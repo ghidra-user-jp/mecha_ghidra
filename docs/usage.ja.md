@@ -29,7 +29,7 @@
    ```bash
    uv sync
    ```
-   `uv` が自動的に仮想環境を作成し、`pyproject.toml` に定義された依存パッケージ（`requests`, `mcp`, `pyghidra` など）をインストールします。
+   `uv` が自動的に仮想環境を作成し、`pyproject.toml` に定義された依存パッケージ（`mcp`, `pyghidra`, `pydantic`, `regex` など）をインストールします。
 
 4. **環境変数の設定**
    ```bash
@@ -49,7 +49,7 @@
 
 5. **MCP サーバーの起動**
    ```bash
-   uv run ghidra-mcp --project-location /Users/samsepi0l/ghidra_project.gpr  --transport http --mcp-host 127.0.0.1 --mcp-port 8081 
+   uv run ghidra-mcp --project-location /path/to/ghidra_project.gpr --transport http --mcp-host 127.0.0.1 --mcp-port 8081
    ```
 
 ## Docker でのセットアップ
@@ -138,7 +138,7 @@ GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.2_d
 
 - http接続時の推奨は `--transport http` です。FastMCP の Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
-- `--mcp-host 0.0.0.0`（または `::`）で起動する場合、ローカル限定時とは保護設定が異なります。外部公開時は必ずリバースプロキシ/TLS/アクセス制御を併用してください。
+- `--mcp-host 0.0.0.0`（または `::`）で wildcard bind しても DNS rebinding protection は有効なままで、既定では loopback の Host/Origin だけを許可します。外部公開する場合は client-facing Host と一致する固定 IP/hostname を bind し、TLS、認証、ネットワークアクセス制御を併用してください。
 - ツール公開は `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, `--disable-tool` で制御します。
 - `shared_sync` は通常の tool category です。shared project の `commit/pull/checkout/delete` operations を行う同期ツールを公開したい場合は、`--add-category shared_sync` を追加するか、`--tool-profile full` を使ってください。
 - ツール制御引数を何も付けない場合は `--tool-profile default` と同じで、default のツール集合を使い、`shared_sync` は含みません。
@@ -153,13 +153,13 @@ GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.2_d
 - `rename_function` などの更新系 tool を使った後、変更を `.gpr/.rep` に残すには `save_project_program(target="default")` を呼んでください。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードが必要になることがあります。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
 - shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
-- `delete_shared_project_file` は明示的な `domain_path` と、正規化後パスに一致する `confirm` が必須です。ロード中ファイル、active checkout があるファイル、`allow_private=true` でない private file は削除しません。
+- `delete_shared_project_file` は明示的な `domain_path` と、正規化後パスに一致する `confirm` が必須です。ロード中ファイル、active checkout があるファイル、`allow_private=true` でない private file は削除しません。Ghidra には versioned file の原子的な compare-and-delete API がないため、同時更新を排除したうえで `expected_latest_version` と `allow_non_atomic_versioned_delete=true` の両方を明示しない限り fail-closed します。
 - shared project で `rename_*` / `set_*` など更新系ツールを使う場合は、先に `checkout_project_program` が必要です（未checkout時は `CHECKOUT_REQUIRED` エラー）。
-- shared project 同期ツールの `add_project_program_to_version_control` / `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避のため内部で一度閉じて再オープンします。
+- shared project 同期ツールの `checkout_project_program` / `add_project_program_to_version_control` / `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避とロード済みprogram object更新のため内部で一度閉じて再オープンします。
 - Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
 - `pull_project_program(on_local_changes="discard")` はローカル変更に対して `undoCheckout(keep=False)` を使用し、さらに checked-out 状態で `can_merge=true` の場合は `DomainFile.merge()` を呼ばず、古い checkout を破棄して最新サーバー状態へ追従します。
 - `can_merge=true` でも破棄できる checkout が無い場合、`pull_project_program` は Ghidra の PropertyList merge 経路を踏まずに `UNSAFE_MERGE_REQUIRED` で停止します。
-- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでは `UNSAFE_MERGE_REQUIRED` で停止します。ローカル checkout を破棄して最新サーバー状態へ追従したい場合のみ `on_conflict="discard"` を明示してください（`status=noop` / `reason=conflict_discarded`）。
+- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでは `UNSAFE_MERGE_REQUIRED` で停止します。ローカル checkout を破棄して最新サーバー状態へ追従したい場合のみ `on_conflict="discard"` を明示してください（`status=ok` / `committed=false` / `conflict_discarded=true`）。
 - Docker 構成では `./samples:/samples:ro` と `ghidra-projects:/data/projects` を既定で使います。入力ファイルは `/samples/<filename>` として指定してください。
 - Docker で初回起動する server は project のみを登録した状態で立ち上がるため、新規 volume では `create_project` で project を作成し、その後 `import_program` で取り込み、続けて `load_project_program` で program を開いてください。
 
@@ -188,7 +188,7 @@ uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --
 ```bash
 export GHIDRA_SERVER_PASSWORD='your-password'
 uv run ghidra-mcp \
-    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --project-location /path/to/ghidra_project.gpr \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
@@ -197,11 +197,11 @@ uv run ghidra-mcp \
     --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
 ```
 
-パスワード文字列を直接渡すこともできます。
+パスワード文字列を直接渡すこともできますが、shell history や process inspection から見える可能性があるため、上記の環境変数方式を推奨します。
 
 ```bash
 uv run ghidra-mcp \
-    --project-location /Users/samsepi0l/ghidra_project.gpr \
+    --project-location /path/to/ghidra_project.gpr \
     --transport http \
     --mcp-host 127.0.0.1 \
     --mcp-port 8081 \
@@ -277,14 +277,14 @@ url = "http://127.0.0.1:8081/mcp"
 ```toml
 [mcp_servers.ghidra_headless]
 enabled = true
-command = "/Users/samsepi0l/.local/bin/uv"
+command = "uv"
 args = [
   "--directory",
-  "/Users/samsepi0l/ghidra/GhidraMCP_headless",
+  "/path/to/mecha_ghidra",
   "run",
   "ghidra-mcp",
   "--project-location",
-  "/Users/samsepi0l/ghidra_project.gpr",
+  "/path/to/ghidra_project.gpr",
   "--transport",
   "stdio"
 ]
@@ -308,14 +308,14 @@ Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` 
 {
   "mcpServers": {
     "ghidra_headless": {
-      "command": "/Users/samsepi0l/.local/bin/uv",
+      "command": "uv",
       "args": [
         "--directory",
-        "/Users/samsepi0l/GhidraMCP_headless",
+        "/path/to/mecha_ghidra",
         "run",
         "ghidra-mcp",
         "--project-location",
-        "/Users/samsepi0l/ghidra_project.gpr",
+        "/path/to/ghidra_project.gpr",
         "--transport",
         "stdio"
       ],

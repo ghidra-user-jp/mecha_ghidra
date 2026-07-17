@@ -403,8 +403,32 @@ done
 /bin/mkdir -p "${OVERLAY_DIR}"
 /bin/cp "${DECOMPILE_BIN}" "${SLEIGH_BIN}" "${OVERLAY_DIR}/"
 
+# Preserve the upstream notices and the Decompiler module's third-party zlib
+# license in every standalone overlay.  The patched full distribution already
+# carries these files, but the overlay is also published as an independent
+# artifact and must remain self-describing when redistributed on its own.
+for required_license_file in \
+  LICENSE \
+  NOTICE \
+  DISCLAIMER.md \
+  licenses/zlib_License.txt
+do
+  [[ -f "${GHIDRA_SRC_DIR}/${required_license_file}" ]] || {
+    echo "Error: required upstream license file is missing: ${required_license_file}" >&2
+    exit 1
+  }
+done
+/bin/mkdir -p "${OVERLAY_ROOT}/licenses"
+/bin/cp "${GHIDRA_SRC_DIR}/LICENSE" "${OVERLAY_ROOT}/LICENSE"
+/bin/cp "${GHIDRA_SRC_DIR}/NOTICE" "${OVERLAY_ROOT}/NOTICE"
+/bin/cp "${GHIDRA_SRC_DIR}/DISCLAIMER.md" "${OVERLAY_ROOT}/DISCLAIMER.md"
+/bin/cp \
+  "${GHIDRA_SRC_DIR}/licenses/zlib_License.txt" \
+  "${OVERLAY_ROOT}/licenses/zlib_License.txt"
+
 log_step "Packaging ${TARGET_PLATFORM} overlay"
-tar -C "${OVERLAY_ROOT}" -czf "${OVERLAY_TARBALL}" Ghidra
+tar -C "${OVERLAY_ROOT}" -czf "${OVERLAY_TARBALL}" \
+  Ghidra LICENSE NOTICE DISCLAIMER.md licenses
 write_sha256_file "${OVERLAY_TARBALL}"
 
 echo "Created overlay artifact: ${OVERLAY_TARBALL}"
@@ -442,6 +466,13 @@ if [[ "${BUILD_PATCHED_DIST}" == "1" ]]; then
 
   /bin/mkdir -p "${RELEASE_DIR}/Ghidra/Features/Decompiler/os/${TARGET_PLATFORM}"
   /bin/cp "${DECOMPILE_BIN}" "${SLEIGH_BIN}" "${RELEASE_DIR}/Ghidra/Features/Decompiler/os/${TARGET_PLATFORM}/"
+  /bin/mkdir -p "${RELEASE_DIR}/licenses"
+  /bin/cp "${OVERLAY_ROOT}/LICENSE" "${RELEASE_DIR}/LICENSE"
+  /bin/cp "${OVERLAY_ROOT}/NOTICE" "${RELEASE_DIR}/NOTICE"
+  /bin/cp "${OVERLAY_ROOT}/DISCLAIMER.md" "${RELEASE_DIR}/DISCLAIMER.md"
+  /bin/cp \
+    "${OVERLAY_ROOT}/licenses/zlib_License.txt" \
+    "${RELEASE_DIR}/licenses/zlib_License.txt"
 
   log_step "Packaging patched ${TARGET_PLATFORM} Ghidra distribution"
   pushd "${PATCH_ROOT}" >/dev/null

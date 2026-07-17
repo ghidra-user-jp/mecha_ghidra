@@ -174,6 +174,7 @@ class DummyRegistry:
             "was_versioned": True,
             "version": 1,
             "latest_version": 1,
+            "atomic_version_guard": False,
         }
 
     def reload_project_program(self, target, **kwargs):
@@ -332,6 +333,14 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("delete_shared_project_file", {"domain_path": "/main", "confirm": 1}),
         ("delete_shared_project_file", {"domain_path": "/main", "confirm": "/main", "expected_latest_version": "x"}),
         ("delete_shared_project_file", {"domain_path": "/main", "confirm": "/main", "allow_private": "x"}),
+        (
+            "delete_shared_project_file",
+            {
+                "domain_path": "/main",
+                "confirm": "/main",
+                "allow_non_atomic_versioned_delete": "x",
+            },
+        ),
         ("reload_project_program", {"domain_path": 1}),
         ("get_version_history", {"limit": "x", "domain_path": None}),
         ("get_version_diff", {"from_version": "x", "to_version": 2, "range_limit": 1}),

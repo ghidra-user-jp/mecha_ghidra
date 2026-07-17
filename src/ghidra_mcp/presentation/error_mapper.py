@@ -9,12 +9,19 @@ from ghidra_mcp.domain import DomainError, ErrorCode
 _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.OPERATION_FAILED: "OPERATION_FAILED: operation failed",
     ErrorCode.CHECKOUT_REQUIRED: "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects",
+    ErrorCode.CHECKOUT_UNAVAILABLE: "CHECKOUT_UNAVAILABLE: the repository refused the requested checkout",
+    ErrorCode.HIJACKED_PROGRAM: (
+        "HIJACKED_PROGRAM: a private local file shadows the repository version; recover it before mutating"
+    ),
     ErrorCode.NOT_SHARED_PROJECT: "NOT_SHARED_PROJECT: target program is not under shared-project version control",
     ErrorCode.NOT_CHECKED_OUT: "NOT_CHECKED_OUT: program is not checked out",
     ErrorCode.LOCAL_CHANGES_EXIST: "LOCAL_CHANGES_EXIST: operation aborted due to local changes",
     ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE: (
         "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: active checkout cannot be terminated; "
         "use undo_checkout_project_program instead"
+    ),
+    ErrorCode.UNSAFE_VERSIONED_DELETE: (
+        "UNSAFE_VERSIONED_DELETE: versioned delete is non-atomic; explicitly acknowledge the risk first"
     ),
     ErrorCode.UNSAFE_PROGRAM_REMOVE: (
         "UNSAFE_PROGRAM_REMOVE: refusing to remove a versioned shared-project program"

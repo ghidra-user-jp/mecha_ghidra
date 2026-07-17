@@ -60,8 +60,20 @@ def to_domain_error(
         code = ErrorCode.SYNC_OPERATION_FAILED
     elif message.startswith("SYNC_STATUS_UNAVAILABLE"):
         code = ErrorCode.SYNC_OPERATION_FAILED
+    elif message.startswith(
+        ("SYNC_REFRESH_FAILED", "REPOSITORY_CONNECT_FAILED", "PROJECT_DATA_REFRESH_FAILED")
+    ):
+        # Raw refresh/connection errors occur before a sync side effect.  Any
+        # post-side-effect refresh failure is wrapped by the operation as a
+        # structured, non-retryable partial success before it reaches here.
+        code = ErrorCode.SYNC_OPERATION_FAILED
+        retryable = True
     elif message.startswith("CHECKOUT_REQUIRED"):
         code = ErrorCode.CHECKOUT_REQUIRED
+    elif message.startswith("CHECKOUT_UNAVAILABLE") or message.startswith("AUTO_CHECKOUT_FAILED"):
+        code = ErrorCode.CHECKOUT_UNAVAILABLE
+    elif message.startswith("HIJACKED_PROGRAM"):
+        code = ErrorCode.HIJACKED_PROGRAM
     elif message.startswith("NOT_SHARED_PROJECT"):
         code = ErrorCode.NOT_SHARED_PROJECT
     elif message.startswith("NOT_CHECKED_OUT"):
@@ -70,6 +82,8 @@ def to_domain_error(
         code = ErrorCode.LOCAL_CHANGES_EXIST
     elif message.startswith("UNSAFE_ACTIVE_CHECKOUT_TERMINATE"):
         code = ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE
+    elif message.startswith("UNSAFE_VERSIONED_DELETE"):
+        code = ErrorCode.UNSAFE_VERSIONED_DELETE
     elif message.startswith("UNSAFE_PROGRAM_REMOVE"):
         code = ErrorCode.UNSAFE_PROGRAM_REMOVE
     elif message.startswith("UNSAFE_MERGE_REQUIRED"):
@@ -87,11 +101,16 @@ def to_domain_error(
         code = ErrorCode.SESSION_NOT_FOUND
     elif "Target '" in message and "is not initialized" in message:
         code = ErrorCode.TARGET_NOT_REGISTERED
-    elif "DomainFile" in message or "failed to resolve domain path" in message:
+    elif (
+        "DomainFile" in message
+        or "failed to resolve domain path" in message
+        or message.startswith("Program not found:")
+        or message.startswith("Domain file not found:")
+    ):
         code = ErrorCode.PROGRAM_NOT_FOUND
     elif message.startswith("REOPEN_FAILED"):
         code = ErrorCode.REOPEN_FAILED
-        retryable = True
+        retryable = False
     elif message.startswith("SAVE_FAILED"):
         code = ErrorCode.SAVE_FAILED
     elif "CORE_EXECUTOR_UNAVAILABLE" in message:

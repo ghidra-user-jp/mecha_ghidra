@@ -91,14 +91,18 @@ class RuntimeSessionStore:
         save: bool = True,
     ) -> None:
         session_domain_path = None
+        owns_target_state = not remove_registry_entry
         if session is not None:
             try:
                 session_domain_path = self.session_domain_path(session)
             except Exception:
                 session_domain_path = None
         if remove_registry_entry:
-            self.sessions.pop(name, None)
-            self.locks.pop(name, None)
+            with self.registry_lock.write_lock():
+                owns_target_state = session is None or self.sessions.get(name) is session
+                if owns_target_state:
+                    self.sessions.pop(name, None)
+                    self.locks.pop(name, None)
 
         close_error = None
         try:
@@ -107,7 +111,18 @@ class RuntimeSessionStore:
         except Exception as exc:  # noqa: BLE001
             close_error = exc
 
-        if remove_context:
+        # A detached/stale session may finish closing after another session has
+        # already been installed for the same target.  Its cleanup must not
+        # remove the replacement session's context.
+        with self.registry_lock.read_lock():
+            current_session = self.sessions.get(name)
+        can_clear_dirty = owns_target_state and (
+            current_session is None or current_session is session
+        )
+        can_remove_context = owns_target_state and (
+            not remove_registry_entry or can_clear_dirty
+        )
+        if remove_context and can_remove_context:
             self.core_accessor().remove_context(name)
 
         session_closed = False
@@ -117,10 +132,22 @@ class RuntimeSessionStore:
             except Exception:
                 session_closed = True
 
-        if handle is not None and handle.is_closed():
-            self.project_handles.pop(handle.get_key(), None)
-        if session_domain_path is not None and (close_error is None or session_closed):
-            self.clear_dirty_program(name, session_domain_path)
+        handle_closed = handle is not None and handle.is_closed()
+        with self.registry_lock.write_lock():
+            if handle is not None and handle_closed:
+                handle_key = handle.get_key()
+                if self.project_handles.get(handle_key) is handle:
+                    self.project_handles.pop(handle_key, None)
+            current_session = self.sessions.get(name)
+            can_clear_dirty = owns_target_state and (
+                current_session is None or current_session is session
+            )
+            if (
+                can_clear_dirty
+                and session_domain_path is not None
+                and (close_error is None or session_closed)
+            ):
+                self.clear_dirty_program(name, session_domain_path)
 
         if close_error is not None:
             message = str(close_error)

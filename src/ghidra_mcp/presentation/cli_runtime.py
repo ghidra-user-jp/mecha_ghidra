@@ -199,6 +199,7 @@ class ServiceRegistryAdapter:
         confirm: str,
         expected_latest_version: int | None = None,
         allow_private: bool = False,
+        allow_non_atomic_versioned_delete: bool = False,
     ):
         return self._sync_service.delete_shared_project_file(
             target,
@@ -206,6 +207,7 @@ class ServiceRegistryAdapter:
             confirm=confirm,
             expected_latest_version=expected_latest_version,
             allow_private=allow_private,
+            allow_non_atomic_versioned_delete=allow_non_atomic_versioned_delete,
         )
 
     def reload_project_program(self, target: str, *, domain_path: str | None = None):

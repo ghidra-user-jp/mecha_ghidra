@@ -5,21 +5,156 @@ on:
   push:
     tags:
       - "v*"
-  release:
-    types:
-      - published
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-decompiler-natives-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  test_package:
+    name: Test and build Python package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      is_prerelease: ${{ steps.version_check.outputs.is_prerelease }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.2
+
+      - name: Verify lockfile and install test dependencies
+        run: |
+          uv lock --check
+          uv sync --frozen --extra test
+
+      - name: Verify release tag matches package version
+        id: version_check
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          uv run --frozen python - "${RELEASE_TAG}" <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          from packaging.version import InvalidVersion, Version
+
+          tag = sys.argv[1]
+          if not tag.startswith("v"):
+              raise SystemExit(f"Release tag must start with 'v': {tag}")
+          try:
+              tag_version = Version(tag[1:])
+          except InvalidVersion as exc:
+              raise SystemExit(f"Release tag is not a valid version: {tag}") from exc
+          package_version = Version(
+              subprocess.check_output(["uv", "version", "--short"], text=True).strip()
+          )
+          if tag_version != package_version:
+              raise SystemExit(
+                  f"Release tag {tag} does not match package version {package_version}"
+              )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"is_prerelease={str(tag_version.is_prerelease).lower()}\n")
+          print(f"Release tag and package version match: {package_version}")
+          PY
+
+      - name: Run unit tests
+        run: uv run pytest -q
+
+      - name: Compile and build distributions
+        run: |
+          uv run python -m compileall -q src
+          uv build --out-dir package-dist
+
+      - name: Verify Python package version and license metadata
+        run: |
+          uv run --frozen python - <<'PY'
+          from email.parser import BytesParser
+          from pathlib import Path
+          import subprocess
+          import tarfile
+          import zipfile
+
+          expected_version = subprocess.check_output(
+              ["uv", "version", "--short"], text=True
+          ).strip()
+          expected_license = Path("LICENSE").read_bytes()
+          wheels = list(Path("package-dist").glob("*.whl"))
+          sdists = list(Path("package-dist").glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              raise SystemExit(
+                  f"Expected one wheel and one sdist, got {wheels=} {sdists=}"
+              )
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata_names = [
+                  name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+              ]
+              license_names = [
+                  name
+                  for name in archive.namelist()
+                  if name.endswith(".dist-info/licenses/LICENSE")
+              ]
+              if len(metadata_names) != 1 or len(license_names) != 1:
+                  raise SystemExit("Wheel is missing unique METADATA or LICENSE entries")
+              metadata = BytesParser().parsebytes(archive.read(metadata_names[0]))
+              if metadata.get("Version") != expected_version:
+                  raise SystemExit(
+                      f"Wheel version {metadata.get('Version')} != {expected_version}"
+                  )
+              if metadata.get("License-Expression") != "Apache-2.0":
+                  raise SystemExit(
+                      "Wheel License-Expression is not Apache-2.0: "
+                      f"{metadata.get('License-Expression')}"
+                  )
+              if archive.read(license_names[0]) != expected_license:
+                  raise SystemExit("Wheel LICENSE does not match the repository LICENSE")
+
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              license_members = [
+                  member
+                  for member in archive.getmembers()
+                  if member.isfile() and member.name.endswith("/LICENSE")
+              ]
+              if len(license_members) != 1:
+                  raise SystemExit("Source distribution is missing a unique LICENSE")
+              license_file = archive.extractfile(license_members[0])
+              if license_file is None or license_file.read() != expected_license:
+                  raise SystemExit("Source distribution LICENSE does not match")
+
+          print(f"Verified package version {expected_version} and Apache-2.0 licensing")
+          PY
+
+      - name: Upload Python package artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ghidra-mcp-python-package
+          if-no-files-found: error
+          path: package-dist/*
+
   build-decompiler:
     name: Build ${{ matrix.platform }} decompiler
+    needs: test_package
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 120
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -28,10 +163,10 @@ jobs:
             runs_on: ubuntu-24.04-arm
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
         with:
           distribution: temurin
           java-version: "21"
@@ -65,9 +200,13 @@ jobs:
           test -n "${overlay}"
           tar -tzf "${overlay}" | grep "^Ghidra/Features/Decompiler/os/${{ matrix.platform }}/decompile$"
           tar -tzf "${overlay}" | grep "^Ghidra/Features/Decompiler/os/${{ matrix.platform }}/sleigh$"
+          tar -tzf "${overlay}" | grep '^LICENSE$'
+          tar -tzf "${overlay}" | grep '^NOTICE$'
+          tar -tzf "${overlay}" | grep '^DISCLAIMER.md$'
+          tar -tzf "${overlay}" | grep '^licenses/zlib_License.txt$'
 
       - name: Upload platform artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: decompiler-${{ matrix.platform }}
           if-no-files-found: error
@@ -76,23 +215,33 @@ jobs:
 
   publish-release-assets:
     name: Publish decompiler release assets
-    needs: build-decompiler
+    needs: [test_package, build-decompiler]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Download platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          pattern: decompiler-*
           path: platform-artifacts
+
+      - name: Download Python package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ghidra-mcp-python-package
+          path: python-package-artifacts
 
       - name: Prepare user-facing release assets
         run: |
           set -eu
           . ./scripts/ghidra_release.env
           mkdir -p release-assets
+          cp python-package-artifacts/* release-assets/
 
           mkdir -p release-assets/decompiler-natives
           for overlay in \
@@ -104,7 +253,8 @@ jobs:
 
           (
             cd release-assets/decompiler-natives
-            zip -qr "../${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}" Ghidra
+            zip -qr "../${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}" \
+              Ghidra LICENSE NOTICE DISCLAIMER.md licenses
           )
           rm -rf release-assets/decompiler-natives
 
@@ -114,7 +264,10 @@ jobs:
           unzip -q "release-assets/full-ghidra/${MECHA_GHIDRA_GHIDRA_DIST_FILENAME}" -d release-assets/full-ghidra
           ghidra_dir="$(find release-assets/full-ghidra -mindepth 1 -maxdepth 1 -type d -name 'ghidra_*' | head -n 1)"
           test -n "${ghidra_dir}"
-          unzip -q "release-assets/${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}" -d "${ghidra_dir}"
+          # The overlay intentionally carries the same upstream LICENSE as the
+          # official distribution, so overwrite that identical file without an
+          # interactive unzip prompt while adding NOTICE and module licenses.
+          unzip -oq "release-assets/${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}" -d "${ghidra_dir}"
           (
             cd release-assets/full-ghidra
             zip -qr "../${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}" "$(basename "${ghidra_dir}")"
@@ -129,8 +282,14 @@ jobs:
           full_zip_path="release-assets/${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}"
           test -f "${zip_path}"
           test -f "${full_zip_path}"
+          test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.whl' | wc -l)" -eq 1
+          test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | wc -l)" -eq 1
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
+          unzip -Z1 "${zip_path}" | grep '^LICENSE$'
+          unzip -Z1 "${zip_path}" | grep '^NOTICE$'
+          unzip -Z1 "${zip_path}" | grep '^DISCLAIMER.md$'
+          unzip -Z1 "${zip_path}" | grep '^licenses/zlib_License.txt$'
           unzip -Z1 "${full_zip_path}" | grep "^${MECHA_GHIDRA_GHIDRA_DIST_ROOT}/Ghidra/Features/Decompiler/os/linux_arm_64/decompile$"
           unzip -Z1 "${full_zip_path}" | grep "^${MECHA_GHIDRA_GHIDRA_DIST_ROOT}/Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$"
           unzip -Z1 "${full_zip_path}" | grep "^${MECHA_GHIDRA_GHIDRA_DIST_ROOT}/Ghidra/Features/Decompiler/os/mac_arm_64/decompile$"
@@ -144,9 +303,24 @@ jobs:
           . ./scripts/ghidra_release.env
           zip_path="release-assets/${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}"
           full_zip_path="release-assets/${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}"
+          wheel_path="$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.whl' | head -n 1)"
+          sdist_path="$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | head -n 1)"
+          test -n "${wheel_path}"
+          test -n "${sdist_path}"
           zip_sha256="$(sha256sum "${zip_path}" | awk '{print $1}')"
           full_zip_sha256="$(sha256sum "${full_zip_path}" | awk '{print $1}')"
+          wheel_sha256="$(sha256sum "${wheel_path}" | awk '{print $1}')"
+          sdist_sha256="$(sha256sum "${sdist_path}" | awk '{print $1}')"
+          wheel_name="$(basename "${wheel_path}")"
+          sdist_name="$(basename "${sdist_path}")"
           cat > release-body.md <<EOF
+          ## Python package
+
+          This release includes the tested \`ghidra_mcp\` wheel and source distribution built from this tag.
+
+          - \`${wheel_name}\` — SHA-256: \`${wheel_sha256}\`
+          - \`${sdist_name}\` — SHA-256: \`${sdist_sha256}\`
+
           ## Native decompiler binaries
 
           This release provides two ZIP assets:
@@ -157,7 +331,7 @@ jobs:
             SHA-256: \`${full_zip_sha256}\`
 
           - \`${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}\`
-            Overlay ZIP containing only the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries.
+            Overlay ZIP containing the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries and required upstream license notices.
             Extract it at the root of an existing Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} installation.
             Files are already stored under their final \`Ghidra/Features/Decompiler/os/...\` paths inside the ZIP.
             SHA-256: \`${zip_sha256}\`
@@ -167,14 +341,20 @@ jobs:
           - \`Ghidra/Features/Decompiler/os/linux_arm_64/decompile\`
           - \`Ghidra/Features/Decompiler/os/linux_arm_64/sleigh\`
 
+          The native archives include Ghidra's upstream \`LICENSE\`, \`NOTICE\`,
+          \`DISCLAIMER.md\`, and the Decompiler module's applicable third-party
+          zlib license. The mecha_ghidra Python package is licensed under
+          Apache License 2.0.
+
           The upstream Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} ZIP already includes \`mac_arm_64\` and \`mac_x86_64\` decompiler binaries.
           EOF
 
-      - name: Remove legacy release assets
-        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+      - name: Look up existing release
+        id: release_lookup
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -eu
@@ -184,16 +364,66 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
           if [ "${status_code}" = "404" ]; then
             echo "No existing release found for tag ${RELEASE_TAG}; skipping legacy asset cleanup."
+            echo "release_exists=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           [ "${status_code}" = "200" ]
-          RELEASE_JSON="$(cat release.json)" python3 - <<'PY'
+          echo "release_exists=true" >> "${GITHUB_OUTPUT}"
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("release.json", encoding="utf-8") as release_file:
+              release = json.load(release_file)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"release_is_draft={str(bool(release.get('draft'))).lower()}\n")
+          PY
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mecha-ghidra-release-assets
+          if-no-files-found: error
+          path: |
+            release-assets/*
+
+      - name: Create release after all gates pass
+        if: startsWith(github.ref, 'refs/tags/') && steps.release_lookup.outputs.release_exists != 'true'
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        with:
+          files: |
+            release-assets/*
+          body_path: release-body.md
+          generate_release_notes: true
+          prerelease: ${{ needs.test_package.outputs.is_prerelease }}
+          fail_on_unmatched_files: true
+
+      - name: Update assets without replacing an existing release body
+        if: startsWith(github.ref, 'refs/tags/') && steps.release_lookup.outputs.release_exists == 'true'
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        with:
+          files: |
+            release-assets/*
+          draft: ${{ steps.release_lookup.outputs.release_is_draft }}
+          prerelease: ${{ needs.test_package.outputs.is_prerelease }}
+          fail_on_unmatched_files: true
+
+      - name: Remove superseded legacy release assets
+        if: startsWith(github.ref, 'refs/tags/') && steps.release_lookup.outputs.release_exists == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -eu
+          python3 - <<'PY'
           import fnmatch
           import json
           import os
           import subprocess
+          from pathlib import Path
 
-          payload = json.loads(os.environ["RELEASE_JSON"])
+          with open("release.json", encoding="utf-8") as release_file:
+              payload = json.load(release_file)
           delete_patterns = [
               "*.sha256",
               "mecha_ghidra_release_assets.txt",
@@ -213,11 +443,16 @@ jobs:
               "ghidra_*_mac_x86_64_decompiler.zip",
               "ghidra_*_mac_x86_64_decompiler_overlay.tar.gz",
           ]
+          new_asset_names = {
+              path.name for path in Path("release-assets").iterdir() if path.is_file()
+          }
           repo = os.environ["GITHUB_REPOSITORY"]
           token = os.environ["GITHUB_TOKEN"]
 
           for asset in payload.get("assets", []):
               name = asset.get("name", "")
+              if name in new_asset_names:
+                  continue
               if not any(fnmatch.fnmatch(name, pattern) for pattern in delete_patterns):
                   continue
               asset_id = asset["id"]
@@ -238,27 +473,3 @@ jobs:
               )
               print(f"Deleted legacy release asset: {name}")
           PY
-
-      - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: mecha-ghidra-release-assets
-          if-no-files-found: error
-          path: |
-            release-assets/*
-
-      - name: Publish release assets for tag pushes
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release-assets/*
-          body_path: release-body.md
-
-      - name: Publish release assets for published releases
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release-assets/*
-          body_path: release-body.md

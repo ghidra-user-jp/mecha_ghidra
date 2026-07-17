@@ -12,6 +12,7 @@ from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.doc_resources import register_tool_doc_resources
 from ghidra_mcp.presentation.result_resources import (
     ResultResourceStore,
+    maybe_compact_tool_result,
     register_result_resources,
     register_result_tools,
 )
@@ -38,10 +39,15 @@ def _server_instructions(config: ToolPresentationConfig) -> str:
     if config.large_result_mode == "resource":
         parts.append(
             f"Tool results longer than {config.large_result_threshold_chars} characters are "
-            "returned as a preview plus a result_id. Page through the remainder with the "
-            "read_result tool, or locate specific content with the search_result tool (regex), "
-            "instead of re-reading whole payloads. Clients with MCP resource support can also "
-            "read the full payload at ghidra://results/{result_id}."
+            "returned as a preview plus a result_id when that reduces response size. Page "
+            "through stored payloads with read_result, or locate specific content with "
+            "search_result (regex), instead of re-reading whole payloads. Clients with MCP "
+            "resource support can also read them at ghidra://results/{result_id}. A result "
+            "entry larger than the entire cache returns a successful RESULT_TOO_LARGE "
+            "result-unavailable notice without the full content when that notice is smaller; "
+            "otherwise the smaller inline result is preserved. Tool execution has already "
+            "completed when this notice appears, so do not automatically retry side-effecting "
+            "calls."
         )
     return "\n".join(parts)
 
@@ -72,13 +78,18 @@ def create_mcp_server(
         registry,
     ) -> Any:
         dispatcher = dispatcher_provider()
-        return dispatcher(
+        result = dispatcher(
             spec_name,
             raw_args,
             target,
             registry=registry,
-            presentation_config=effective_config,
-            result_store=result_store,
+        )
+        return maybe_compact_tool_result(
+            tool_name=spec_name,
+            target=target,
+            result=result,
+            config=effective_config,
+            store=result_store,
         )
 
     tools = ToolRegistry.register_all(

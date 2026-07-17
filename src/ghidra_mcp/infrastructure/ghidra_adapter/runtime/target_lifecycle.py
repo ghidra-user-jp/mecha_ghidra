@@ -49,22 +49,36 @@ class RuntimeTargetLifecycle:
                         yield
 
     def _get_or_create_project_handle_outside_registry(self, key: tuple[str, str]) -> ProjectHandle:
-        with self._store.registry_lock.write_lock():
+        with self._store.registry_lock.read_lock():
             handle = self._store.project_handles.get(key)
-            if handle is not None and not handle.is_closed():
-                return handle
+        if handle is not None and not handle.is_closed():
+            return handle
 
-        handle = ProjectHandle(key[0], key[1])
-        with self._store.registry_lock.write_lock():
-            current = self._store.project_handles.get(key)
-            if current is None or current.is_closed():
-                self._store.project_handles[key] = handle
-                return handle
+        candidate = ProjectHandle(key[0], key[1])
+        while True:
+            with self._store.registry_lock.write_lock():
+                current = self._store.project_handles.get(key)
+                if current is None or current is handle:
+                    self._store.project_handles[key] = candidate
+                    return candidate
+            if not current.is_closed():
+                break
+            handle = current
         try:
-            handle.close()
+            candidate.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning("failed to close duplicate project handle for %s::%s: %s", key[0], key[1], exc)
         return current
+
+    def _get_target_handle_outside_registry(self, name: str) -> ProjectHandle:
+        with self._store.registry_lock.write_lock():
+            session = self._store.sessions.get(name)
+            if session is not None:
+                handle = session.get_project_handle()
+                self._store.target_projects[name] = handle.get_key()
+                return handle
+            key = self._store.get_target_project_key_locked(name)
+        return self._get_or_create_project_handle_outside_registry(key)
 
     def create_session(
         self,
@@ -140,7 +154,8 @@ class RuntimeTargetLifecycle:
                     return session
                 except Exception as operation_error:  # noqa: BLE001
                     with self._store.registry_lock.write_lock():
-                        self._store.sessions.pop(name, None)
+                        if session is not None and self._store.sessions.get(name) is session:
+                            self._store.sessions.pop(name, None)
                     rollback_error = None
                     if handle is not None:
                         rollback_error = self._cleanup_failed_create_session_locked(
@@ -196,22 +211,52 @@ class RuntimeTargetLifecycle:
                     }
 
     def list_targets(self) -> List[Dict[str, Optional[str]]]:
-        with self._store.registry_lock.read_lock():
-            names = sorted(set(self._store.target_projects.keys()) | set(self._store.sessions.keys()))
+        with self._store.operation_lock.read_lock():
+            with self._store.registry_lock.read_lock():
+                names = sorted(set(self._store.target_projects.keys()) | set(self._store.sessions.keys()))
             results: List[Dict[str, Optional[str]]] = []
             for name in names:
-                session = self._store.sessions.get(name)
-                if session is not None:
-                    info = session.to_dict()
-                else:
-                    project_key = self._store.target_projects.get(name)
-                    if project_key is None:
-                        continue
-                    info = {
-                        "project_location": project_key[0],
-                        "project_name": project_key[1],
-                        "domain_path": None,
-                    }
+                # A target lock can be removed and recreated while this read is
+                # waiting.  Retry until the lock we acquired is still the
+                # registry's lock for this target.
+                while True:
+                    with self._store.registry_lock.read_lock():
+                        lock = self._store.locks.get(name)
+                        target_exists = name in self._store.sessions or name in self._store.target_projects
+                    if lock is None and target_exists:
+                        with self._store.registry_lock.write_lock():
+                            if name in self._store.sessions or name in self._store.target_projects:
+                                lock = self._store.locks.setdefault(name, threading.RLock())
+                    if lock is None:
+                        break
+                    with lock:
+                        with self._store.registry_lock.read_lock():
+                            if self._store.locks.get(name) is not lock:
+                                continue
+                            session = self._store.sessions.get(name)
+                            project_key = self._store.target_projects.get(name)
+                        if session is not None:
+                            # ProgramSession.to_dict() reaches into Ghidra.  The
+                            # target lock keeps the session alive without
+                            # holding registry_lock across that external call.
+                            info = session.to_dict()
+                        elif project_key is not None:
+                            info = {
+                                "project_location": project_key[0],
+                                "project_name": project_key[1],
+                                "domain_path": None,
+                            }
+                        else:
+                            info = None
+                        break
+
+                if lock is None:
+                    # The target was removed after the names snapshot, or the
+                    # registry is incomplete.  Do not inspect a session whose
+                    # lifecycle cannot be protected by a target lock.
+                    continue
+                if info is None:
+                    continue
                 results.append({"target": name, **info})
             return results
 
@@ -263,33 +308,39 @@ class RuntimeTargetLifecycle:
         if not domain_path:
             raise ValueError("domain_path is required")
         with self._target_operation(name):
-            with self._store.registry_lock.write_lock():
-                handle = self._store.get_target_handle_locked(name)
-                normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
-                owner_target = self._find_loaded_target_locked(handle=handle, domain_path=normalized_domain_path)
-                if owner_target is not None:
-                    details = {
-                        "operation": "load_program",
-                        "target": name,
-                        "domain_path": normalized_domain_path,
-                    }
-                    if owner_target != name:
-                        details["owner_target"] = owner_target
-                    raise DomainError(
-                        code=ErrorCode.TARGET_ALREADY_LOADED,
-                        message=f"TARGET_ALREADY_LOADED: program already loaded: {normalized_domain_path}",
-                        hint="Use the existing target directly instead of reloading the same program",
-                        retryable=False,
-                        details=details,
-                    )
+            handle = self._get_target_handle_outside_registry(name)
+            normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
+            with self._store.registry_lock.read_lock():
+                session_snapshot = list(self._store.sessions.items())
+            owner_target = self._find_loaded_target_locked(
+                handle=handle,
+                domain_path=normalized_domain_path,
+                sessions=session_snapshot,
+            )
+            if owner_target is not None:
+                details = {
+                    "operation": "load_program",
+                    "target": name,
+                    "domain_path": normalized_domain_path,
+                }
+                if owner_target != name:
+                    details["owner_target"] = owner_target
+                raise DomainError(
+                    code=ErrorCode.TARGET_ALREADY_LOADED,
+                    message=f"TARGET_ALREADY_LOADED: program already loaded: {normalized_domain_path}",
+                    hint="Use the existing target directly instead of reloading the same program",
+                    retryable=False,
+                    details=details,
+                )
 
+            with self._store.registry_lock.read_lock():
                 old_session = self._store.sessions.get(name)
-                old_domain_path = None
-                if old_session is not None:
-                    try:
-                        old_domain_path = self._store.session_domain_path(old_session)
-                    except Exception:
-                        old_domain_path = None
+            old_domain_path = None
+            if old_session is not None:
+                try:
+                    old_domain_path = self._store.session_domain_path(old_session)
+                except Exception:
+                    old_domain_path = None
             new_session = handle.open_program(normalized_domain_path)
             try:
                 loaded_domain_path = self._initialize_opened_session_locked(
@@ -322,20 +373,21 @@ class RuntimeTargetLifecycle:
                 )
                 raise
 
+            handle_closed = handle.is_closed()
             with self._store.registry_lock.write_lock():
                 self._store.sessions[name] = new_session
                 if old_domain_path is not None:
                     self._store.clear_dirty_program(name, old_domain_path)
-                if handle.is_closed():
-                    self._store.project_handles.pop(handle.get_key(), None)
+                if handle_closed:
+                    if self._store.project_handles.get(handle.get_key()) is handle:
+                        self._store.project_handles.pop(handle.get_key(), None)
             return loaded_domain_path
 
     def import_program(self, name: str, binary_path: str, **kwargs) -> str:
         if not binary_path:
             raise ValueError("binary_path is required")
         with self._target_operation(name):
-            with self._store.registry_lock.write_lock():
-                handle = self._store.get_target_handle_locked(name)
+            handle = self._get_target_handle_outside_registry(name)
             binary = pathlib.Path(binary_path)
             existing_domain_path = self._existing_imported_program_path_locked(handle, binary)
             if existing_domain_path is not None:
@@ -368,10 +420,10 @@ class RuntimeTargetLifecycle:
 
     def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, object]:
         with self._target_operation(name):
-            with self._store.registry_lock.write_lock():
+            with self._store.registry_lock.read_lock():
                 session = self._store.ensure_session(name)
-                handle = session.get_project_handle()
-                active_domain_path = self._store.session_domain_path(session)
+            handle = session.get_project_handle()
+            active_domain_path = self._store.session_domain_path(session)
             requested_domain_path = (domain_path or "").strip()
             resolved_domain_path = active_domain_path
             if requested_domain_path:
@@ -422,41 +474,47 @@ class RuntimeTargetLifecycle:
             self._close_all_locked()
 
     def _close_all_locked(self) -> None:
-        with self._store.registry_lock.write_lock():
+        with self._store.registry_lock.read_lock():
             names = list(self._store.sessions.keys())
-            close_errors: list[tuple[str, Exception]] = []
-            handle_errors: list[tuple[tuple[str, str], Exception]] = []
-            for name in names:
-                try:
-                    self._close_session_locked(name, remove_program=False)
-                except Exception as close_exc:  # noqa: BLE001
-                    logger.warning("failed to close session during close_all for target '%s': %s", name, close_exc)
-                    close_errors.append((name, close_exc))
+        close_errors: list[tuple[str, Exception]] = []
+        handle_errors: list[tuple[tuple[str, str], Exception]] = []
+        for name in names:
+            try:
+                self._close_session_locked(name, remove_program=False)
+            except Exception as close_exc:  # noqa: BLE001
+                logger.warning("failed to close session during close_all for target '%s': %s", name, close_exc)
+                close_errors.append((name, close_exc))
+            with self._store.registry_lock.write_lock():
                 if name not in self._store.sessions:
                     self._store.locks.pop(name, None)
                     self._store.target_projects.pop(name, None)
                     self._store.clear_analyzed_loads_for_target(name)
                     self._store.clear_dirty_programs_for_target(name)
 
-            for handle in list(self._store.project_handles.values()):
-                if close_errors and self._handle_has_live_sessions_locked(handle):
-                    continue
-                try:
-                    # force: a session close that failed above may have leaked a
-                    # refcount; shutdown must still reclaim the project.
-                    handle.close(force=True)
-                except Exception as handle_exc:
-                    logger.warning("failed to close project handle during close_all: %s", handle_exc)
-                    handle_errors.append((handle.get_key(), handle_exc))
-                if handle.is_closed():
-                    self._store.project_handles.pop(handle.get_key(), None)
+        with self._store.registry_lock.read_lock():
+            handles = list(self._store.project_handles.values())
+        for handle in handles:
+            if close_errors and self._handle_has_live_sessions_locked(handle):
+                continue
+            try:
+                # force: a session close that failed above may have leaked a
+                # refcount; shutdown must still reclaim the project.
+                handle.close(force=True)
+            except Exception as handle_exc:
+                logger.warning("failed to close project handle during close_all: %s", handle_exc)
+                handle_errors.append((handle.get_key(), handle_exc))
+            if handle.is_closed():
+                with self._store.registry_lock.write_lock():
+                    if self._store.project_handles.get(handle.get_key()) is handle:
+                        self._store.project_handles.pop(handle.get_key(), None)
 
-            if close_errors or handle_errors:
-                parts = [f"{name}: {error}" for name, error in close_errors]
-                parts.extend(f"{key[0]}::{key[1]}: {error}" for key, error in handle_errors)
-                summary = "; ".join(parts)
-                raise RuntimeError(f"CLOSE_ALL_FAILED: failed to close runtime resource(s): {summary}")
+        if close_errors or handle_errors:
+            parts = [f"{name}: {error}" for name, error in close_errors]
+            parts.extend(f"{key[0]}::{key[1]}: {error}" for key, error in handle_errors)
+            summary = "; ".join(parts)
+            raise RuntimeError(f"CLOSE_ALL_FAILED: failed to close runtime resource(s): {summary}")
 
+        with self._store.registry_lock.write_lock():
             self._store.sessions.clear()
             self._store.locks.clear()
             self._store.project_locks.clear()
@@ -464,19 +522,22 @@ class RuntimeTargetLifecycle:
             self._store.clear_analyzed_loads()
             self._store.clear_dirty_programs()
             self._store.project_handles.clear()
-            self._store.core_accessor().clear_contexts()
+        self._store.core_accessor().clear_contexts()
 
     def _close_session_locked(self, name: str, *, remove_program: bool) -> None:
-        session = self._store.sessions.get(name)
+        with self._store.registry_lock.read_lock():
+            session = self._store.sessions.get(name)
+            target_exists = name in self._store.target_projects
         if session is None:
-            if not remove_program and name in self._store.target_projects:
+            if not remove_program and target_exists:
                 return
             raise RuntimeError(f"Session '{name}' does not exist")
         handle = session.get_project_handle()
         domain_path = self._store.session_domain_path(session)
         if remove_program:
             self._ensure_program_removal_allowed_locked(name, session, handle)
-            session = self._store.sessions.get(name)
+            with self._store.registry_lock.read_lock():
+                session = self._store.sessions.get(name)
             if session is None:
                 raise RuntimeError(f"Session '{name}' was closed during remove safety verification")
             handle = session.get_project_handle()
@@ -501,15 +562,23 @@ class RuntimeTargetLifecycle:
             and str(close_error).startswith("REMOVE_PROGRAM_FAILED:")
         )
         if remove_failed:
+            # ProgramSession marks itself closed when removal fails after the
+            # program was released.  Do not leave that unusable object in the
+            # registry if reopening also fails.
+            if self._session_is_closed(session):
+                with self._store.registry_lock.write_lock():
+                    if self._store.sessions.get(name) is session:
+                        self._store.sessions.pop(name, None)
             restore_error = self._restore_session_after_remove_failure_locked(
                 name,
                 project_key=project_key,
                 domain_path=domain_path,
             )
             if restore_error is not None:
-                restored_session = self._store.sessions.get(name)
-                self._store.target_projects[name] = project_key
-                self._store.locks.setdefault(name, threading.RLock())
+                with self._store.registry_lock.write_lock():
+                    restored_session = self._store.sessions.get(name)
+                    self._store.target_projects[name] = project_key
+                    self._store.locks.setdefault(name, threading.RLock())
                 if restored_session is None:
                     try:
                         self._store.core_accessor().remove_context(name)
@@ -519,16 +588,25 @@ class RuntimeTargetLifecycle:
             raise close_error
 
         if close_error is None or self._session_is_closed(session):
-            self._store.sessions.pop(name, None)
-            if remove_program:
-                self._store.locks.pop(name, None)
-                self._store.target_projects.pop(name, None)
-                self._store.clear_analyzed_loads_for_target(name)
-                self._store.clear_dirty_programs_for_target(name)
-            else:
-                self._store.target_projects[name] = project_key
-                self._store.locks.setdefault(name, threading.RLock())
-            self._store.core_accessor().remove_context(name)
+            owns_target_state = False
+            with self._store.registry_lock.write_lock():
+                current_session = self._store.sessions.get(name)
+                if current_session is session:
+                    self._store.sessions.pop(name, None)
+                    owns_target_state = True
+                elif current_session is None:
+                    owns_target_state = True
+                if owns_target_state:
+                    if remove_program:
+                        self._store.locks.pop(name, None)
+                        self._store.target_projects.pop(name, None)
+                        self._store.clear_analyzed_loads_for_target(name)
+                        self._store.clear_dirty_programs_for_target(name)
+                    else:
+                        self._store.target_projects[name] = project_key
+                        self._store.locks.setdefault(name, threading.RLock())
+            if owns_target_state:
+                self._store.core_accessor().remove_context(name)
 
         if close_error is not None:
             raise close_error
@@ -540,10 +618,11 @@ class RuntimeTargetLifecycle:
         project_key: tuple[str, str],
         domain_path: str,
     ) -> Exception | None:
-        self._store.target_projects[name] = project_key
-        self._store.locks.setdefault(name, threading.RLock())
+        with self._store.registry_lock.write_lock():
+            self._store.target_projects[name] = project_key
+            self._store.locks.setdefault(name, threading.RLock())
         try:
-            handle = self._store.get_or_create_project_handle(project_key[0], project_key[1])
+            handle = self._get_or_create_project_handle_outside_registry(project_key)
             restored = handle.open_program(domain_path)
             try:
                 self._initialize_opened_session_locked(name=name, session=restored)
@@ -551,14 +630,16 @@ class RuntimeTargetLifecycle:
                 try:
                     restored.close(save=False)
                 except Exception as close_exc:  # noqa: BLE001
-                    self._store.sessions[name] = restored
+                    with self._store.registry_lock.write_lock():
+                        self._store.sessions[name] = restored
                     raise RuntimeError(
                         "PROGRAM_CLOSE_FAILED: failed to close restored session during "
                         f"remove-failure recovery for target '{name}': {close_exc}; "
                         f"original error: {init_error}"
                     ) from init_error
                 raise
-            self._store.sessions[name] = restored
+            with self._store.registry_lock.write_lock():
+                self._store.sessions[name] = restored
             return None
         except Exception as exc:  # noqa: BLE001
             return exc
@@ -669,21 +750,27 @@ class RuntimeTargetLifecycle:
         try:
             session.close(save=save)
             if handle.is_closed():
-                self._store.project_handles.pop(handle.get_key(), None)
+                with self._store.registry_lock.write_lock():
+                    if self._store.project_handles.get(handle.get_key()) is handle:
+                        self._store.project_handles.pop(handle.get_key(), None)
             if not handle.is_closed():
                 active_handle = handle
             else:
-                active_handle = self._store.get_or_create_project_handle(project_location, project_name)
+                active_handle = self._get_or_create_project_handle_outside_registry(
+                    ProjectHandle.make_key(project_location, project_name)
+                )
             reopened = active_handle.open_program(domain_path)
             try:
                 self._initialize_opened_session_locked(name=name, session=reopened)
-                self._store.sessions[name] = reopened
+                with self._store.registry_lock.write_lock():
+                    self._store.sessions[name] = reopened
                 reopened_session_bound = True
             except Exception as init_error:  # noqa: BLE001
                 try:
                     reopened.close(save=False)
                 except Exception as close_exc:  # noqa: BLE001
-                    self._store.sessions[name] = reopened
+                    with self._store.registry_lock.write_lock():
+                        self._store.sessions[name] = reopened
                     reopened_session_bound = True
                     raise RuntimeError(
                         "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
@@ -693,14 +780,19 @@ class RuntimeTargetLifecycle:
                 raise
             finally:
                 if active_handle is not None and active_handle.is_closed():
-                    self._store.project_handles.pop(active_handle.get_key(), None)
-            self._store.clear_dirty_program(name, domain_path)
+                    with self._store.registry_lock.write_lock():
+                        if self._store.project_handles.get(active_handle.get_key()) is active_handle:
+                            self._store.project_handles.pop(active_handle.get_key(), None)
+            with self._store.registry_lock.write_lock():
+                self._store.clear_dirty_program(name, domain_path)
             return reopened
         except Exception:
             if not reopened_session_bound and self._session_is_closed(session):
-                self._store.sessions.pop(name, None)
-                self._store.clear_analyzed_loads_for_target(name)
-                self._store.clear_dirty_programs_for_target(name)
+                with self._store.registry_lock.write_lock():
+                    if self._store.sessions.get(name) is session:
+                        self._store.sessions.pop(name, None)
+                    self._store.clear_analyzed_loads_for_target(name)
+                    self._store.clear_dirty_programs_for_target(name)
                 try:
                     self._store.core_accessor().remove_context(name)
                 except Exception as remove_exc:  # noqa: BLE001
@@ -884,9 +976,11 @@ class RuntimeTargetLifecycle:
             allow_handle_close=old_session_closed,
         )
         if old_session_closed:
-            self._store.sessions.pop(name, None)
-            if old_domain_path is not None:
-                self._store.clear_dirty_program(name, old_domain_path)
+            with self._store.registry_lock.write_lock():
+                if self._store.sessions.get(name) is old_session:
+                    self._store.sessions.pop(name, None)
+                if old_domain_path is not None:
+                    self._store.clear_dirty_program(name, old_domain_path)
             if cleanup_error is not None:
                 raise cleanup_error
             return
@@ -940,7 +1034,9 @@ class RuntimeTargetLifecycle:
                 else:
                     cleanup_error = handle_close_error
         if handle.is_closed():
-            self._store.project_handles.pop(handle.get_key(), None)
+            with self._store.registry_lock.write_lock():
+                if self._store.project_handles.get(handle.get_key()) is handle:
+                    self._store.project_handles.pop(handle.get_key(), None)
         return cleanup_error
 
     def _cleanup_failed_create_session_locked(
@@ -971,19 +1067,22 @@ class RuntimeTargetLifecycle:
                     f"for target '{name}': {handle_exc}"
                 )
         if handle.is_closed():
-            self._store.project_handles.pop(handle.get_key(), None)
+            with self._store.registry_lock.write_lock():
+                if self._store.project_handles.get(handle.get_key()) is handle:
+                    self._store.project_handles.pop(handle.get_key(), None)
         return cleanup_error
 
     def _handle_has_live_sessions_locked(self, handle: ProjectHandle) -> bool:
-        handle_key = handle.get_key()
-        for session in self._store.sessions.values():
+        with self._store.registry_lock.read_lock():
+            sessions = list(self._store.sessions.values())
+        for session in sessions:
             if self._session_is_closed(session):
                 continue
             try:
                 session_handle = session.get_project_handle()
             except Exception:
                 continue
-            if session_handle.get_key() == handle_key:
+            if session_handle is handle:
                 return True
         return False
 
@@ -998,13 +1097,23 @@ class RuntimeTargetLifecycle:
             normalized_path = "/" + normalized_path
         return normalized_path
 
-    def _find_loaded_target_locked(self, *, handle: ProjectHandle, domain_path: str) -> str | None:
+    def _find_loaded_target_locked(
+        self,
+        *,
+        handle: ProjectHandle,
+        domain_path: str,
+        sessions: list[tuple[str, ProgramSession]],
+    ) -> str | None:
         requested_key = handle.get_key()
-        for target_name, session in self._store.sessions.items():
-            session_handle = session.get_project_handle()
+        for target_name, session in sessions:
+            try:
+                session_handle = session.get_project_handle()
+            except Exception:
+                continue
             if session_handle.get_key() != requested_key:
                 continue
-            if self._store.session_domain_path(session) == domain_path:
+            loaded_domain_path = self._store.session_domain_path(session)
+            if loaded_domain_path == domain_path:
                 return target_name
         return None
 

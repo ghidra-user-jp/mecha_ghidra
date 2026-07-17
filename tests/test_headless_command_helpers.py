@@ -134,21 +134,27 @@ def test_iter_items_supports_bare_next_iterator(monkeypatch: pytest.MonkeyPatch)
 def test_iter_items_bare_next_treats_java_no_such_element_as_end(monkeypatch: pytest.MonkeyPatch):
     core_helpers = _import_core_helpers(monkeypatch)
 
-    # jpype maps java.util.NoSuchElementException to a Python class of the same
-    # name; a bare-next iterator raising it has ended, not failed.
+    # Pure-Python fakes usually expose the simple class name, while real JPype
+    # classes use the fully qualified name ``java.util.NoSuchElementException``.
     class NoSuchElementException(Exception):
         pass
 
+    QualifiedNoSuchElementException = type(
+        "java.util.NoSuchElementException", (Exception,), {}
+    )
+
     class _BareNextJava:
-        def __init__(self):
+        def __init__(self, exception_type):
             self._values = [10, 20]
+            self._exception_type = exception_type
 
         def next(self):
             if not self._values:
-                raise NoSuchElementException()
+                raise self._exception_type()
             return self._values.pop(0)
 
-    assert list(core_helpers._iter_items(_BareNextJava())) == [10, 20]
+    for exception_type in (NoSuchElementException, QualifiedNoSuchElementException):
+        assert list(core_helpers._iter_items(_BareNextJava(exception_type))) == [10, 20]
 
     class _ExplodingBareNext:
         def next(self):
@@ -175,6 +181,30 @@ def test_iter_items_supports_java_style_iterator(monkeypatch: pytest.MonkeyPatch
             return value
 
     assert list(core_helpers._iter_items(_JavaIter())) == [1, 2, 3]
+
+
+def test_iter_items_propagates_iterator_acquisition_errors(monkeypatch: pytest.MonkeyPatch):
+    core_helpers = _import_core_helpers(monkeypatch)
+
+    class _BrokenIterable:
+        def iterator(self):
+            raise RuntimeError("backend iterator unavailable")
+
+    with pytest.raises(RuntimeError, match="backend iterator unavailable"):
+        list(core_helpers._iter_items(_BrokenIterable()))
+
+
+def test_iter_items_falls_back_when_iterator_returns_none(monkeypatch: pytest.MonkeyPatch):
+    core_helpers = _import_core_helpers(monkeypatch)
+
+    class _PythonIterable:
+        def iterator(self):
+            return None
+
+        def __iter__(self):
+            return iter([4, 5, 6])
+
+    assert list(core_helpers._iter_items(_PythonIterable())) == [4, 5, 6]
 
 
 # --- list_classes -----------------------------------------------------------

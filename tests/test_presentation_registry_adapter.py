@@ -164,6 +164,7 @@ class RecordingService:
                     "merged": False,
                     "discarded_local_changes": False,
                     "followed_latest": False,
+                    "reloaded": False,
                     "version": 1,
                     "latest_version": 1,
                     "is_latest_version": True,
@@ -199,6 +200,7 @@ class RecordingService:
                     "was_versioned": True,
                     "version": 1,
                     "latest_version": 1,
+                    "atomic_version_guard": False,
                 }
             if name == "reload_project_program":
                 target = args[0]

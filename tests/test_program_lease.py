@@ -68,6 +68,8 @@ def test_program_lease_reopen_failure_maps_to_domain_error():
     err = exc_info.value
     assert err.code == ErrorCode.REOPEN_FAILED
     assert "reopen boom" in err.message
+    assert err.retryable is False
+    assert "inspect the remote operation state" in str(err.hint)
 
 
 def test_program_lease_reopen_failure_marks_none_result_as_partial_success():
@@ -83,6 +85,7 @@ def test_program_lease_reopen_failure_marks_none_result_as_partial_success():
     err = exc_info.value
     assert err.code == ErrorCode.REOPEN_FAILED
     assert err.details == {"operation_completed": True, "partial_success": True}
+    assert err.retryable is False
 
 
 def test_program_lease_reopen_failure_keeps_operation_error_in_details():
@@ -101,6 +104,7 @@ def test_program_lease_reopen_failure_keeps_operation_error_in_details():
     err = exc_info.value
     assert err.code == ErrorCode.REOPEN_FAILED
     assert err.details == {"operation_error": "operation boom"}
+    assert err.retryable is False
 
 
 def test_program_lease_reopen_failure_keeps_success_result_in_details():

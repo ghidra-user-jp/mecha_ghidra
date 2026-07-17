@@ -324,6 +324,18 @@ class _NeverVersionedFailingCloseOnReopenProjectHandle(_NeverVersionedOnReopenPr
         return session
 
 
+class _RestoreOpenFailsProjectHandle(_FakeProjectHandle):
+    def __init__(self, project_location: str, project_name: str | None) -> None:
+        super().__init__(project_location, project_name)
+        self.open_program_calls = 0
+
+    def open_program(self, domain_path: str | None = None):
+        self.open_program_calls += 1
+        if self.open_program_calls > 1:
+            raise RuntimeError("restore open failed")
+        return super().open_program(domain_path)
+
+
 class _DomainErrorDuringRemoveVerifyProjectHandle(_FakeProjectHandle):
     def get_sync_status(self, domain_path: str):  # noqa: ARG002
         raise DomainError(
@@ -618,6 +630,67 @@ def test_target_lifecycle_remove_restore_close_failure_preserves_restored_sessio
     assert core.contexts == {"fw": "/main"}
 
 
+def test_target_lifecycle_remove_restore_open_failure_drops_closed_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(
+        monkeypatch,
+        core=core,
+        handle_cls=_RestoreOpenFailsProjectHandle,
+    )
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    created = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = created.get_project_handle()
+    handle.sync_status["can_add_to_repository"] = False
+    failing = _RemoveFailedClosedSession(handle, "/main", created.flat_api)
+    store.sessions["fw"] = failing
+
+    with pytest.raises(RuntimeError, match="REOPEN_FAILED: failed to restore session: restore open failed"):
+        lifecycle.close_session("fw", remove_program=True)
+
+    assert "fw" not in store.sessions
+    assert store.target_projects["fw"] == ("/tmp/prj", "sample")
+    assert "fw" in store.locks
+    assert core.contexts == {}
+    assert core.removed == ["fw"]
+
+
+def test_target_lifecycle_close_stale_session_preserves_reentrant_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+    created = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    replacement_handle = _FakeProjectHandle("/tmp/replacement", "replacement")
+    replacement = _FakeSession(replacement_handle, "/replacement", created.flat_api)
+    replacement_lock = threading.RLock()
+
+    class _ReentrantReplacementSession(_FakeSession):
+        def close(self, *, save: bool = True, remove_program: bool = False) -> None:
+            self.closed_with.append((save, remove_program))
+            self._handle = None
+            with store.registry_lock.write_lock():
+                store.sessions["fw"] = replacement
+                store.locks["fw"] = replacement_lock
+                store.target_projects["fw"] = replacement_handle.get_key()
+            core.contexts["fw"] = "/replacement"
+
+    stale = _ReentrantReplacementSession(created.get_project_handle(), "/main", created.flat_api)
+    store.sessions["fw"] = stale
+    store.mark_dirty_program("fw", "/main")
+
+    lifecycle.close_session("fw")
+
+    assert stale.closed_with == [(True, False)]
+    assert store.sessions["fw"] is replacement
+    assert store.locks["fw"] is replacement_lock
+    assert store.target_projects["fw"] == replacement_handle.get_key()
+    assert store.is_dirty_program("fw", "/main")
+    assert core.contexts == {"fw": "/replacement"}
+    assert core.removed == []
+
+
 def test_target_lifecycle_refuses_to_remove_versioned_program(monkeypatch: pytest.MonkeyPatch):
     lifecycle, store, core = _build_target_lifecycle(monkeypatch)
     lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
@@ -864,6 +937,65 @@ def test_target_lifecycle_close_registered_target_without_loaded_session_is_noop
     assert core.removed == []
 
 
+def test_target_lifecycle_list_targets_waits_for_target_lock(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    target_lock = store.locks["fw"]
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def list_targets() -> None:
+        started.set()
+        try:
+            lifecycle.list_targets()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    with target_lock:
+        thread = threading.Thread(target=list_targets)
+        thread.start()
+        assert started.wait(1)
+        assert not finished.wait(0.05)
+
+    thread.join(1)
+    assert finished.is_set()
+    assert errors == []
+
+
+def test_target_lifecycle_list_targets_reads_session_outside_registry_lock(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    session = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    original_to_dict = session.to_dict
+
+    def to_dict():  # noqa: ANN202
+        acquired = threading.Event()
+
+        def acquire_registry() -> None:
+            with store.registry_lock.write_lock():
+                acquired.set()
+
+        thread = threading.Thread(target=acquire_registry)
+        thread.start()
+        assert acquired.wait(1), "session metadata was read while registry_lock was held"
+        thread.join(1)
+        assert not thread.is_alive()
+        return original_to_dict()
+
+    session.to_dict = to_dict
+
+    assert lifecycle.list_targets() == [
+        {
+            "target": "fw",
+            "project_location": "/tmp/prj",
+            "project_name": "sample",
+            "domain_path": "/main",
+        }
+    ]
+
+
 def test_target_lifecycle_list_programs_uses_metadata_when_no_session(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
@@ -1073,6 +1205,28 @@ def test_target_lifecycle_create_session_failure_does_not_close_shared_handle(mo
     assert created.get_project_handle().is_closed() is False
     assert store.session_domain_path(store.sessions["fw1"]) == "/main"
     assert core.contexts == {"fw1": "/main"}
+
+
+def test_target_lifecycle_failed_cleanup_closes_stale_same_key_handle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    stale_handle = _FakeProjectHandle("/tmp/prj", "sample")
+    replacement_handle = _FakeProjectHandle("/tmp/prj", "sample")
+    replacement = _FakeSession(replacement_handle, "/main", object())
+    store.sessions["fw"] = replacement
+    store.project_handles[replacement_handle.get_key()] = replacement_handle
+
+    cleanup_error = lifecycle._cleanup_failed_create_session_locked(  # noqa: SLF001
+        name="stale",
+        session=None,
+        handle=stale_handle,
+    )
+
+    assert cleanup_error is None
+    assert stale_handle.is_closed()
+    assert store.sessions["fw"] is replacement
+    assert store.project_handles[replacement_handle.get_key()] is replacement_handle
 
 
 def test_target_lifecycle_create_session_failure_restores_registered_target_project(monkeypatch: pytest.MonkeyPatch):
@@ -1341,6 +1495,43 @@ def test_target_lifecycle_close_all_waits_for_active_runtime_operation(monkeypat
     assert core.cleared == 1
 
 
+def test_target_lifecycle_close_all_calls_resources_outside_registry_lock(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    session = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = session.get_project_handle()
+    original_session_close = session.close
+    original_handle_close = handle.close
+
+    def assert_registry_writer_available() -> None:
+        acquired = threading.Event()
+
+        def acquire_registry() -> None:
+            with store.registry_lock.write_lock():
+                acquired.set()
+
+        thread = threading.Thread(target=acquire_registry)
+        thread.start()
+        assert acquired.wait(1), "resource close was called while registry_lock was held"
+        thread.join(1)
+        assert not thread.is_alive()
+
+    def close_session(*, save: bool = True, remove_program: bool = False) -> None:
+        assert_registry_writer_available()
+        original_session_close(save=save, remove_program=remove_program)
+
+    def close_handle(*, force: bool = False) -> None:
+        assert_registry_writer_available()
+        original_handle_close(force=force)
+
+    session.close = close_session
+    handle.close = close_handle
+
+    lifecycle.close_all()
+
+    assert not store.sessions
+    assert not store.project_handles
+
+
 def test_target_lifecycle_duplicate_load_same_target_raises_specific_error(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
@@ -1414,6 +1605,58 @@ def test_target_lifecycle_list_programs_opens_handle_outside_registry_helper(mon
     monkeypatch.setattr(store, "get_or_create_project_handle", fail_registry_bound_open)
 
     assert lifecycle.list_programs("fw") == [{"path": "/main"}]
+
+
+def test_target_lifecycle_load_unloaded_target_opens_handle_outside_registry_helper(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+
+    def fail_registry_bound_open(*_args, **_kwargs):
+        raise AssertionError("load_program must not open ProjectHandle via registry-bound helper")
+
+    monkeypatch.setattr(store, "get_target_handle_locked", fail_registry_bound_open)
+
+    assert lifecycle.load_program("fw", "/main") == "/main"
+
+
+def test_target_lifecycle_import_unloaded_target_opens_handle_outside_registry_helper(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+
+    def fail_registry_bound_open(*_args, **_kwargs):
+        raise AssertionError("import_program must not open ProjectHandle via registry-bound helper")
+
+    monkeypatch.setattr(store, "get_target_handle_locked", fail_registry_bound_open)
+
+    assert lifecycle.import_program("fw", "/tmp/sample.bin") == "/imported.bin"
+
+
+def test_target_lifecycle_checks_cached_handle_outside_registry_lock(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    handle = _FakeProjectHandle("/tmp/prj", "sample")
+    store.project_handles[handle.get_key()] = handle
+
+    def is_closed() -> bool:
+        acquired = threading.Event()
+
+        def acquire_registry() -> None:
+            with store.registry_lock.write_lock():
+                acquired.set()
+
+        thread = threading.Thread(target=acquire_registry)
+        thread.start()
+        assert acquired.wait(1), "cached handle state was checked while registry_lock was held"
+        thread.join(1)
+        assert not thread.is_alive()
+        return False
+
+    handle.is_closed = is_closed
+
+    assert lifecycle._get_or_create_project_handle_outside_registry(handle.get_key()) is handle  # noqa: SLF001
 
 
 def test_target_lifecycle_save_project_program_saves_active_and_clears_dirty(monkeypatch: pytest.MonkeyPatch):
