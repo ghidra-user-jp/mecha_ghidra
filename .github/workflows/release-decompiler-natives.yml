@@ -241,7 +241,7 @@ jobs:
           set -eu
           . ./scripts/ghidra_release.env
           mkdir -p release-assets
-          cp python-package-artifacts/* release-assets/
+          cp python-package-artifacts/ghidra_mcp-*.tar.gz release-assets/
 
           mkdir -p release-assets/decompiler-natives
           for overlay in \
@@ -282,7 +282,7 @@ jobs:
           full_zip_path="release-assets/${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}"
           test -f "${zip_path}"
           test -f "${full_zip_path}"
-          test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.whl' | wc -l)" -eq 1
+          test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.whl' | wc -l)" -eq 0
           test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | wc -l)" -eq 1
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
@@ -303,22 +303,17 @@ jobs:
           . ./scripts/ghidra_release.env
           zip_path="release-assets/${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}"
           full_zip_path="release-assets/${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}"
-          wheel_path="$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.whl' | head -n 1)"
           sdist_path="$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | head -n 1)"
-          test -n "${wheel_path}"
           test -n "${sdist_path}"
           zip_sha256="$(sha256sum "${zip_path}" | awk '{print $1}')"
           full_zip_sha256="$(sha256sum "${full_zip_path}" | awk '{print $1}')"
-          wheel_sha256="$(sha256sum "${wheel_path}" | awk '{print $1}')"
           sdist_sha256="$(sha256sum "${sdist_path}" | awk '{print $1}')"
-          wheel_name="$(basename "${wheel_path}")"
           sdist_name="$(basename "${sdist_path}")"
           cat > release-body.md <<EOF
           ## Python package
 
-          This release includes the tested \`ghidra_mcp\` wheel and source distribution built from this tag.
+          This release includes the tested \`ghidra_mcp\` source distribution built from this tag.
 
-          - \`${wheel_name}\` — SHA-256: \`${wheel_sha256}\`
           - \`${sdist_name}\` — SHA-256: \`${sdist_sha256}\`
 
           ## Native decompiler binaries
@@ -442,6 +437,7 @@ jobs:
               "ghidra_*_mac_arm_64_decompiler_overlay.tar.gz",
               "ghidra_*_mac_x86_64_decompiler.zip",
               "ghidra_*_mac_x86_64_decompiler_overlay.tar.gz",
+              "ghidra_mcp-*.whl",
           ]
           new_asset_names = {
               path.name for path in Path("release-assets").iterdir() if path.is_file()
