@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import threading
 
 import pytest
@@ -169,6 +170,28 @@ class _FakeProjectHandle:
     @staticmethod
     def make_key(project_location: str, project_name: str | None) -> tuple[str, str]:
         return (project_location, project_name or "")
+
+    @staticmethod
+    def resolve_project_creation_target(
+        project_location: str,
+        project_name: str | None,
+    ) -> tuple[str, str]:
+        return (project_location, project_name or "")
+
+    @staticmethod
+    def create_project(
+        project_location: str,
+        project_name: str | None = None,
+        *,
+        overwrite: bool = False,
+    ) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "project_location": project_location,
+            "project_name": project_name or "",
+            "created": True,
+            "overwritten": overwrite,
+        }
 
     @staticmethod
     def list_programs_from_metadata(project_location: str, project_name: str | None):  # noqa: ARG004
@@ -436,6 +459,75 @@ def _build_target_lifecycle(
     store = RuntimeSessionStore(state=state, core_accessor=lambda: core)
     lifecycle = RuntimeTargetLifecycle(store=store)
     return lifecycle, store, core
+
+
+def test_create_project_uses_exclusive_operation_lock(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+
+    class _WriterOnlyLock:
+        def __init__(self) -> None:
+            self.writer_entries = 0
+
+        @contextlib.contextmanager
+        def write_lock(self):
+            self.writer_entries += 1
+            yield
+
+        def read_lock(self):
+            raise AssertionError("create_project must not use a shared operation lock")
+
+    operation_lock = _WriterOnlyLock()
+    store.operation_lock = operation_lock
+
+    result = lifecycle.create_project("/tmp/prj", project_name="sample")
+
+    assert result["project_name"] == "sample"
+    assert operation_lock.writer_entries == 1
+
+
+@pytest.mark.parametrize("registered", [False, True], ids=["open-handle", "registered-target"])
+def test_create_project_rejects_overwrite_when_project_is_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+    registered: bool,
+):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    project_key = ("/tmp/prj", "sample")
+    if registered:
+        store.target_projects["fw"] = project_key
+    else:
+        store.project_handles[project_key] = _FakeProjectHandle(*project_key)
+
+    create_called = False
+
+    def unexpected_create(*_args, **_kwargs):
+        nonlocal create_called
+        create_called = True
+        raise AssertionError("destructive project creation must not run")
+
+    monkeypatch.setattr(_FakeProjectHandle, "create_project", staticmethod(unexpected_create))
+
+    with pytest.raises(RuntimeError, match="PROJECT_IN_USE"):
+        lifecycle.create_project("/tmp/prj", project_name="sample", overwrite=True)
+
+    assert create_called is False
+
+
+def test_create_project_allows_overwrite_with_only_closed_stale_handle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    project_key = ("/tmp/prj", "sample")
+    stale_handle = _FakeProjectHandle(*project_key)
+    stale_handle.close()
+    store.project_handles[project_key] = stale_handle
+
+    result = lifecycle.create_project(
+        "/tmp/prj",
+        project_name="sample",
+        overwrite=True,
+    )
+
+    assert result["overwritten"] is True
 
 
 def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.MonkeyPatch):

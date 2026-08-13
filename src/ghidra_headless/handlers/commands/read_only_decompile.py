@@ -79,7 +79,14 @@ def disassemble_range(params, *, ensure_context, get_address, to_int, iter_items
         normalized_length = to_int(length, 0)
         if normalized_length <= 0:
             raise ValueError("length must be > 0")
-        end = start.add(normalized_length - 1)
+        try:
+            end = start.add(normalized_length - 1)
+        except Exception as exc:
+            # Address.add() raises an AddressOverflowException at the end of an
+            # address space (and the Python/Java bridge rejects values outside a
+            # signed long). Expose either case as an invalid user range instead of
+            # leaking a backend-specific exception.
+            raise ValueError("length exceeds the address space") from exc
     if start.compareTo(end) > 0:
         raise ValueError("start_address must be <= end_address")
     if limit <= 0:

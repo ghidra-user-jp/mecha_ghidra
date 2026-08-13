@@ -7,6 +7,10 @@ def list_functions(params, *, ensure_context, to_int, collect):
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
 
     def _to_entry(func):
         return {
@@ -21,6 +25,10 @@ def list_functions(params, *, ensure_context, to_int, collect):
 def list_classes(params, *, context, to_int, iter_namespaces, safe_call):
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
 
     def _is_class(namespace):
         # Ghidra's Namespace has no isClass(); class-ness is carried by the
@@ -38,7 +46,7 @@ def list_classes(params, *, context, to_int, iter_namespaces, safe_call):
     items = []
     idx = 0
     for namespace in iter_namespaces(context):
-        if bool(safe_call(namespace, "isGlobal")):
+        if bool(safe_call(namespace, "isGlobal")) or not _is_class(namespace):
             continue
         if idx >= offset:
             items.append(_to_entry(namespace))
@@ -55,6 +63,10 @@ def search_functions_by_name(params, *, ensure_context, to_int):
         raise ValueError("query is required")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     iterator = ctx.function_manager.getFunctions(True)
     matches = []
     idx = 0

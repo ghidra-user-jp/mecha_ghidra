@@ -147,7 +147,11 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli.import_program(target=target, binary_path=binary_path)
+        imported = cli.import_program(
+            target=target,
+            binary_path=binary_path,
+            analyze_imported=True,
+        )
         domain_path = imported["program"]
         cli.load_project_program(target=target, domain_path=domain_path)
 
@@ -155,6 +159,32 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             cli.create_struct(name="__it_struct", target=target)
         )
         _log_runtime_result("create_struct", struct_result)
+
+        from ghidra_headless.handlers.core_runtime import _ensure_context_for_key
+
+        program = _ensure_context_for_key(target).program
+        enum_data_type = pycore.JClass("ghidra.program.model.data.EnumDataType")
+        transaction_id = program.startTransaction("Create runtime validation enum")
+        committed = False
+        try:
+            enum_type = enum_data_type("__it_enum", 4)
+            enum_type.add("NEGATIVE", -1, "negative value")
+            enum_type.add("ZERO", 0)
+            program.getDataTypeManager().addDataType(enum_type, None)
+            committed = True
+        finally:
+            program.endTransaction(transaction_id, committed)
+
+        enum_result = _unwrap_runtime_result(
+            cli.get_enum(name="__it_enum", target=target)
+        )
+        _log_runtime_result("get_enum", enum_result)
+        assert enum_result["name"] == "__it_enum"
+        assert enum_result["isSigned"] is True
+        assert {item["name"]: item["value"] for item in enum_result["values"]} == {
+            "NEGATIVE": -1,
+            "ZERO": 0,
+        }
 
         first_functions = _unwrap_runtime_result(
             cli.list_functions(offset=0, limit=1, target=target)
@@ -200,8 +230,17 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         function_info = _unwrap_runtime_result(
             cli.get_function(address=address, target=target)
         )
-        label = function_info["name"]
         _log_runtime_result("get_function(seed)", function_info)
+
+        first_data_items = _unwrap_runtime_result(
+            cli.list_data_items(offset=0, limit=20, target=target)
+        )
+        assert first_data_items, "Cannot validate get_data_by_label without defined data"
+        data_address = first_data_items[0]["address"]
+        data_label = "__it_runtime_data"
+        _unwrap_runtime_result(
+            cli.rename_data(address=data_address, new_name=data_label, target=target)
+        )
 
         bytes_dump = _unwrap_runtime_result(
             cli.get_bytes(address=address, size=16, target=target)
@@ -259,7 +298,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
                 cli.list_strings(offset=0, limit=5, target=target)
             ),
             "get_data_by_label": _unwrap_runtime_result(
-                cli.get_data_by_label(label=label, target=target)
+                cli.get_data_by_label(label=data_label, target=target)
             ),
             "get_bytes": bytes_dump,
             "search_bytes": _unwrap_runtime_result(
@@ -279,7 +318,9 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["decompile_function"], str)
         assert isinstance(runtime_results["decompile_function(address)"], str)
         assert isinstance(runtime_results["disassemble_function"], list)
+        assert runtime_results["disassemble_function"]
         assert isinstance(runtime_results["disassemble_range"], list)
+        assert runtime_results["disassemble_range"]
         assert isinstance(runtime_results["get_callee"], list)
         assert isinstance(runtime_results["get_xrefs_to"], list)
         assert isinstance(runtime_results["get_xrefs_from"], list)
@@ -287,12 +328,16 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["list_segments"], list)
         assert isinstance(runtime_results["list_imports"], list)
         assert isinstance(runtime_results["list_exports"], list)
+        assert data_label in runtime_results["list_exports"]
         assert isinstance(runtime_results["list_classes"], list)
+        assert all(item.get("isClass") is True for item in runtime_results["list_classes"])
         assert isinstance(runtime_results["list_namespaces"], list)
         assert isinstance(runtime_results["list_data_items"], list)
         assert isinstance(runtime_results["list_data_types"], list)
         assert isinstance(runtime_results["list_strings"], list)
         assert isinstance(runtime_results["get_data_by_label"], list)
+        assert runtime_results["get_data_by_label"]
+        assert all(item["name"] == data_label for item in runtime_results["get_data_by_label"])
         assert isinstance(runtime_results["get_bytes"], str)
         assert isinstance(runtime_results["search_bytes"], list)
         assert isinstance(runtime_results["get_struct"], dict)

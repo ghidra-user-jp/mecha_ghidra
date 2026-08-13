@@ -278,6 +278,46 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
             pass
 
 
+def test_runtime_single_byte_search_stops_at_memory_end(tmp_path):
+    _start_pyghidra_if_needed()
+
+    target = f"runtime_search_end_{uuid.uuid4().hex[:8]}"
+    project_dir = tmp_path / "runtime_search_end_project"
+    project_name = "runtime_search_end_validation"
+    raw_blob = tmp_path / "one_byte.bin"
+    raw_blob.write_bytes(b"\xff")
+    _ensure_project_created(project_dir, project_name)
+
+    try:
+        cli.register_target(
+            target=target,
+            project_location=str(project_dir),
+            project_name=project_name,
+        )
+        imported = cli.import_program(
+            target=target,
+            binary_path=str(raw_blob),
+            import_mode="raw_binary",
+            language_id="x86:LE:32:default",
+            base_address="0xffffffff",
+            analyze_imported=False,
+        )
+        cli.load_project_program(target=target, domain_path=imported["program"])
+
+        assert _unwrap_runtime_result(
+            cli.search_bytes(pattern="ff", offset=0, limit=2, target=target)
+        ) == ["ffffffff"]
+        with pytest.raises(Exception, match="VALIDATION_ERROR"):
+            cli.search_bytes(pattern="   ", offset=0, limit=2, target=target)
+        with pytest.raises(Exception, match="VALIDATION_ERROR"):
+            cli.set_bytes(address="0xffffffff", bytes_hex="   ", target=target)
+    finally:
+        try:
+            cli.close_session(target=target)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def test_runtime_mutating_commands_all_success(tmp_path):
     _start_pyghidra_if_needed()
     binary_path = _resolve_runtime_binary_path()
@@ -407,10 +447,12 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         )
         _log_runtime_result("rename_function(address)", rename_function_by_address_result)
 
-        rename_data_result = _unwrap_runtime_result(
+        with pytest.raises(Exception, match="VALIDATION_ERROR"):
             cli.rename_data(address=aux_address, new_name=f"{renamed_aux_2}_data", target=target)
+        function_after_rename_data = _unwrap_runtime_result(
+            cli.get_function(address=aux_address, target=target)
         )
-        _log_runtime_result("rename_data", rename_data_result)
+        assert function_after_rename_data["name"] == renamed_aux_2
 
         create_struct_result = _unwrap_runtime_result(
             cli.create_struct(name="__it_struct_mut", target=target)
@@ -434,18 +476,24 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _unwrap_runtime_result(
             cli.add_struct_members(
                 struct_name="__it_struct_mut",
-                members=[{"name": "field_b", "type": "char"}],
+                members=[
+                    {"name": "field_a", "type": "char"},
+                    {"name": "field_b", "type": "char"},
+                    {"name": "field_keep", "type": "char"},
+                    {"name": "field_d", "type": "char"},
+                ],
                 target=target,
             )
         )
         remove_struct_members_result = _unwrap_runtime_result(
             cli.remove_struct_members(
                 struct_name="__it_struct_mut",
-                members=["field_b"],
+                members=["field_a", "field_b", "field_d"],
                 target=target,
             )
         )
         _log_runtime_result("remove_struct_members", remove_struct_members_result)
+        assert [member["name"] for member in remove_struct_members_result["members"]] == ["field_keep"]
         list_data_types_result = _unwrap_runtime_result(
             cli.list_data_types(offset=0, limit=20, filter="__it_struct_mut", target=target)
         )
@@ -504,7 +552,6 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         runtime_results = {
             "rename_function": rename_function_result,
             "rename_function(address)": rename_function_by_address_result,
-            "rename_data": rename_data_result,
             "rename_variable": rename_variable_result,
             "set_decompiler_comment": decompiler_comment_result,
             "set_disassembly_comment": disassembly_comment_result,

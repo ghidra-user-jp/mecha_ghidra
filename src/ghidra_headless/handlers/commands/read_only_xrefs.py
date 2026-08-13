@@ -8,6 +8,10 @@ def get_xrefs_to(params, *, ensure_context, get_address, to_int, iter_items):
     address_text = params.get("address")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     address = get_address(ctx, address_text)
     references = ctx.reference_manager.getReferencesTo(address)
     items = []
@@ -31,6 +35,10 @@ def get_xrefs_from(params, *, ensure_context, get_address, to_int, iter_items):
     address_text = params.get("address")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     address = get_address(ctx, address_text)
     references = ctx.reference_manager.getReferencesFrom(address)
     items = []
@@ -56,6 +64,10 @@ def get_function_xrefs(params, *, ensure_context, find_function_by_name, to_int,
         raise ValueError("name is required")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     function = find_function_by_name(ctx, name)
     if function is None:
         raise LookupError("Function not found: %s" % name)

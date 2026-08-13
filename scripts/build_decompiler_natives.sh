@@ -56,7 +56,7 @@ log_step() {
 }
 
 run_with_retry() {
-  local attempts delay status
+  local attempt attempts delay status
   attempts="$1"
   delay="$2"
   shift 2
@@ -64,8 +64,12 @@ run_with_retry() {
   for ((attempt=1; attempt<=attempts; attempt++)); do
     if "$@"; then
       return 0
+    else
+      # Capture the command's status inside the else branch.  After an `if`
+      # statement with no matching branch, `$?` is 0 in bash, which previously
+      # made every failed attempt look successful and disabled the retry loop.
+      status=$?
     fi
-    status=$?
     if [[ "${attempt}" -ge "${attempts}" ]]; then
       return "${status}"
     fi
