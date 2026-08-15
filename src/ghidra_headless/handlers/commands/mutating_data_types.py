@@ -109,20 +109,15 @@ def clear_struct(
         struct = get_struct_datatype(ctx, struct_name, category)
         if struct is None:
             raise LookupError("Struct not found: %s" % struct_name)
-        cleared = False
-        clear_components = getattr(struct, "clearComponents", None)
-        if callable(clear_components):
-            clear_components()
-            cleared = True
+        delete_all = getattr(struct, "deleteAll", None)
+        if callable(delete_all):
+            delete_all()
         else:
             num_components = safe_call(struct, "getNumComponents")
             if num_components is None:
                 num_components = len(list(iter_items(struct.getComponents())))
             for ordinal in range(int(num_components) - 1, -1, -1):
                 struct.delete(ordinal)
-                cleared = True
-        if not cleared:
-            raise RuntimeError("Failed to clear struct members")
         dt_manager(ctx).replaceDataType(struct, struct, True)
         return struct
 
@@ -145,9 +140,13 @@ def remove_struct_members(params, *, ensure_context, txn, get_struct_datatype, d
         if struct is None:
             raise LookupError("Struct not found: %s" % struct_name)
         target_names = set(members)
-        for component in list(struct.getComponents()):
-            if component.getFieldName() in target_names:
-                struct.delete(component.getOrdinal())
+        ordinals = [
+            component.getOrdinal()
+            for component in list(struct.getComponents())
+            if component.getFieldName() in target_names
+        ]
+        for ordinal in sorted(ordinals, reverse=True):
+            struct.delete(ordinal)
         dt_manager(ctx).replaceDataType(struct, struct, True)
         return struct
 
@@ -211,6 +210,10 @@ def list_data_types(params, *, ensure_context, to_int, dt_manager, collect, iter
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     text_filter = params.get("filter")
     category = params.get("category")
     filter_lower = str(text_filter).lower() if text_filter else None

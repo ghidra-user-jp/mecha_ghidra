@@ -3,10 +3,28 @@
 from __future__ import absolute_import, print_function
 
 
+MAX_BYTE_PAYLOAD_SIZE = 1024 * 1024
+
+
+def validate_hex_payload_size(value):
+    max_hex_digits = MAX_BYTE_PAYLOAD_SIZE * 2
+    hex_digits = 0
+    for character in value:
+        if character.isspace():
+            continue
+        hex_digits += 1
+        if hex_digits > max_hex_digits:
+            raise ValueError("bytes must not exceed %d bytes" % MAX_BYTE_PAYLOAD_SIZE)
+
+
 def list_segments(params, *, ensure_context, to_int):
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     blocks = ctx.program.getMemory().getBlocks()
     result = []
     idx = 0
@@ -36,6 +54,10 @@ def list_imports(params, *, ensure_context, to_int):
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     iterator = ctx.symbol_table.getExternalSymbols()
     items = []
     idx = 0
@@ -53,17 +75,22 @@ def list_exports(params, *, ensure_context, to_int, iter_items, is_exported_symb
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
-    iterator = ctx.function_manager.getFunctions(True)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
+    iterator = ctx.symbol_table.getExternalEntryPointIterator()
     exports = []
     idx = 0
-    for function in iter_items(iterator):
-        symbol = function.getSymbol()
-        if is_exported_symbol(ctx, symbol):
-            if idx >= offset:
-                exports.append(symbol.getName(True))
-                if len(exports) >= limit:
-                    break
-            idx += 1
+    for address in iter_items(iterator):
+        symbol = ctx.symbol_table.getPrimarySymbol(address)
+        if symbol is None or not is_exported_symbol(ctx, symbol):
+            continue
+        if idx >= offset:
+            exports.append(symbol.getName(True))
+            if len(exports) >= limit:
+                break
+        idx += 1
     return exports
 
 
@@ -71,6 +98,10 @@ def list_namespaces(params, *, ensure_context, to_int, iter_namespaces, safe_cal
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     result = []
     idx = 0
     for namespace in iter_namespaces(ctx):
@@ -88,6 +119,10 @@ def list_data_items(params, *, ensure_context, to_int):
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     data_iter = ctx.listing.getDefinedData(True)
     items = []
     idx = 0
@@ -111,6 +146,10 @@ def list_strings(params, *, ensure_context, to_int):
     filter_text = params.get("filter")
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 200)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     data_iter = ctx.listing.getDefinedData(True)
     items = []
     idx = 0
@@ -144,7 +183,9 @@ def get_data_by_label(params, *, ensure_context, iter_items):
     for symbol in iter_items(symbols):
         address = symbol.getAddress()
         data = ctx.listing.getDefinedDataAt(address)
-        representation = data.getDefaultValueRepresentation() if data else ""
+        if data is None:
+            continue
+        representation = data.getDefaultValueRepresentation()
         results.append(
             {
                 "name": symbol.getName(True),
@@ -161,34 +202,49 @@ def get_bytes(params, *, ensure_context, to_int, get_address, hexdump):
     size = to_int(params.get("size"), 1)
     if size <= 0:
         raise ValueError("size must be a positive integer")
+    if size > MAX_BYTE_PAYLOAD_SIZE:
+        raise ValueError("size must not exceed %d bytes" % MAX_BYTE_PAYLOAD_SIZE)
     address = get_address(ctx, address_text)
     memory = ctx.program.getMemory()
     return hexdump(memory, address, size)
 
 
 def search_bytes(params, *, ensure_context, to_int, decode_hex_bytes):
-    ctx = ensure_context()
     pattern_text = params.get("bytes")
     if not pattern_text:
         raise ValueError("bytes is required")
+    validate_hex_payload_size(pattern_text)
+    ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
     pattern = decode_hex_bytes(pattern_text)
+    if not pattern:
+        raise ValueError("bytes must contain at least one byte")
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     memory = ctx.program.getMemory()
     start = memory.getMinAddress()
     end = memory.getMaxAddress()
     monitor = ctx.monitor()
     results = []
+    skipped = 0
     current = start
     while True:
         address = memory.findBytes(current, end, pattern, None, True, monitor)
         if address is None:
             break
-        results.append(str(address))
-        if len(results) >= offset + limit:
+        if skipped < offset:
+            skipped += 1
+        else:
+            results.append(str(address))
+            if len(results) >= limit:
+                break
+        if address.compareTo(end) >= 0:
             break
         current = address.add(1)
-    return results[offset: offset + limit]
+    return results
 
 
 def get_struct(params, *, ensure_context, get_struct_datatype, describe_struct):

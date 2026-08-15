@@ -1,6 +1,7 @@
+import pathlib
+import sys
 import threading
 import types
-import pathlib
 
 import pytest
 
@@ -69,6 +70,96 @@ def build_handle(monkeypatch):
     handle._closed = False
     handle._open_programs = set()
     return handle
+
+
+def test_create_project_without_overwrite_uses_non_destructive_manager(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+    created_project = types.SimpleNamespace(close=lambda: calls.append(("close",)))
+
+    class ProjectLocator:
+        def __init__(self, path, name):
+            calls.append(("locator", path, name))
+
+    class ProjectManager:
+        def createProject(self, locator, repository, remember):
+            calls.append(("create", locator, repository, remember))
+            return created_project
+
+    framework_model = types.ModuleType("ghidra.framework.model")
+    framework_model.ProjectLocator = ProjectLocator
+    pyghidra_module = types.ModuleType("ghidra.pyghidra")
+    pyghidra_module.PyGhidraProjectManager = ProjectManager
+    exception_module = types.ModuleType("ghidra.util.exception")
+    exception_module.DuplicateFileException = type("DuplicateFileException", (Exception,), {})
+    destructive_module = types.ModuleType("ghidra.base.project")
+    destructive_module.GhidraProject = types.SimpleNamespace(
+        createProject=lambda *_args: pytest.fail("destructive GhidraProject API was called")
+    )
+    monkeypatch.setitem(sys.modules, "ghidra.framework.model", framework_model)
+    monkeypatch.setitem(sys.modules, "ghidra.pyghidra", pyghidra_module)
+    monkeypatch.setitem(sys.modules, "ghidra.util.exception", exception_module)
+    monkeypatch.setitem(sys.modules, "ghidra.base.project", destructive_module)
+
+    result = session.ProjectHandle.create_project(str(tmp_path), "Sample")
+
+    assert result["created"] is True
+    assert result["overwritten"] is False
+    assert calls[0] == ("locator", str(tmp_path.resolve()), "Sample")
+    assert calls[1][0] == "create"
+    assert calls[1][2:] == (None, True)
+    assert calls[2] == ("close",)
+
+
+def test_create_project_maps_racing_duplicate_to_existing_error(monkeypatch, tmp_path):
+    class DuplicateFileException(Exception):
+        pass
+
+    class ProjectLocator:
+        def __init__(self, _path, _name):
+            pass
+
+    class ProjectManager:
+        def createProject(self, _locator, _repository, _remember):
+            raise DuplicateFileException("project appeared after preflight check")
+
+    framework_model = types.ModuleType("ghidra.framework.model")
+    framework_model.ProjectLocator = ProjectLocator
+    pyghidra_module = types.ModuleType("ghidra.pyghidra")
+    pyghidra_module.PyGhidraProjectManager = ProjectManager
+    exception_module = types.ModuleType("ghidra.util.exception")
+    exception_module.DuplicateFileException = DuplicateFileException
+    monkeypatch.setitem(sys.modules, "ghidra.framework.model", framework_model)
+    monkeypatch.setitem(sys.modules, "ghidra.pyghidra", pyghidra_module)
+    monkeypatch.setitem(sys.modules, "ghidra.util.exception", exception_module)
+
+    with pytest.raises(RuntimeError, match=r"PROJECT_ALREADY_EXISTS: .*Sample\.gpr"):
+        session.ProjectHandle.create_project(str(tmp_path), "Sample")
+
+
+def test_create_project_with_overwrite_preserves_destructive_opt_in(monkeypatch, tmp_path):
+    project_file = tmp_path / "Sample.gpr"
+    project_file.touch()
+    calls = []
+    created_project = types.SimpleNamespace(close=lambda: calls.append(("close",)))
+    destructive_module = types.ModuleType("ghidra.base.project")
+    destructive_module.GhidraProject = types.SimpleNamespace(
+        createProject=lambda *args: calls.append(("create", *args)) or created_project
+    )
+    monkeypatch.setitem(sys.modules, "ghidra.base.project", destructive_module)
+
+    result = session.ProjectHandle.create_project(
+        str(project_file),
+        overwrite=True,
+    )
+
+    assert result["overwritten"] is True
+    assert calls == [
+        ("create", str(tmp_path.resolve()), "Sample", False),
+        ("close",),
+    ]
 
 
 def test_get_shared_project_url_returns_normalized_string(monkeypatch):

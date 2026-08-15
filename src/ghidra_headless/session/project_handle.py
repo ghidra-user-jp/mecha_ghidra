@@ -55,7 +55,10 @@ class ProjectHandle:
         return ProjectHandle.resolve_project_location_and_file(project_location, project_name)
 
     @staticmethod
-    def create_project(project_location: str, project_name: Optional[str] = None, *, overwrite: bool = False) -> Dict[str, Any]:
+    def resolve_project_creation_target(
+        project_location: str,
+        project_name: Optional[str],
+    ) -> tuple[str, str]:
         path = pathlib.Path(project_location).expanduser().resolve()
         if project_name is not None:
             effective_name = project_name.strip()
@@ -70,6 +73,49 @@ class ProjectHandle:
             effective_name = path.stem
             project_dir = path.parent
 
+        return (str(project_dir), effective_name)
+
+    @staticmethod
+    def _create_empty_project(
+        project_dir: pathlib.Path,
+        effective_name: str,
+        *,
+        overwrite: bool,
+    ) -> Any:
+        if overwrite:
+            from ghidra.base.project import GhidraProject
+
+            # GhidraProject.createProject intentionally deletes a previous project.
+            # Callers must only select this path after authorizing overwrite.
+            return GhidraProject.createProject(str(project_dir), effective_name, False)
+
+        from ghidra.framework.model import ProjectLocator
+        from ghidra.pyghidra import PyGhidraProjectManager
+        from ghidra.util.exception import DuplicateFileException
+
+        locator = ProjectLocator(str(project_dir), effective_name)
+        try:
+            # Unlike GhidraProject.createProject, this API fails if either the
+            # marker file or project repository already exists; it never runs
+            # deletePreviousProject().
+            return PyGhidraProjectManager().createProject(locator, None, True)
+        except DuplicateFileException as exc:
+            project_file = project_dir / f"{effective_name}.gpr"
+            raise RuntimeError(f"PROJECT_ALREADY_EXISTS: {project_file}") from exc
+
+    @staticmethod
+    def create_project(
+        project_location: str,
+        project_name: Optional[str] = None,
+        *,
+        overwrite: bool = False,
+    ) -> Dict[str, Any]:
+        resolved_dir, effective_name = ProjectHandle.resolve_project_creation_target(
+            project_location,
+            project_name,
+        )
+        project_dir = pathlib.Path(resolved_dir)
+
         project_file = project_dir / f"{effective_name}.gpr"
         project_rep = project_dir / f"{effective_name}.rep"
         existed = project_file.exists() or project_rep.exists()
@@ -77,9 +123,11 @@ class ProjectHandle:
             raise RuntimeError(f"PROJECT_ALREADY_EXISTS: {project_file}")
         project_dir.mkdir(parents=True, exist_ok=True)
 
-        from ghidra.base.project import GhidraProject
-
-        project = GhidraProject.createProject(str(project_dir), effective_name, False)
+        project = ProjectHandle._create_empty_project(
+            project_dir,
+            effective_name,
+            overwrite=overwrite,
+        )
         try:
             project.close()
         except Exception as exc:

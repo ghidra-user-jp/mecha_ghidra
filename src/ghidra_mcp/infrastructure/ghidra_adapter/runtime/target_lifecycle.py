@@ -103,10 +103,36 @@ class RuntimeTargetLifecycle:
         project_name: str | None = None,
         overwrite: bool = False,
     ) -> Dict[str, object]:
-        with self._store.operation_lock.read_lock():
-            return ProjectHandle.create_project(
+        with self._store.operation_lock.write_lock():
+            project_key = ProjectHandle.resolve_project_creation_target(
                 project_location,
                 project_name,
+            )
+            if overwrite:
+                with self._store.registry_lock.read_lock():
+                    registered_targets = sorted(
+                        name
+                        for name, target_key in self._store.target_projects.items()
+                        if target_key == project_key
+                    )
+                    handle = self._store.project_handles.get(project_key)
+                has_open_handle = handle is not None and not handle.is_closed()
+                if registered_targets or has_open_handle:
+                    reasons = []
+                    if registered_targets:
+                        reasons.append(
+                            f"registered target(s): {', '.join(registered_targets)}"
+                        )
+                    if has_open_handle:
+                        reasons.append("an open project handle")
+                    raise RuntimeError(
+                        "PROJECT_IN_USE: cannot overwrite project "
+                        f"'{project_key[0]}::{project_key[1]}' while it has "
+                        + " and ".join(reasons)
+                    )
+            return ProjectHandle.create_project(
+                project_key[0],
+                project_key[1],
                 overwrite=overwrite,
             )
 

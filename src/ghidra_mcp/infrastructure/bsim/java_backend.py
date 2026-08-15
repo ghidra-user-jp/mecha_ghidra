@@ -7,6 +7,9 @@ from typing import Any, Iterator
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 
+_BSIM_UNIQUE_LOOKUP_LIMIT = 100
+
+
 def _iter_java_items(items) -> Iterator[Any]:  # noqa: ANN001
     if items is None:
         return
@@ -16,14 +19,18 @@ def _iter_java_items(items) -> Iterator[Any]:  # noqa: ANN001
         while bool(has_next()):
             yield next_item()
         return
-    iterator = getattr(items, "iterator", None)
-    if callable(iterator):
-        yield from _iter_java_items(iterator())
+    java_iterator = getattr(items, "iterator", None)
+    if callable(java_iterator):
+        yield from _iter_java_items(java_iterator())
         return
     try:
-        yield from items
+        python_iterator = iter(items)
     except TypeError:
         return
+    # Only a failure to obtain an iterator means this is a non-iterable Java object.
+    # TypeError raised while consuming it signals a real partial-read failure and must
+    # reach the caller rather than silently turning a prefix into a complete result.
+    yield from python_iterator
 
 
 def _category_map(record) -> dict[str, list[str]]:  # noqa: ANN001
@@ -83,6 +90,65 @@ def _name_matches_exactly(record_name, *, name) -> bool:  # noqa: ANN001
     return name is None or str(record_name) == name
 
 
+def _select_unique_executable_record(records, *, name):  # noqa: ANN001
+    candidates = list(records)
+    exact_matches = [
+        record
+        for record in candidates
+        if _name_matches_exactly(record.getNameExec(), name=name)
+    ]
+    if len(exact_matches) > 1:
+        raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
+    if len(candidates) > _BSIM_UNIQUE_LOOKUP_LIMIT:
+        # The extra record is a truncation sentinel. Even if the visible page has one
+        # exact match, another exact match may be beyond it, so mutating would be unsafe.
+        raise RuntimeError(
+            "BSIM_EXECUTABLE_LOOKUP_TRUNCATED: more than 100 candidates matched; use md5"
+        )
+    if not exact_matches:
+        raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
+    return exact_matches[0]
+
+
+def _load_executable_update_manager(database, query_name_class, source_record):  # noqa: ANN001
+    """Load one real function alongside an executable before issuing QueryUpdate.
+
+    Ghidra 12.1.2's SQL backend calls ``DescriptionManager.listFunctions()`` for
+    every executable in a ``QueryUpdate``.  That method raises
+    ``NoSuchElementException`` when the manager's function set is empty, so merely
+    transferring the ``QueryExeInfo`` executable record is not sufficient.  A
+    lightweight ``QueryName`` supplies the executable plus one unchanged function.
+    """
+
+    query = query_name_class()
+    query.spec.transfer(source_record)
+    query.funcname = ""
+    query.maxfunc = 1
+    query.printselfsig = False
+    query.printjustexe = False
+    query.fillinSigs = False
+    query.fillinCallgraph = False
+    query.fillinCategories = True
+    response = database.query(query)
+    if response is None:
+        last_error = database.getLastError()
+        message = "unknown error" if last_error is None else str(last_error.message)
+        raise RuntimeError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+    if not bool(response.uniqueexecutable):
+        raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
+
+    manager = response.manage
+    if int(manager.numFunctions()) == 0:
+        # Avoid propagating Ghidra's opaque NoSuchElementException.  BSim records
+        # normally contain functions, but an empty/corrupt record cannot safely use
+        # QueryUpdate on Ghidra 12.1.2.
+        raise RuntimeError(
+            "BSIM_EXECUTABLE_UPDATE_UNSUPPORTED: executable has no function records"
+        )
+    record = manager.findExecutable(str(source_record.getMd5()))
+    return manager, record
+
+
 def _server_info_to_dict(server_info) -> dict[str, Any]:  # noqa: ANN001
     if server_info is None:
         return {}
@@ -129,20 +195,20 @@ class BsimJavaBackend:
     @staticmethod
     def _classes():
         from ghidra.features.bsim.query import BSimClientFactory
-        from ghidra.features.bsim.query.description import DescriptionManager
         from ghidra.features.bsim.query.protocol import (
             InstallCategoryRequest,
             QueryExeCount,
             QueryExeInfo,
+            QueryName,
             QueryUpdate,
         )
 
         return {
             "BSimClientFactory": BSimClientFactory,
-            "DescriptionManager": DescriptionManager,
             "InstallCategoryRequest": InstallCategoryRequest,
             "QueryExeCount": QueryExeCount,
             "QueryExeInfo": QueryExeInfo,
+            "QueryName": QueryName,
             "QueryUpdate": QueryUpdate,
         }
 
@@ -299,12 +365,29 @@ class BsimJavaBackend:
     ) -> dict[str, Any]:
         if not md5 and not name:
             raise ValueError("md5 or name is required")
-        result = self.list_executables(bsim_url, name=name, md5=md5, limit=100)
-        items = [item for item in result["items"] if _name_matches_exactly(item.get("name"), name=name)]
-        if not items:
-            raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
+        # Fetch a sentinel record beyond the scan budget. A unique match within a full
+        # page is not necessarily unique in the database, and "not found" is likewise
+        # unsafe when an exact match may exist beyond that page.
+        result = self.list_executables(
+            bsim_url,
+            name=name,
+            md5=md5,
+            limit=_BSIM_UNIQUE_LOOKUP_LIMIT + 1,
+        )
+        candidates = list(result["items"])
+        items = [
+            item
+            for item in candidates
+            if _name_matches_exactly(item.get("name"), name=name)
+        ]
         if len(items) > 1:
             raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
+        if len(candidates) > _BSIM_UNIQUE_LOOKUP_LIMIT or bool(result.get("truncated")):
+            raise RuntimeError(
+                "BSIM_EXECUTABLE_LOOKUP_TRUNCATED: more than 100 candidates matched; use md5"
+            )
+        if not items:
+            raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
         return items[0]
 
     def update_executable_metadata(
@@ -328,7 +411,9 @@ class BsimJavaBackend:
                 )
 
             query = classes["QueryExeInfo"]()
-            query.limit = 100
+            # Fetch one record beyond the scan budget so a full result page cannot be
+            # mistaken for a complete, unique lookup.
+            query.limit = _BSIM_UNIQUE_LOOKUP_LIMIT + 1
             query.filterMd5 = md5.lower() if md5 else md5
             query.filterExeName = name
             query.fillinCategories = True
@@ -340,26 +425,25 @@ class BsimJavaBackend:
 
             # The name filter is a case-insensitive substring (ILIKE) match server-side, so
             # narrow to records whose identity matches exactly before mutating anything.
-            records = [
-                record
-                for record in _iter_java_items(response.records)
-                if _name_matches_exactly(record.getNameExec(), name=name)
-            ]
-            if not records:
-                raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
-            if len(records) > 1:
-                raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
-
-            source_record = records[0]
-            merged_categories = _category_map(source_record)
+            source_record = _select_unique_executable_record(
+                _iter_java_items(response.records),
+                name=name,
+            )
+            manager, updated_record = _load_executable_update_manager(
+                database,
+                classes["QueryName"],
+                source_record,
+            )
+            # QueryName is a second, exact-MD5 read.  Merge from that fresher record
+            # so a category change between the uniqueness scan and this query is not
+            # overwritten merely because the first snapshot was stale.
+            merged_categories = _category_map(updated_record)
             for category_type, values in categories.items():
                 if values:
                     merged_categories[category_type] = list(values)
                 else:
                     merged_categories.pop(category_type, None)
 
-            manager = classes["DescriptionManager"]()
-            updated_record = manager.transferExecutable(source_record)
             manager.setExeCategories(updated_record, _categories_to_java_list(merged_categories))
 
             update = classes["QueryUpdate"]()

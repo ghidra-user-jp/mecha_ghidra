@@ -88,7 +88,7 @@ FastMCP tools are grouped under `ghidra_headless.handlers.core` and exposed to M
 #### Function Analysis
 
 - `list_functions` - List functions
-- `list_classes` - List classes
+- `list_classes` - List class namespaces
 - `list_namespaces` - List namespaces (with pagination)
 - `search_functions_by_name` - Partial-match search by function name
 - `decompile_function` - Get C-like pseudocode by function name or address (`address` wins if both are set)

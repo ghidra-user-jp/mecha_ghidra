@@ -66,6 +66,77 @@ def test_runtime_bsim_database_status():
         assert result["postgresql_version"]
 
 
+def test_runtime_bsim_readonly_java_bridge():
+    _configure_runtime()
+
+    categories = cli.list_bsim_categories()
+    executables = cli.list_bsim_executables(limit=1)
+
+    assert categories["count"] == len(categories["items"])
+    assert categories["function_tag_count"] == len(categories["function_tags"])
+    assert executables["count"] == len(executables["items"])
+    assert 0 <= executables["count"] <= 1
+    assert isinstance(executables["truncated"], bool)
+    for item in executables["items"]:
+        assert isinstance(item["md5"], str)
+        assert isinstance(item["name"], str)
+        assert isinstance(item["categories"], dict)
+
+
+def test_runtime_bsim_category_mutation_java_bridge():
+    if os.environ.get("GHIDRA_BSIM_MUTATION_VALIDATION") != "1":
+        pytest.skip("Set GHIDRA_BSIM_MUTATION_VALIDATION=1 for isolated mutation validation")
+    _configure_runtime()
+    category = f"CODEX_RUNTIME_{uuid.uuid4().hex[:12].upper()}"
+
+    created = cli.bsim_add_executable_category(category=category)
+    repeated = cli.bsim_add_executable_category(category=category)
+    categories = cli.list_bsim_categories()
+
+    assert created["status"] == "created"
+    assert created["category"] == category
+    assert category in created["items"]
+    assert repeated["status"] == "already_exists"
+    assert category in categories["items"]
+
+
+def test_runtime_bsim_metadata_mutation_java_bridge():
+    if os.environ.get("GHIDRA_BSIM_MUTATION_VALIDATION") != "1":
+        pytest.skip("Set GHIDRA_BSIM_MUTATION_VALIDATION=1 for isolated mutation validation")
+    _configure_runtime()
+    executables = cli.list_bsim_executables(limit=1)
+    if not executables["items"]:
+        pytest.skip("BSim metadata mutation validation requires one executable record")
+
+    executable = executables["items"][0]
+    category = f"CODEX_RUNTIME_{uuid.uuid4().hex[:12].upper()}"
+    cli.bsim_add_executable_category(category=category)
+
+    updated = cli.bsim_update_executable_metadata(
+        md5=executable["md5"],
+        categories={category: "temporary"},
+    )
+    fetched = cli.get_bsim_executable(md5=executable["md5"])
+
+    assert updated["status"] == "updated"
+    assert updated["updated_executables"] == 1
+    assert updated["updated_functions"] == 0
+    assert updated["categories"][category] == ["temporary"]
+    assert fetched["categories"][category] == ["temporary"]
+
+    cleared = cli.bsim_update_executable_metadata(
+        md5=executable["md5"],
+        categories={category: None},
+    )
+    fetched_after_clear = cli.get_bsim_executable(md5=executable["md5"])
+
+    assert cleared["status"] == "updated"
+    assert cleared["updated_executables"] == 1
+    assert cleared["updated_functions"] == 0
+    assert category not in cleared["categories"]
+    assert category not in fetched_after_clear["categories"]
+
+
 def test_runtime_bsim_query_function_and_decompile_match():
     required = {
         "GHIDRA_BSIM_PROJECT_LOCATION": os.environ.get("GHIDRA_BSIM_PROJECT_LOCATION"),

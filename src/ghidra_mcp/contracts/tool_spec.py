@@ -926,6 +926,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
+        description="List class namespaces in the loaded target program.",
     ),
     _core_tool(
         "list_namespaces",

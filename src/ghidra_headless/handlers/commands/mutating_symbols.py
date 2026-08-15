@@ -2,6 +2,8 @@
 
 from __future__ import absolute_import, print_function
 
+from ghidra_headless.handlers.commands.read_only_memory_data import validate_hex_payload_size
+
 
 def _bookmark_to_dict(bookmark):
     return {
@@ -47,6 +49,8 @@ def rename_data(params, *, ensure_context, get_address, txn, source_type):
     if not new_name:
         raise ValueError("newName is required")
     address = get_address(ctx, address_text)
+    if ctx.function_manager.getFunctionAt(address) is not None:
+        raise ValueError("Address is a function entry; use rename_function instead")
     symbol = ctx.symbol_table.getPrimarySymbol(address)
     if symbol is None:
         raise LookupError("No data symbol at address: %s" % address_text)
@@ -295,13 +299,16 @@ def set_local_variable_type(
 
 
 def set_bytes(params, *, ensure_context, get_address, decode_hex_bytes, txn):
-    ctx = ensure_context()
     address_text = params.get("address")
     bytes_text = params.get("bytes")
     if not address_text or not bytes_text:
         raise ValueError("address and bytes are required")
-    address = get_address(ctx, address_text)
+    validate_hex_payload_size(bytes_text)
+    ctx = ensure_context()
     data = decode_hex_bytes(bytes_text)
+    if not data:
+        raise ValueError("bytes must contain at least one byte")
+    address = get_address(ctx, address_text)
 
     def _apply():
         ctx.program.getMemory().setBytes(address, data)
@@ -414,6 +421,10 @@ def list_bookmarks(params, *, ensure_context, get_address, to_int, collect, iter
     ctx = ensure_context()
     offset = to_int(params.get("offset"), 0)
     limit = to_int(params.get("limit"), 100)
+    if limit <= 0:
+        return []
+    if offset < 0:
+        offset = 0
     address_text = params.get("address")
     bookmark_type = params.get("type")
     category = params.get("category")

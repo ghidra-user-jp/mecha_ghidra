@@ -6,7 +6,30 @@ import types
 
 import pytest
 
-from ghidra_headless.handlers.commands.read_only_functions import list_classes
+from ghidra_headless.handlers.commands.mutating_data_types import list_data_types
+from ghidra_headless.handlers.commands.mutating_symbols import list_bookmarks, set_bytes
+from ghidra_headless.handlers.commands.read_only_decompile import disassemble_range
+from ghidra_headless.handlers.commands.read_only_functions import (
+    list_classes,
+    list_functions,
+    search_functions_by_name,
+)
+from ghidra_headless.handlers.commands.read_only_memory_data import (
+    get_bytes,
+    get_data_by_label,
+    list_data_items,
+    list_exports,
+    list_imports,
+    list_namespaces,
+    list_segments,
+    list_strings,
+    search_bytes,
+)
+from ghidra_headless.handlers.commands.read_only_xrefs import (
+    get_function_xrefs,
+    get_xrefs_from,
+    get_xrefs_to,
+)
 
 
 def _import_core_helpers(monkeypatch: pytest.MonkeyPatch):
@@ -98,6 +121,401 @@ def test_import_core_helpers_does_not_pollute_sys_modules(monkeypatch: pytest.Mo
     # import must be restored.
     assert sys.modules.get("ghidra_headless.handlers.core_helpers") is not fresh
     assert sys.modules.get("ghidra_headless.handlers.core_helpers") is original
+
+
+def test_get_bytes_rejects_oversized_request_before_allocating():
+    ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: object()))
+    hexdump_called = False
+
+    def unexpected_hexdump(*_args):
+        nonlocal hexdump_called
+        hexdump_called = True
+        raise AssertionError("oversized request must not allocate a byte buffer")
+
+    with pytest.raises(ValueError, match="must not exceed 1048576 bytes"):
+        get_bytes(
+            {"address": "0x1000", "size": 1024 * 1024 + 1},
+            ensure_context=lambda: ctx,
+            to_int=lambda value, _default: int(value),
+            get_address=lambda _ctx, value: value,
+            hexdump=unexpected_hexdump,
+        )
+
+    assert hexdump_called is False
+
+
+def test_get_bytes_allows_request_at_size_limit():
+    memory = object()
+    ctx = types.SimpleNamespace(
+        program=types.SimpleNamespace(getMemory=lambda: memory)
+    )
+    calls = []
+
+    result = get_bytes(
+        {"address": "0x1000", "size": 1024 * 1024},
+        ensure_context=lambda: ctx,
+        to_int=lambda value, _default: int(value),
+        get_address=lambda _ctx, value: value,
+        hexdump=lambda *args: calls.append(args) or "dump",
+    )
+
+    assert result == "dump"
+    assert calls == [(memory, "0x1000", 1024 * 1024)]
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_list_segments_returns_empty_for_non_positive_limit(limit):
+    get_blocks_called = False
+
+    def get_blocks():
+        nonlocal get_blocks_called
+        get_blocks_called = True
+        return [object()]
+
+    memory = types.SimpleNamespace(getBlocks=get_blocks)
+    ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory))
+
+    result = list_segments(
+        {"offset": 0, "limit": limit},
+        ensure_context=lambda: ctx,
+        to_int=lambda value, _default: int(value),
+    )
+
+    assert result == []
+    assert get_blocks_called is False
+
+
+def test_list_segments_normalizes_negative_offset_to_zero():
+    block = types.SimpleNamespace(
+        getName=lambda: "text",
+        getStart=lambda: "0x1000",
+        getEnd=lambda: "0x10ff",
+        getSize=lambda: 0x100,
+        isRead=lambda: True,
+        isWrite=lambda: False,
+        isExecute=lambda: True,
+    )
+    memory = types.SimpleNamespace(getBlocks=lambda: [block])
+    ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory))
+
+    result = list_segments(
+        {"offset": -5, "limit": 1},
+        ensure_context=lambda: ctx,
+        to_int=lambda value, _default: int(value),
+    )
+
+    assert result == [
+        {
+            "name": "text",
+            "start": "0x1000",
+            "end": "0x10ff",
+            "length": 0x100,
+            "permissions": {"read": True, "write": False, "execute": True},
+        }
+    ]
+
+
+def test_paginated_commands_short_circuit_before_runtime_access():
+    context = object()
+
+    def checked_context():
+        return context
+
+    def unexpected_iter(_context):
+        raise AssertionError("limit <= 0 must not enumerate Ghidra objects")
+
+    def unexpected_collect(*_args):
+        raise AssertionError("limit <= 0 must not collect Ghidra objects")
+
+    def noop_to_int(value, default):
+        return default if value is None else int(value)
+
+    def no_items(items):
+        return iter(items)
+    commands = [
+        lambda: list_functions(
+            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int, collect=unexpected_collect
+        ),
+        lambda: list_classes(
+            {"limit": 0}, context=object(), to_int=noop_to_int,
+            iter_namespaces=unexpected_iter, safe_call=lambda *_args: None,
+        ),
+        lambda: search_functions_by_name(
+            {"query": "entry", "limit": 0}, ensure_context=checked_context, to_int=noop_to_int
+        ),
+        lambda: list_segments({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
+        lambda: list_imports({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
+        lambda: list_exports(
+            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
+            iter_items=no_items, is_exported_symbol=lambda *_args: True,
+        ),
+        lambda: list_namespaces(
+            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
+            iter_namespaces=unexpected_iter, safe_call=lambda *_args: None,
+        ),
+        lambda: list_data_items({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
+        lambda: list_strings({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
+        lambda: search_bytes(
+            {"bytes": "90", "limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
+            decode_hex_bytes=bytearray.fromhex,
+        ),
+        lambda: get_xrefs_to(
+            {"address": "0x1000", "limit": 0}, ensure_context=checked_context,
+            get_address=lambda *_args: None, to_int=noop_to_int, iter_items=no_items,
+        ),
+        lambda: get_xrefs_from(
+            {"address": "0x1000", "limit": 0}, ensure_context=checked_context,
+            get_address=lambda *_args: None, to_int=noop_to_int, iter_items=no_items,
+        ),
+        lambda: get_function_xrefs(
+            {"name": "entry", "limit": 0}, ensure_context=checked_context,
+            find_function_by_name=lambda *_args: None, to_int=noop_to_int, iter_items=no_items,
+        ),
+        lambda: list_data_types(
+            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
+            dt_manager=lambda *_args: None, collect=unexpected_collect, iter_items=no_items,
+            safe_call=lambda *_args: None, describe_data_type=lambda item: item,
+        ),
+        lambda: list_bookmarks(
+            {"limit": 0}, ensure_context=checked_context, get_address=lambda *_args: None,
+            to_int=noop_to_int, collect=unexpected_collect, iter_items=no_items,
+        ),
+    ]
+
+    for command in commands:
+        assert command() == []
+
+
+@pytest.mark.parametrize("offset", [-7, -1])
+def test_search_functions_normalizes_negative_offset(offset):
+    class _Iterator:
+        def __init__(self):
+            self.items = [
+                types.SimpleNamespace(getName=lambda: "first", getEntryPoint=lambda: "0x1000"),
+                types.SimpleNamespace(getName=lambda: "second", getEntryPoint=lambda: "0x2000"),
+            ]
+
+        def hasNext(self):
+            return bool(self.items)
+
+        def next(self):
+            return self.items.pop(0)
+
+    manager = types.SimpleNamespace(getFunctions=lambda _forward: _Iterator())
+    context = types.SimpleNamespace(function_manager=manager)
+
+    result = search_functions_by_name(
+        {"query": "first", "offset": offset, "limit": 1},
+        ensure_context=lambda: context,
+        to_int=lambda value, default: default if value is None else int(value),
+    )
+
+    assert result == [{"name": "first", "entry": "0x1000"}]
+
+
+def test_search_bytes_stops_at_memory_max_address():
+    class _Address:
+        def __init__(self):
+            self.add_called = False
+
+        def compareTo(self, other):
+            assert other is self
+            return 0
+
+        def add(self, _amount):
+            self.add_called = True
+            raise AssertionError("must not advance past the maximum address")
+
+        def __str__(self):
+            return "0xffff"
+
+    address = _Address()
+    memory = types.SimpleNamespace(
+        getMinAddress=lambda: address,
+        getMaxAddress=lambda: address,
+        findBytes=lambda *_args: address,
+    )
+    context = types.SimpleNamespace(
+        program=types.SimpleNamespace(getMemory=lambda: memory), monitor=lambda: object()
+    )
+
+    result = search_bytes(
+        {"bytes": "ff", "limit": 2},
+        ensure_context=lambda: context,
+        to_int=lambda value, default: default if value is None else int(value),
+        decode_hex_bytes=bytearray.fromhex,
+    )
+
+    assert result == ["0xffff"]
+    assert address.add_called is False
+
+
+def test_disassemble_range_maps_address_overflow_to_validation_error():
+    class _MaxAddress:
+        def add(self, _amount):
+            raise RuntimeError("AddressOverflowException")
+
+    context = types.SimpleNamespace(
+        listing=types.SimpleNamespace(
+            getInstructions=lambda *_args: pytest.fail(
+                "an invalid range must not enumerate instructions"
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="length exceeds the address space"):
+        disassemble_range(
+            {"start_address": "0xffffffff", "length": 2, "limit": 1},
+            ensure_context=lambda: context,
+            get_address=lambda _ctx, _text: _MaxAddress(),
+            to_int=lambda value, default: default if value is None else int(value),
+            iter_items=iter,
+            code_unit=object(),
+        )
+
+
+def test_search_bytes_does_not_materialize_skipped_matches():
+    class _Address:
+        def __init__(self, value):
+            self.value = value
+
+        def compareTo(self, other):
+            return (self.value > other.value) - (self.value < other.value)
+
+        def add(self, amount):
+            return _Address(self.value + amount)
+
+        def __str__(self):
+            stringified.append(self.value)
+            return "0x%x" % self.value
+
+    stringified = []
+    end = _Address(10_000)
+    memory = types.SimpleNamespace(
+        getMinAddress=lambda: _Address(0),
+        getMaxAddress=lambda: end,
+        findBytes=lambda current, *_args: _Address(current.value),
+    )
+    context = types.SimpleNamespace(
+        program=types.SimpleNamespace(getMemory=lambda: memory), monitor=lambda: object()
+    )
+
+    result = search_bytes(
+        {"bytes": "00", "offset": 10_000, "limit": 1},
+        ensure_context=lambda: context,
+        to_int=lambda value, default: default if value is None else int(value),
+        decode_hex_bytes=bytearray.fromhex,
+    )
+
+    assert result == ["0x2710"]
+    assert stringified == [10_000]
+
+
+def test_get_data_by_label_excludes_non_data_symbols():
+    data = types.SimpleNamespace(getDefaultValueRepresentation=lambda: '"value"')
+    symbols = [
+        types.SimpleNamespace(getAddress=lambda: "0x1000", getName=lambda _full: "function"),
+        types.SimpleNamespace(getAddress=lambda: "0x2000", getName=lambda _full: "global_data"),
+    ]
+    context = types.SimpleNamespace(
+        symbol_table=types.SimpleNamespace(getSymbols=lambda _label: symbols),
+        listing=types.SimpleNamespace(
+            getDefinedDataAt=lambda address: data if address == "0x2000" else None
+        ),
+    )
+
+    result = get_data_by_label(
+        {"label": "same_name"},
+        ensure_context=lambda: context,
+        iter_items=iter,
+    )
+
+    assert result == [
+        {"name": "global_data", "address": "0x2000", "value": '"value"'}
+    ]
+
+
+def test_list_exports_includes_exported_data_symbols():
+    function_symbol = types.SimpleNamespace(getName=lambda _full: "exported_function")
+    data_symbol = types.SimpleNamespace(getName=lambda _full: "exported_data")
+    symbols = {"0x1000": function_symbol, "0x2000": data_symbol}
+    symbol_table = types.SimpleNamespace(
+        getExternalEntryPointIterator=lambda: iter(symbols),
+        getPrimarySymbol=lambda address: symbols[address],
+    )
+    context = types.SimpleNamespace(symbol_table=symbol_table)
+
+    result = list_exports(
+        {"offset": 0, "limit": 10},
+        ensure_context=lambda: context,
+        to_int=lambda value, default: default if value is None else int(value),
+        iter_items=iter,
+        is_exported_symbol=lambda _ctx, symbol: symbol in (function_symbol, data_symbol),
+    )
+
+    assert result == ["exported_function", "exported_data"]
+
+
+@pytest.mark.parametrize("command", ["search", "set"])
+def test_byte_commands_reject_whitespace_only_payload(command):
+    def decode(value):
+        return bytearray.fromhex(value)
+
+    if command == "search":
+        with pytest.raises(ValueError, match="at least one byte"):
+            search_bytes(
+                {"bytes": "   \t"},
+                ensure_context=lambda: object(),
+                to_int=lambda value, default: default if value is None else int(value),
+                decode_hex_bytes=decode,
+            )
+    else:
+        with pytest.raises(ValueError, match="at least one byte"):
+            set_bytes(
+                {"address": "0x1000", "bytes": "   \t"},
+                ensure_context=lambda: object(),
+                get_address=lambda *_args: None,
+                decode_hex_bytes=decode,
+                txn=lambda *_args: None,
+            )
+
+
+@pytest.mark.parametrize("command", ["search", "set"])
+def test_byte_commands_reject_oversized_payload_before_decoding(command):
+    decoded = False
+    context_accessed = False
+
+    def unexpected_context():
+        nonlocal context_accessed
+        context_accessed = True
+        raise AssertionError("oversized payload must be rejected before Ghidra access")
+
+    def unexpected_decode(_value):
+        nonlocal decoded
+        decoded = True
+        raise AssertionError("oversized payload must not allocate a bytearray")
+
+    oversized = "00" * (1024 * 1024 + 1)
+    if command == "search":
+        with pytest.raises(ValueError, match="must not exceed 1048576 bytes"):
+            search_bytes(
+                {"bytes": oversized},
+                ensure_context=unexpected_context,
+                to_int=lambda value, default: default if value is None else int(value),
+                decode_hex_bytes=unexpected_decode,
+            )
+    else:
+        with pytest.raises(ValueError, match="must not exceed 1048576 bytes"):
+            set_bytes(
+                {"address": "0x1000", "bytes": oversized},
+                ensure_context=unexpected_context,
+                get_address=lambda *_args: None,
+                decode_hex_bytes=unexpected_decode,
+                txn=lambda *_args: None,
+            )
+
+    assert decoded is False
+    assert context_accessed is False
 
 
 def test_iter_items_propagates_mid_iteration_errors(monkeypatch: pytest.MonkeyPatch):
@@ -251,7 +669,7 @@ class _FakeNamespace:
         return types.SimpleNamespace(getSymbolType=lambda: symbol_type)
 
 
-def test_list_classes_flags_class_namespaces_via_symbol_type():
+def test_list_classes_returns_only_class_namespaces():
     namespaces = [
         _FakeNamespace("Global", symbol_type="Namespace", is_global=True),
         _FakeNamespace("std", symbol_type="Namespace"),
@@ -267,8 +685,4 @@ def test_list_classes_flags_class_namespaces_via_symbol_type():
         safe_call=_safe_call,
     )
 
-    assert result == [
-        {"name": "std", "isClass": False},
-        {"name": "MyClass", "isClass": True},
-        {"name": "no_symbol", "isClass": False},
-    ]
+    assert result == [{"name": "MyClass", "isClass": True}]

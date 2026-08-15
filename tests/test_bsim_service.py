@@ -172,6 +172,52 @@ def test_bsim_query_function_uses_configured_url_and_masks_response():
     ]
 
 
+def test_bsim_success_payload_masks_all_url_credentials():
+    service, _core, _target = _service(
+        bsim_url=(
+            "postgresql://localhost/bsim?user=alice&password=topsecret&token=opaque&mode=ro"
+        )
+    )
+
+    result = service.get_database_status()
+
+    expected = "postgresql://localhost/bsim?user=***&password=***&token=***&mode=***"
+    assert result["bsim_url"] == expected
+    assert result["raw_url"] == expected
+    assert "alice" not in str(result)
+    assert "topsecret" not in str(result)
+    assert "opaque" not in str(result)
+
+
+def test_bsim_backend_exception_masks_url_credentials_and_raw_cause():
+    class CredentialFailBackend(FakeJavaBackend):
+        def get_database_status(self, bsim_url: str):
+            raise RuntimeError(
+                "connection failed for "
+                "postgresql://alice:topsecret@host:99999/db?password=second&token=opaque"
+            )
+
+    service = BsimService(
+        core_command_service=FakeCoreCommandService(),
+        target_service=FakeTargetService(),  # type: ignore[arg-type]
+        config=BsimConfig(bsim_url="postgresql://localhost/bsim"),
+        java_backend=CredentialFailBackend(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        service.get_database_status()
+
+    message = str(raised.value)
+    assert "postgresql://***:***@host:99999/db?password=***&token=***" in message
+    assert "alice" not in message
+    assert "topsecret" not in message
+    assert "second" not in message
+    assert "opaque" not in message
+    assert raised.value.__suppress_context__ is True
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+
+
 def test_bsim_password_is_added_to_configured_url_and_masked():
     service, core, _target = _service(
         bsim_url="postgresql://user@localhost/bsim",
@@ -692,6 +738,19 @@ def test_bsim_invalid_port_raises_coded_url_error():
         service.get_database_status()
 
 
+def test_bsim_unparseable_url_raises_fixed_error_without_credentials():
+    service, _core, _target = _service(
+        bsim_url="postgresql://alice:topsecret@host／evil/db?password=second"
+    )
+
+    with pytest.raises(ValueError) as raised:
+        service.get_database_status()
+
+    assert str(raised.value) == "BSIM_URL_INVALID: unable to parse BSim URL"
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+
+
 def test_bsim_status_reclassifies_prefixed_authentication_error():
     class AuthFailBackend(FakeJavaBackend):
         def get_database_status(self, bsim_url: str):
@@ -739,6 +798,32 @@ def test_bsim_query_preserves_structured_domain_error():
         service.query_target("fw")
 
     assert excinfo.value.code is ErrorCode.SESSION_NOT_FOUND
+
+
+def test_bsim_query_masks_credentials_in_structured_domain_error():
+    service, core, _target = _service()
+    raw_url = "postgresql://alice:topsecret@host/db?token=opaque"
+    core.errors["bsim_query_target"] = DomainError(
+        code=ErrorCode.SESSION_NOT_FOUND,
+        message=f"Session failed while using {raw_url}",
+        hint=f"Retry without {raw_url}",
+        retryable=True,
+        details={"connection": raw_url},
+    )
+
+    with pytest.raises(DomainError) as excinfo:
+        service.query_target("fw")
+
+    error = excinfo.value
+    rendered = f"{error} {error.hint} {error.details}"
+    assert error.code is ErrorCode.SESSION_NOT_FOUND
+    assert error.retryable is True
+    assert "postgresql://***:***@host/db?token=***" in rendered
+    assert "alice" not in rendered
+    assert "topsecret" not in rendered
+    assert "opaque" not in rendered
+    assert error.__context__ is None
+    assert error.__cause__ is None
 
 
 @pytest.mark.parametrize("version", [1, "1", 1.0, "1.0"])
@@ -861,4 +946,61 @@ def test_bsim_load_matched_executable_reuses_loaded_remote_ref_target():
 
     assert result["status"] == "already_loaded"
     assert result["target"] == "manual_session"
+    assert target.created == []
+
+
+def test_bsim_load_remote_ref_does_not_reuse_unrelated_same_domain_target():
+    target = FakeTargetService()
+    target.targets.append(
+        {
+            "target": "unrelated_session",
+            "project_location": "/tmp/unrelated.gpr",
+            "project_name": None,
+            "domain_path": "/samples/remote.exe",
+        }
+    )
+    service, _core, target = _service(target_service=target)
+
+    with pytest.raises(ValueError, match="BSIM_REMOTE_PROJECT_LOAD_UNSUPPORTED"):
+        service.load_matched_executable(
+            matched_ref={
+                "matched_ref_version": 1,
+                "executable_md5": "deadbeefcafebabedeadbeefcafebabe",
+                "executable_name": "remote.exe",
+                "repository": "ghidra://server/repo",
+                "domain_path": "/samples/remote.exe",
+                "address": "0x401000",
+                "name": "entry",
+            }
+        )
+
+    assert target.created == []
+
+
+def test_bsim_load_invalid_non_remote_ref_does_not_use_manual_domain_fallback():
+    target = FakeTargetService()
+    target.targets.append(
+        {
+            "target": "manual_session",
+            "project_location": None,
+            "project_name": None,
+            "domain_path": "/samples/remote.exe",
+        }
+    )
+    service, _core, target = _service(target_service=target)
+
+    with pytest.raises(ValueError, match="BSIM_INVALID_MATCHED_REF: unsupported"):
+        service.load_matched_executable(
+            matched_ref={
+                "matched_ref_version": 1,
+                "executable_md5": "deadbeefcafebabedeadbeefcafebabe",
+                "executable_name": "remote.exe",
+                "repository": "https://server/repo",
+                "domain_path": "/samples/remote.exe",
+                "address": "0x401000",
+                "name": "entry",
+            },
+            target="manual_session",
+        )
+
     assert target.created == []

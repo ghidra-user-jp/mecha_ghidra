@@ -8,11 +8,15 @@ import os
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn, TypeVar
+from typing import Any, Callable, TypeVar
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.infrastructure.bsim import BsimJavaBackend, mask_bsim_url
+from ghidra_mcp.infrastructure.bsim import (
+    BsimJavaBackend,
+    mask_bsim_url,
+    mask_bsim_urls_in_text,
+)
 
 from .core_command_service import CoreCommandService
 from .target_service import TargetService
@@ -95,15 +99,34 @@ def _classify_bsim_message(message: str, *, default_code: str = "BSIM_OPERATION_
     return _bsim_message(default_code, text)
 
 
-def _raise_classified_bsim_error(exc: Exception, *, default_code: str = "BSIM_OPERATION_FAILED") -> NoReturn:
-    message = _classify_bsim_message(str(exc), default_code=default_code)
+def _classified_bsim_error(
+    exc: Exception,
+    *,
+    default_code: str = "BSIM_OPERATION_FAILED",
+) -> Exception:
+    message = _classify_bsim_message(
+        mask_bsim_urls_in_text(str(exc)),
+        default_code=default_code,
+    )
     if message == "BSIM_FUNCTION_NOT_FOUND" or message.startswith("BSIM_FUNCTION_NOT_FOUND:"):
-        raise LookupError(message) from exc
+        return LookupError(message)
     if message == "BSIM_EXECUTABLE_NOT_FOUND" or message.startswith("BSIM_EXECUTABLE_NOT_FOUND:"):
-        raise LookupError(message) from exc
+        return LookupError(message)
     if isinstance(exc, ValueError):
-        raise ValueError(message) from exc
-    raise RuntimeError(message) from exc
+        return ValueError(message)
+    return RuntimeError(message)
+
+
+def _mask_bsim_payload_credentials(value: Any) -> Any:
+    if isinstance(value, str):
+        return mask_bsim_urls_in_text(value)
+    if isinstance(value, dict):
+        return {key: _mask_bsim_payload_credentials(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_mask_bsim_payload_credentials(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_mask_bsim_payload_credentials(item) for item in value)
+    return value
 
 
 def _validate_executable_category_name(category: object) -> str:
@@ -197,7 +220,13 @@ def _bsim_url_with_password(bsim_url: str, password: str | None) -> str:
 
 
 def _validate_bsim_url(bsim_url: str) -> str:
-    parts = urlsplit(bsim_url)
+    try:
+        parts = urlsplit(bsim_url)
+    except ValueError:
+        parts = None
+    if parts is None:
+        # urlsplit's error can quote the original netloc, including its userinfo.
+        raise ValueError("BSIM_URL_INVALID: unable to parse BSim URL") from None
     scheme = parts.scheme.lower()
     if not scheme:
         raise ValueError(
@@ -212,8 +241,12 @@ def _validate_bsim_url(bsim_url: str) -> str:
     if scheme in {"postgresql", "elastic", "https"}:
         try:
             parts.port
-        except ValueError as exc:
-            raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL has an invalid port") from exc
+        except ValueError:
+            invalid_port = True
+        else:
+            invalid_port = False
+        if invalid_port:
+            raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL has an invalid port") from None
         path = parts.path.strip("/")
         if not path:
             raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL requires a database name")
@@ -427,7 +460,7 @@ class BsimService:
 
     @staticmethod
     def _mask_response_url(payload: dict[str, Any], bsim_url: str) -> dict[str, Any]:
-        result = dict(payload)
+        result = _mask_bsim_payload_credentials(dict(payload))
         result["bsim_url"] = mask_bsim_url(bsim_url)
         return result
 
@@ -465,6 +498,7 @@ class BsimService:
 
     @staticmethod
     def _call_bsim(operation: Callable[[], _T], *, default_code: str = "BSIM_OPERATION_FAILED") -> _T:
+        public_error: Exception | None = None
         try:
             return operation()
         except DomainError as exc:
@@ -477,10 +511,33 @@ class BsimService:
             # BSIM_DATABASE_UNREACHABLE via the Java-backend path but as an opaque
             # OPERATION_FAILED via the core-command path.
             if exc.code is ErrorCode.OPERATION_FAILED:
-                _raise_classified_bsim_error(exc, default_code=default_code)
-            raise
+                public_error = _classified_bsim_error(exc, default_code=default_code)
+            else:
+                # Preserve the structured contract while preventing credentials embedded
+                # in a runtime message, hint, or details value from escaping this boundary.
+                public_error = DomainError(
+                    code=exc.code,
+                    message=mask_bsim_urls_in_text(exc.message),
+                    hint=(
+                        None
+                        if exc.hint is None
+                        else mask_bsim_urls_in_text(exc.hint)
+                    ),
+                    retryable=exc.retryable,
+                    details=(
+                        None
+                        if exc.details is None
+                        else _mask_bsim_payload_credentials(exc.details)
+                    ),
+                )
         except Exception as exc:
-            _raise_classified_bsim_error(exc, default_code=default_code)
+            public_error = _classified_bsim_error(exc, default_code=default_code)
+
+        # Raising after leaving the except suite prevents Python from attaching the raw
+        # backend error as __context__; that object may itself contain credential URLs.
+        if public_error is None:  # pragma: no cover - operation either returned or raised
+            raise AssertionError("BSim operation failed without an exception")
+        raise public_error from None
 
     def _ghidra_install_dir(self) -> str | None:
         configured = self._text(self._config.ghidra_install_dir) or self._text(os.environ.get("GHIDRA_INSTALL_DIR"))
@@ -876,12 +933,16 @@ class BsimService:
         matched_address = ref.address
         matched_name = ref.name
 
+        explicit_target = bool((target or "").strip())
         requested_target = (target or "").strip() or _default_match_target(executable_md5, executable_name)
         existing = self._find_loaded_match_target(
             executable_md5=executable_md5,
             matched_ref=ref.raw,
             domain_path=domain_path,
             requested_target=requested_target,
+            allow_domain_only_requested_target=(
+                explicit_target and self._is_remote_matched_ref(ref.raw)
+            ),
         )
         if existing is not None:
             return {
@@ -974,6 +1035,20 @@ class BsimService:
         except ValueError:
             return None
 
+    def _is_remote_matched_ref(self, matched_ref: dict[str, object]) -> bool:
+        if self._text(matched_ref.get("project_location")) is not None:
+            return False
+        repository = self._text(matched_ref.get("repository")) or self._text(
+            matched_ref.get("ghidra_url")
+        )
+        if repository is None:
+            return False
+        try:
+            parts = urlsplit(repository)
+        except ValueError:
+            return False
+        return parts.scheme == "ghidra" and bool(parts.netloc)
+
     def _target_matches_ref(
         self,
         item: dict[str, object],
@@ -985,10 +1060,8 @@ class BsimService:
         if item_domain != domain_path:
             return False
         if expected_identity is None:
-            # Remote ghidra:// refs have no computable local project identity, so the
-            # domain path is the only signal we have. Match on it alone (the pre-hardening
-            # behavior) rather than rejecting every target, which would make the
-            # "load it manually and retry" workaround permanently fail.
+            # This is safe only when the caller explicitly names the manually loaded
+            # target. The caller prevents this weaker match from scanning other targets.
             return True
         item_project_location = self._text(item.get("project_location"))
         if not item_project_location:
@@ -1009,6 +1082,7 @@ class BsimService:
         matched_ref: dict[str, object],
         domain_path: str,
         requested_target: str,
+        allow_domain_only_requested_target: bool,
     ) -> dict[str, str] | None:
         candidates: list[str] = []
         seen_candidates: set[str] = set()
@@ -1035,6 +1109,22 @@ class BsimService:
 
         targets = self._target_service.list_targets()
         by_name = {str(item.get("target")): item for item in targets if item.get("target") is not None}
+        if expected_identity is None:
+            # A remote ghidra:// reference cannot be tied to a local project. Preserve
+            # the documented manual-load retry by checking an explicitly supplied target,
+            # but never attach to an arbitrary target merely because its domain path is
+            # the same.
+            if not allow_domain_only_requested_target:
+                return None
+            info = by_name.get(requested_target)
+            if info is not None and self._target_matches_ref(
+                info,
+                domain_path=domain_path,
+                expected_identity=None,
+            ):
+                return {"target": requested_target, "program": domain_path}
+            return None
+
         for candidate in candidates:
             info = by_name.get(candidate)
             if info is None:
