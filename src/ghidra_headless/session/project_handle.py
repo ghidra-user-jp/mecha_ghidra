@@ -15,6 +15,7 @@ from . import java_bindings, path_utils, sync_utils
 
 logger = logging.getLogger(__name__)
 
+_VERSION_HISTORY_MAX_LIMIT = 10_000
 _VERSION_DIFF_MAX_RANGE_LIMIT = 10_000
 _VERSION_DIFF_TIMEOUT_SECONDS = 60
 
@@ -362,6 +363,10 @@ class ProjectHandle:
             normalized_limit = int(limit)
             if normalized_limit < 1:
                 raise ValueError("limit must be >= 1")
+            if normalized_limit > _VERSION_HISTORY_MAX_LIMIT:
+                raise ValueError(
+                    f"limit must be <= {_VERSION_HISTORY_MAX_LIMIT}"
+                )
             domain_file = self._get_domain_file_locked(domain_path)
             if not bool(sync_utils._required_call(domain_file, "isVersioned")):
                 raise RuntimeError("NOT_SHARED_PROJECT: target program is not under shared-project version control")

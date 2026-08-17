@@ -36,10 +36,93 @@ _SEARCH_MAX_PATTERN_CHARS = 512
 _MIN_RESULT_TOOL_RESPONSE_CHARS = 1024
 _MIN_COMPACT_RESULT_RESPONSE_CHARS = 2048
 _RESULT_METADATA_JSON_CHARS = 128
+_UTF8_CHUNK_CHARS = 65_536
+_SURROGATE_RE = regex.compile(r"[\ud800-\udfff]")
 _ResultId = Annotated[
     str,
     Field(min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$"),
 ]
+
+
+def _utf8_size_and_sha256(text: str) -> tuple[int, str]:
+    """Measure and hash UTF-8 text without a payload-sized bytes copy."""
+
+    digest = hashlib.sha256()
+    size_bytes = 0
+    if len(text) <= _UTF8_CHUNK_CHARS:
+        chunks = (text.encode("utf-8", errors="replace"),)
+    else:
+        chunks = (
+            text[offset : offset + _UTF8_CHUNK_CHARS].encode(
+                "utf-8",
+                errors="replace",
+            )
+            for offset in range(0, len(text), _UTF8_CHUNK_CHARS)
+        )
+    for chunk in chunks:
+        digest.update(chunk)
+        size_bytes += len(chunk)
+    return size_bytes, digest.hexdigest()
+
+
+def _normalize_surrogate_text(value: str) -> str:
+    if _SURROGATE_RE.search(value) is None:
+        return value
+    normalized: list[str] = []
+    index = 0
+    while index < len(value):
+        codepoint = ord(value[index])
+        if 0xD800 <= codepoint <= 0xDBFF and index + 1 < len(value):
+            low = ord(value[index + 1])
+            if 0xDC00 <= low <= 0xDFFF:
+                normalized.append(
+                    chr(0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00))
+                )
+                index += 2
+                continue
+        if 0xD800 <= codepoint <= 0xDFFF:
+            normalized.append("\ufffd")
+        else:
+            normalized.append(value[index])
+        index += 1
+    return "".join(normalized)
+
+
+def _normalize_json_surrogates(value: Any) -> tuple[Any, bool]:
+    """Replace unpaired surrogate code points in JSON container strings."""
+
+    if isinstance(value, str):
+        normalized = _normalize_surrogate_text(value)
+        return normalized, normalized is not value
+    if isinstance(value, list):
+        changed = False
+        items = []
+        for item in value:
+            normalized, item_changed = _normalize_json_surrogates(item)
+            items.append(normalized)
+            changed = changed or item_changed
+        return (items, True) if changed else (value, False)
+    if isinstance(value, tuple):
+        changed = False
+        items = []
+        for item in value:
+            normalized, item_changed = _normalize_json_surrogates(item)
+            items.append(normalized)
+            changed = changed or item_changed
+        return (tuple(items), True) if changed else (value, False)
+    if isinstance(value, dict):
+        changed = type(value) is not dict
+        normalized_items: list[tuple[Any, Any]] = []
+        for key in dict.keys(value):
+            normalized_key, key_changed = _normalize_json_surrogates(key)
+            normalized_value, value_changed = _normalize_json_surrogates(
+                dict.__getitem__(value, key)
+            )
+            normalized_items.append((normalized_key, normalized_value))
+            changed = changed or key_changed or value_changed
+        return (dict(normalized_items), True) if changed else (value, False)
+    return value, False
+
 
 # Static pattern screening cannot reliably separate safe expressions from ReDoS
 # patterns. Matching therefore uses the third-party `regex` engine's timeout and
@@ -68,6 +151,11 @@ class StoredToolResult:
     target: str
     result_type: str
     item_count: int | None
+
+
+@dataclass(slots=True)
+class _CompactionFallback:
+    value: Any
 
 
 class ResultResourceStore:
@@ -99,8 +187,32 @@ class ResultResourceStore:
         result_type: str,
         item_count: int | None,
     ) -> StoredToolResult | None:
-        encoded = text.encode("utf-8", errors="replace")
-        payload_hash = hashlib.sha256(encoded).hexdigest()
+        text = _normalize_surrogate_text(text)
+        size_bytes, payload_hash = _utf8_size_and_sha256(text)
+        return self._add_precomputed(
+            tool=tool,
+            target=target,
+            text=text,
+            size_bytes=size_bytes,
+            payload_hash=payload_hash,
+            mime_type=mime_type,
+            result_type=result_type,
+            item_count=item_count,
+        )
+
+    def _add_precomputed(
+        self,
+        *,
+        tool: str,
+        target: str,
+        text: str,
+        size_bytes: int,
+        payload_hash: str,
+        mime_type: str,
+        result_type: str,
+        item_count: int | None,
+    ) -> StoredToolResult | None:
+        """Add a result using precomputed streaming UTF-8 metadata."""
         # Content-addressed id: repeating the same call reuses the stored entry
         # instead of duplicating it, and the URI stays stable across turns.
         # Metadata participates in the identity as well as the payload. The
@@ -124,13 +236,13 @@ class ResultResourceStore:
             "uri": uri,
             "mime_type": mime_type,
             "size_chars": len(text),
-            "size_bytes": len(encoded),
+            "size_bytes": size_bytes,
             "tool": tool,
             "target": target,
             "result_type": result_type,
             "item_count": item_count,
         }
-        cache_size_bytes = len(encoded) + len(to_json(metadata, fallback=str))
+        cache_size_bytes = size_bytes + len(to_json(metadata, fallback=str))
         with self._lock:
             existing = self._entries.get(result_id)
             if existing is not None:
@@ -146,7 +258,7 @@ class ResultResourceStore:
                 text=text,
                 mime_type=mime_type,
                 size_chars=len(text),
-                size_bytes=len(encoded),
+                size_bytes=size_bytes,
                 cache_size_bytes=cache_size_bytes,
                 tool=tool,
                 target=target,
@@ -313,6 +425,9 @@ def _prepare_result_for_compaction(value: Any) -> tuple[Any, bool]:
     Dicts are atomic to FastMCP's converter; pydantic_core observes their base
     storage rather than an overridden ``items()``, which we mirror for previews.
     """
+    if isinstance(value, str):
+        normalized = _normalize_surrogate_text(value)
+        return normalized, normalized is not value
     if isinstance(value, Image):
         return value.to_image_content(), True
     if isinstance(value, Audio):
@@ -351,16 +466,15 @@ def _prepare_result_for_compaction(value: Any) -> tuple[Any, bool]:
             if prepared_items is not None
             else (value, False)
         )
-    if isinstance(value, dict) and type(value) is not dict:
+    if isinstance(value, dict):
         # Call the base methods explicitly: a subclass may override iteration or
         # items() even though pydantic_core serializes the underlying dict order.
-        return (
-            {
-                key: dict.__getitem__(value, key)
-                for key in dict.keys(value)
-            },
-            True,
-        )
+        return _normalize_json_surrogates(value)
+    if isinstance(value, BaseModel):
+        payload = value.model_dump(mode="python", by_alias=True)
+        normalized, changed = _normalize_json_surrogates(payload)
+        if changed:
+            return type(value).model_validate(normalized), True
     return value, False
 
 
@@ -439,7 +553,12 @@ def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, in
     return _json_text(result), "application/json", type(result).__name__, None
 
 
-def _delivered_inline_size(result: Any, *, tool_name: str) -> int:
+def _delivered_inline_size(
+    result: Any,
+    *,
+    tool_name: str,
+    stop_after: int | None = None,
+) -> int:
     """Chars FastMCP would put in context if this result were returned inline.
 
     The compaction decision must reflect what the client actually receives.
@@ -455,9 +574,12 @@ def _delivered_inline_size(result: Any, *, tool_name: str) -> int:
         # blocks represent the same user-visible payload as a raw list of those
         # blocks. Count block payloads consistently, then add only meaningful
         # outer metadata/structured content (not transport envelope overhead).
-        content_chars = sum(
-            _delivered_content_block_size(block) for block in result.content
+        content_chars = _delivered_blocks_size(
+            iter(result.content),
+            stop_after=stop_after,
         )
+        if stop_after is not None and content_chars > stop_after:
+            return content_chars
         outer = result.model_dump(
             mode="json",
             by_alias=True,
@@ -472,16 +594,16 @@ def _delivered_inline_size(result: Any, *, tool_name: str) -> int:
     if isinstance(result, ContentBlock):
         return len(_json_text(_content_block_payload(result), indent=2))
     if isinstance(result, (Image, Audio)):
-        block = _inline_content_blocks(result)[0]
+        block = next(_iter_inline_content_blocks(result))
         return _delivered_content_block_size(block)
     if isinstance(result, (list, tuple)):
         # Nested CallToolResult values are not passed through by FastMCP: only a
         # top-level CallToolResult is special. Its recursive list converter turns
         # each nested value into a TextContent JSON string. Measure those actual
         # converted blocks instead of applying top-level semantics recursively.
-        return sum(
-            _delivered_content_block_size(block)
-            for block in _inline_content_blocks(result)
+        return _delivered_blocks_size(
+            _iter_inline_content_blocks(result),
+            stop_after=stop_after,
         )
     if result is None:
         return 0
@@ -717,6 +839,40 @@ def _uncacheable_result(
     )
 
 
+def _presentation_failure_result(tool_name: str, target: str) -> CallToolResult:
+    """Report completed execution when its result cannot be represented safely."""
+
+    display_tool, tool_truncated = _bounded_json_string(
+        tool_name,
+        max_json_chars=_RESULT_METADATA_JSON_CHARS,
+    )
+    display_target, target_truncated = _bounded_json_string(
+        target,
+        max_json_chars=_RESULT_METADATA_JSON_CHARS,
+    )
+    return CallToolResult(
+        isError=False,
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"RESULT_PRESENTATION_FAILED: [{display_tool}] completed successfully, "
+                    "but its result could not be represented safely. Do not automatically "
+                    "retry a side-effecting tool solely to recover this result."
+                ),
+            )
+        ],
+        structuredContent={
+            "tool": display_tool,
+            "target": display_target,
+            "operation_succeeded": True,
+            "result_unavailable": True,
+            "presentation_failed": True,
+            "metadata_truncated": tool_truncated or target_truncated,
+        },
+    )
+
+
 def _call_tool_result_wire_chars(result: CallToolResult) -> int:
     # stdio, SSE, websocket, and streamable HTTP transports all serialize MCP
     # models compactly with aliases and exclude_none=True. Outer JSON-RPC fields
@@ -735,23 +891,42 @@ def _delivered_content_block_size(block: ContentBlock) -> int:
     return len(_json_text(_content_block_payload(block), indent=2))
 
 
-def _inline_content_blocks(result: Any) -> list[ContentBlock]:
+def _delivered_blocks_size(
+    blocks,
+    *,
+    stop_after: int | None,
+) -> int:
+    total = 0
+    for block in blocks:
+        total += _delivered_content_block_size(block)
+        if stop_after is not None and total > stop_after:
+            break
+    return total
+
+
+def _iter_inline_content_blocks(result: Any):
     """Mirror FastMCP's unstructured result conversion for wire comparison."""
     if result is None:
-        return []
+        return
     if isinstance(result, ContentBlock):
-        return [result]
+        yield result
+        return
     if isinstance(result, Image):
-        return [result.to_image_content()]
+        yield result.to_image_content()
+        return
     if isinstance(result, Audio):
-        return [result.to_audio_content()]
+        yield result.to_audio_content()
+        return
     if isinstance(result, (list, tuple)):
-        blocks: list[ContentBlock] = []
         for item in result:
-            blocks.extend(_inline_content_blocks(item))
-        return blocks
+            yield from _iter_inline_content_blocks(item)
+        return
     text = result if isinstance(result, str) else _json_text(result, indent=2)
-    return [TextContent(type="text", text=text)]
+    yield TextContent(type="text", text=text)
+
+
+def _inline_content_blocks(result: Any) -> list[ContentBlock]:
+    return list(_iter_inline_content_blocks(result))
 
 
 def _inline_result_wire_chars(result: Any) -> int:
@@ -768,33 +943,67 @@ def _maybe_compact_tool_result(
     result: Any,
     config: ToolPresentationConfig,
     store: ResultResourceStore | None,
+    fallback: _CompactionFallback | None = None,
 ) -> Any:
     if store is None or config.large_result_mode == "inline":
         return result
     if isinstance(result, CallToolResult):
         if result.isError or _is_normalized_empty_list_result(result):
             return result
+    if fallback is not None:
+        # Preparing FastMCP Image/Audio helpers can consume one-shot state. If a
+        # later helper fails, returning the original value would make FastMCP
+        # consume the earlier helper again and turn a completed mutation into an
+        # apparent tool error. Start with a serialization-safe success notice;
+        # replace it with the exact prepared value only after preparation ends.
+        fallback.value = _presentation_failure_result(tool_name, target)
     prepared_result, prepared = _prepare_result_for_compaction(result)
     # A prepared helper/block sequence is wire-equivalent to the original and
     # avoids making FastMCP invoke a stateful adapter a second time on fallback.
     inline_result = prepared_result if prepared else result
+    if fallback is not None:
+        fallback.value = inline_result
+    threshold = config.large_result_threshold_chars
+    inline_chars = _delivered_inline_size(
+        prepared_result,
+        tool_name=tool_name,
+        stop_after=threshold,
+    )
+    if inline_chars <= threshold:
+        return inline_result
     text, mime_type, result_type, item_count = _serialize_result(
         prepared_result,
         tool_name=tool_name,
     )
-    threshold = config.large_result_threshold_chars
-    inline_chars = _delivered_inline_size(prepared_result, tool_name=tool_name)
-    if inline_chars <= threshold:
-        return inline_result
-    inline_wire_chars = _inline_result_wire_chars(prepared_result)
 
-    encoded = text.encode("utf-8", errors="replace")
-    if len(encoded) > store.max_bytes:
+    # Both the delivered payload measurement and the compact stored form are
+    # lower bounds for most inline results, but each has one exceptional shape:
+    # pretty-printed explicit content blocks can make ``inline_chars`` larger
+    # than their compact wire form, while nested list delimiters can make
+    # ``text`` larger than FastMCP's flattened content sequence. Their minimum
+    # is therefore a safe wire-size lower bound for every supported shape. Most
+    # genuinely large results exceed a compact candidate by this bound alone,
+    # avoiding a second, potentially many-times-larger serialization of the
+    # complete payload merely to compare lengths.
+    inline_wire_lower_bound = min(inline_chars, len(text))
+    inline_wire_chars: int | None = None
+
+    def _candidate_is_smaller(candidate: CallToolResult) -> bool:
+        nonlocal inline_wire_chars
+        candidate_wire_chars = _call_tool_result_wire_chars(candidate)
+        if candidate_wire_chars < inline_wire_lower_bound:
+            return True
+        if inline_wire_chars is None:
+            inline_wire_chars = _inline_result_wire_chars(prepared_result)
+        return candidate_wire_chars < inline_wire_chars
+
+    size_bytes, payload_hash = _utf8_size_and_sha256(text)
+    if size_bytes > store.max_bytes:
         uncacheable = _uncacheable_result(
             tool_name=tool_name,
             target=target,
             text=text,
-            size_bytes=len(encoded),
+            size_bytes=size_bytes,
             mime_type=mime_type,
             result_type=result_type,
             item_count=item_count,
@@ -803,7 +1012,7 @@ def _maybe_compact_tool_result(
         # A deliberately tiny threshold/cache must not turn a short result into
         # a larger error envelope.  Real oversized payloads still take the
         # compact error path and never leak their full contents inline.
-        if _call_tool_result_wire_chars(uncacheable) >= inline_wire_chars:
+        if not _candidate_is_smaller(uncacheable):
             return inline_result
         return uncacheable
 
@@ -816,7 +1025,7 @@ def _maybe_compact_tool_result(
         text=text,
         mime_type=mime_type,
         size_chars=len(text),
-        size_bytes=len(encoded),
+        size_bytes=size_bytes,
         cache_size_bytes=0,
         tool=tool_name,
         target=target,
@@ -879,13 +1088,15 @@ def _maybe_compact_tool_result(
             preview_desc=preview_desc,
             continue_offset=continue_offset,
         )
-    if _call_tool_result_wire_chars(provisional_result) >= inline_wire_chars:
+    if not _candidate_is_smaller(provisional_result):
         return inline_result
 
-    entry = store.add(
+    entry = store._add_precomputed(
         tool=tool_name,
         target=target,
         text=text,
+        size_bytes=size_bytes,
+        payload_hash=payload_hash,
         mime_type=mime_type,
         result_type=result_type,
         item_count=item_count,
@@ -895,13 +1106,13 @@ def _maybe_compact_tool_result(
             tool_name=tool_name,
             target=target,
             text=text,
-            size_bytes=len(encoded),
+            size_bytes=size_bytes,
             mime_type=mime_type,
             result_type=result_type,
             item_count=item_count,
             cache_max_bytes=store.max_bytes,
         )
-        if _call_tool_result_wire_chars(uncacheable) >= inline_wire_chars:
+        if not _candidate_is_smaller(uncacheable):
             return inline_result
         return uncacheable
     return _build_compacted_result(
@@ -925,10 +1136,12 @@ def maybe_compact_tool_result(
     The underlying tool may already have changed a Ghidra project by the time
     this presentation layer runs. A serializer/adapter/cache defect must not
     convert that completed operation into an MCP error, because an agent could
-    then repeat a non-idempotent call. Fall back to the original result and log
-    only the exception class; exception messages can contain result data and
-    must not leak payloads into server logs.
+    then repeat a non-idempotent call. Fall back to the latest wire-equivalent
+    result (including any already-converted stateful helpers) and log only the
+    exception class; exception messages can contain result data and must not
+    leak payloads into server logs.
     """
+    fallback = _CompactionFallback(result)
     try:
         return _maybe_compact_tool_result(
             tool_name=tool_name,
@@ -936,15 +1149,16 @@ def maybe_compact_tool_result(
             result=result,
             config=config,
             store=store,
+            fallback=fallback,
         )
     except Exception as exc:  # noqa: BLE001 - post-execution safety boundary
         logger.warning(
-            "Large-result presentation failed for tool %s (%s); returning the "
-            "original completed result",
+            "Large-result presentation failed for tool %s (%s); returning a "
+            "wire-equivalent completed result",
             tool_name,
             type(exc).__name__,
         )
-        return result
+        return fallback.value
 
 
 def register_result_resources(mcp, *, store: ResultResourceStore) -> None:

@@ -2,16 +2,13 @@
 
 from __future__ import absolute_import, print_function
 
+from ghidra_headless.handlers.commands.pagination import normalize_pagination
+
 
 def get_xrefs_to(params, *, ensure_context, get_address, to_int, iter_items):
     ctx = ensure_context()
     address_text = params.get("address")
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     address = get_address(ctx, address_text)
     references = ctx.reference_manager.getReferencesTo(address)
     items = []
@@ -33,12 +30,7 @@ def get_xrefs_to(params, *, ensure_context, get_address, to_int, iter_items):
 def get_xrefs_from(params, *, ensure_context, get_address, to_int, iter_items):
     ctx = ensure_context()
     address_text = params.get("address")
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     address = get_address(ctx, address_text)
     references = ctx.reference_manager.getReferencesFrom(address)
     items = []
@@ -62,12 +54,7 @@ def get_function_xrefs(params, *, ensure_context, find_function_by_name, to_int,
     name = params.get("name")
     if not name:
         raise ValueError("name is required")
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     function = find_function_by_name(ctx, name)
     if function is None:
         raise LookupError("Function not found: %s" % name)

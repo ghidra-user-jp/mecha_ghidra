@@ -7,6 +7,7 @@ import math
 import os
 import pathlib
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -17,6 +18,7 @@ from ghidra_mcp.infrastructure.bsim import (
     mask_bsim_url,
     mask_bsim_urls_in_text,
 )
+from ghidra_mcp.infrastructure.locks import KeyedLockPool
 
 from .core_command_service import CoreCommandService
 from .target_service import TargetService
@@ -441,6 +443,8 @@ class BsimService:
         self._config = config or BsimConfig()
         self._java_backend = java_backend or BsimJavaBackend()
         self._loaded_match_index: dict[str, str] = {}
+        self._matched_load_locks = KeyedLockPool()
+        self._matched_load_state_lock = threading.Lock()
 
     def _resolve_bsim_url(self, bsim_url: str | None = None) -> str:
         override = (bsim_url or "").strip()
@@ -927,14 +931,33 @@ class BsimService:
         target: str | None = None,
     ) -> dict[str, Any]:
         ref = _validate_matched_ref(matched_ref)
-        executable_md5 = ref.executable_md5
-        executable_name = ref.executable_name
-        domain_path = ref.domain_path
-        matched_address = ref.address
-        matched_name = ref.name
-
         explicit_target = bool((target or "").strip())
-        requested_target = (target or "").strip() or _default_match_target(executable_md5, executable_name)
+        requested_target = (target or "").strip() or _default_match_target(
+            ref.executable_md5,
+            ref.executable_name,
+        )
+        load_key = self._matched_load_key(
+            matched_ref=ref.raw,
+            executable_md5=ref.executable_md5,
+            domain_path=ref.domain_path,
+            requested_target=requested_target,
+        )
+        with self._matched_load_locks.acquire(load_key, lock_name="bsim_load"):
+            return self._load_matched_executable_once(
+                ref=ref,
+                requested_target=requested_target,
+                explicit_target=explicit_target,
+            )
+
+    def _load_matched_executable_once(
+        self,
+        *,
+        ref: _MatchedRef,
+        requested_target: str,
+        explicit_target: bool,
+    ) -> dict[str, Any]:
+        executable_md5 = ref.executable_md5
+        domain_path = ref.domain_path
         existing = self._find_loaded_match_target(
             executable_md5=executable_md5,
             matched_ref=ref.raw,
@@ -949,8 +972,8 @@ class BsimService:
                 "status": "already_loaded",
                 "target": existing["target"],
                 "program": existing["program"],
-                "matched_function_address": matched_address,
-                "matched_function_name": matched_name,
+                "matched_function_address": ref.address,
+                "matched_function_name": ref.name,
                 "executable_md5": executable_md5,
                 "matched_ref_version": BSIM_MATCHED_REF_VERSION,
             }
@@ -980,11 +1003,31 @@ class BsimService:
             "status": "loaded",
             "target": requested_target,
             "program": created.get("domain_path") or domain_path,
-            "matched_function_address": matched_address,
-            "matched_function_name": matched_name,
+            "matched_function_address": ref.address,
+            "matched_function_name": ref.name,
             "executable_md5": executable_md5,
             "matched_ref_version": BSIM_MATCHED_REF_VERSION,
         }
+
+    def _matched_load_key(
+        self,
+        *,
+        matched_ref: dict[str, object],
+        executable_md5: str | None,
+        domain_path: str,
+        requested_target: str,
+    ) -> str:
+        identity = self._matched_ref_project_identity(matched_ref)
+        if identity is not None:
+            return f"program:{identity[0]}::{identity[1]}::{domain_path}"
+        repository = self._text(matched_ref.get("repository")) or self._text(
+            matched_ref.get("ghidra_url")
+        )
+        if repository:
+            return f"url:{repository}::{domain_path}"
+        if executable_md5:
+            return f"md5:{executable_md5.lower()}"
+        return f"target:{requested_target}::{domain_path}"
 
     def bsim_load_matched_executable(
         self,
@@ -1011,13 +1054,18 @@ class BsimService:
         project_name: str | None,
         domain_path: str,
     ) -> None:
-        if executable_md5:
-            self._loaded_match_index[f"md5:{executable_md5.lower()}"] = target
         identity = _project_identity(project_location, project_name)
-        self._loaded_match_index[f"program:{identity[0]}::{identity[1]}::{domain_path}"] = target
-        repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
-        if repository:
-            self._loaded_match_index[f"url:{repository}::{domain_path}"] = target
+        repository = self._text(matched_ref.get("repository")) or self._text(
+            matched_ref.get("ghidra_url")
+        )
+        with self._matched_load_state_lock:
+            if executable_md5:
+                self._loaded_match_index[f"md5:{executable_md5.lower()}"] = target
+            self._loaded_match_index[
+                f"program:{identity[0]}::{identity[1]}::{domain_path}"
+            ] = target
+            if repository:
+                self._loaded_match_index[f"url:{repository}::{domain_path}"] = target
 
     def _matched_ref_project_identity(self, matched_ref: dict[str, object]) -> tuple[str, str] | None:
         project_location = self._text(matched_ref.get("project_location"))
@@ -1093,16 +1141,18 @@ class BsimService:
                 seen_candidates.add(candidate)
 
         expected_identity = self._matched_ref_project_identity(matched_ref)
+        with self._matched_load_state_lock:
+            loaded_match_index = dict(self._loaded_match_index)
         _add_candidate(requested_target)
         if executable_md5:
-            indexed = self._loaded_match_index.get(f"md5:{executable_md5.lower()}")
+            indexed = loaded_match_index.get(f"md5:{executable_md5.lower()}")
             _add_candidate(indexed)
         repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
         if repository:
-            indexed = self._loaded_match_index.get(f"url:{repository}::{domain_path}")
+            indexed = loaded_match_index.get(f"url:{repository}::{domain_path}")
             _add_candidate(indexed)
         if expected_identity is not None:
-            indexed = self._loaded_match_index.get(
+            indexed = loaded_match_index.get(
                 f"program:{expected_identity[0]}::{expected_identity[1]}::{domain_path}"
             )
             _add_candidate(indexed)

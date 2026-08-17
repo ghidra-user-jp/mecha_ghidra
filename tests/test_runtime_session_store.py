@@ -90,13 +90,42 @@ def test_get_or_create_project_handle_reuses_open_handle(monkeypatch: pytest.Mon
     monkeypatch.setattr(module, "ProjectHandle", _FakeProjectHandle)
     store, _core = _build_store()
 
-    first = store.get_or_create_project_handle("/tmp/prj", "sample")
-    second = store.get_or_create_project_handle("/tmp/prj", "sample")
+    first = store.get_or_create_project_handle(("/tmp/prj", "sample"))
+    second = store.get_or_create_project_handle(("/tmp/prj", "sample"))
     assert first is second
 
     first._closed = True  # noqa: SLF001
-    third = store.get_or_create_project_handle("/tmp/prj", "sample")
+    third = store.get_or_create_project_handle(("/tmp/prj", "sample"))
     assert third is not first
+
+
+def test_get_or_create_project_handle_opens_outside_registry_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store as module
+
+    store, _core = _build_store()
+
+    class RegistryCheckingHandle(_FakeProjectHandle):
+        def __init__(self, project_location: str, project_name: str | None) -> None:
+            acquired = threading.Event()
+
+            def read_registry() -> None:
+                with store.registry_lock.read_lock():
+                    acquired.set()
+
+            reader = threading.Thread(target=read_registry)
+            reader.start()
+            assert acquired.wait(timeout=1), "ProjectHandle opened while registry lock was held"
+            reader.join(timeout=1)
+            assert not reader.is_alive()
+            super().__init__(project_location, project_name)
+
+    monkeypatch.setattr(module, "ProjectHandle", RegistryCheckingHandle)
+
+    handle = store.get_or_create_project_handle(("/tmp/prj", "sample"))
+
+    assert isinstance(handle, RegistryCheckingHandle)
 
 
 def test_cleanup_session_removes_entries_and_context():

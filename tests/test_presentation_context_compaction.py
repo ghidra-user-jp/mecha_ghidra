@@ -928,6 +928,124 @@ def test_fastmcp_binary_helper_is_converted_exactly_once():
     assert helper.calls == 1
 
 
+def test_compaction_fault_after_binary_conversion_returns_prepared_block(monkeypatch):
+    from ghidra_mcp.presentation import result_resources
+
+    class OneShotImage(Image):
+        calls = 0
+
+        def to_image_content(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("image helper converted more than once")
+            return super().to_image_content()
+
+    helper = OneShotImage(data=b"x" * 4096)
+
+    def fail_after_preparation(*_args, **_kwargs):
+        raise RuntimeError("presentation fault")
+
+    monkeypatch.setattr(result_resources, "_serialize_result", fail_after_preparation)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=helper,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=20,
+        ),
+        store=ResultResourceStore(max_entries=4),
+    )
+
+    # FastMCP can pass this block through directly. Returning the original
+    # helper here would make FastMCP call its one-shot adapter a second time.
+    assert result is not helper
+    assert result.type == "image"
+    assert helper.calls == 1
+
+
+def test_partial_binary_preparation_failure_returns_safe_completed_notice():
+    class OneShotImage(Image):
+        calls = 0
+
+        def to_image_content(self):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("image helper converted more than once")
+            return super().to_image_content()
+
+    class BrokenImage(Image):
+        calls = 0
+
+        def to_image_content(self):
+            self.calls += 1
+            raise RuntimeError("image conversion failed")
+
+    prepared = OneShotImage(data=b"x" * 4096)
+    broken = BrokenImage(data=b"y" * 4096)
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=[prepared, broken],
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=20,
+        ),
+        store=ResultResourceStore(max_entries=4),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is False
+    assert result.structuredContent["operation_succeeded"] is True
+    assert result.structuredContent["result_unavailable"] is True
+    assert result.structuredContent["presentation_failed"] is True
+    assert prepared.calls == 1
+    assert broken.calls == 1
+
+
+def test_compaction_normalizes_unpaired_unicode_surrogates():
+    store = ResultResourceStore(max_entries=4)
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result={"bad": "\ud800" * 5000},
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=100,
+            large_result_preview_chars=20,
+        ),
+        store=store,
+    )
+
+    assert isinstance(result, CallToolResult)
+    result.model_dump_json(by_alias=True, exclude_none=True)
+    stored = store.read_text(result.structuredContent["result_id"])
+    assert "\ud800" not in stored
+    assert "\ufffd" in stored
+
+
+def test_compaction_normalizes_surrogates_inside_call_tool_result():
+    raw = CallToolResult(
+        content=[TextContent(type="text", text="bad:\ud800 pair:\ud83d\ude00")],
+        structuredContent={"nested": ["\udfff"]},
+    )
+
+    result = maybe_compact_tool_result(
+        tool_name="custom_tool",
+        target="fw",
+        result=raw,
+        config=ToolPresentationConfig(large_result_threshold_chars=10_000),
+        store=ResultResourceStore(max_entries=4),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result is not raw
+    assert result.content[0].text == "bad:\ufffd pair:\U0001f600"
+    assert result.structuredContent == {"nested": ["\ufffd"]}
+    result.model_dump_json(by_alias=True, exclude_none=True)
+
+
 def test_mixed_content_list_is_stored_as_fastmcp_wire_blocks():
     store = ResultResourceStore(max_entries=4)
     result_value = [{"status": "ok"}, Image(data=b"x" * 4096)]
@@ -1394,6 +1512,64 @@ def test_compaction_compares_inline_and_compact_results_in_wire_units():
     assert _call_tool_result_wire_chars(result) < _call_tool_result_wire_chars(
         CallToolResult(content=[TextContent(type="text", text=payload)])
     )
+
+
+def test_large_string_uses_wire_lower_bound_and_encodes_payload_once(monkeypatch):
+    from ghidra_mcp.presentation import result_resources
+
+    class CountingString(str):
+        encode_calls = 0
+
+        def encode(self, *args, **kwargs):
+            self.encode_calls += 1
+            return super().encode(*args, **kwargs)
+
+    payload = CountingString("x" * 50_000)
+
+    def fail_full_wire_serialization(_result):
+        raise AssertionError("large inline result was fully serialized")
+
+    monkeypatch.setattr(
+        result_resources,
+        "_inline_result_wire_chars",
+        fail_full_wire_serialization,
+    )
+
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="fw",
+        result=payload,
+        config=ToolPresentationConfig(
+            large_result_threshold_chars=1_000,
+            large_result_preview_chars=200,
+        ),
+        store=ResultResourceStore(max_bytes=100_000),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["truncated"] is True
+    assert payload.encode_calls == 1
+
+
+def test_delivered_inline_size_stops_after_threshold():
+    class CountingList(list):
+        yielded = 0
+
+        def __iter__(self):
+            for item in super().__iter__():
+                self.yielded += 1
+                yield item
+
+    payload = CountingList(["x" * 100 for _ in range(10_000)])
+
+    measured = _delivered_inline_size(
+        payload,
+        tool_name="list_functions",
+        stop_after=150,
+    )
+
+    assert measured == 200
+    assert payload.yielded == 2
 
 
 def test_call_tool_result_wire_size_matches_mcp_transport_serialization():

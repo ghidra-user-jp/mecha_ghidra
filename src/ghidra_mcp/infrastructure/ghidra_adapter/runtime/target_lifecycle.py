@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_utils import is_project_lock_error
+from ghidra_mcp.infrastructure.locks import acquire_ordered_locks
 from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings, path_utils
 
 from .session_store import RuntimeSessionStore
@@ -41,44 +42,11 @@ class RuntimeTargetLifecycle:
                     project_key = self._store.sessions[name].get_project_handle().get_key()
                     self._store.target_projects[name] = project_key
                 project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
-            with lock:
-                if project_lock is None:
-                    yield
-                else:
-                    with project_lock:
-                        yield
-
-    def _get_or_create_project_handle_outside_registry(self, key: tuple[str, str]) -> ProjectHandle:
-        with self._store.registry_lock.read_lock():
-            handle = self._store.project_handles.get(key)
-        if handle is not None and not handle.is_closed():
-            return handle
-
-        candidate = ProjectHandle(key[0], key[1])
-        while True:
-            with self._store.registry_lock.write_lock():
-                current = self._store.project_handles.get(key)
-                if current is None or current is handle:
-                    self._store.project_handles[key] = candidate
-                    return candidate
-            if not current.is_closed():
-                break
-            handle = current
-        try:
-            candidate.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("failed to close duplicate project handle for %s::%s: %s", key[0], key[1], exc)
-        return current
-
-    def _get_target_handle_outside_registry(self, name: str) -> ProjectHandle:
-        with self._store.registry_lock.write_lock():
-            session = self._store.sessions.get(name)
-            if session is not None:
-                handle = session.get_project_handle()
-                self._store.target_projects[name] = handle.get_key()
-                return handle
-            key = self._store.get_target_project_key_locked(name)
-        return self._get_or_create_project_handle_outside_registry(key)
+            locks = [("target", lock)]
+            if project_lock is not None:
+                locks.append(("project", project_lock))
+            with acquire_ordered_locks(locks, message_prefix="runtime "):
+                yield
 
     def create_session(
         self,
@@ -157,54 +125,56 @@ class RuntimeTargetLifecycle:
             project_lock = self._store.ensure_project_lock(project_key)
             self._store.target_projects[name] = project_key
 
-        with lock:
-            with project_lock:
+        with acquire_ordered_locks(
+            [("target", lock), ("project", project_lock)],
+            message_prefix="runtime ",
+        ):
+            with self._store.registry_lock.write_lock():
+                if name in self._store.sessions:
+                    if had_target and previous_target_key is not None:
+                        self._store.target_projects[name] = previous_target_key
+                    else:
+                        self._store.target_projects.pop(name, None)
+                    if not had_lock:
+                        self._store.locks.pop(name, None)
+                    raise ValueError(f"Session '{name}' already exists")
+            try:
+                handle = self._store.get_or_create_project_handle(project_key)
+                session = handle.open_program(domain_path)
+                self._initialize_opened_session_locked(
+                    name=name,
+                    session=session,
+                )
                 with self._store.registry_lock.write_lock():
-                    if name in self._store.sessions:
-                        if had_target and previous_target_key is not None:
-                            self._store.target_projects[name] = previous_target_key
-                        else:
-                            self._store.target_projects.pop(name, None)
-                        if not had_lock:
-                            self._store.locks.pop(name, None)
-                        raise ValueError(f"Session '{name}' already exists")
-                try:
-                    handle = self._get_or_create_project_handle_outside_registry(project_key)
-                    session = handle.open_program(domain_path)
-                    self._initialize_opened_session_locked(
+                    self._store.sessions[name] = session
+                return session
+            except Exception as operation_error:  # noqa: BLE001
+                with self._store.registry_lock.write_lock():
+                    if session is not None and self._store.sessions.get(name) is session:
+                        self._store.sessions.pop(name, None)
+                rollback_error = None
+                if handle is not None:
+                    rollback_error = self._cleanup_failed_create_session_locked(
                         name=name,
                         session=session,
+                        handle=handle,
                     )
-                    with self._store.registry_lock.write_lock():
-                        self._store.sessions[name] = session
-                    return session
-                except Exception as operation_error:  # noqa: BLE001
-                    with self._store.registry_lock.write_lock():
-                        if session is not None and self._store.sessions.get(name) is session:
-                            self._store.sessions.pop(name, None)
-                    rollback_error = None
-                    if handle is not None:
-                        rollback_error = self._cleanup_failed_create_session_locked(
-                            name=name,
-                            session=session,
-                            handle=handle,
-                        )
-                    if rollback_error is not None:
-                        logger.warning(
-                            "failed to rollback session close during create_session for target '%s': %s",
-                            name,
-                            rollback_error,
-                        )
-                    with self._store.registry_lock.write_lock():
-                        if had_target and previous_target_key is not None:
-                            self._store.target_projects[name] = previous_target_key
-                        else:
-                            self._store.target_projects.pop(name, None)
-                        if not had_lock:
-                            self._store.locks.pop(name, None)
-                    if rollback_error is not None:
-                        raise rollback_error from operation_error
-                    raise
+                if rollback_error is not None:
+                    logger.warning(
+                        "failed to rollback session close during create_session for target '%s': %s",
+                        name,
+                        rollback_error,
+                    )
+                with self._store.registry_lock.write_lock():
+                    if had_target and previous_target_key is not None:
+                        self._store.target_projects[name] = previous_target_key
+                    else:
+                        self._store.target_projects.pop(name, None)
+                    if not had_lock:
+                        self._store.locks.pop(name, None)
+                if rollback_error is not None:
+                    raise rollback_error from operation_error
+                raise
 
     def register_target(
         self,
@@ -218,23 +188,25 @@ class RuntimeTargetLifecycle:
             with self._store.registry_lock.write_lock():
                 lock = self._store.locks.setdefault(name, threading.RLock())
                 project_lock = self._store.ensure_project_lock(key)
-            with lock:
-                with project_lock:
-                    with self._store.registry_lock.write_lock():
-                        if name in self._store.sessions:
-                            active_key = self._store.sessions[name].get_project_handle().get_key()
-                            if active_key != key:
-                                raise ValueError(
-                                    f"Target '{name}' already has an open session in another project: {active_key}"
-                                )
-                        self._store.target_projects[name] = key
-                        self._store.locks.setdefault(name, lock)
-                    return {
-                        "target": name,
-                        "project_location": key[0],
-                        "project_name": key[1],
-                        "domain_path": None,
-                    }
+            with acquire_ordered_locks(
+                [("target", lock), ("project", project_lock)],
+                message_prefix="runtime ",
+            ):
+                with self._store.registry_lock.write_lock():
+                    if name in self._store.sessions:
+                        active_key = self._store.sessions[name].get_project_handle().get_key()
+                        if active_key != key:
+                            raise ValueError(
+                                f"Target '{name}' already has an open session in another project: {active_key}"
+                            )
+                    self._store.target_projects[name] = key
+                    self._store.locks.setdefault(name, lock)
+                return {
+                    "target": name,
+                    "project_location": key[0],
+                    "project_name": key[1],
+                    "domain_path": None,
+                }
 
     def list_targets(self) -> List[Dict[str, Optional[str]]]:
         with self._store.operation_lock.read_lock():
@@ -255,7 +227,10 @@ class RuntimeTargetLifecycle:
                                 lock = self._store.locks.setdefault(name, threading.RLock())
                     if lock is None:
                         break
-                    with lock:
+                    with acquire_ordered_locks(
+                        [("target", lock)],
+                        message_prefix="runtime ",
+                    ):
                         with self._store.registry_lock.read_lock():
                             if self._store.locks.get(name) is not lock:
                                 continue
@@ -292,39 +267,41 @@ class RuntimeTargetLifecycle:
                 lock = self._store.ensure_lock(name)
                 key = self._store.get_target_project_key_locked(name)
                 project_lock = self._store.ensure_project_lock(key)
-            with lock:
-                with project_lock:
-                    with self._store.registry_lock.write_lock():
-                        session = self._store.sessions.get(name)
-                        if session is not None:
-                            handle = session.get_project_handle()
-                            self._store.target_projects[name] = handle.get_key()
-                        else:
-                            handle = None
-                            key = self._store.get_target_project_key_locked(name)
-                    if handle is not None:
-                        return handle.list_programs()
+            with acquire_ordered_locks(
+                [("target", lock), ("project", project_lock)],
+                message_prefix="runtime ",
+            ):
+                with self._store.registry_lock.write_lock():
+                    session = self._store.sessions.get(name)
+                    if session is not None:
+                        handle = session.get_project_handle()
+                        self._store.target_projects[name] = handle.get_key()
+                    else:
+                        handle = None
+                        key = self._store.get_target_project_key_locked(name)
+                if handle is not None:
+                    return handle.list_programs()
 
-                    is_repository_project = ProjectHandle.is_repository_project_from_metadata(key[0], key[1])
-                    if not is_repository_project:
+                is_repository_project = ProjectHandle.is_repository_project_from_metadata(key[0], key[1])
+                if not is_repository_project:
+                    metadata_programs = self._list_programs_from_metadata_locked(key)
+                    if metadata_programs is not None:
+                        return metadata_programs
+
+                try:
+                    handle = self._store.get_or_create_project_handle(key)
+                    return handle.list_programs()
+                except Exception as exc:
+                    if is_repository_project and is_project_lock_error(exc):
                         metadata_programs = self._list_programs_from_metadata_locked(key)
                         if metadata_programs is not None:
-                            return metadata_programs
-
-                    try:
-                        handle = self._get_or_create_project_handle_outside_registry(key)
-                        return handle.list_programs()
-                    except Exception as exc:
-                        if is_repository_project and is_project_lock_error(exc):
-                            metadata_programs = self._list_programs_from_metadata_locked(key)
-                            if metadata_programs is not None:
-                                logger.info(
-                                    "project is locked while listing programs for target '%s'; "
-                                    "returning project metadata snapshot",
-                                    name,
-                                )
-                                return self._mark_metadata_programs_as_lock_snapshot(metadata_programs)
-                        raise
+                            logger.info(
+                                "project is locked while listing programs for target '%s'; "
+                                "returning project metadata snapshot",
+                                name,
+                            )
+                            return self._mark_metadata_programs_as_lock_snapshot(metadata_programs)
+                    raise
 
     def load_program(
         self,
@@ -334,7 +311,7 @@ class RuntimeTargetLifecycle:
         if not domain_path:
             raise ValueError("domain_path is required")
         with self._target_operation(name):
-            handle = self._get_target_handle_outside_registry(name)
+            handle = self._store.get_target_handle(name)
             normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
             with self._store.registry_lock.read_lock():
                 session_snapshot = list(self._store.sessions.items())
@@ -413,7 +390,7 @@ class RuntimeTargetLifecycle:
         if not binary_path:
             raise ValueError("binary_path is required")
         with self._target_operation(name):
-            handle = self._get_target_handle_outside_registry(name)
+            handle = self._store.get_target_handle(name)
             binary = pathlib.Path(binary_path)
             existing_domain_path = self._existing_imported_program_path_locked(handle, binary)
             if existing_domain_path is not None:
@@ -648,7 +625,7 @@ class RuntimeTargetLifecycle:
             self._store.target_projects[name] = project_key
             self._store.locks.setdefault(name, threading.RLock())
         try:
-            handle = self._get_or_create_project_handle_outside_registry(project_key)
+            handle = self._store.get_or_create_project_handle(project_key)
             restored = handle.open_program(domain_path)
             try:
                 self._initialize_opened_session_locked(name=name, session=restored)
@@ -782,7 +759,7 @@ class RuntimeTargetLifecycle:
             if not handle.is_closed():
                 active_handle = handle
             else:
-                active_handle = self._get_or_create_project_handle_outside_registry(
+                active_handle = self._store.get_or_create_project_handle(
                     ProjectHandle.make_key(project_location, project_name)
                 )
             reopened = active_handle.open_program(domain_path)

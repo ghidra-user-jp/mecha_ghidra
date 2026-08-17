@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import ghidra_mcp.contracts.tool_models as tool_models
+import pytest
+from pydantic import ValidationError
 from ghidra_mcp.contracts.tool_spec import (
     ExecutorKind,
     ToolCategoryTag,
@@ -24,6 +26,33 @@ TOOL_SPEC_PATH = ROOT / "src" / "ghidra_mcp" / "contracts" / "tool_spec.py"
 def test_tool_specs_cover_all_public_tools():
     specs = get_all_tool_specs()
     assert set(specs) == set(presentation_cli.PUBLIC_TOOL_FUNCTIONS)
+
+
+def test_paginated_tool_schema_and_validation_are_bounded():
+    spec = get_all_tool_specs()["list_functions"]
+    schema = spec.input_model.model_json_schema()["properties"]
+
+    assert schema["offset"]["minimum"] == 0
+    assert schema["offset"]["maximum"] == 1_000_000
+    assert schema["limit"]["minimum"] == 1
+    assert schema["limit"]["maximum"] == 10_000
+
+    for params in (
+        {"offset": -1},
+        {"offset": 1_000_001},
+        {"limit": 0},
+        {"limit": 10_001},
+    ):
+        with pytest.raises(ValidationError):
+            spec.input_model.model_validate(params)
+
+
+def test_version_diff_range_limit_is_bounded():
+    spec = get_all_tool_specs()["get_version_diff"]
+    schema = spec.input_model.model_json_schema()["properties"]["range_limit"]
+
+    assert schema["minimum"] == 0
+    assert schema["maximum"] == 10_000
 
 
 def test_tool_specs_include_expected_tags():

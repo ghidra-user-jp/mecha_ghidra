@@ -2,6 +2,7 @@
 
 from __future__ import absolute_import, print_function
 
+from ghidra_headless.handlers.commands.pagination import normalize_pagination
 from ghidra_headless.handlers.commands.read_only_memory_data import validate_hex_payload_size
 
 
@@ -419,12 +420,7 @@ def add_bookmark(params, *, ensure_context, get_address, txn):
 
 def list_bookmarks(params, *, ensure_context, get_address, to_int, collect, iter_items):
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     address_text = params.get("address")
     bookmark_type = params.get("type")
     category = params.get("category")

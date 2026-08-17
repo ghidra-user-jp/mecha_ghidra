@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -561,6 +563,44 @@ def test_bsim_load_matched_executable_creates_once_then_reuses_index():
     assert first["target"] == "past_sample"
     assert second["status"] == "already_loaded"
     assert second["target"] == "past_sample"
+    assert target.created == [
+        (
+            "past_sample",
+            "/tmp/history.gpr",
+            {"project_name": None, "domain_path": "/samples/old.exe"},
+        )
+    ]
+    assert service._matched_load_locks.active_count == 0  # noqa: SLF001
+
+
+def test_bsim_load_matched_executable_serializes_concurrent_check_and_create():
+    service, _core, target = _service()
+    matched_ref = {
+        "matched_ref_version": 1,
+        "executable_md5": "0123456789abcdef0123456789abcdef",
+        "executable_name": "old.exe",
+        "project_location": "/tmp/history.gpr",
+        "domain_path": "/samples/old.exe",
+        "address": "0x402000",
+        "name": "match_func",
+    }
+    start = threading.Barrier(2)
+
+    def load():
+        start.wait(timeout=1)
+        return service.load_matched_executable(
+            matched_ref=matched_ref,
+            target="past_sample",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: load(), range(2)))
+
+    assert sorted(result["status"] for result in results) == [
+        "already_loaded",
+        "loaded",
+    ]
+    assert {result["target"] for result in results} == {"past_sample"}
     assert target.created == [
         (
             "past_sample",

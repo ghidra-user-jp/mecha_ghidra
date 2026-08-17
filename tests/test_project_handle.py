@@ -1673,6 +1673,13 @@ def test_get_version_history(monkeypatch):
     assert result["versions"][0]["create_time_iso"] == "1970-01-01T00:00:02Z"
 
 
+def test_get_version_history_rejects_excessive_limit(monkeypatch):
+    handle = build_handle(monkeypatch)
+
+    with pytest.raises(ValueError, match="limit must be <= 10000"):
+        handle.get_version_history("/folder/app", limit=10_001)
+
+
 def test_get_version_diff(monkeypatch):
     handle = build_handle(monkeypatch)
 

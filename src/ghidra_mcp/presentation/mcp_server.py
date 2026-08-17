@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
@@ -23,7 +25,7 @@ from ghidra_mcp.presentation.tool_registry import ToolRegistry
 class MCPServerRuntime:
     mcp: FastMCP
     tools: dict[str, Callable[..., Any]]
-    specs: dict[str, ToolSpec]
+    specs: Mapping[str, ToolSpec]
     presentation_config: ToolPresentationConfig
     result_store: ResultResourceStore
 
@@ -54,18 +56,26 @@ def _server_instructions(config: ToolPresentationConfig) -> str:
 
 def create_mcp_server(
     *,
-    specs: dict[str, ToolSpec],
+    specs: Mapping[str, ToolSpec],
     registry_provider: Callable[[], Any],
     dispatcher_provider: Callable[[], Callable[..., Any]],
     presentation_config: ToolPresentationConfig | None = None,
 ) -> MCPServerRuntime:
     effective_config = presentation_config or ToolPresentationConfig()
+    effective_specs: dict[str, ToolSpec] = {}
+    for supplied_name, spec in tuple(specs.items()):
+        if supplied_name != spec.name:
+            raise ValueError(
+                "Tool spec mapping key must match spec.name: "
+                f"{supplied_name!r} != {spec.name!r}"
+            )
+        effective_specs[spec.name] = spec
     mcp = FastMCP("GhidraMCP Headless", instructions=_server_instructions(effective_config))
     result_store = ResultResourceStore(
         max_entries=effective_config.result_cache_max_entries,
         max_bytes=effective_config.result_cache_max_bytes,
     )
-    register_tool_doc_resources(mcp, specs=specs)
+    register_tool_doc_resources(mcp, specs=effective_specs)
     if effective_config.large_result_mode == "resource":
         register_result_resources(mcp, store=result_store)
         register_result_tools(mcp, store=result_store, config=effective_config)
@@ -94,7 +104,7 @@ def create_mcp_server(
 
     tools = ToolRegistry.register_all(
         mcp,
-        specs,
+        effective_specs,
         lambda: _dispatch_with_presentation,
         registry_provider,
         presentation_config=effective_config,
@@ -102,7 +112,7 @@ def create_mcp_server(
     runtime = MCPServerRuntime(
         mcp=mcp,
         tools=tools,
-        specs=dict(specs),
+        specs=MappingProxyType(effective_specs),
         presentation_config=effective_config,
         result_store=result_store,
     )

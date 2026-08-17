@@ -2,6 +2,8 @@
 
 from __future__ import absolute_import, print_function
 
+from ghidra_headless.handlers.commands.pagination import normalize_limit
+
 
 def _instruction_to_dict(inst, code_unit):
     operand_parts = []
@@ -67,7 +69,7 @@ def disassemble_range(params, *, ensure_context, get_address, to_int, iter_items
     start_text = params.get("start_address") or params.get("address")
     end_text = params.get("end_address")
     length = params.get("length")
-    limit = to_int(params.get("limit"), 200)
+    limit = normalize_limit(params, to_int, 200)
     if not start_text:
         raise ValueError("start_address is required")
     if end_text is None and length is None:
@@ -89,9 +91,6 @@ def disassemble_range(params, *, ensure_context, get_address, to_int, iter_items
             raise ValueError("length exceeds the address space") from exc
     if start.compareTo(end) > 0:
         raise ValueError("start_address must be <= end_address")
-    if limit <= 0:
-        return []
-
     lines = []
     instructions = ctx.listing.getInstructions(start, True)
     for inst in iter_items(instructions):

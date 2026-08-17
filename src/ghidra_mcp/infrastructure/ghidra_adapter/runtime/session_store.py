@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_headless.session import ProgramSession, ProjectHandle
+
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeSessionStore:
@@ -51,13 +55,49 @@ class RuntimeSessionStore:
             self.project_locks[key] = lock
         return lock
 
-    def get_or_create_project_handle(self, project_location: str, project_name: Optional[str]) -> ProjectHandle:
-        key = ProjectHandle.make_key(project_location, project_name)
-        handle = self.project_handles.get(key)
-        if handle is None or handle.is_closed():
-            handle = ProjectHandle(project_location, project_name)
-            self.project_handles[key] = handle
-        return handle
+    def get_or_create_project_handle(
+        self,
+        key: tuple[str, str],
+    ) -> ProjectHandle:
+        """Open a project without holding the global registry lock."""
+
+        with self.registry_lock.read_lock():
+            observed = self.project_handles.get(key)
+        if observed is not None and not observed.is_closed():
+            return observed
+
+        candidate = ProjectHandle(key[0], key[1])
+        while True:
+            with self.registry_lock.write_lock():
+                current = self.project_handles.get(key)
+                if current is None or current is observed:
+                    self.project_handles[key] = candidate
+                    return candidate
+            if not current.is_closed():
+                break
+            observed = current
+        try:
+            candidate.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to close duplicate project handle for %s::%s: %s",
+                key[0],
+                key[1],
+                exc,
+            )
+        return current
+
+    def get_target_handle(self, name: str) -> ProjectHandle:
+        """Resolve a target handle while keeping project-open I/O lock-free."""
+
+        with self.registry_lock.write_lock():
+            session = self.sessions.get(name)
+            if session is not None:
+                handle = session.get_project_handle()
+                self.target_projects[name] = handle.get_key()
+                return handle
+            key = self.get_target_project_key_locked(name)
+        return self.get_or_create_project_handle(key)
 
     def get_target_project_key_locked(self, name: str) -> tuple[str, str]:
         session = self.sessions.get(name)
@@ -69,15 +109,6 @@ class RuntimeSessionStore:
             return self.target_projects[name]
         except KeyError:
             raise RuntimeError(f"Target '{name}' is not initialized")
-
-    def get_target_handle_locked(self, name: str) -> ProjectHandle:
-        session = self.sessions.get(name)
-        if session is not None:
-            handle = session.get_project_handle()
-            self.target_projects[name] = handle.get_key()
-            return handle
-        key = self.get_target_project_key_locked(name)
-        return self.get_or_create_project_handle(key[0], key[1])
 
     def cleanup_session(
         self,

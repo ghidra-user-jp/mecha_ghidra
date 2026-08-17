@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Literal
+from typing import Annotated, Any, Iterable, Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .tool_models import (
     ToolInputModel,
@@ -90,9 +90,12 @@ class ToolProfileSpec:
 
 
 _NO_FIELDS: tuple[ToolFieldSpec, ...] = ()
+_PAGE_OFFSET = Annotated[int, Field(ge=0, le=1_000_000)]
+_PAGE_LIMIT = Annotated[int, Field(ge=1, le=10_000)]
+_RANGE_LIMIT = Annotated[int, Field(ge=0, le=10_000)]
 _OFFSET_LIMIT_FIELDS: tuple[ToolFieldSpec, ...] = (
-    ("offset", int, 0),
-    ("limit", int, 100),
+    ("offset", _PAGE_OFFSET, 0),
+    ("limit", _PAGE_LIMIT, 100),
 )
 _DOMAIN_PATH_FIELD: ToolFieldSpec = ("domain_path", str | None, None)
 _STATUS_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
@@ -772,7 +775,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("md5", str | None, None),
             ("arch", str | None, None),
             ("compiler", str | None, None),
-            ("limit", int, 100),
+            ("limit", _PAGE_LIMIT, 100),
         ),
         include_target=False,
         include_none_keys=("bsim_url",),
@@ -973,7 +976,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("start_address", str, ...),
             ("end_address", str | None, None),
             ("length", int | None, None),
-            ("limit", int, 200),
+            ("limit", _PAGE_LIMIT, 200),
         ),
         list_output=True,
     ),
@@ -1075,8 +1078,8 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
-            ("offset", int, 0),
-            ("limit", int, 2000),
+            ("offset", _PAGE_OFFSET, 0),
+            ("limit", _PAGE_LIMIT, 2000),
             ("filter", str | None, None),
         ),
         list_output=True,
@@ -1112,8 +1115,8 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
-            ("offset", int, 0),
-            ("limit", int, 100),
+            ("offset", _PAGE_OFFSET, 0),
+            ("limit", _PAGE_LIMIT, 100),
             ("filter", str | None, None),
             ("category", str | None, None),
         ),
@@ -1280,8 +1283,8 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
-            ("offset", int, 0),
-            ("limit", int, 100),
+            ("offset", _PAGE_OFFSET, 0),
+            ("limit", _PAGE_LIMIT, 100),
             ("address", str | None, None),
             ("type", str | None, None),
             ("category", str | None, None),
@@ -1422,7 +1425,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
-            ("limit", int, 50),
+            ("limit", _PAGE_LIMIT, 50),
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_GET_VERSION_HISTORY_OUTPUT_FIELDS,
@@ -1438,7 +1441,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         input_fields=(
             ("from_version", int, ...),
             ("to_version", int, ...),
-            ("range_limit", int, 200),
+            ("range_limit", _RANGE_LIMIT, 200),
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_GET_VERSION_DIFF_OUTPUT_FIELDS,

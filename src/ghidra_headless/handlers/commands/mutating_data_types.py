@@ -2,6 +2,8 @@
 
 from __future__ import absolute_import, print_function
 
+from ghidra_headless.handlers.commands.pagination import normalize_pagination
+
 
 def create_struct(
     params,
@@ -208,12 +210,7 @@ def rename_data_type(
 
 def list_data_types(params, *, ensure_context, to_int, dt_manager, collect, iter_items, safe_call, describe_data_type):
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     text_filter = params.get("filter")
     category = params.get("category")
     filter_lower = str(text_filter).lower() if text_filter else None

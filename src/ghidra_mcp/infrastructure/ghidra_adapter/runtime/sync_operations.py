@@ -6,12 +6,14 @@ import contextlib
 import ipaddress
 import logging
 import pathlib
+import time
 import urllib.parse
 from collections.abc import Callable, Iterator
 from typing import Any, Dict
 
-from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain import DEFAULT_LOCK_TIMEOUT_SECONDS, DomainError, ErrorCode, LOCK_ORDER
 from ghidra_mcp.infrastructure.ghidra_adapter.program_lease import ProgramLease
+from ghidra_mcp.infrastructure.locks import acquire_ordered_locks
 from ghidra_headless.session import ProjectHandle, path_utils
 
 from .session_store import RuntimeSessionStore
@@ -34,34 +36,103 @@ class RuntimeSyncOperations:
             with self._store.registry_lock.write_lock():
                 lock = self._store.ensure_lock(name)
                 project_key = self._store.get_target_project_key_locked(name)
-                requested_handle = self._store.get_target_handle_locked(name)
-                project_keys = {project_key}
-                for candidate_key, candidate_handle in self._store.project_handles.items():
-                    try:
-                        if candidate_handle.is_closed():
+            with acquire_ordered_locks(
+                [("target", lock)],
+                message_prefix="runtime ",
+            ):
+                requested_handle = self._store.get_target_handle(name)
+                snapshot_deadline = time.monotonic() + DEFAULT_LOCK_TIMEOUT_SECONDS
+                while True:
+                    with self._store.registry_lock.read_lock():
+                        handle_snapshot = dict(self._store.project_handles)
+
+                    project_keys = {project_key}
+                    for candidate_key, candidate_handle in handle_snapshot.items():
+                        try:
+                            if candidate_handle.is_closed():
+                                continue
+                            if self._handles_share_project_identity(
+                                requested_handle,
+                                candidate_handle,
+                            ):
+                                project_keys.add(candidate_key)
+                        except Exception as exc:  # noqa: BLE001
+                            raise RuntimeError(
+                                "SYNC_STATUS_UNAVAILABLE: failed to determine project lock identity: "
+                                f"{exc}"
+                            ) from exc
+
+                    with self._store.registry_lock.write_lock():
+                        snapshot_unchanged = len(handle_snapshot) == len(
+                            self._store.project_handles
+                        ) and all(
+                            self._store.project_handles.get(key) is handle
+                            for key, handle in handle_snapshot.items()
+                        )
+                        if snapshot_unchanged:
+                            project_locks = [
+                                self._store.ensure_project_lock(key)
+                                for key in sorted(
+                                    project_keys,
+                                    key=lambda item: (str(item[0]), str(item[1])),
+                                )
+                            ]
+                        else:
+                            project_locks = []
+
+                    if not snapshot_unchanged:
+                        if time.monotonic() >= snapshot_deadline:
+                            raise DomainError(
+                                code=ErrorCode.LOCK_TIMEOUT,
+                                message="Failed to stabilize runtime project lock identity",
+                                hint=f"Lock acquisition order: {' -> '.join(LOCK_ORDER)}",
+                                retryable=True,
+                                details={
+                                    "lock": "registry_snapshot",
+                                    "timeout": DEFAULT_LOCK_TIMEOUT_SECONDS,
+                                },
+                            )
+                        continue
+
+                    named_project_locks = [
+                        ("project", project_lock) for project_lock in project_locks
+                    ]
+                    with acquire_ordered_locks(
+                        named_project_locks,
+                        message_prefix="runtime ",
+                    ):
+                        with self._store.registry_lock.read_lock():
+                            still_unchanged = len(handle_snapshot) == len(
+                                self._store.project_handles
+                            ) and all(
+                                self._store.project_handles.get(key) is handle
+                                for key, handle in handle_snapshot.items()
+                            )
+                        if not still_unchanged:
+                            if time.monotonic() >= snapshot_deadline:
+                                raise DomainError(
+                                    code=ErrorCode.LOCK_TIMEOUT,
+                                    message="Failed to stabilize runtime project lock identity",
+                                    hint=f"Lock acquisition order: {' -> '.join(LOCK_ORDER)}",
+                                    retryable=True,
+                                    details={
+                                        "lock": "registry_snapshot",
+                                        "timeout": DEFAULT_LOCK_TIMEOUT_SECONDS,
+                                    },
+                                )
                             continue
-                        if self._handles_share_project_identity(requested_handle, candidate_handle):
-                            project_keys.add(candidate_key)
-                    except Exception as exc:  # noqa: BLE001
-                        raise RuntimeError(
-                            "SYNC_STATUS_UNAVAILABLE: failed to determine project lock identity: "
-                            f"{exc}"
-                        ) from exc
-                project_locks = [
-                    self._store.ensure_project_lock(key)
-                    for key in sorted(project_keys, key=lambda item: (str(item[0]), str(item[1])))
-                ]
-            with lock:
-                with contextlib.ExitStack() as stack:
-                    for project_lock in project_locks:
-                        stack.enter_context(project_lock)
-                    yield
+                        yield
+                        return
 
     def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
         with self._target_operation(name):
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
             active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
-            status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path)
+            status = self._get_refreshed_sync_status_locked(
+                handle,
+                resolved_domain_path,
+                require_refresh=True,
+            )
             status = self._overlay_active_program_sync_status_locked(
                 active_target,
                 resolved_domain_path,
@@ -85,8 +156,7 @@ class RuntimeSyncOperations:
                     handle=handle,
                     domain_path=resolved_domain_path,
                 )
-                with self._store.registry_lock.write_lock():
-                    handle = self._store.get_target_handle_locked(name)
+                handle = self._store.get_target_handle(name)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
                 status = handle.get_sync_status(resolved_domain_path)
             self._ensure_versioned_project(status)
@@ -225,8 +295,7 @@ class RuntimeSyncOperations:
                     handle=handle,
                     domain_path=resolved_domain_path,
                 )
-                with self._store.registry_lock.write_lock():
-                    handle = self._store.get_target_handle_locked(name)
+                handle = self._store.get_target_handle(name)
                 active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
                 status = handle.get_sync_status(resolved_domain_path)
             if not status.get("is_versioned") and status.get("can_add_to_repository"):
@@ -264,8 +333,7 @@ class RuntimeSyncOperations:
                         domain_path=resolved_domain_path,
                         operation="commit_project_program.auto_checkout",
                     )
-                    with self._store.registry_lock.write_lock():
-                        handle = self._store.get_target_handle_locked(name)
+                    handle = self._store.get_target_handle(name)
                     status = self._read_postcondition_sync_status_locked(
                         name,
                         domain_path=resolved_domain_path,
@@ -309,8 +377,7 @@ class RuntimeSyncOperations:
                     save_before_close=False,
                     force=saved_active_program,
                 ):
-                    with self._store.registry_lock.write_lock():
-                        handle = self._store.get_target_handle_locked(name)
+                    handle = self._store.get_target_handle(name)
             # This refresh still precedes check-in.  Do not label a failure here
             # as a completed/partial commit: callers may safely retry after the
             # repository connection recovers because commit_program() has not run.
@@ -739,8 +806,7 @@ class RuntimeSyncOperations:
         # critical section.  Reader mode lets create_session() for another local
         # cache slip between them and open the file immediately before deletion.
         with self._target_operation(name, exclusive=True):
-            with self._store.registry_lock.write_lock():
-                handle = self._store.get_target_handle_locked(name)
+            handle = self._store.get_target_handle(name)
             resolved_domain_path = self._normalize_domain_path_locked(handle, domain_path)
             confirmation = (confirm or "").strip()
             if confirmation != resolved_domain_path:
@@ -854,7 +920,26 @@ class RuntimeSyncOperations:
                         details=details,
                     )
                 temporary_session = handle.open_program(resolved_domain_path)
-                temporary_session.close()
+                try:
+                    # This session exists only to force a clean reopen. Saving it
+                    # would create an unnecessary failure point and can never
+                    # preserve user edits because it was opened moments ago.
+                    temporary_session.close(save=False)
+                except Exception:
+                    session_closed = self._session_is_closed(temporary_session)
+                    handle_closed = handle.is_closed()
+                    with self._store.registry_lock.write_lock():
+                        if not session_closed:
+                            # Keep a live failed-close session reachable so a
+                            # caller can retry close_session or close_all instead
+                            # of wedging this program until process restart.
+                            self._store.sessions[name] = temporary_session
+                            self._store.target_projects[name] = handle.get_key()
+                        if handle_closed and self._store.project_handles.get(
+                            handle.get_key()
+                        ) is handle:
+                            self._store.project_handles.pop(handle.get_key(), None)
+                    raise
             return {
                 "status": "ok",
                 "target": name,
@@ -871,7 +956,13 @@ class RuntimeSyncOperations:
     ) -> Dict[str, Any]:
         with self._target_operation(name):
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-            self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
+            self._ensure_versioned_project(
+                self._get_refreshed_sync_status_locked(
+                    handle,
+                    resolved_domain_path,
+                    require_refresh=True,
+                )
+            )
             history = handle.get_version_history(resolved_domain_path, limit=limit)
             return {
                 "target": name,
@@ -890,7 +981,13 @@ class RuntimeSyncOperations:
     ) -> Dict[str, Any]:
         with self._target_operation(name):
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
-            self._ensure_versioned_project(self._get_refreshed_sync_status_locked(handle, resolved_domain_path))
+            self._ensure_versioned_project(
+                self._get_refreshed_sync_status_locked(
+                    handle,
+                    resolved_domain_path,
+                    require_refresh=True,
+                )
+            )
             diff = handle.get_version_diff(
                 resolved_domain_path,
                 from_version=from_version,
@@ -1158,8 +1255,7 @@ class RuntimeSyncOperations:
     ) -> tuple[ProjectHandle, str]:
         resolved_domain_path = (domain_path or "").strip()
         if resolved_domain_path:
-            with self._store.registry_lock.write_lock():
-                handle = self._store.get_target_handle_locked(name)
+            handle = self._store.get_target_handle(name)
             return handle, self._normalize_domain_path_locked(handle, resolved_domain_path)
 
         with self._store.registry_lock.read_lock():
@@ -1618,8 +1714,7 @@ class RuntimeSyncOperations:
         save_before_close: bool,
         reopen_domain_path_resolver=None,
     ):
-        with self._store.registry_lock.write_lock():
-            handle = self._store.get_target_handle_locked(name)
+        handle = self._store.get_target_handle(name)
         active_target = self._find_loaded_target_locked(handle=handle, domain_path=domain_path)
         if active_target is None:
             return operation(handle, domain_path)
@@ -1645,8 +1740,7 @@ class RuntimeSyncOperations:
         with self._store.registry_lock.read_lock():
             session = self._store.ensure_session(name)
         handle = session.get_project_handle()
-        project_location = handle.get_project_location()
-        project_name = handle.get_project_name()
+        project_key = handle.get_key()
         domain_path = self._store.session_domain_path(session)
         program = session.get_program()
         active_handle: ProjectHandle | None = None
@@ -1665,16 +1759,14 @@ class RuntimeSyncOperations:
 
         def _do_operation():
             nonlocal active_handle
-            with self._store.registry_lock.write_lock():
-                active_handle = self._store.get_or_create_project_handle(project_location, project_name)
+            active_handle = self._store.get_or_create_project_handle(project_key)
             return operation(active_handle, domain_path)
 
         def _reopen() -> None:
             nonlocal reopened_session_bound
             nonlocal active_handle
             if active_handle is None:
-                with self._store.registry_lock.write_lock():
-                    active_handle = self._store.get_or_create_project_handle(project_location, project_name)
+                active_handle = self._store.get_or_create_project_handle(project_key)
             reopen_domain_path = domain_path
             if reopen_domain_path_resolver is not None:
                 reopen_domain_path = reopen_domain_path_resolver(active_handle, domain_path)

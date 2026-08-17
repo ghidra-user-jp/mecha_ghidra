@@ -146,6 +146,12 @@ class _FailingCloseSession(_FakeSession):
         return super().get_program()
 
 
+class _LiveFailingCloseSession(_FakeSession):
+    def close(self, *, save: bool = True, remove_program: bool = False) -> None:  # noqa: ARG002
+        self.close_saves.append(bool(save))
+        raise RuntimeError("PROGRAM_CLOSE_FAILED: close failed while program remains open")
+
+
 class _FailingCloseReopenedSession(_FakeSession):
     def close(self, *, save: bool = True, remove_program: bool = False) -> None:  # noqa: ARG002
         self.close_saves.append(bool(save))
@@ -877,6 +883,17 @@ class _DuplicateSessionRejectingHandle(_FakeHandle):
     def open_program(self, domain_path: str):
         self.open_program_calls += 1
         raise RuntimeError(f"Program already has an active session: {domain_path}")
+
+
+class _RegisteredOnlyCloseFailureHandle(_FakeHandle):
+    def __init__(self, project_location: str, project_name: str) -> None:
+        super().__init__(project_location, project_name)
+        self.opened_sessions: list[_LiveFailingCloseSession] = []
+
+    def open_program(self, domain_path: str):
+        session = _LiveFailingCloseSession(self, domain_path)
+        self.opened_sessions.append(session)
+        return session
 
 
 class _ExplodingCommitHandle(_FakeHandle):
@@ -2048,13 +2065,50 @@ def test_sync_status_refreshes_project_data_after_external_add_to_version_contro
     assert core.initialized == []
 
 
-def test_sync_status_tolerates_refresh_failure(monkeypatch: pytest.MonkeyPatch):
+def test_sync_status_fails_closed_when_refresh_fails(monkeypatch: pytest.MonkeyPatch):
     sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_FailingRefreshHandle)
 
-    result = sync.get_project_sync_status("fw", domain_path="/main")
+    with pytest.raises(RuntimeError, match="SYNC_REFRESH_FAILED"):
+        sync.get_project_sync_status("fw", domain_path="/main")
 
-    assert result["is_versioned"] is True
     assert handle.refresh_project_data_calls == 1
+
+
+def test_sync_runtime_target_lock_respects_deadline(monkeypatch: pytest.MonkeyPatch):
+    import ghidra_mcp.infrastructure.ghidra_adapter.runtime.sync_operations as sync_module
+    from ghidra_mcp.infrastructure.locks import acquire_ordered_locks as acquire_with_timeout
+
+    sync, store, _core, _handle = _build_sync_runtime(monkeypatch)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_target_lock() -> None:
+        with store.locks["fw"]:
+            held.set()
+            release.wait(timeout=2)
+
+    holder = threading.Thread(target=hold_target_lock)
+    holder.start()
+    assert held.wait(timeout=1)
+    monkeypatch.setattr(
+        sync_module,
+        "acquire_ordered_locks",
+        lambda locks, **_kwargs: acquire_with_timeout(
+            locks,
+            timeout=0.02,
+            message_prefix="runtime ",
+        ),
+    )
+
+    try:
+        with pytest.raises(DomainError) as exc_info:
+            sync.get_project_sync_status("fw", domain_path="/main")
+    finally:
+        release.set()
+        holder.join(timeout=1)
+
+    assert exc_info.value.code == ErrorCode.LOCK_TIMEOUT
+    assert exc_info.value.details["lock"] == "target"
 
 
 def test_mutating_sync_refresh_failure_aborts_before_operation(monkeypatch: pytest.MonkeyPatch):
@@ -2362,6 +2416,27 @@ def test_reload_registered_only_target_fails_closed_when_loaded_target_inspectio
         sync.reload_project_program("fw-shadow", domain_path="/main")
 
     assert "fw" in store.sessions
+    assert core.initialized == []
+
+
+def test_reload_registered_only_target_preserves_live_session_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_RegisteredOnlyCloseFailureHandle,
+    )
+    assert isinstance(handle, _RegisteredOnlyCloseFailureHandle)
+    store.locks["fw-shadow"] = threading.RLock()
+    store.target_projects["fw-shadow"] = handle.get_key()
+
+    with pytest.raises(RuntimeError, match="PROGRAM_CLOSE_FAILED"):
+        sync.reload_project_program("fw-shadow", domain_path="/shadow")
+
+    leaked_session = handle.opened_sessions[-1]
+    assert leaked_session.close_saves == [False]
+    assert store.sessions["fw-shadow"] is leaked_session
+    assert store.target_projects["fw-shadow"] == handle.get_key()
     assert core.initialized == []
 
 
@@ -2784,6 +2859,54 @@ def test_shared_project_identity_canonicalizes_safe_url_aliases(first_url: str, 
     second = _SharedIdentityHandle("/tmp/cache-b", "sample-b", shared_url=second_url)
 
     assert RuntimeSyncOperations._handles_share_project_identity(first, second) is True
+
+
+def test_sync_project_identity_io_does_not_hold_registry_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_SharedIdentityHandle,
+    )
+    identity_started = threading.Event()
+    release_identity = threading.Event()
+    registry_read = threading.Event()
+    errors: list[BaseException] = []
+    original_get_shared_url = handle.get_shared_project_url
+
+    def blocking_get_shared_url():
+        identity_started.set()
+        if not release_identity.wait(timeout=2):
+            raise AssertionError("timed out waiting to release project identity lookup")
+        return original_get_shared_url()
+
+    def read_registry() -> None:
+        with store.registry_lock.read_lock():
+            registry_read.set()
+
+    def run_status() -> None:
+        try:
+            sync.get_project_sync_status("fw", domain_path="/main")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    monkeypatch.setattr(handle, "get_shared_project_url", blocking_get_shared_url)
+    status_thread = threading.Thread(target=run_status)
+    reader_thread = threading.Thread(target=read_registry)
+    status_thread.start()
+    assert identity_started.wait(timeout=1)
+    reader_thread.start()
+
+    try:
+        assert registry_read.wait(timeout=1)
+    finally:
+        release_identity.set()
+        status_thread.join(timeout=2)
+        reader_thread.join(timeout=2)
+
+    assert not status_thread.is_alive()
+    assert not reader_thread.is_alive()
+    assert errors == []
 
 
 def test_delete_fails_closed_when_shared_project_identity_lookup_fails(

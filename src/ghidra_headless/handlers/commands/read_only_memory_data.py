@@ -2,6 +2,8 @@
 
 from __future__ import absolute_import, print_function
 
+from ghidra_headless.handlers.commands.pagination import normalize_pagination
+
 
 MAX_BYTE_PAYLOAD_SIZE = 1024 * 1024
 
@@ -19,12 +21,7 @@ def validate_hex_payload_size(value):
 
 def list_segments(params, *, ensure_context, to_int):
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     blocks = ctx.program.getMemory().getBlocks()
     result = []
     idx = 0
@@ -52,12 +49,7 @@ def list_segments(params, *, ensure_context, to_int):
 
 def list_imports(params, *, ensure_context, to_int):
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     iterator = ctx.symbol_table.getExternalSymbols()
     items = []
     idx = 0
@@ -73,12 +65,7 @@ def list_imports(params, *, ensure_context, to_int):
 
 def list_exports(params, *, ensure_context, to_int, iter_items, is_exported_symbol):
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     iterator = ctx.symbol_table.getExternalEntryPointIterator()
     exports = []
     idx = 0
@@ -96,12 +83,7 @@ def list_exports(params, *, ensure_context, to_int, iter_items, is_exported_symb
 
 def list_namespaces(params, *, ensure_context, to_int, iter_namespaces, safe_call):
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     result = []
     idx = 0
     for namespace in iter_namespaces(ctx):
@@ -117,12 +99,7 @@ def list_namespaces(params, *, ensure_context, to_int, iter_namespaces, safe_cal
 
 def list_data_items(params, *, ensure_context, to_int):
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 100)
     data_iter = ctx.listing.getDefinedData(True)
     items = []
     idx = 0
@@ -144,12 +121,7 @@ def list_strings(params, *, ensure_context, to_int):
     # Simple dump list; in Jython environments this is extracted from dataIter.
     ctx = ensure_context()
     filter_text = params.get("filter")
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 200)
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
+    offset, limit = normalize_pagination(params, to_int, 2000)
     data_iter = ctx.listing.getDefinedData(True)
     items = []
     idx = 0
@@ -215,15 +187,10 @@ def search_bytes(params, *, ensure_context, to_int, decode_hex_bytes):
         raise ValueError("bytes is required")
     validate_hex_payload_size(pattern_text)
     ctx = ensure_context()
-    offset = to_int(params.get("offset"), 0)
-    limit = to_int(params.get("limit"), 100)
+    offset, limit = normalize_pagination(params, to_int, 100)
     pattern = decode_hex_bytes(pattern_text)
     if not pattern:
         raise ValueError("bytes must contain at least one byte")
-    if limit <= 0:
-        return []
-    if offset < 0:
-        offset = 0
     memory = ctx.program.getMemory()
     start = memory.getMinAddress()
     end = memory.getMaxAddress()

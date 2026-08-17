@@ -164,7 +164,7 @@ def test_get_bytes_allows_request_at_size_limit():
 
 
 @pytest.mark.parametrize("limit", [0, -1])
-def test_list_segments_returns_empty_for_non_positive_limit(limit):
+def test_list_segments_rejects_non_positive_limit(limit):
     get_blocks_called = False
 
     def get_blocks():
@@ -175,17 +175,17 @@ def test_list_segments_returns_empty_for_non_positive_limit(limit):
     memory = types.SimpleNamespace(getBlocks=get_blocks)
     ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory))
 
-    result = list_segments(
-        {"offset": 0, "limit": limit},
-        ensure_context=lambda: ctx,
-        to_int=lambda value, _default: int(value),
-    )
+    with pytest.raises(ValueError, match="limit must be >= 1"):
+        list_segments(
+            {"offset": 0, "limit": limit},
+            ensure_context=lambda: ctx,
+            to_int=lambda value, _default: int(value),
+        )
 
-    assert result == []
     assert get_blocks_called is False
 
 
-def test_list_segments_normalizes_negative_offset_to_zero():
+def test_list_segments_rejects_negative_offset():
     block = types.SimpleNamespace(
         getName=lambda: "text",
         getStart=lambda: "0x1000",
@@ -198,34 +198,25 @@ def test_list_segments_normalizes_negative_offset_to_zero():
     memory = types.SimpleNamespace(getBlocks=lambda: [block])
     ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory))
 
-    result = list_segments(
-        {"offset": -5, "limit": 1},
-        ensure_context=lambda: ctx,
-        to_int=lambda value, _default: int(value),
-    )
-
-    assert result == [
-        {
-            "name": "text",
-            "start": "0x1000",
-            "end": "0x10ff",
-            "length": 0x100,
-            "permissions": {"read": True, "write": False, "execute": True},
-        }
-    ]
+    with pytest.raises(ValueError, match="offset must be >= 0"):
+        list_segments(
+            {"offset": -5, "limit": 1},
+            ensure_context=lambda: ctx,
+            to_int=lambda value, _default: int(value),
+        )
 
 
-def test_paginated_commands_short_circuit_before_runtime_access():
+def test_paginated_commands_reject_invalid_limit_before_runtime_access():
     context = object()
 
     def checked_context():
         return context
 
     def unexpected_iter(_context):
-        raise AssertionError("limit <= 0 must not enumerate Ghidra objects")
+        raise AssertionError("invalid limit must not enumerate Ghidra objects")
 
     def unexpected_collect(*_args):
-        raise AssertionError("limit <= 0 must not collect Ghidra objects")
+        raise AssertionError("invalid limit must not collect Ghidra objects")
 
     def noop_to_int(value, default):
         return default if value is None else int(value)
@@ -283,11 +274,12 @@ def test_paginated_commands_short_circuit_before_runtime_access():
     ]
 
     for command in commands:
-        assert command() == []
+        with pytest.raises(ValueError, match="limit must be >= 1"):
+            command()
 
 
 @pytest.mark.parametrize("offset", [-7, -1])
-def test_search_functions_normalizes_negative_offset(offset):
+def test_search_functions_rejects_negative_offset(offset):
     class _Iterator:
         def __init__(self):
             self.items = [
@@ -304,13 +296,35 @@ def test_search_functions_normalizes_negative_offset(offset):
     manager = types.SimpleNamespace(getFunctions=lambda _forward: _Iterator())
     context = types.SimpleNamespace(function_manager=manager)
 
-    result = search_functions_by_name(
-        {"query": "first", "offset": offset, "limit": 1},
-        ensure_context=lambda: context,
-        to_int=lambda value, default: default if value is None else int(value),
-    )
+    with pytest.raises(ValueError, match="offset must be >= 0"):
+        search_functions_by_name(
+            {"query": "first", "offset": offset, "limit": 1},
+            ensure_context=lambda: context,
+            to_int=lambda value, default: default if value is None else int(value),
+        )
 
-    assert result == [{"name": "first", "entry": "0x1000"}]
+
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        ({"offset": 1_000_001, "limit": 1}, "offset must be <= 1000000"),
+        ({"offset": 0, "limit": 10_001}, "limit must be <= 10000"),
+    ],
+)
+def test_list_segments_rejects_unbounded_pagination(params, message):
+    memory = types.SimpleNamespace(
+        getBlocks=lambda: (_ for _ in ()).throw(
+            AssertionError("invalid pagination must not enumerate memory blocks")
+        )
+    )
+    ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory))
+
+    with pytest.raises(ValueError, match=message):
+        list_segments(
+            params,
+            ensure_context=lambda: ctx,
+            to_int=lambda value, _default: int(value),
+        )
 
 
 def test_search_bytes_stops_at_memory_max_address():

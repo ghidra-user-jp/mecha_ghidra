@@ -165,34 +165,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - name: Set up Java
-        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            git \
-            unzip \
-            zip \
-            tar \
-            build-essential \
-            bison \
-            flex \
-            file \
-            python3
-
       - name: Make scripts executable
         run: chmod +x scripts/build_decompiler_natives.sh scripts/build_linux_arm64_decompiler.sh
 
-      - name: Build decompiler overlay
-        run: ./scripts/build_decompiler_natives.sh --platform "${{ matrix.platform }}" --no-docker --no-patched-dist --output-dir dist
+      - name: Build decompiler overlay against the Ubuntu 22.04 ABI
+        env:
+          DOCKER_IMAGE: eclipse-temurin:21-jdk-jammy
+        run: ./scripts/build_decompiler_natives.sh --platform "${{ matrix.platform }}" --docker --no-patched-dist --output-dir dist
 
       - name: Verify overlay contents
         run: |
@@ -204,6 +183,30 @@ jobs:
           tar -tzf "${overlay}" | grep '^NOTICE$'
           tar -tzf "${overlay}" | grep '^DISCLAIMER.md$'
           tar -tzf "${overlay}" | grep '^licenses/zlib_License.txt$'
+
+      - name: Verify binaries run on Ubuntu 22.04
+        run: |
+          set -eu
+          overlay="$(find dist -type f -name "*${{ matrix.platform }}_decompiler_overlay.tar.gz" | head -n 1)"
+          test -n "${overlay}"
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "${verify_dir}"' EXIT
+          tar -xzf "${overlay}" -C "${verify_dir}"
+          docker run --rm --platform linux/arm64 \
+            -v "${verify_dir}:/overlay:ro" \
+            ubuntu:22.04 \
+            bash -ec '
+              apt-get update >/dev/null
+              apt-get install -y --no-install-recommends libstdc++6 >/dev/null
+              for binary in decompile sleigh; do
+                path="/overlay/Ghidra/Features/Decompiler/os/linux_arm_64/${binary}"
+                output="$("${path}" 2>&1 || true)"
+                if printf "%s\n" "${output}" | grep -Eq "GLIBC(X{2})?_[0-9.]+.*not found"; then
+                  printf "%s\n" "${output}" >&2
+                  exit 1
+                fi
+              done
+            '
 
       - name: Upload platform artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -305,16 +308,13 @@ jobs:
           full_zip_path="release-assets/${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}"
           sdist_path="$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | head -n 1)"
           test -n "${sdist_path}"
-          zip_sha256="$(sha256sum "${zip_path}" | awk '{print $1}')"
-          full_zip_sha256="$(sha256sum "${full_zip_path}" | awk '{print $1}')"
-          sdist_sha256="$(sha256sum "${sdist_path}" | awk '{print $1}')"
           sdist_name="$(basename "${sdist_path}")"
           cat > release-body.md <<EOF
           ## Python package
 
           This release includes the tested \`ghidra_mcp\` source distribution built from this tag.
 
-          - \`${sdist_name}\` — SHA-256: \`${sdist_sha256}\`
+          - \`${sdist_name}\`
 
           ## Native decompiler binaries
 
@@ -323,13 +323,11 @@ jobs:
           - \`${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}\`
             Ready-to-use Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} distribution with the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries already included.
             Extract this ZIP and run Ghidra from the extracted \`${MECHA_GHIDRA_GHIDRA_DIST_ROOT}\` directory.
-            SHA-256: \`${full_zip_sha256}\`
 
           - \`${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}\`
             Overlay ZIP containing the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries and required upstream license notices.
             Extract it at the root of an existing Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} installation.
             Files are already stored under their final \`Ghidra/Features/Decompiler/os/...\` paths inside the ZIP.
-            SHA-256: \`${zip_sha256}\`
 
           Added native paths:
 
