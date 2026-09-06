@@ -27,7 +27,9 @@ class DummyRuntime:
         return self.project_keys.get(name)
 
     def create_project(self, project_location: str, *, project_name: str | None = None, overwrite: bool = False):
-        self.calls.append(("create_project", (project_location,), {"project_name": project_name, "overwrite": overwrite}))
+        self.calls.append(
+            ("create_project", (project_location,), {"project_name": project_name, "overwrite": overwrite})
+        )
         return {
             "status": "ok",
             "project_location": project_location,
@@ -37,8 +39,12 @@ class DummyRuntime:
             "overwritten": overwrite,
         }
 
-    def create_session(self, name: str, project_location: str, *, project_name: str | None = None, domain_path: str | None = None):
-        self.calls.append(("create_session", (name, project_location), {"project_name": project_name, "domain_path": domain_path}))
+    def create_session(
+        self, name: str, project_location: str, *, project_name: str | None = None, domain_path: str | None = None
+    ):
+        self.calls.append(
+            ("create_session", (name, project_location), {"project_name": project_name, "domain_path": domain_path})
+        )
         return {"target": name, "domain_path": domain_path}
 
     def register_target(self, name: str, project_location: str, *, project_name: str | None = None):
@@ -54,9 +60,21 @@ class DummyRuntime:
         self.calls.append(("list_programs", (name,), {}))
         return []
 
-    def load_program(self, name: str, domain_path: str):
-        self.calls.append(("load_program", (name, domain_path), {}))
+    def load_program(self, name: str, domain_path: str, *, version: int | None = None):
+        self.calls.append(("load_program", (name, domain_path), {"version": version}))
         return domain_path
+
+    def create_repository_cache_project(
+        self, project_location: str, *, project_name: str | None = None, repository_url: str
+    ):
+        self.calls.append(
+            (
+                "create_repository_cache_project",
+                (project_location,),
+                {"project_name": project_name, "repository_url": repository_url},
+            )
+        )
+        return {"status": "ok", "project_location": project_location, "project_name": project_name}
 
     def import_program(self, name: str, binary_path: str, **kwargs):
         self.calls.append(("import_program", (name, binary_path), dict(kwargs)))
@@ -131,7 +149,7 @@ def test_target_service_lifecycle_and_lock_routing():
 
 def test_target_service_preserves_runtime_domain_error_code():
     class Runtime(DummyRuntime):
-        def load_program(self, name: str, domain_path: str):  # noqa: ARG002
+        def load_program(self, name: str, domain_path: str, *, version: int | None = None):  # noqa: ARG002
             raise DomainError(
                 code=ErrorCode.VALIDATION_ERROR,
                 message="domain_path is required",
@@ -247,7 +265,7 @@ def test_target_service_preserves_domain_error_and_merges_details():
 
 def test_target_service_preserves_target_already_loaded_error_details():
     class Runtime(DummyRuntime):
-        def load_program(self, name: str, domain_path: str):  # noqa: ARG002
+        def load_program(self, name: str, domain_path: str, *, version: int | None = None):  # noqa: ARG002
             raise DomainError(
                 code=ErrorCode.TARGET_ALREADY_LOADED,
                 message="TARGET_ALREADY_LOADED: program already loaded: /main",

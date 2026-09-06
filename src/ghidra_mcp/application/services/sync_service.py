@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from ghidra_mcp.application.locks import LockManager
 from ghidra_mcp.application.services.ports import SyncRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.domain.error_utils import is_project_lock_error, safe_cause_details
-from ghidra_mcp.infrastructure.locks import LockManager
+from ghidra_mcp.domain.error_mapping import to_domain_error
 
 
 class SyncService:
@@ -21,31 +21,14 @@ class SyncService:
         target: str,
         domain_path: str | None,
     ) -> DomainError:
-        if isinstance(exc, DomainError):
-            details = dict(exc.details or {})
-            details.setdefault("operation", operation)
-            details.setdefault("target", target)
-            details.setdefault("domain_path", domain_path)
-            return DomainError(
-                code=exc.code,
-                message=exc.message,
-                hint=exc.hint,
-                retryable=exc.retryable,
-                details=details,
-            )
-
-        code = ErrorCode.PROJECT_LOCKED if is_project_lock_error(exc) else ErrorCode.SYNC_OPERATION_FAILED
-        return DomainError(
-            code=code,
-            message=str(exc),
+        return to_domain_error(
+            exc,
+            operation=operation,
+            target=target,
+            domain_path=domain_path,
             hint="Check shared-project and checkout state",
-            retryable=code == ErrorCode.PROJECT_LOCKED,
-            details={
-                "operation": operation,
-                "target": target,
-                "domain_path": domain_path,
-                **safe_cause_details(exc),
-            },
+            default_code=ErrorCode.SYNC_OPERATION_FAILED,
+            keep_none_details=("domain_path",),
         )
 
     def _project_key(self, target: str) -> str | None:
@@ -67,7 +50,7 @@ class SyncService:
         self,
         name: str,
         *,
-        exclusive: bool = False,
+        exclusive: bool | None = None,
         domain_path: str | None = None,
     ):
         try:
@@ -227,18 +210,6 @@ class SyncService:
                 domain_path=domain_path,
             ) from exc
 
-    def reload_project_program(self, name: str, *, domain_path: str | None = None):
-        try:
-            with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
-                return self._runtime.reload_project_program(name, domain_path=domain_path)
-        except Exception as exc:
-            raise self._raise_domain_error(
-                exc,
-                operation="reload_project_program",
-                target=name,
-                domain_path=domain_path,
-            ) from exc
-
     def get_version_history(self, name: str, *, limit: int = 50, domain_path: str | None = None):
         try:
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
@@ -258,6 +229,8 @@ class SyncService:
         from_version: int,
         to_version: int,
         range_limit: int = 200,
+        include_details: bool = False,
+        details_limit: int = 20,
         domain_path: str | None = None,
     ):
         try:
@@ -267,6 +240,8 @@ class SyncService:
                     from_version=from_version,
                     to_version=to_version,
                     range_limit=range_limit,
+                    include_details=include_details,
+                    details_limit=details_limit,
                     domain_path=domain_path,
                 )
         except Exception as exc:

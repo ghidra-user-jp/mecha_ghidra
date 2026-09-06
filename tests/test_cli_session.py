@@ -226,10 +226,6 @@ class FakeSyncService:
         )
         return {"status": "ok"}
 
-    def reload_project_program(self, target: str, *, domain_path: str | None = None):
-        self.calls.append(("reload_project_program", (target,), {"domain_path": domain_path}))
-        return {"status": "ok"}
-
     def get_version_history(self, target: str, *, limit: int = 50, domain_path: str | None = None):
         self.calls.append(("get_version_history", (target,), {"limit": limit, "domain_path": domain_path}))
         return {"versions": []}
@@ -399,10 +395,6 @@ def test_parse_session_definition_invalid(text):
             {"status": "ok"},
         ),
         (
-            lambda a: a.reload_project_program("fw", domain_path="/app"),
-            {"status": "ok"},
-        ),
-        (
             lambda a: a.get_version_history("fw", limit=5, domain_path="/app"),
             {"versions": []},
         ),
@@ -434,13 +426,13 @@ def test_service_registry_adapter_has_targets_and_close_all(adapter):
     ("call", "expected_spec", "expected_args"),
     [
         (
-            lambda: cli.list_classes(offset=3, limit=4, target="fw"),
-            "list_classes",
-            {"offset": 3, "limit": 4},
+            lambda: cli.list_namespaces(classes_only=True, offset=3, limit=4, target="fw"),
+            "list_namespaces",
+            {"classes_only": True, "offset": 3, "limit": 4},
         ),
     ],
 )
-def test_list_classes_use_dispatcher(monkeypatch, call, expected_spec, expected_args):
+def test_list_namespaces_use_dispatcher(monkeypatch, call, expected_spec, expected_args):
     called: dict[str, object] = {}
 
     def fake_dispatch(spec_name, raw_args, target, *, registry, core_executor=None):
@@ -465,12 +457,12 @@ def test_list_classes_use_dispatcher(monkeypatch, call, expected_spec, expected_
     ("call", "message"),
     [
         (
-            lambda: cli.list_classes(offset=0, limit=10, target="fw"),
+            lambda: cli.list_namespaces(classes_only=True, offset=0, limit=10, target="fw"),
             "Session 'fw' is not initialized",
         ),
     ],
 )
-def test_list_classes_error_message_compat(monkeypatch, call, message):
+def test_list_namespaces_error_message_compat(monkeypatch, call, message):
     class DummyRegistry:
         def call(self, command, params, target):  # noqa: ARG002
             raise RuntimeError(f"Session '{target}' is not initialized")
@@ -599,34 +591,24 @@ def test_normalize_transport_alias():
     ],
 )
 def test_normalize_streamable_http_path(raw, expected):
-    assert cli._normalize_streamable_http_path(raw) == expected
+    from ghidra_mcp.presentation.transport import normalize_streamable_http_path
+
+    assert normalize_streamable_http_path(raw) == expected
 
 
-def test_configure_mcp_for_streamable_http(monkeypatch):
-    fake_mcp = types.SimpleNamespace(
-        settings=types.SimpleNamespace(
-            log_level="INFO",
-            host="127.0.0.1",
-            port=8081,
-            streamable_http_path="/mcp",
-            transport_security=None,
-        )
-    )
-    monkeypatch.setattr(cli, "mcp", fake_mcp)
-
+def test_configure_mcp_for_streamable_http():
     args = types.SimpleNamespace(
         log_level="DEBUG",
         mcp_host="0.0.0.0",
         mcp_port=9090,
         mcp_path="custom",
     )
-    cli.configure_mcp_for_streamable_http(args)
+    run_kwargs = cli.configure_mcp_for_streamable_http(args)
 
-    assert fake_mcp.settings.log_level == "DEBUG"
-    assert fake_mcp.settings.host == "0.0.0.0"
-    assert fake_mcp.settings.port == 9090
-    assert fake_mcp.settings.streamable_http_path == "/custom"
-    security = fake_mcp.settings.transport_security
+    assert run_kwargs["host"] == "0.0.0.0"
+    assert run_kwargs["port"] == 9090
+    assert run_kwargs["streamable_http_path"] == "/custom"
+    security = run_kwargs["transport_security"]
     assert security.enable_dns_rebinding_protection is True
     assert "127.0.0.1:*" in security.allowed_hosts
     assert "http://localhost:*" in security.allowed_origins
@@ -638,27 +620,16 @@ def test_configure_mcp_for_streamable_http(monkeypatch):
     assert middleware._validate_origin("https://attacker.example") is False
 
 
-def test_configure_mcp_for_streamable_http_with_specific_host_enables_rebinding_protection(monkeypatch):
-    fake_mcp = types.SimpleNamespace(
-        settings=types.SimpleNamespace(
-            log_level="INFO",
-            host="127.0.0.1",
-            port=8081,
-            streamable_http_path="/mcp",
-            transport_security=None,
-        )
-    )
-    monkeypatch.setattr(cli, "mcp", fake_mcp)
-
+def test_configure_mcp_for_streamable_http_with_specific_host_enables_rebinding_protection():
     args = types.SimpleNamespace(
         log_level="INFO",
         mcp_host="172.16.53.129",
         mcp_port=8081,
         mcp_path="/mcp",
     )
-    cli.configure_mcp_for_streamable_http(args)
+    run_kwargs = cli.configure_mcp_for_streamable_http(args)
 
-    security = fake_mcp.settings.transport_security
+    security = run_kwargs["transport_security"]
     assert security.enable_dns_rebinding_protection is True
     assert security.allowed_hosts == ["172.16.53.129", "172.16.53.129:*"]
     assert security.allowed_origins == [
@@ -669,27 +640,41 @@ def test_configure_mcp_for_streamable_http_with_specific_host_enables_rebinding_
     ]
 
 
-def test_configure_mcp_for_sse_with_loopback_host_keeps_local_security(monkeypatch):
-    fake_mcp = types.SimpleNamespace(
-        settings=types.SimpleNamespace(
-            log_level="INFO",
-            host="127.0.0.1",
-            port=8081,
-            transport_security=None,
-        )
-    )
-    monkeypatch.setattr(cli, "mcp", fake_mcp)
-
+def test_configure_mcp_for_sse_with_loopback_host_keeps_local_security():
     args = types.SimpleNamespace(
         log_level="INFO",
         mcp_host="127.0.0.1",
         mcp_port=8081,
     )
-    cli.configure_mcp_for_sse(args)
+    run_kwargs = cli.configure_mcp_for_sse(args)
 
-    security = fake_mcp.settings.transport_security
+    assert run_kwargs["host"] == "127.0.0.1"
+    assert run_kwargs["port"] == 8081
+    security = run_kwargs["transport_security"]
     assert security.enable_dns_rebinding_protection is True
     assert "127.0.0.1:*" in security.allowed_hosts
+
+
+def test_run_kwargs_for_stdio_transport_are_empty():
+    from ghidra_mcp.presentation.transport import run_kwargs_for_transport
+
+    args = types.SimpleNamespace(log_level="INFO", mcp_host="127.0.0.1", mcp_port=None, mcp_path="/mcp")
+    assert run_kwargs_for_transport(transport="stdio", args=args, logger=cli.logger) == {}
+
+
+def test_redirect_java_stdout_to_stderr_swaps_system_out(monkeypatch):
+    calls: list[object] = []
+
+    class FakeSystem:
+        err = object()
+
+        @staticmethod
+        def setOut(stream):
+            calls.append(stream)
+
+    monkeypatch.setattr(cli.pycore, "JClass", lambda name: FakeSystem if name == "java.lang.System" else None)
+    cli.redirect_java_stdout_to_stderr()
+    assert calls == [FakeSystem.err]
 
 
 def test_configure_ghidra_server_auth_sets_client_authenticator_from_env(monkeypatch):
@@ -827,6 +812,13 @@ def test_ensure_supported_ghidra_installation_raises_for_missing_linux_arm64(mon
 
     with pytest.raises(RuntimeError, match="Linux ARM64 requires Ghidra native decompiler binaries"):
         cli._ensure_supported_ghidra_installation("/tmp/ghidra")
+
+
+def test_start_pyghidra_headless_delegates_to_shared_launcher(monkeypatch):
+    calls: list[object] = []
+    monkeypatch.setattr(cli, "start_headless_jvm", lambda install_dir: calls.append(install_dir))
+    cli._start_pyghidra_headless("/tmp/ghidra")
+    assert calls == ["/tmp/ghidra"]
 
 
 def test_public_tool_functions_match_declared_specs():

@@ -6,11 +6,12 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from ghidra_headless.errors import HeadlessError
 
 _BSIM_UNIQUE_LOOKUP_LIMIT = 100
 
 
-def _iter_java_items(items) -> Iterator[Any]:  # noqa: ANN001
+def _iter_java_items(items) -> Iterator[Any]:
     if items is None:
         return
     has_next = getattr(items, "hasNext", None)
@@ -33,7 +34,7 @@ def _iter_java_items(items) -> Iterator[Any]:  # noqa: ANN001
     yield from python_iterator
 
 
-def _category_map(record) -> dict[str, list[str]]:  # noqa: ANN001
+def _category_map(record) -> dict[str, list[str]]:
     categories: dict[str, list[str]] = {}
     get_all = getattr(record, "getAllCategories", None)
     if get_all is None:
@@ -44,7 +45,7 @@ def _category_map(record) -> dict[str, list[str]]:  # noqa: ANN001
     return categories
 
 
-def _categories_to_java_list(categories: dict[str, list[str]]):  # noqa: ANN001
+def _categories_to_java_list(categories: dict[str, list[str]]):
     from ghidra.features.bsim.query.description import CategoryRecord
     from java.util import ArrayList
 
@@ -55,7 +56,7 @@ def _categories_to_java_list(categories: dict[str, list[str]]):  # noqa: ANN001
     return records
 
 
-def _executable_to_dict(record) -> dict[str, Any]:  # noqa: ANN001
+def _executable_to_dict(record) -> dict[str, Any]:
     return {
         "md5": str(record.getMd5()),
         "name": str(record.getNameExec()),
@@ -69,20 +70,20 @@ def _executable_to_dict(record) -> dict[str, Any]:  # noqa: ANN001
     }
 
 
-def _text_or_none(value) -> str | None:  # noqa: ANN001
+def _text_or_none(value) -> str | None:
     if value is None:
         return None
     text = str(value)
     return text or None
 
 
-def _format_address(value) -> str:  # noqa: ANN001
+def _format_address(value) -> str:
     # Ghidra's FunctionDescription.getAddress() returns a signed Java long; mask to
     # unsigned 64-bit so high addresses do not render as "0x-..." strings.
     return "0x%x" % (int(value) & 0xFFFFFFFFFFFFFFFF)
 
 
-def _name_matches_exactly(record_name, *, name) -> bool:  # noqa: ANN001
+def _name_matches_exactly(record_name, *, name) -> bool:
     # BSim's QueryExeInfo name filter is a case-insensitive substring (ILIKE) match, so
     # re-check the name exactly to avoid acting on an unintended record. md5 is filtered
     # exactly server-side for full 32-char values (and as a prefix otherwise), so it
@@ -90,27 +91,21 @@ def _name_matches_exactly(record_name, *, name) -> bool:  # noqa: ANN001
     return name is None or str(record_name) == name
 
 
-def _select_unique_executable_record(records, *, name):  # noqa: ANN001
+def _select_unique_executable_record(records, *, name):
     candidates = list(records)
-    exact_matches = [
-        record
-        for record in candidates
-        if _name_matches_exactly(record.getNameExec(), name=name)
-    ]
+    exact_matches = [record for record in candidates if _name_matches_exactly(record.getNameExec(), name=name)]
     if len(exact_matches) > 1:
-        raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
+        raise HeadlessError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
     if len(candidates) > _BSIM_UNIQUE_LOOKUP_LIMIT:
         # The extra record is a truncation sentinel. Even if the visible page has one
         # exact match, another exact match may be beyond it, so mutating would be unsafe.
-        raise RuntimeError(
-            "BSIM_EXECUTABLE_LOOKUP_TRUNCATED: more than 100 candidates matched; use md5"
-        )
+        raise HeadlessError("BSIM_EXECUTABLE_LOOKUP_TRUNCATED: more than 100 candidates matched; use md5")
     if not exact_matches:
         raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
     return exact_matches[0]
 
 
-def _load_executable_update_manager(database, query_name_class, source_record):  # noqa: ANN001
+def _load_executable_update_manager(database, query_name_class, source_record):
     """Load one real function alongside an executable before issuing QueryUpdate.
 
     Ghidra 12.1.2's SQL backend calls ``DescriptionManager.listFunctions()`` for
@@ -133,7 +128,7 @@ def _load_executable_update_manager(database, query_name_class, source_record): 
     if response is None:
         last_error = database.getLastError()
         message = "unknown error" if last_error is None else str(last_error.message)
-        raise RuntimeError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+        raise HeadlessError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
     if not bool(response.uniqueexecutable):
         raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
 
@@ -142,14 +137,12 @@ def _load_executable_update_manager(database, query_name_class, source_record): 
         # Avoid propagating Ghidra's opaque NoSuchElementException.  BSim records
         # normally contain functions, but an empty/corrupt record cannot safely use
         # QueryUpdate on Ghidra 12.1.2.
-        raise RuntimeError(
-            "BSIM_EXECUTABLE_UPDATE_UNSUPPORTED: executable has no function records"
-        )
+        raise HeadlessError("BSIM_EXECUTABLE_UPDATE_UNSUPPORTED: executable has no function records")
     record = manager.findExecutable(str(source_record.getMd5()))
     return manager, record
 
 
-def _server_info_to_dict(server_info) -> dict[str, Any]:  # noqa: ANN001
+def _server_info_to_dict(server_info) -> dict[str, Any]:
     if server_info is None:
         return {}
     return {
@@ -196,7 +189,9 @@ class BsimJavaBackend:
     def _classes():
         from ghidra.features.bsim.query import BSimClientFactory
         from ghidra.features.bsim.query.protocol import (
+            ExeSpecifier,
             InstallCategoryRequest,
+            QueryDelete,
             QueryExeCount,
             QueryExeInfo,
             QueryName,
@@ -205,7 +200,9 @@ class BsimJavaBackend:
 
         return {
             "BSimClientFactory": BSimClientFactory,
+            "ExeSpecifier": ExeSpecifier,
             "InstallCategoryRequest": InstallCategoryRequest,
+            "QueryDelete": QueryDelete,
             "QueryExeCount": QueryExeCount,
             "QueryExeInfo": QueryExeInfo,
             "QueryName": QueryName,
@@ -221,7 +218,7 @@ class BsimJavaBackend:
             if not bool(database.initialize()):
                 last_error = database.getLastError()
                 message = "unknown error" if last_error is None else str(last_error.message)
-                raise RuntimeError(f"BSIM_DATABASE_INIT_FAILED: {message}")
+                raise HeadlessError(f"BSIM_DATABASE_INIT_FAILED: {message}")
             yield database
         finally:
             database.close()
@@ -248,7 +245,7 @@ class BsimJavaBackend:
             connection = DriverManager.getConnection(*connection_info)
             metadata = connection.getMetaData()
             return str(metadata.getDatabaseProductVersion()), None
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return None, str(exc)
         finally:
             if connection is not None:
@@ -265,7 +262,7 @@ class BsimJavaBackend:
             if response is None:
                 last_error = database.getLastError()
                 message = "unknown error" if last_error is None else str(last_error.message)
-                raise RuntimeError(f"BSIM_QUERY_FAILED: {message}")
+                raise HeadlessError(f"BSIM_QUERY_FAILED: {message}")
             return {
                 "status": "ok",
                 "database": str(info.databasename),
@@ -312,7 +309,7 @@ class BsimJavaBackend:
             if response is None:
                 last_error = database.getLastError()
                 message = "unknown error" if last_error is None else str(last_error.message)
-                raise RuntimeError(f"BSIM_ADD_EXECUTABLE_CATEGORY_FAILED: {message}")
+                raise HeadlessError(f"BSIM_ADD_EXECUTABLE_CATEGORY_FAILED: {message}")
             updated_info = response.info or database.getInfo()
             categories = [str(item) for item in _iter_java_items(updated_info.execats)]
             return {
@@ -345,7 +342,7 @@ class BsimJavaBackend:
             if response is None:
                 last_error = database.getLastError()
                 message = "unknown error" if last_error is None else str(last_error.message)
-                raise RuntimeError(f"BSIM_QUERY_FAILED: {message}")
+                raise HeadlessError(f"BSIM_QUERY_FAILED: {message}")
             items = [_executable_to_dict(record) for record in _iter_java_items(response.records)]
             # recordCount reflects the returned page size, not a true total, so a full page
             # means more rows may exist; report that rather than claiming completeness.
@@ -375,17 +372,11 @@ class BsimJavaBackend:
             limit=_BSIM_UNIQUE_LOOKUP_LIMIT + 1,
         )
         candidates = list(result["items"])
-        items = [
-            item
-            for item in candidates
-            if _name_matches_exactly(item.get("name"), name=name)
-        ]
+        items = [item for item in candidates if _name_matches_exactly(item.get("name"), name=name)]
         if len(items) > 1:
-            raise RuntimeError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
+            raise HeadlessError("BSIM_EXECUTABLE_AMBIGUOUS: more than one executable matched")
         if len(candidates) > _BSIM_UNIQUE_LOOKUP_LIMIT or bool(result.get("truncated")):
-            raise RuntimeError(
-                "BSIM_EXECUTABLE_LOOKUP_TRUNCATED: more than 100 candidates matched; use md5"
-            )
+            raise HeadlessError("BSIM_EXECUTABLE_LOOKUP_TRUNCATED: more than 100 candidates matched; use md5")
         if not items:
             raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
         return items[0]
@@ -421,7 +412,7 @@ class BsimJavaBackend:
             if response is None:
                 last_error = database.getLastError()
                 message = "unknown error" if last_error is None else str(last_error.message)
-                raise RuntimeError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+                raise HeadlessError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
 
             # The name filter is a case-insensitive substring (ILIKE) match server-side, so
             # narrow to records whose identity matches exactly before mutating anything.
@@ -452,12 +443,9 @@ class BsimJavaBackend:
             if update_response is None:
                 last_error = database.getLastError()
                 message = "unknown error" if last_error is None else str(last_error.message)
-                raise RuntimeError(f"BSIM_UPDATE_EXECUTABLE_METADATA_FAILED: {message}")
+                raise HeadlessError(f"BSIM_UPDATE_EXECUTABLE_METADATA_FAILED: {message}")
 
-            bad_executables = [
-                _executable_to_dict(record)
-                for record in _iter_java_items(update_response.badexe)
-            ]
+            bad_executables = [_executable_to_dict(record) for record in _iter_java_items(update_response.badexe)]
             bad_functions = [
                 {
                     "executable_md5": str(func.getExecutableRecord().getMd5()),
@@ -474,6 +462,61 @@ class BsimJavaBackend:
                 "updated_functions": int(update_response.funcupdate),
                 "bad_executables": bad_executables,
                 "bad_functions": bad_functions,
+            }
+
+    def delete_executable(
+        self,
+        bsim_url: str,
+        *,
+        md5: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete one executable and its function records (``bsim delete``)."""
+        classes = self._classes()
+        with self._database(bsim_url) as database:
+            query = classes["QueryExeInfo"]()
+            query.limit = _BSIM_UNIQUE_LOOKUP_LIMIT + 1
+            query.filterMd5 = md5.lower() if md5 else md5
+            query.filterExeName = name
+            query.fillinCategories = True
+            response = database.query(query)
+            if response is None:
+                last_error = database.getLastError()
+                message = "unknown error" if last_error is None else str(last_error.message)
+                raise HeadlessError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+            record = _select_unique_executable_record(_iter_java_items(response.records), name=name)
+            executable = _executable_to_dict(record)
+
+            specifier = classes["ExeSpecifier"]()
+            specifier.transfer(record)
+            delete = classes["QueryDelete"]()
+            delete.addSpecifier(specifier)
+            delete_response = database.query(delete)
+            if delete_response is None:
+                last_error = database.getLastError()
+                message = "unknown error" if last_error is None else str(last_error.message)
+                raise HeadlessError(f"BSIM_DELETE_EXECUTABLE_FAILED: {message}")
+            deleted = [
+                {
+                    "md5": str(item.md5),
+                    "name": str(item.name),
+                    "deleted_functions": int(item.funccount),
+                }
+                for item in _iter_java_items(delete_response.reslist)
+            ]
+            missed = [
+                {"md5": _text_or_none(item.exemd5), "name": _text_or_none(item.exename)}
+                for item in _iter_java_items(delete_response.missedlist)
+            ]
+            if not deleted:
+                detail = "; ".join(f"{item['name']} ({item['md5']})" for item in missed) or executable["md5"]
+                raise HeadlessError(f"BSIM_DELETE_EXECUTABLE_FAILED: database did not delete {detail}")
+            return {
+                "status": "deleted",
+                "executable": executable,
+                "deleted": deleted,
+                "deleted_functions": sum(item["deleted_functions"] for item in deleted),
+                "missed": missed,
             }
 
 

@@ -219,3 +219,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# export_program output directory mounted by docker-compose
+exports/

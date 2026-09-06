@@ -10,8 +10,8 @@ import pyghidra.core as pycore
 import pytest
 from mcp.types import CallToolResult
 
+from ghidra_headless.launcher import start_headless_jvm
 from ghidra_mcp import cli
-
 
 RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
@@ -70,7 +70,7 @@ def _start_pyghidra_if_needed() -> None:
     if shutil.which("java") is None:
         pytest.fail("java command not found (required for runtime tests)")
     try:
-        pyghidra.start(install_dir=_resolve_ghidra_install_dir())
+        start_headless_jvm(_resolve_ghidra_install_dir())
     except Exception as exc:
         pytest.fail(f"Failed to start pyghidra: {exc}")
 
@@ -115,10 +115,7 @@ def _count_of(value):
 
 
 def _log_runtime_result(name: str, value) -> None:
-    print(
-        f"[runtime] {name}: type={type(value).__name__} "
-        f"count={_count_of(value)} sample={_sample_of(value)!r}"
-    )
+    print(f"[runtime] {name}: type={type(value).__name__} count={_count_of(value)} sample={_sample_of(value)!r}")
 
 
 def _derive_search_pattern_from_hexdump(hexdump: str) -> str:
@@ -155,9 +152,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         domain_path = imported["program"]
         cli.load_project_program(target=target, domain_path=domain_path)
 
-        struct_result = _unwrap_runtime_result(
-            cli.create_struct(name="__it_struct", target=target)
-        )
+        struct_result = _unwrap_runtime_result(cli.create_struct(name="__it_struct", target=target))
         _log_runtime_result("create_struct", struct_result)
 
         from ghidra_headless.handlers.core_runtime import _ensure_context_for_key
@@ -175,9 +170,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         finally:
             program.endTransaction(transaction_id, committed)
 
-        enum_result = _unwrap_runtime_result(
-            cli.get_enum(name="__it_enum", target=target)
-        )
+        enum_result = _unwrap_runtime_result(cli.get_enum(name="__it_enum", target=target))
         _log_runtime_result("get_enum", enum_result)
         assert enum_result["name"] == "__it_enum"
         assert enum_result["isSigned"] is True
@@ -186,9 +179,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "ZERO": 0,
         }
 
-        first_functions = _unwrap_runtime_result(
-            cli.list_functions(offset=0, limit=1, target=target)
-        )
+        first_functions = _unwrap_runtime_result(cli.list_functions(offset=0, limit=1, target=target))
         assert isinstance(first_functions, list)
         assert first_functions, "Cannot continue runtime validation because list_functions returned empty"
         first = first_functions[0]
@@ -208,8 +199,8 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         _log_runtime_result("add_bookmark(seed)", bookmark_result)
 
         search_result = _unwrap_runtime_result(
-            cli.search_functions_by_name(
-                query="main",
+            cli.list_functions(
+                filter="main",
                 offset=0,
                 limit=5,
                 target=target,
@@ -218,95 +209,61 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         if not search_result:
             fallback_query = (function_name or "main")[:4] or function_name or "main"
             search_result = _unwrap_runtime_result(
-                cli.search_functions_by_name(
-                    query=fallback_query,
+                cli.list_functions(
+                    filter=fallback_query,
                     offset=0,
                     limit=5,
                     target=target,
                 )
             )
-        _log_runtime_result("search_functions_by_name(seed)", search_result)
+        _log_runtime_result("list_functions(filter, seed)", search_result)
 
-        function_info = _unwrap_runtime_result(
-            cli.get_function(address=address, target=target)
-        )
+        function_info = _unwrap_runtime_result(cli.get_function(address=address, target=target))
         _log_runtime_result("get_function(seed)", function_info)
 
-        first_data_items = _unwrap_runtime_result(
-            cli.list_data_items(offset=0, limit=20, target=target)
-        )
+        first_data_items = _unwrap_runtime_result(cli.list_data_items(offset=0, limit=20, target=target))
         assert first_data_items, "Cannot validate get_data_by_label without defined data"
         data_address = first_data_items[0]["address"]
         data_label = "__it_runtime_data"
-        _unwrap_runtime_result(
-            cli.rename_data(address=data_address, new_name=data_label, target=target)
-        )
+        _unwrap_runtime_result(cli.rename_data(address=data_address, new_name=data_label, target=target))
 
-        bytes_dump = _unwrap_runtime_result(
-            cli.get_bytes(address=address, size=16, target=target)
-        )
+        bytes_dump = _unwrap_runtime_result(cli.get_bytes(address=address, size=16, target=target))
         pattern = _derive_search_pattern_from_hexdump(bytes_dump)
         _log_runtime_result("get_bytes(seed)", bytes_dump)
 
         runtime_results = {
-            "decompile_function": _unwrap_runtime_result(
-                cli.decompile_function(name=function_name, target=target)
-            ),
+            "decompile_function": _unwrap_runtime_result(cli.decompile_function(name=function_name, target=target)),
             "decompile_function(address)": _unwrap_runtime_result(
                 cli.decompile_function(address=address, target=target)
             ),
-            "disassemble_function": _unwrap_runtime_result(
-                cli.disassemble_function(address=address, target=target)
-            ),
+            "disassemble_function": _unwrap_runtime_result(cli.disassemble_function(address=address, target=target)),
             "disassemble_range": _unwrap_runtime_result(
                 cli.disassemble_range(start_address=address, length=32, limit=10, target=target)
             ),
-            "get_callee": _unwrap_runtime_result(
-                cli.get_callee(address=address, target=target)
-            ),
-            "get_xrefs_to": _unwrap_runtime_result(
-                cli.get_xrefs_to(address=address, offset=0, limit=5, target=target)
-            ),
+            "get_callee": _unwrap_runtime_result(cli.get_callee(address=address, target=target)),
+            "get_xrefs_to": _unwrap_runtime_result(cli.get_xrefs_to(address=address, offset=0, limit=5, target=target)),
             "get_xrefs_from": _unwrap_runtime_result(
                 cli.get_xrefs_from(address=address, offset=0, limit=5, target=target)
             ),
             "get_function_xrefs": _unwrap_runtime_result(
                 cli.get_function_xrefs(name=function_name, offset=0, limit=5, target=target)
             ),
-            "list_segments": _unwrap_runtime_result(
-                cli.list_segments(offset=0, limit=5, target=target)
-            ),
-            "list_imports": _unwrap_runtime_result(
-                cli.list_imports(offset=0, limit=5, target=target)
-            ),
-            "list_exports": _unwrap_runtime_result(
-                cli.list_exports(offset=0, limit=5, target=target)
-            ),
+            "list_segments": _unwrap_runtime_result(cli.list_segments(offset=0, limit=5, target=target)),
+            "list_imports": _unwrap_runtime_result(cli.list_imports(offset=0, limit=5, target=target)),
+            "list_exports": _unwrap_runtime_result(cli.list_exports(offset=0, limit=5, target=target)),
             "list_classes": _unwrap_runtime_result(
-                cli.list_classes(offset=0, limit=5, target=target)
+                cli.list_namespaces(classes_only=True, offset=0, limit=5, target=target)
             ),
-            "list_namespaces": _unwrap_runtime_result(
-                cli.list_namespaces(offset=0, limit=5, target=target)
-            ),
-            "list_data_items": _unwrap_runtime_result(
-                cli.list_data_items(offset=0, limit=5, target=target)
-            ),
+            "list_namespaces": _unwrap_runtime_result(cli.list_namespaces(offset=0, limit=5, target=target)),
+            "list_data_items": _unwrap_runtime_result(cli.list_data_items(offset=0, limit=5, target=target)),
             "list_data_types": _unwrap_runtime_result(
                 cli.list_data_types(offset=0, limit=20, filter="__it_", target=target)
             ),
-            "list_strings": _unwrap_runtime_result(
-                cli.list_strings(offset=0, limit=5, target=target)
-            ),
-            "get_data_by_label": _unwrap_runtime_result(
-                cli.get_data_by_label(label=data_label, target=target)
-            ),
+            "list_strings": _unwrap_runtime_result(cli.list_strings(offset=0, limit=5, target=target)),
+            "get_data_by_label": _unwrap_runtime_result(cli.get_data_by_label(label=data_label, target=target)),
             "get_bytes": bytes_dump,
-            "search_bytes": _unwrap_runtime_result(
-                cli.search_bytes(pattern=pattern, offset=0, limit=5, target=target)
-            ),
-            "get_struct": _unwrap_runtime_result(
-                cli.get_struct(name="__it_struct", target=target)
-            ),
+            "search_bytes": _unwrap_runtime_result(cli.search_bytes(pattern=pattern, offset=0, limit=5, target=target)),
+            "get_struct": _unwrap_runtime_result(cli.get_struct(name="__it_struct", target=target)),
             "list_bookmarks": _unwrap_runtime_result(
                 cli.list_bookmarks(address=address, type="Info", category="Validation", target=target)
             ),
@@ -328,9 +285,9 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert isinstance(runtime_results["list_segments"], list)
         assert isinstance(runtime_results["list_imports"], list)
         assert isinstance(runtime_results["list_exports"], list)
-        assert data_label in runtime_results["list_exports"]
+        assert any(item["name"] == data_label for item in runtime_results["list_exports"])
         assert isinstance(runtime_results["list_classes"], list)
-        assert all(item.get("isClass") is True for item in runtime_results["list_classes"])
+        assert all(item.get("is_class") is True for item in runtime_results["list_classes"])
         assert isinstance(runtime_results["list_namespaces"], list)
         assert isinstance(runtime_results["list_data_items"], list)
         assert isinstance(runtime_results["list_data_types"], list)

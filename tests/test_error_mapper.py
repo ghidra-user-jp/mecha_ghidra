@@ -65,8 +65,7 @@ def test_map_exception_does_not_duplicate_cause_type_prefix():
     mapped = map_exception(exc)
 
     assert (
-        str(mapped)
-        == "OPERATION_FAILED: operation failed "
+        str(mapped) == "OPERATION_FAILED: operation failed "
         "(ghidra.framework.store.LockException: Unable to lock project! <path>)"
     )
 
@@ -85,7 +84,10 @@ def test_map_exception_exposes_project_locked_with_safe_cause():
     mapped = map_exception(exc)
 
     assert isinstance(mapped, RuntimeError)
-    assert str(mapped) == "PROJECT_LOCKED: project is locked by another process (RuntimeError: Unable to lock project! <path>)"
+    assert (
+        str(mapped)
+        == "PROJECT_LOCKED: project is locked by another process (RuntimeError: Unable to lock project! <path>)"
+    )
     assert getattr(mapped, "domain_error")["code"] == ErrorCode.PROJECT_LOCKED.value
 
 
@@ -101,7 +103,7 @@ def test_map_exception_exposes_merge_required_guidance():
     assert isinstance(mapped, RuntimeError)
     assert (
         str(mapped)
-        == "MERGE_REQUIRED: automatic merge is disabled; reopen the latest version or re-checkout before retrying"
+        == "MERGE_REQUIRED: the repository moved ahead of this checkout and automatic merge is disabled; pull_project_program refreshes an unmodified checkout, and commit_project_program(on_conflict='discard') drops the local changes and follows the latest version"
     )
     assert getattr(mapped, "domain_error")["code"] == ErrorCode.MERGE_REQUIRED.value
 
@@ -120,8 +122,7 @@ def test_map_exception_exposes_active_checkout_terminate_guidance():
 
     assert isinstance(mapped, RuntimeError)
     assert (
-        str(mapped)
-        == "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: active checkout cannot be terminated; "
+        str(mapped) == "UNSAFE_ACTIVE_CHECKOUT_TERMINATE: active checkout cannot be terminated; "
         "use undo_checkout_project_program instead"
     )
     assert getattr(mapped, "domain_error")["code"] == ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE.value

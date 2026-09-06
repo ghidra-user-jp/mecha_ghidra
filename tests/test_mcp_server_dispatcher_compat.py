@@ -51,13 +51,7 @@ def test_create_mcp_server_preserves_legacy_dispatcher_signature():
 
 
 def test_server_boundary_compacts_legacy_dispatcher_result():
-    full_result = (
-        "int main(void) {\n"
-        + ("  return 0;\n" * 20)
-        + "}\n/* "
-        + ("x" * 2000)
-        + " */\n"
-    )
+    full_result = "int main(void) {\n" + ("  return 0;\n" * 20) + "}\n/* " + ("x" * 2000) + " */\n"
 
     def legacy_dispatcher(name, args, target, *, registry):  # noqa: ARG001
         return full_result
@@ -73,8 +67,8 @@ def test_server_boundary_compacts_legacy_dispatcher_result():
     result = runtime.tools["decompile_function"](name="main", target="fw")
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent is not None
-    result_id = result.structuredContent["result_id"]
+    assert result.structured_content is not None
+    result_id = result.structured_content["result_id"]
     assert runtime.result_store.read_text(result_id) == full_result
 
 
@@ -90,12 +84,8 @@ def test_create_mcp_server_snapshots_specs_for_tools_and_docs():
     specs["list_functions"] = get_tool_spec("list_functions")
 
     tools = asyncio.run(runtime.mcp.list_tools())
-    docs = json.loads(
-        asyncio.run(runtime.mcp.read_resource("ghidra://docs/tools"))[0].content
-    )
-    assert [tool.name for tool in tools if tool.name not in {"read_result", "search_result"}] == [
-        "decompile_function"
-    ]
+    docs = json.loads(asyncio.run(runtime.mcp.read_resource("ghidra://docs/tools"))[0].content)
+    assert [tool.name for tool in tools if tool.name not in {"read_result", "search_result"}] == ["decompile_function"]
     assert list(runtime.specs) == ["decompile_function"]
     assert [item["name"] for item in docs["tools"]] == ["decompile_function"]
 

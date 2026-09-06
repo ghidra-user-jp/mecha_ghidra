@@ -10,12 +10,15 @@ import threading
 from collections.abc import Iterator
 from typing import Dict, List, Optional
 
+from ghidra_headless.errors import HeadlessError, error_code_of
+from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings, path_utils
+from ghidra_headless.session.transactions import run_in_transaction
+from ghidra_mcp.application.locks import acquire_ordered_locks
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_utils import is_project_lock_error
-from ghidra_mcp.infrastructure.locks import acquire_ordered_locks
-from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings, path_utils
 
 from .session_store import RuntimeSessionStore
+from .sync_reopen import SyncReopenMixin
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +31,33 @@ _IMPORT_DOMAIN_PATH_PATTERNS = (
 )
 
 
-class RuntimeTargetLifecycle:
+class RuntimeTargetLifecycle(SyncReopenMixin):
+    """Target/session lifecycle; reuses the sync close/reopen lease for in-place reloads."""
+
     def __init__(self, *, store: RuntimeSessionStore) -> None:
         self._store = store
+
+    def create_repository_cache_project(
+        self,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        repository_url: str,
+    ) -> Dict[str, object]:
+        with self._store.operation_lock.read_lock():
+            return ProjectHandle.create_repository_cache_project(
+                project_location,
+                project_name,
+                repository_url=repository_url,
+            )
 
     @contextlib.contextmanager
     def _target_operation(self, name: str, *, create: bool = False) -> Iterator[None]:
         with self._store.operation_lock.read_lock():
             with self._store.registry_lock.write_lock():
-                lock = self._store.locks.setdefault(name, threading.RLock()) if create else self._store.ensure_lock(name)
+                lock = (
+                    self._store.locks.setdefault(name, threading.RLock()) if create else self._store.ensure_lock(name)
+                )
                 project_key = self._store.target_projects.get(name)
                 if project_key is None and name in self._store.sessions:
                     project_key = self._store.sessions[name].get_project_handle().get_key()
@@ -79,24 +100,19 @@ class RuntimeTargetLifecycle:
             if overwrite:
                 with self._store.registry_lock.read_lock():
                     registered_targets = sorted(
-                        name
-                        for name, target_key in self._store.target_projects.items()
-                        if target_key == project_key
+                        name for name, target_key in self._store.target_projects.items() if target_key == project_key
                     )
                     handle = self._store.project_handles.get(project_key)
                 has_open_handle = handle is not None and not handle.is_closed()
                 if registered_targets or has_open_handle:
                     reasons = []
                     if registered_targets:
-                        reasons.append(
-                            f"registered target(s): {', '.join(registered_targets)}"
-                        )
+                        reasons.append(f"registered target(s): {', '.join(registered_targets)}")
                     if has_open_handle:
                         reasons.append("an open project handle")
-                    raise RuntimeError(
+                    raise HeadlessError(
                         "PROJECT_IN_USE: cannot overwrite project "
-                        f"'{project_key[0]}::{project_key[1]}' while it has "
-                        + " and ".join(reasons)
+                        f"'{project_key[0]}::{project_key[1]}' while it has " + " and ".join(reasons)
                     )
             return ProjectHandle.create_project(
                 project_key[0],
@@ -148,7 +164,7 @@ class RuntimeTargetLifecycle:
                 with self._store.registry_lock.write_lock():
                     self._store.sessions[name] = session
                 return session
-            except Exception as operation_error:  # noqa: BLE001
+            except Exception as operation_error:
                 with self._store.registry_lock.write_lock():
                     if session is not None and self._store.sessions.get(name) is session:
                         self._store.sessions.pop(name, None)
@@ -307,33 +323,53 @@ class RuntimeTargetLifecycle:
         self,
         name: str,
         domain_path: str,
-    ) -> str:
+        *,
+        version: int | None = None,
+    ) -> Dict[str, object]:
+        """Open ``domain_path`` in target ``name``.
+
+        Loading the program the target already holds reopens it in place (the
+        former ``reload_project_program``); a ``version`` opens that past
+        repository version read-only instead of the current file.
+        """
         if not domain_path:
             raise ValueError("domain_path is required")
+        requested_version = None if version is None else int(version)
+        if requested_version is not None and requested_version < 1:
+            raise ValueError("version must be >= 1")
         with self._target_operation(name):
             handle = self._store.get_target_handle(name)
             normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
             with self._store.registry_lock.read_lock():
                 session_snapshot = list(self._store.sessions.items())
+                current_session = self._store.sessions.get(name)
+            if current_session is not None and self._session_matches_load_locked(
+                current_session,
+                domain_path=normalized_domain_path,
+                version=requested_version,
+            ):
+                return self._reload_current_session_locked(
+                    name,
+                    domain_path=normalized_domain_path,
+                    version=requested_version,
+                )
             owner_target = self._find_loaded_target_locked(
                 handle=handle,
                 domain_path=normalized_domain_path,
                 sessions=session_snapshot,
             )
-            if owner_target is not None:
-                details = {
-                    "operation": "load_program",
-                    "target": name,
-                    "domain_path": normalized_domain_path,
-                }
-                if owner_target != name:
-                    details["owner_target"] = owner_target
+            if owner_target is not None and owner_target != name and requested_version is None:
                 raise DomainError(
                     code=ErrorCode.TARGET_ALREADY_LOADED,
                     message=f"TARGET_ALREADY_LOADED: program already loaded: {normalized_domain_path}",
                     hint="Use the existing target directly instead of reloading the same program",
                     retryable=False,
-                    details=details,
+                    details={
+                        "operation": "load_program",
+                        "target": name,
+                        "domain_path": normalized_domain_path,
+                        "owner_target": owner_target,
+                    },
                 )
 
             with self._store.registry_lock.read_lock():
@@ -344,7 +380,10 @@ class RuntimeTargetLifecycle:
                     old_domain_path = self._store.session_domain_path(old_session)
                 except Exception:
                     old_domain_path = None
-            new_session = handle.open_program(normalized_domain_path)
+            if requested_version is None:
+                new_session = handle.open_program(normalized_domain_path)
+            else:
+                new_session = handle.open_program(normalized_domain_path, version=requested_version)
             try:
                 loaded_domain_path = self._initialize_opened_session_locked(
                     name=name,
@@ -384,7 +423,40 @@ class RuntimeTargetLifecycle:
                 if handle_closed:
                     if self._store.project_handles.get(handle.get_key()) is handle:
                         self._store.project_handles.pop(handle.get_key(), None)
-            return loaded_domain_path
+            return {
+                "program": loaded_domain_path,
+                "reloaded": False,
+                "version": requested_version,
+                "read_only": requested_version is not None,
+            }
+
+    def _session_matches_load_locked(self, session: ProgramSession, *, domain_path: str, version: int | None) -> bool:
+        try:
+            current_path = self._store.session_domain_path(session)
+        except Exception:
+            return False
+        if current_path != domain_path:
+            return False
+        current_version = getattr(session, "read_only_version", None)
+        return (None if current_version is None else int(current_version)) == version
+
+    def _reload_current_session_locked(self, name: str, *, domain_path: str, version: int | None) -> Dict[str, object]:
+        """Close and reopen the program the target already holds (unsaved edits are saved first)."""
+        with self._store.registry_lock.read_lock():
+            session = self._store.ensure_session(name)
+        save_before_close = version is None and self._active_program_is_changed_locked(name, session, domain_path)
+        self._run_with_reopened_program_locked(
+            name,
+            operation=lambda _active_handle, _active_domain_path: None,
+            save_before_close=save_before_close,
+            reopen_version=version,
+        )
+        return {
+            "program": domain_path,
+            "reloaded": True,
+            "version": version,
+            "read_only": version is not None,
+        }
 
     def import_program(self, name: str, binary_path: str, **kwargs) -> str:
         if not binary_path:
@@ -454,12 +526,12 @@ class RuntimeTargetLifecycle:
             }
 
     @staticmethod
-    def _save_cleared_runtime_dirty_locked(handle, domain_path: str, *, saved: bool) -> bool:  # noqa: ANN001
+    def _save_cleared_runtime_dirty_locked(handle, domain_path: str, *, saved: bool) -> bool:
         if not saved:
             return False
         try:
             status = handle.get_sync_status(domain_path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("failed to refresh sync status after runtime-dirty save: %s", exc)
             return False
         if not status.get("is_versioned"):
@@ -484,7 +556,7 @@ class RuntimeTargetLifecycle:
         for name in names:
             try:
                 self._close_session_locked(name, remove_program=False)
-            except Exception as close_exc:  # noqa: BLE001
+            except Exception as close_exc:
                 logger.warning("failed to close session during close_all for target '%s': %s", name, close_exc)
                 close_errors.append((name, close_exc))
             with self._store.registry_lock.write_lock():
@@ -515,7 +587,7 @@ class RuntimeTargetLifecycle:
             parts = [f"{name}: {error}" for name, error in close_errors]
             parts.extend(f"{key[0]}::{key[1]}: {error}" for key, error in handle_errors)
             summary = "; ".join(parts)
-            raise RuntimeError(f"CLOSE_ALL_FAILED: failed to close runtime resource(s): {summary}")
+            raise HeadlessError(f"CLOSE_ALL_FAILED: failed to close runtime resource(s): {summary}")
 
         with self._store.registry_lock.write_lock():
             self._store.sessions.clear()
@@ -560,9 +632,7 @@ class RuntimeTargetLifecycle:
             close_error = exc
 
         remove_failed = (
-            remove_program
-            and close_error is not None
-            and str(close_error).startswith("REMOVE_PROGRAM_FAILED:")
+            remove_program and close_error is not None and str(close_error).startswith("REMOVE_PROGRAM_FAILED:")
         )
         if remove_failed:
             # ProgramSession marks itself closed when removal fails after the
@@ -585,9 +655,11 @@ class RuntimeTargetLifecycle:
                 if restored_session is None:
                     try:
                         self._store.core_accessor().remove_context(name)
-                    except Exception as remove_exc:  # noqa: BLE001
+                    except Exception as remove_exc:
                         logger.warning("failed to remove context while preserving target '%s': %s", name, remove_exc)
-                raise RuntimeError(f"{close_error}; REOPEN_FAILED: failed to restore session: {restore_error}") from close_error
+                raise RuntimeError(
+                    f"{close_error}; REOPEN_FAILED: failed to restore session: {restore_error}"
+                ) from close_error
             raise close_error
 
         if close_error is None or self._session_is_closed(session):
@@ -632,10 +704,10 @@ class RuntimeTargetLifecycle:
             except Exception as init_error:
                 try:
                     restored.close(save=False)
-                except Exception as close_exc:  # noqa: BLE001
+                except Exception as close_exc:
                     with self._store.registry_lock.write_lock():
                         self._store.sessions[name] = restored
-                    raise RuntimeError(
+                    raise HeadlessError(
                         "PROGRAM_CLOSE_FAILED: failed to close restored session during "
                         f"remove-failure recovery for target '{name}': {close_exc}; "
                         f"original error: {init_error}"
@@ -644,16 +716,14 @@ class RuntimeTargetLifecycle:
             with self._store.registry_lock.write_lock():
                 self._store.sessions[name] = restored
             return None
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return exc
 
     def _ensure_program_removal_allowed_locked(self, name: str, session, handle) -> None:
         domain_path = self._store.session_domain_path(session)
         status: dict = {}
         try:
-            refresh_project_data = getattr(handle, "refresh_project_data", None)
-            if refresh_project_data is not None:
-                refresh_project_data(force=True)
+            handle.refresh_project_data(force=True)
             status = handle.get_sync_status(domain_path)
             if not status.get("is_versioned"):
                 status = self._refresh_active_program_sync_status_for_remove_locked(
@@ -768,14 +838,14 @@ class RuntimeTargetLifecycle:
                 with self._store.registry_lock.write_lock():
                     self._store.sessions[name] = reopened
                 reopened_session_bound = True
-            except Exception as init_error:  # noqa: BLE001
+            except Exception as init_error:
                 try:
                     reopened.close(save=False)
-                except Exception as close_exc:  # noqa: BLE001
+                except Exception as close_exc:
                     with self._store.registry_lock.write_lock():
                         self._store.sessions[name] = reopened
                     reopened_session_bound = True
-                    raise RuntimeError(
+                    raise HeadlessError(
                         "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
                         f"remove guard rollback for target '{name}': {close_exc}; "
                         f"original error: {init_error}"
@@ -798,7 +868,7 @@ class RuntimeTargetLifecycle:
                     self._store.clear_dirty_programs_for_target(name)
                 try:
                     self._store.core_accessor().remove_context(name)
-                except Exception as remove_exc:  # noqa: BLE001
+                except Exception as remove_exc:
                     logger.warning("failed to remove context while cleaning target '%s': %s", name, remove_exc)
             raise
 
@@ -807,7 +877,7 @@ class RuntimeTargetLifecycle:
             return True
         try:
             return bool(session.get_program().isChanged())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(
                 "failed to determine active program dirty state for target '%s'; assuming changed: %s",
                 name,
@@ -817,16 +887,13 @@ class RuntimeTargetLifecycle:
 
     @staticmethod
     def _remove_guard_error_should_surface(exc: Exception) -> bool:
-        message = str(exc)
-        return message.startswith(
-            (
-                "SAVE_FAILED:",
-                "PROGRAM_CLOSE_FAILED:",
-                "SESSION_CLOSE_FAILED:",
-                "REOPEN_FAILED:",
-                "PROJECT_CLOSE_FAILED:",
-            )
-        )
+        return error_code_of(exc) in {
+            "SAVE_FAILED",
+            "PROGRAM_CLOSE_FAILED",
+            "SESSION_CLOSE_FAILED",
+            "REOPEN_FAILED",
+            "PROJECT_CLOSE_FAILED",
+        }
 
     @staticmethod
     def _sync_status_version_details(status: dict) -> dict[str, object]:
@@ -863,7 +930,9 @@ class RuntimeTargetLifecycle:
         program = session.get_program()
         self._store.core_accessor().initialize(program, key=name)
         loaded_domain_path = session.to_dict().get("domain_path") or self._store.session_domain_path(session)
-        self._analyze_program_on_first_load_locked(name=name, domain_path=loaded_domain_path, session=session)
+        if getattr(session, "read_only_version", None) is None:
+            # A past version is immutable, so it can neither be analyzed nor saved.
+            self._analyze_program_on_first_load_locked(name=name, domain_path=loaded_domain_path, session=session)
         return loaded_domain_path
 
     def _analyze_program_on_first_load_locked(
@@ -885,8 +954,12 @@ class RuntimeTargetLifecycle:
             script_util = java_bindings._ghidra_script_util()
             script_util.acquireBundleHostReference()
             try:
-                session.flat_api.analyzeAll(program)
-                utilities.markProgramAnalyzed(program)
+
+                def _analyze():
+                    session.flat_api.analyzeAll(program)
+                    utilities.markProgramAnalyzed(program)
+
+                run_in_transaction(program, "Auto analysis", _analyze)
                 self._save_analyzed_program_locked(session, program)
             finally:
                 script_util.releaseBundleHostReference()
@@ -902,7 +975,7 @@ class RuntimeTargetLifecycle:
         handle = session.get_project_handle()
         try:
             status = handle.get_sync_status(domain_path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(
                 "skipping initial auto-analysis for target '%s' because sync status is unavailable: %s",
                 name,
@@ -925,15 +998,12 @@ class RuntimeTargetLifecycle:
         return True
 
     @staticmethod
-    def _save_analyzed_program_locked(session: ProgramSession, program) -> None:  # noqa: ANN001
+    def _save_analyzed_program_locked(session: ProgramSession, program) -> None:
         handle = session.get_project_handle()
-        save = getattr(handle.project, "save", None)
-        if save is None:
-            return
         try:
-            save(program)
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"SAVE_FAILED: failed to save analysis results after initial load: {exc}") from exc
+            handle.save_program(program, force=True)
+        except Exception as exc:
+            raise HeadlessError(f"SAVE_FAILED: failed to save analysis results after initial load: {exc}") from exc
 
     def _rollback_failed_load_initialization_locked(
         self,
@@ -954,7 +1024,7 @@ class RuntimeTargetLifecycle:
         if old_session is not None and not self._session_is_closed(old_session):
             try:
                 self._restore_session_context_locked(name, old_session)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 restore_error = exc
         if cleanup_error is not None:
             raise cleanup_error
@@ -991,7 +1061,7 @@ class RuntimeTargetLifecycle:
         restore_error = None
         try:
             self._restore_session_context_locked(name, old_session)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             restore_error = exc
         if cleanup_error is not None:
             raise cleanup_error
@@ -1017,7 +1087,7 @@ class RuntimeTargetLifecycle:
                 remove_context=remove_context,
                 save=False,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             cleanup_error = exc
 
         if allow_handle_close and not handle.is_closed() and not self._handle_has_live_sessions_locked(handle):
@@ -1027,8 +1097,8 @@ class RuntimeTargetLifecycle:
                 # could ever release it — a plain close would reject and wedge
                 # the target until the server restarts.
                 handle.close(force=True)
-            except Exception as handle_exc:  # noqa: BLE001
-                handle_close_error = RuntimeError(
+            except Exception as handle_exc:
+                handle_close_error = HeadlessError(
                     "PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback "
                     f"for target '{name}': {handle_exc}"
                 )
@@ -1064,8 +1134,8 @@ class RuntimeTargetLifecycle:
                 # force: see _cleanup_failed_session_locked — a leaked refcount
                 # from a failed open/release must not wedge the target.
                 handle.close(force=True)
-            except Exception as handle_exc:  # noqa: BLE001
-                cleanup_error = RuntimeError(
+            except Exception as handle_exc:
+                cleanup_error = HeadlessError(
                     "PROJECT_CLOSE_FAILED: failed to close leaked project handle during rollback "
                     f"for target '{name}': {handle_exc}"
                 )
@@ -1109,6 +1179,9 @@ class RuntimeTargetLifecycle:
     ) -> str | None:
         requested_key = handle.get_key()
         for target_name, session in sessions:
+            if getattr(session, "read_only_version", None) is not None:
+                # Read-only version sessions never conflict with a live load.
+                continue
             try:
                 session_handle = session.get_project_handle()
             except Exception:
@@ -1135,11 +1208,13 @@ class RuntimeTargetLifecycle:
         binary_path: str,
     ) -> DomainError | None:
         message = str(exc)
-        if not (
-            message.startswith("IMPORT_CLOSE_FAILED:")
-            or message.startswith("IMPORT_POST_PROCESS_FAILED:")
-            or message.startswith("PROGRAM_CLOSE_FAILED: failed to close imported program")
-            or message.startswith("PROGRAM_CLOSE_FAILED: failed to close raw import results")
+        if not message.startswith(
+            (
+                "IMPORT_CLOSE_FAILED:",
+                "IMPORT_POST_PROCESS_FAILED:",
+                "PROGRAM_CLOSE_FAILED: failed to close imported program",
+                "PROGRAM_CLOSE_FAILED: failed to close raw import results",
+            )
         ):
             return None
 

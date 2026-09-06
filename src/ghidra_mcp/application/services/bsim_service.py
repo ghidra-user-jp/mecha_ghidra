@@ -12,17 +12,13 @@ from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+from ghidra_mcp.application.locks import KeyedLockPool
+from ghidra_mcp.application.services.ports import BsimBackendPort
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.infrastructure.bsim import (
-    BsimJavaBackend,
-    mask_bsim_url,
-    mask_bsim_urls_in_text,
-)
-from ghidra_mcp.infrastructure.locks import KeyedLockPool
+from ghidra_mcp.domain.bsim_url_masking import mask_bsim_url, mask_bsim_urls_in_text
 
 from .core_command_service import CoreCommandService
 from .target_service import TargetService
-
 
 BSIM_MATCHED_REF_VERSION = 1
 _BSIM_CODE_RE = re.compile(r"^BSIM_[A-Z0-9_]+(?::|$)")
@@ -30,6 +26,9 @@ _BSIM_GENERIC_CODE_PREFIXES = (
     "BSIM_DATABASE_INIT_FAILED:",
     "BSIM_QUERY_FAILED:",
     "BSIM_CLI_FAILED:",
+    # InsertRequest reports "<name> is already ingested" through this wrapper;
+    # strip it so the keyword rule below can promote it to BSIM_ALREADY_REGISTERED.
+    "BSIM_INSERT_FAILED:",
 )
 _BSIM_CATEGORY_TYPE_RE = re.compile(r"^[A-Za-z0-9 ._:/()]+$")
 _BSIM_MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -37,6 +36,10 @@ _BSIM_SUPPORTED_URL_SCHEMES = frozenset({"postgresql", "elastic", "https", "file
 _MAX_BSIM_LIST_LIMIT = 10_000
 _MAX_BSIM_MATCHES_PER_FUNCTION = 1_000
 _MAX_BSIM_QUERY_RESULTS = 10_000
+_MAX_BSIM_QUERY_FUNCTIONS = 1_000
+_MAX_BSIM_APPLY_FUNCTIONS = 10_000
+_MAX_BSIM_MIN_FUNCTION_SIZE = 1_000_000
+_REMOTE_CACHE_SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _T = TypeVar("_T")
 
 
@@ -46,6 +49,10 @@ class BsimConfig:
     bsim_password: str | None = None
     bsim_password_env: str | None = None
     ghidra_install_dir: str | None = None
+    # Directory for local caches of Ghidra Server repositories referenced by
+    # ghidra:// matched_refs (``--bsim-remote-cache-dir``).  None disables
+    # loading remote matches.
+    remote_cache_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,19 @@ class _MatchedRef:
     project_name: str | None
     repository: str | None
     ghidra_url: str | None
+
+
+def _default_bsim_backend() -> BsimBackendPort:
+    """Resolve the Ghidra-backed adapter when the composition root injected none.
+
+    Kept as a late import so this application module has no module-level
+    dependency on infrastructure; ``create_cli_runtime`` injects the adapter
+    explicitly and tests inject fakes.
+    """
+
+    from ghidra_mcp.infrastructure.bsim import BsimJavaBackend
+
+    return BsimJavaBackend()
 
 
 def _bsim_message(code: str, message: str) -> str:
@@ -80,11 +100,13 @@ def _classify_bsim_message(message: str, *, default_code: str = "BSIM_OPERATION_
     # existing prefix and return the text unchanged, defeating reclassification.
     for prefix in _BSIM_GENERIC_CODE_PREFIXES:
         if text.startswith(prefix):
-            text = text[len(prefix):].strip() or "unknown error"
+            text = text[len(prefix) :].strip() or "unknown error"
             break
     lower = text.lower()
     if "function not found" in lower:
         return _bsim_message("BSIM_FUNCTION_NOT_FOUND", text)
+    if "already ingested" in lower:
+        return _bsim_message("BSIM_ALREADY_REGISTERED", text)
     if "password" in lower or "authentication" in lower or "auth failed" in lower:
         return _bsim_message("BSIM_AUTHENTICATION_FAILED", text)
     if (
@@ -136,9 +158,7 @@ def _validate_executable_category_name(category: object) -> str:
     if not text:
         raise ValueError("BSIM_EXECUTABLE_CATEGORY_INVALID: category must not be empty")
     if _BSIM_CATEGORY_TYPE_RE.fullmatch(text) is None:
-        raise ValueError(
-            "BSIM_EXECUTABLE_CATEGORY_INVALID: category contains unsupported characters"
-        )
+        raise ValueError("BSIM_EXECUTABLE_CATEGORY_INVALID: category contains unsupported characters")
     return text
 
 
@@ -232,8 +252,7 @@ def _validate_bsim_url(bsim_url: str) -> str:
     scheme = parts.scheme.lower()
     if not scheme:
         raise ValueError(
-            "BSIM_URL_INVALID: bsim_url requires a scheme "
-            "(supported: postgresql://, elastic://, https://, file:)"
+            "BSIM_URL_INVALID: bsim_url requires a scheme (supported: postgresql://, elastic://, https://, file:)"
         )
     if scheme not in _BSIM_SUPPORTED_URL_SCHEMES:
         supported = ", ".join(sorted(_BSIM_SUPPORTED_URL_SCHEMES))
@@ -242,7 +261,7 @@ def _validate_bsim_url(bsim_url: str) -> str:
         raise ValueError(f"BSIM_URL_INVALID: {scheme} BSim URL requires a host")
     if scheme in {"postgresql", "elastic", "https"}:
         try:
-            parts.port
+            _ = parts.port
         except ValueError:
             invalid_port = True
         else:
@@ -296,6 +315,41 @@ def _validate_positive_int(value: int, *, name: str, maximum: int) -> int:
     return number
 
 
+def _validate_non_negative_int(value: int, *, name: str, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be an integer") from exc
+    if number < 0:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be >= 0")
+    if number > maximum:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be <= {maximum}")
+    return number
+
+
+def _validate_function_selectors(
+    addresses: list[str] | None,
+    function_names: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    def _clean(values: list[str] | None, *, name: str) -> list[str]:
+        if values is None:
+            return []
+        if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+            raise ValueError(f"BSIM_PARAMETER_INVALID: {name} must be a list of strings")
+        cleaned: list[str] = []
+        for item in values:
+            text = BsimService._text(item)
+            if text is not None and text not in cleaned:
+                cleaned.append(text)
+        return cleaned
+
+    cleaned_addresses = _clean(addresses, name="addresses")
+    cleaned_names = _clean(function_names, name="function_names")
+    if len(cleaned_addresses) + len(cleaned_names) > _MAX_BSIM_QUERY_FUNCTIONS:
+        raise ValueError(f"BSIM_PARAMETER_INVALID: at most {_MAX_BSIM_QUERY_FUNCTIONS} functions per call")
+    return cleaned_addresses, cleaned_names
+
+
 def _validate_query_parameters(
     *,
     similarity_threshold: float,
@@ -340,16 +394,49 @@ def _project_identity(project_location: str, project_name: str | None = None) ->
     raise ValueError("project_name is required when project_location is not a .gpr file")
 
 
-def _project_from_ghidra_url(url: str | None) -> tuple[str, str | None]:
+def _remote_repository_parts(url: str) -> tuple[str, int, str] | None:
+    """Return (host, port, repository) for a remote ghidra:// URL, else None."""
+    try:
+        parts = urlsplit(str(url))
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "ghidra" or not parts.hostname:
+        return None
+    segments = [segment for segment in parts.path.split("/") if segment]
+    if not segments:
+        return None
+    return parts.hostname.lower(), int(port or 13100), segments[0]
+
+
+def _remote_cache_project(cache_dir: str, url: str) -> tuple[str, str, str]:
+    """Derive (project_location, project_name, repository_url) for a remote match cache.
+
+    One cache per server repository: ``<cache_dir>/<host>_<port>_<repo>/<same>.gpr``.
+    """
+    remote = _remote_repository_parts(url)
+    if remote is None:
+        raise ValueError(f"BSIM_INVALID_MATCHED_REF: unsupported BSim ghidra URL: {url}")
+    host, port, repository = remote
+    slug = _REMOTE_CACHE_SLUG_RE.sub("_", f"{host}_{port}_{repository}").strip("_") or "repository"
+    location = str(pathlib.Path(cache_dir).expanduser() / slug)
+    return location, slug, f"ghidra://{host}:{port}/{repository}"
+
+
+def _project_from_ghidra_url(url: str | None, *, remote_cache_dir: str | None = None) -> tuple[str, str | None]:
     if not url:
         raise ValueError("BSIM_INVALID_MATCHED_REF: matched_ref requires repository or ghidra_url")
     parts = urlsplit(str(url))
     if parts.scheme != "ghidra":
         raise ValueError(f"BSIM_INVALID_MATCHED_REF: unsupported BSim ghidra URL: {url}")
     if parts.netloc:
+        if remote_cache_dir:
+            location, name, _ = _remote_cache_project(remote_cache_dir, url)
+            return (location, name)
         raise ValueError(
             "BSIM_REMOTE_PROJECT_LOAD_UNSUPPORTED: matched_ref points to a remote ghidra:// repository; "
-            "provide project_location/project_name in matched_ref or load it manually"
+            "start the server with --bsim-remote-cache-dir to let it create a local cache, or provide "
+            "project_location/project_name in matched_ref"
         )
     path = pathlib.Path(parts.path).expanduser()
     if path.suffix.lower() == ".gpr":
@@ -380,8 +467,7 @@ def _validate_matched_ref(matched_ref: dict[str, object]) -> _MatchedRef:
             version = int(number) if number.is_integer() else None
     if version != BSIM_MATCHED_REF_VERSION:
         raise ValueError(
-            "BSIM_INVALID_MATCHED_REF: matched_ref.matched_ref_version must be "
-            f"{BSIM_MATCHED_REF_VERSION}"
+            f"BSIM_INVALID_MATCHED_REF: matched_ref.matched_ref_version must be {BSIM_MATCHED_REF_VERSION}"
         )
 
     def _field(name: str) -> str | None:
@@ -411,9 +497,7 @@ def _validate_matched_ref(matched_ref: dict[str, object]) -> _MatchedRef:
     if missing:
         raise ValueError("BSIM_INVALID_MATCHED_REF: missing required keys: " + ", ".join(missing))
     if not project_location and not repository and not ghidra_url:
-        raise ValueError(
-            "BSIM_INVALID_MATCHED_REF: matched_ref requires project_location, repository, or ghidra_url"
-        )
+        raise ValueError("BSIM_INVALID_MATCHED_REF: matched_ref requires project_location, repository, or ghidra_url")
 
     return _MatchedRef(
         raw=matched_ref,
@@ -436,12 +520,12 @@ class BsimService:
         core_command_service: CoreCommandService,
         target_service: TargetService,
         config: BsimConfig | None = None,
-        java_backend: BsimJavaBackend | None = None,
+        java_backend: BsimBackendPort | None = None,
     ) -> None:
         self._core_command_service = core_command_service
         self._target_service = target_service
         self._config = config or BsimConfig()
-        self._java_backend = java_backend or BsimJavaBackend()
+        self._java_backend = java_backend if java_backend is not None else _default_bsim_backend()
         self._loaded_match_index: dict[str, str] = {}
         self._matched_load_locks = KeyedLockPool()
         self._matched_load_state_lock = threading.Lock()
@@ -481,6 +565,10 @@ class BsimService:
         max_results: int,
         address: str | None = None,
         function_name: str | None = None,
+        addresses: list[str] | None = None,
+        function_names: list[str] | None = None,
+        exclude_self: bool | None = None,
+        min_function_size: int | None = None,
     ) -> dict[str, Any]:
         result = dict(payload)
         query: dict[str, Any] = {
@@ -497,6 +585,14 @@ class BsimService:
             query["address"] = address
         if function_name is not None:
             query["function_name"] = function_name
+        if addresses:
+            query["addresses"] = list(addresses)
+        if function_names:
+            query["function_names"] = list(function_names)
+        if exclude_self is not None:
+            query["exclude_self"] = bool(exclude_self)
+        if min_function_size is not None:
+            query["min_function_size"] = int(min_function_size)
         result["query"] = query
         return result
 
@@ -522,17 +618,9 @@ class BsimService:
                 public_error = DomainError(
                     code=exc.code,
                     message=mask_bsim_urls_in_text(exc.message),
-                    hint=(
-                        None
-                        if exc.hint is None
-                        else mask_bsim_urls_in_text(exc.hint)
-                    ),
+                    hint=(None if exc.hint is None else mask_bsim_urls_in_text(exc.hint)),
                     retryable=exc.retryable,
-                    details=(
-                        None
-                        if exc.details is None
-                        else _mask_bsim_payload_credentials(exc.details)
-                    ),
+                    details=(None if exc.details is None else _mask_bsim_payload_credentials(exc.details)),
                 )
         except Exception as exc:
             public_error = _classified_bsim_error(exc, default_code=default_code)
@@ -575,9 +663,6 @@ class BsimService:
             default_code="BSIM_LIST_CATEGORIES_FAILED",
         )
         return self._mask_response_url(result, resolved)
-
-    def list_bsim_categories(self, *, bsim_url: str | None = None) -> dict[str, Any]:
-        return self.list_categories(bsim_url=bsim_url)
 
     def add_executable_category(
         self,
@@ -722,6 +807,8 @@ class BsimService:
         significance_threshold: float = 0.0,
         matches_per_function: int = 10,
         max_results: int = 500,
+        exclude_self: bool = True,
+        min_function_size: int = 0,
     ) -> dict[str, Any]:
         (
             similarity_threshold,
@@ -734,6 +821,9 @@ class BsimService:
             matches_per_function=matches_per_function,
             max_results=max_results,
         )
+        min_function_size = _validate_non_negative_int(
+            min_function_size, name="min_function_size", maximum=_MAX_BSIM_MIN_FUNCTION_SIZE
+        )
         resolved = self._resolve_bsim_url(bsim_url)
         result = self._call_bsim(
             lambda: self._core_command_service.call(
@@ -745,6 +835,8 @@ class BsimService:
                     "significance_threshold": significance_threshold,
                     "matches_per_function": matches_per_function,
                     "max_results": max_results,
+                    "exclude_self": bool(exclude_self),
+                    "min_function_size": min_function_size,
                 },
                 target,
             ),
@@ -760,6 +852,8 @@ class BsimService:
             significance_threshold=significance_threshold,
             matches_per_function=matches_per_function,
             max_results=max_results,
+            exclude_self=bool(exclude_self),
+            min_function_size=min_function_size,
         )
 
     def bsim_query_target(
@@ -771,6 +865,8 @@ class BsimService:
         significance_threshold: float = 0.0,
         matches_per_function: int = 10,
         max_results: int = 500,
+        exclude_self: bool = True,
+        min_function_size: int = 0,
     ) -> dict[str, Any]:
         return self.query_target(
             target,
@@ -779,6 +875,8 @@ class BsimService:
             significance_threshold=significance_threshold,
             matches_per_function=matches_per_function,
             max_results=max_results,
+            exclude_self=exclude_self,
+            min_function_size=min_function_size,
         )
 
     def query_function(
@@ -788,10 +886,13 @@ class BsimService:
         bsim_url: str | None = None,
         address: str | None = None,
         function_name: str | None = None,
+        addresses: list[str] | None = None,
+        function_names: list[str] | None = None,
         similarity_threshold: float = 0.7,
         significance_threshold: float = 0.0,
         matches_per_function: int = 10,
         max_results: int = 100,
+        exclude_self: bool = True,
     ) -> dict[str, Any]:
         (
             similarity_threshold,
@@ -804,6 +905,11 @@ class BsimService:
             matches_per_function=matches_per_function,
             max_results=max_results,
         )
+        addresses, function_names = _validate_function_selectors(addresses, function_names)
+        address = self._text(address)
+        function_name = self._text(function_name)
+        if address is None and function_name is None and not addresses and not function_names:
+            raise ValueError("BSIM_PARAMETER_INVALID: address, function_name, addresses, or function_names is required")
         resolved = self._resolve_bsim_url(bsim_url)
         result = self._call_bsim(
             lambda: self._core_command_service.call(
@@ -813,10 +919,13 @@ class BsimService:
                     "query_target": target,
                     "address": address,
                     "function_name": function_name,
+                    "addresses": addresses,
+                    "function_names": function_names,
                     "similarity_threshold": similarity_threshold,
                     "significance_threshold": significance_threshold,
                     "matches_per_function": matches_per_function,
                     "max_results": max_results,
+                    "exclude_self": bool(exclude_self),
                 },
                 target,
             ),
@@ -830,10 +939,13 @@ class BsimService:
             masked_bsim_url=masked.get("bsim_url"),
             address=address,
             function_name=function_name,
+            addresses=addresses or None,
+            function_names=function_names or None,
             similarity_threshold=similarity_threshold,
             significance_threshold=significance_threshold,
             matches_per_function=matches_per_function,
             max_results=max_results,
+            exclude_self=bool(exclude_self),
         )
 
     def bsim_query_function(
@@ -843,86 +955,211 @@ class BsimService:
         bsim_url: str | None = None,
         address: str | None = None,
         function_name: str | None = None,
+        addresses: list[str] | None = None,
+        function_names: list[str] | None = None,
         similarity_threshold: float = 0.7,
         significance_threshold: float = 0.0,
         matches_per_function: int = 10,
         max_results: int = 100,
+        exclude_self: bool = True,
     ) -> dict[str, Any]:
         return self.query_function(
             target,
             bsim_url=bsim_url,
             address=address,
             function_name=function_name,
+            addresses=addresses,
+            function_names=function_names,
             similarity_threshold=similarity_threshold,
             significance_threshold=significance_threshold,
             matches_per_function=matches_per_function,
             max_results=max_results,
+            exclude_self=exclude_self,
         )
 
-    def set_target_metadata(
+    def apply_matches(
         self,
         target: str,
         *,
-        categories: dict[str, object],
         bsim_url: str | None = None,
+        similarity_threshold: float = 0.9,
+        significance_threshold: float = 0.0,
+        matches_per_function: int = 5,
+        max_functions: int = 500,
+        only_default_names: bool = True,
+        exclude_self: bool = True,
+        min_function_size: int = 0,
+        dry_run: bool = False,
+        addresses: list[str] | None = None,
+        function_names: list[str] | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(categories, dict) or not categories:
-            raise ValueError("BSIM_TARGET_METADATA_INVALID: categories must be a non-empty object")
-        # When a BSim URL is available, validate the category names against the database's
-        # configured categories. GenSignatures only ingests options whose names match the
-        # configured (case-sensitive) categories, so an unconfigured/miscased name would
-        # otherwise be stored on the program and silently dropped at registration.
-        resolved = (bsim_url or self._config.bsim_url or "").strip()
-        if resolved:
-            resolved_url = self._resolve_bsim_url(bsim_url)
-            configured = self._call_bsim(
-                lambda: self._java_backend.list_categories(resolved_url),
-                default_code="BSIM_LIST_CATEGORIES_FAILED",
-            )
-            configured_names = {str(item) for item in (configured.get("items") or [])}
-            requested: list[str] = []
-            seen: set[str] = set()
-            for key in categories:
-                text = str(key).strip()
-                if text and text not in seen:
-                    seen.add(text)
-                    requested.append(text)
-            unknown = sorted(name for name in requested if name not in configured_names)
-            if unknown:
-                raise ValueError(
-                    "BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED: "
-                    + ", ".join(unknown)
-                    + "; call bsim_add_executable_category first"
-                )
-        return self._core_command_service.call(
-            "bsim_set_target_metadata",
-            {"categories": categories},
-            target,
+        (
+            similarity_threshold,
+            significance_threshold,
+            matches_per_function,
+            _max_results,
+        ) = _validate_query_parameters(
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=1,
         )
-
-    def bsim_set_target_metadata(
-        self,
-        target: str,
-        *,
-        categories: dict[str, object],
-        bsim_url: str | None = None,
-    ) -> dict[str, Any]:
-        return self.set_target_metadata(target, categories=categories, bsim_url=bsim_url)
-
-    def register_target(self, target: str, *, bsim_url: str | None = None) -> dict[str, Any]:
+        max_functions = _validate_positive_int(max_functions, name="max_functions", maximum=_MAX_BSIM_APPLY_FUNCTIONS)
+        min_function_size = _validate_non_negative_int(
+            min_function_size, name="min_function_size", maximum=_MAX_BSIM_MIN_FUNCTION_SIZE
+        )
+        addresses, function_names = _validate_function_selectors(addresses, function_names)
         resolved = self._resolve_bsim_url(bsim_url)
         result = self._call_bsim(
             lambda: self._core_command_service.call(
-                "bsim_register_target",
+                "bsim_apply_matches",
+                {
+                    "bsim_url": resolved,
+                    "query_target": target,
+                    "similarity_threshold": similarity_threshold,
+                    "significance_threshold": significance_threshold,
+                    "matches_per_function": matches_per_function,
+                    "max_functions": max_functions,
+                    "only_default_names": bool(only_default_names),
+                    "exclude_self": bool(exclude_self),
+                    "min_function_size": min_function_size,
+                    "dry_run": bool(dry_run),
+                    "addresses": addresses,
+                    "function_names": function_names,
+                },
+                target,
+            ),
+            default_code="BSIM_APPLY_MATCHES_FAILED",
+        )
+        masked = self._mask_response_url(result, resolved)
+        return self._add_query_provenance(
+            masked,
+            scope="apply",
+            target=target,
+            masked_bsim_url=masked.get("bsim_url"),
+            addresses=addresses or None,
+            function_names=function_names or None,
+            similarity_threshold=similarity_threshold,
+            significance_threshold=significance_threshold,
+            matches_per_function=matches_per_function,
+            max_results=max_functions,
+            exclude_self=bool(exclude_self),
+            min_function_size=min_function_size,
+        )
+
+    def bsim_apply_matches(self, target: str, **kwargs: Any) -> dict[str, Any]:
+        return self.apply_matches(target, **kwargs)
+
+    def update_target_signatures(self, target: str, *, bsim_url: str | None = None) -> dict[str, Any]:
+        resolved = self._resolve_bsim_url(bsim_url)
+        result = self._call_bsim(
+            lambda: self._core_command_service.call(
+                "bsim_update_target_signatures",
                 {"bsim_url": resolved, "query_target": target},
                 target,
             ),
+            default_code="BSIM_UPDATE_FAILED",
+        )
+        return self._mask_response_url(result, resolved)
+
+    def bsim_update_target_signatures(self, target: str, *, bsim_url: str | None = None) -> dict[str, Any]:
+        return self.update_target_signatures(target, bsim_url=bsim_url)
+
+    def delete_executable(
+        self,
+        *,
+        confirm: str,
+        bsim_url: str | None = None,
+        md5: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        resolved = self._resolve_bsim_url(bsim_url)
+        normalized_md5 = self._text(md5)
+        normalized_name = self._text(name)
+        if normalized_md5 is None and normalized_name is None:
+            raise ValueError("BSIM_EXECUTABLE_LOOKUP_REQUIRED: md5 or name is required")
+        if normalized_md5 is not None and _BSIM_MD5_RE.fullmatch(normalized_md5) is None:
+            raise ValueError("BSIM_EXECUTABLE_LOOKUP_INVALID: md5 must be a 32-character hexadecimal string")
+        # Deleting drops every function record of the executable; the caller must
+        # repeat the identifier it is acting on (md5 when given, else the name).
+        expected = normalized_md5.lower() if normalized_md5 is not None else normalized_name
+        confirmation = self._text(confirm)
+        if confirmation is None or (
+            confirmation.lower() != expected if normalized_md5 is not None else confirmation != expected
+        ):
+            raise ValueError(
+                "BSIM_DELETE_CONFIRMATION_MISMATCH: confirm must exactly match the md5 "
+                "(or the name when md5 is omitted) of the executable to delete"
+            )
+        result = self._call_bsim(
+            lambda: self._java_backend.delete_executable(resolved, md5=normalized_md5, name=normalized_name),
+            default_code="BSIM_DELETE_EXECUTABLE_FAILED",
+        )
+        return self._mask_response_url(result, resolved)
+
+    def bsim_delete_executable(
+        self,
+        *,
+        confirm: str,
+        bsim_url: str | None = None,
+        md5: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        return self.delete_executable(confirm=confirm, bsim_url=bsim_url, md5=md5, name=name)
+
+    def _ensure_categories_configured(self, categories: dict[str, object], *, resolved_url: str) -> None:
+        """Reject category names the database does not define.
+
+        GenSignatures only ingests Program Information options whose names match a
+        configured (case-sensitive) category, so an unconfigured or miscased name
+        would be stored on the program and silently dropped at registration.
+        """
+        if not isinstance(categories, dict) or not categories:
+            raise ValueError("BSIM_TARGET_METADATA_INVALID: categories must be a non-empty object")
+        configured = self._call_bsim(
+            lambda: self._java_backend.list_categories(resolved_url),
+            default_code="BSIM_LIST_CATEGORIES_FAILED",
+        )
+        configured_names = {str(item) for item in (configured.get("items") or [])}
+        requested: list[str] = []
+        for key in categories:
+            text = str(key).strip()
+            if text and text not in requested:
+                requested.append(text)
+        unknown = sorted(name for name in requested if name not in configured_names)
+        if unknown:
+            raise ValueError(
+                "BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED: "
+                + ", ".join(unknown)
+                + "; call bsim_add_executable_category first"
+            )
+
+    def register_target(
+        self,
+        target: str,
+        *,
+        bsim_url: str | None = None,
+        categories: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        resolved = self._resolve_bsim_url(bsim_url)
+        params: dict[str, Any] = {"bsim_url": resolved, "query_target": target}
+        if categories:
+            self._ensure_categories_configured(categories, resolved_url=resolved)
+            params["categories"] = dict(categories)
+        result = self._call_bsim(
+            lambda: self._core_command_service.call("bsim_register_target", params, target),
             default_code="BSIM_REGISTER_FAILED",
         )
         return self._mask_response_url(result, resolved)
 
-    def bsim_register_target(self, target: str, *, bsim_url: str | None = None) -> dict[str, Any]:
-        return self.register_target(target, bsim_url=bsim_url)
+    def bsim_register_target(
+        self,
+        target: str,
+        *,
+        bsim_url: str | None = None,
+        categories: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        return self.register_target(target, bsim_url=bsim_url, categories=categories)
 
     def load_matched_executable(
         self,
@@ -963,9 +1200,7 @@ class BsimService:
             matched_ref=ref.raw,
             domain_path=domain_path,
             requested_target=requested_target,
-            allow_domain_only_requested_target=(
-                explicit_target and self._is_remote_matched_ref(ref.raw)
-            ),
+            allow_domain_only_requested_target=(explicit_target and self._is_remote_matched_ref(ref.raw)),
         )
         if existing is not None:
             return {
@@ -981,9 +1216,24 @@ class BsimService:
         project_location = ref.project_location
         project_name = ref.project_name
         if not project_location:
+            repository_url = ref.repository or ref.ghidra_url
             project_location, project_name = _project_from_ghidra_url(
-                ref.repository or ref.ghidra_url
+                repository_url,
+                remote_cache_dir=self._config.remote_cache_dir,
             )
+            if self._is_remote_matched_ref(ref.raw):
+                # The local cache is what Ghidra calls a shared project: the
+                # repository's files appear in it without a copy, and the server
+                # authentication configured at start-up is reused on open.
+                _, _, normalized_repository_url = _remote_cache_project(
+                    str(self._config.remote_cache_dir),
+                    str(repository_url),
+                )
+                self._target_service.create_repository_cache_project(
+                    project_location,
+                    project_name=project_name,
+                    repository_url=normalized_repository_url,
+                )
 
         created = self._target_service.create_session(
             requested_target,
@@ -1020,9 +1270,7 @@ class BsimService:
         identity = self._matched_ref_project_identity(matched_ref)
         if identity is not None:
             return f"program:{identity[0]}::{identity[1]}::{domain_path}"
-        repository = self._text(matched_ref.get("repository")) or self._text(
-            matched_ref.get("ghidra_url")
-        )
+        repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
         if repository:
             return f"url:{repository}::{domain_path}"
         if executable_md5:
@@ -1055,15 +1303,11 @@ class BsimService:
         domain_path: str,
     ) -> None:
         identity = _project_identity(project_location, project_name)
-        repository = self._text(matched_ref.get("repository")) or self._text(
-            matched_ref.get("ghidra_url")
-        )
+        repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
         with self._matched_load_state_lock:
             if executable_md5:
                 self._loaded_match_index[f"md5:{executable_md5.lower()}"] = target
-            self._loaded_match_index[
-                f"program:{identity[0]}::{identity[1]}::{domain_path}"
-            ] = target
+            self._loaded_match_index[f"program:{identity[0]}::{identity[1]}::{domain_path}"] = target
             if repository:
                 self._loaded_match_index[f"url:{repository}::{domain_path}"] = target
 
@@ -1073,7 +1317,10 @@ class BsimService:
         repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
         if not project_location and repository:
             try:
-                project_location, project_name = _project_from_ghidra_url(repository)
+                project_location, project_name = _project_from_ghidra_url(
+                    repository,
+                    remote_cache_dir=self._config.remote_cache_dir,
+                )
             except ValueError:
                 return None
         if not project_location:
@@ -1086,9 +1333,7 @@ class BsimService:
     def _is_remote_matched_ref(self, matched_ref: dict[str, object]) -> bool:
         if self._text(matched_ref.get("project_location")) is not None:
             return False
-        repository = self._text(matched_ref.get("repository")) or self._text(
-            matched_ref.get("ghidra_url")
-        )
+        repository = self._text(matched_ref.get("repository")) or self._text(matched_ref.get("ghidra_url"))
         if repository is None:
             return False
         try:
@@ -1152,9 +1397,7 @@ class BsimService:
             indexed = loaded_match_index.get(f"url:{repository}::{domain_path}")
             _add_candidate(indexed)
         if expected_identity is not None:
-            indexed = loaded_match_index.get(
-                f"program:{expected_identity[0]}::{expected_identity[1]}::{domain_path}"
-            )
+            indexed = loaded_match_index.get(f"program:{expected_identity[0]}::{expected_identity[1]}::{domain_path}")
             _add_candidate(indexed)
 
         targets = self._target_service.list_targets()

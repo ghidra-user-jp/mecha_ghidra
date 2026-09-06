@@ -11,8 +11,8 @@ import pyghidra.core as pycore
 import pytest
 from mcp.types import CallToolResult
 
+from ghidra_headless.launcher import start_headless_jvm
 from ghidra_mcp import cli
-
 
 RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
@@ -71,7 +71,7 @@ def _start_pyghidra_if_needed() -> None:
     if shutil.which("java") is None:
         pytest.fail("java command not found (required for runtime tests)")
     try:
-        pyghidra.start(install_dir=_resolve_ghidra_install_dir())
+        start_headless_jvm(_resolve_ghidra_install_dir())
     except Exception as exc:
         pytest.fail(f"Failed to start pyghidra: {exc}")
 
@@ -116,10 +116,7 @@ def _count_of(value):
 
 
 def _log_runtime_result(name: str, value) -> None:
-    print(
-        f"[runtime] {name}: type={type(value).__name__} "
-        f"count={_count_of(value)} sample={_sample_of(value)!r}"
-    )
+    print(f"[runtime] {name}: type={type(value).__name__} count={_count_of(value)} sample={_sample_of(value)!r}")
 
 
 def _extract_prototype(decompiled_text: str) -> str | None:
@@ -157,18 +154,12 @@ def _derive_patch_bytes_from_hexdump(hexdump: str) -> str:
 
 
 def _pick_primary_function(target: str) -> tuple[str, str, str]:
-    search_result = _unwrap_runtime_result(
-        cli.search_functions_by_name(query="main", offset=0, limit=10, target=target)
-    )
-    candidates = list(search_result) or _unwrap_runtime_result(
-        cli.list_functions(offset=0, limit=20, target=target)
-    )
+    search_result = _unwrap_runtime_result(cli.list_functions(filter="main", offset=0, limit=10, target=target))
+    candidates = list(search_result) or _unwrap_runtime_result(cli.list_functions(offset=0, limit=20, target=target))
     first = candidates[0]
     address = first["entry"]
     name = first["name"]
-    decompiled = _unwrap_runtime_result(
-        cli.decompile_function(address=address, target=target)
-    )
+    decompiled = _unwrap_runtime_result(cli.decompile_function(address=address, target=target))
     return address, name, decompiled
 
 
@@ -176,13 +167,9 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
     last_error = None
     for entry in function_entries:
         address = entry["entry"]
-        info = _unwrap_runtime_result(
-            cli.get_function(address=address, target=target)
-        )
+        info = _unwrap_runtime_result(cli.get_function(address=address, target=target))
         function_name = info["name"]
-        decompiled = _unwrap_runtime_result(
-            cli.decompile_function(address=address, target=target)
-        )
+        decompiled = _unwrap_runtime_result(cli.decompile_function(address=address, target=target))
         for var_name in _extract_variable_candidates(decompiled):
             new_name = f"it_{var_name}_renamed"
             try:
@@ -206,9 +193,7 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 continue
-    raise RuntimeError(
-        f"No candidate succeeded for rename_variable / set_local_variable_type: {last_error}"
-    )
+    raise RuntimeError(f"No candidate succeeded for rename_variable / set_local_variable_type: {last_error}")
 
 
 def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
@@ -238,34 +223,28 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
         domain_path = imported["program"]
         cli.load_project_program(target=target, domain_path=domain_path)
 
-        function_info = _unwrap_runtime_result(
-            cli.get_function(address="0x401000", target=target)
-        )
+        function_info = _unwrap_runtime_result(cli.get_function(address="0x401000", target=target))
         assert isinstance(function_info, dict)
         assert function_info["entry"].lower().endswith("401000")
 
-        delete_function_result = _unwrap_runtime_result(
-            cli.delete_function(address="0x401000", target=target)
-        )
+        delete_function_result = _unwrap_runtime_result(cli.delete_function(address="0x401000", target=target))
         create_function_result = _unwrap_runtime_result(
             cli.create_function(address="0x401000", name="runtime_manual_entry", target=target)
         )
         _log_runtime_result("delete_function(raw)", delete_function_result)
         _log_runtime_result("create_function(raw)", create_function_result)
 
-        disassembly = _unwrap_runtime_result(
-            cli.disassemble_function(address="0x401000", target=target)
-        )
+        disassembly = _unwrap_runtime_result(cli.disassemble_function(address="0x401000", target=target))
         assert isinstance(disassembly, list) and disassembly
 
         range_disassembly = _unwrap_runtime_result(
             cli.disassemble_range(start_address="0x401000", length=4, limit=5, target=target)
         )
         analyze_result = _unwrap_runtime_result(cli.analyze_program(target=target))
-        reanalyze_result = _unwrap_runtime_result(cli.reanalyze_program(target=target))
+        reanalyze_result = _unwrap_runtime_result(cli.analyze_program(force=True, target=target))
         _log_runtime_result("disassemble_range(raw)", range_disassembly)
         _log_runtime_result("analyze_program(raw)", analyze_result)
-        _log_runtime_result("reanalyze_program(raw)", reanalyze_result)
+        _log_runtime_result("analyze_program(force, raw)", reanalyze_result)
         assert isinstance(range_disassembly, list) and range_disassembly
         assert create_function_result["created"] is True
         assert delete_function_result["deleted"] is True
@@ -304,9 +283,7 @@ def test_runtime_single_byte_search_stops_at_memory_end(tmp_path):
         )
         cli.load_project_program(target=target, domain_path=imported["program"])
 
-        assert _unwrap_runtime_result(
-            cli.search_bytes(pattern="ff", offset=0, limit=2, target=target)
-        ) == ["ffffffff"]
+        assert _unwrap_runtime_result(cli.search_bytes(pattern="ff", offset=0, limit=2, target=target)) == ["ffffffff"]
         with pytest.raises(Exception, match="VALIDATION_ERROR"):
             cli.search_bytes(pattern="   ", offset=0, limit=2, target=target)
         with pytest.raises(Exception, match="VALIDATION_ERROR"):
@@ -363,26 +340,26 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("list_bookmarks", list_bookmarks_result)
 
         decompiler_comment_result = _unwrap_runtime_result(
-            cli.set_decompiler_comment(
+            cli.set_comment(
                 address=primary_address,
                 comment="runtime decompiler comment",
+                kind="pre",
                 target=target,
             )
         )
-        _log_runtime_result("set_decompiler_comment", decompiler_comment_result)
+        _log_runtime_result("set_comment(pre)", decompiler_comment_result)
 
         disassembly_comment_result = _unwrap_runtime_result(
-            cli.set_disassembly_comment(
+            cli.set_comment(
                 address=primary_address,
                 comment="runtime disasm comment",
+                kind="eol",
                 target=target,
             )
         )
-        _log_runtime_result("set_disassembly_comment", disassembly_comment_result)
+        _log_runtime_result("set_comment(eol)", disassembly_comment_result)
 
-        current_primary_info = _unwrap_runtime_result(
-            cli.get_function(address=primary_address, target=target)
-        )
+        current_primary_info = _unwrap_runtime_result(cli.get_function(address=primary_address, target=target))
         current_primary_name = current_primary_info["name"]
         prototype_candidates = [
             _extract_prototype(primary_decompiled),
@@ -417,9 +394,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         set_bytes_error = None
         for candidate_address in [data_address, primary_address, aux_address]:
             try:
-                bytes_dump = _unwrap_runtime_result(
-                    cli.get_bytes(address=candidate_address, size=2, target=target)
-                )
+                bytes_dump = _unwrap_runtime_result(cli.get_bytes(address=candidate_address, size=2, target=target))
                 patch_bytes = _derive_patch_bytes_from_hexdump(bytes_dump)
                 set_bytes_result = _unwrap_runtime_result(
                     cli.set_bytes(address=candidate_address, bytes_hex=patch_bytes, target=target)
@@ -449,14 +424,10 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         with pytest.raises(Exception, match="VALIDATION_ERROR"):
             cli.rename_data(address=aux_address, new_name=f"{renamed_aux_2}_data", target=target)
-        function_after_rename_data = _unwrap_runtime_result(
-            cli.get_function(address=aux_address, target=target)
-        )
+        function_after_rename_data = _unwrap_runtime_result(cli.get_function(address=aux_address, target=target))
         assert function_after_rename_data["name"] == renamed_aux_2
 
-        create_struct_result = _unwrap_runtime_result(
-            cli.create_struct(name="__it_struct_mut", target=target)
-        )
+        create_struct_result = _unwrap_runtime_result(cli.create_struct(name="__it_struct_mut", target=target))
         _log_runtime_result("create_struct", create_struct_result)
 
         add_struct_members_result = _unwrap_runtime_result(
@@ -469,9 +440,9 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("add_struct_members", add_struct_members_result)
 
         clear_struct_result = _unwrap_runtime_result(
-            cli.clear_struct(struct_name="__it_struct_mut", target=target)
+            cli.remove_struct_members(struct_name="__it_struct_mut", target=target)
         )
-        _log_runtime_result("clear_struct", clear_struct_result)
+        _log_runtime_result("remove_struct_members(all)", clear_struct_result)
 
         _unwrap_runtime_result(
             cli.add_struct_members(
@@ -507,9 +478,9 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         )
         _log_runtime_result("rename_data_type", rename_data_type_result)
         delete_struct_result = _unwrap_runtime_result(
-            cli.delete_struct(struct_name="__it_struct_mut_renamed", target=target)
+            cli.delete_data_type(name="__it_struct_mut_renamed", target=target)
         )
-        _log_runtime_result("delete_struct", delete_struct_result)
+        _log_runtime_result("delete_data_type", delete_struct_result)
 
         set_global_data_type_result = None
         set_global_error = None
@@ -553,14 +524,14 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             "rename_function": rename_function_result,
             "rename_function(address)": rename_function_by_address_result,
             "rename_variable": rename_variable_result,
-            "set_decompiler_comment": decompiler_comment_result,
-            "set_disassembly_comment": disassembly_comment_result,
+            "set_comment(pre)": decompiler_comment_result,
+            "set_comment(eol)": disassembly_comment_result,
             "set_function_prototype": function_prototype_result,
             "set_local_variable_type": set_local_type_result,
             "create_struct": create_struct_result,
             "add_struct_members": add_struct_members_result,
-            "clear_struct": clear_struct_result,
-            "delete_struct": delete_struct_result,
+            "remove_struct_members(all)": clear_struct_result,
+            "delete_data_type": delete_struct_result,
             "list_data_types": list_data_types_result,
             "rename_data_type": rename_data_type_result,
             "remove_struct_members": remove_struct_members_result,

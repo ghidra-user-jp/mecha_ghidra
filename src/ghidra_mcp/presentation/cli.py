@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "mcp>=1.27.2,<2",
+#     "mcp>=2.1.1,<3",
 #     "pyghidra>=2.0.0",
 #     "fasteners>=0.19",
 #     "pydantic>=2.11,<3",
@@ -14,16 +14,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import signal
 import sys
-from typing import Dict
+from typing import Any, Dict
 
-import pyghidra
 import pyghidra.core as pycore
-from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.mcpserver import MCPServer
 
+from ghidra_headless.launcher import start_headless_jvm
 from ghidra_mcp.application.services.bsim_service import BsimConfig
+from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.contracts.tool_spec import (
     ToolCategoryTag,
     ToolOperationLevel,
@@ -34,20 +33,28 @@ from ghidra_mcp.contracts.tool_spec import (
     get_all_tool_specs,
     get_checkout_required_tool_names,
 )
+from ghidra_mcp.domain import (
+    DEFAULT_LOCK_TIMEOUT_SECONDS,
+    configure_exclusive_checkout_default,
+    configure_lock_timeout_seconds,
+)
 from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
 from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter, create_cli_runtime
 from ghidra_mcp.presentation.config import ToolPresentationConfig
+from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 from ghidra_mcp.presentation.tool_registry import build_tool_functions
 from ghidra_mcp.presentation.transport import (
-    configure_mcp_for_sse as _configure_mcp_for_sse,
-    configure_mcp_for_streamable_http as _configure_mcp_for_streamable_http,
-    configure_transport_security_for_host as _configure_transport_security_for_host_impl,
-    normalize_host as _normalize_host_impl,
-    normalize_streamable_http_path as _normalize_streamable_http_path_impl,
-    normalize_transport as _normalize_transport_impl,
-    resolve_transport_security_for_host as _resolve_transport_security_for_host_impl,
+    normalize_transport as _normalize_transport,
 )
-from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
+from ghidra_mcp.presentation.transport import (
+    run_kwargs_for_transport as _run_kwargs_for_transport,
+)
+from ghidra_mcp.presentation.transport import (
+    sse_run_kwargs as _sse_run_kwargs,
+)
+from ghidra_mcp.presentation.transport import (
+    streamable_http_run_kwargs as _streamable_http_run_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +63,7 @@ _PASSWORD_CLIENT_AUTHENTICATOR_CLASS = None
 _CLIENT_UTIL_CLASS = None
 _registry = None
 _bsim_config = BsimConfig()
-mcp = FastMCP("GhidraMCP Headless")
+mcp: MCPServer = MCPServer("GhidraMCP Headless")
 
 _ALL_TOOL_SPECS = get_all_tool_specs()
 _DEFAULT_TOOL_SPECS = filter_tool_specs(specs=_ALL_TOOL_SPECS, profile=ToolProfile.DEFAULT)
@@ -92,6 +99,8 @@ def _get_registry(
     selected_specs: dict[str, ToolSpec] | None = None,
     bsim_config: BsimConfig | None = None,
     presentation_config: ToolPresentationConfig | None = None,
+    server_log_level: str | None = None,
+    path_policy: PathPolicy | None = None,
 ) -> ServiceRegistryAdapter:
     global _registry, _bsim_config, mcp
     if selected_specs is None and _registry is not None:
@@ -101,7 +110,7 @@ def _get_registry(
     effective_specs = _DEFAULT_TOOL_SPECS if selected_specs is None else selected_specs
     runtime_kwargs = {
         "registered_specs": effective_specs,
-        "core_accessor": lambda: _core(),
+        "core_accessor": _core,
         "checkout_required_commands": get_checkout_required_tool_names(effective_specs),
         "bsim_config": _bsim_config,
         "dispatcher_provider": lambda: dispatch_tool,
@@ -109,6 +118,10 @@ def _get_registry(
     }
     if presentation_config is not None:
         runtime_kwargs["presentation_config"] = presentation_config
+    if server_log_level is not None:
+        runtime_kwargs["server_log_level"] = server_log_level
+    if path_policy is not None:
+        runtime_kwargs["path_policy"] = path_policy
     bundle = create_cli_runtime(**runtime_kwargs)
     _registry = bundle.registry
     mcp = bundle.runtime.mcp
@@ -130,8 +143,8 @@ def configure_logging(level: int) -> None:
 
 def _parse_session_definition(text: str) -> Dict[str, str]:
     result: Dict[str, str] = {}
-    for part in text.split(","):
-        part = part.strip()
+    for raw_part in text.split(","):
+        part = raw_part.strip()
         if not part:
             continue
         if "=" not in part:
@@ -200,6 +213,15 @@ def parse_args(argv: list[str]):
         help="Environment variable name holding the BSim database password",
     )
     parser.add_argument(
+        "--bsim-remote-cache-dir",
+        metavar="DIR",
+        help=(
+            "Directory where bsim_load_matched_executable creates local caches of Ghidra Server "
+            "repositories referenced by ghidra:// matches. Without it remote matches cannot be loaded. "
+            "Must lie under an --allowed-project-root when project roots are restricted."
+        ),
+    )
+    parser.add_argument(
         "--tool-profile",
         default=ToolProfile.DEFAULT.value,
         choices=_enum_choices(ToolProfile),
@@ -264,10 +286,7 @@ def parse_args(argv: list[str]):
         "--large-result-threshold-chars",
         type=int,
         default=_PRESENTATION_DEFAULTS.large_result_threshold_chars,
-        help=(
-            "Consider successful results above this character threshold for "
-            "resource-backed compaction."
-        ),
+        help=("Consider successful results above this character threshold for resource-backed compaction."),
     )
     parser.add_argument(
         "--large-result-preview-chars",
@@ -295,8 +314,55 @@ def parse_args(argv: list[str]):
             "result is preserved. Do not automatically retry side-effecting calls."
         ),
     )
+    parser.add_argument(
+        "--allowed-import-root",
+        action="append",
+        metavar="DIR",
+        help=(
+            "Restrict import_program to files under this directory (repeatable). "
+            "Without it any file readable by the server process can be imported."
+        ),
+    )
+    parser.add_argument(
+        "--allowed-project-root",
+        action="append",
+        metavar="DIR",
+        help=(
+            "Restrict project creation and project opening to this directory (repeatable). "
+            "Without it a Ghidra project can be created or opened anywhere the server can access."
+        ),
+    )
+    parser.add_argument(
+        "--allowed-export-root",
+        action="append",
+        metavar="DIR",
+        help=(
+            "Restrict export_program to output paths under this directory (repeatable). "
+            "Without it a program can be written anywhere the server process can write."
+        ),
+    )
+    parser.add_argument(
+        "--lock-timeout-seconds",
+        type=float,
+        default=DEFAULT_LOCK_TIMEOUT_SECONDS,
+        help=(
+            "How long a tool call waits for a busy target/project before returning a "
+            "retryable LOCK_TIMEOUT. Parallel tool calls queue up to this long."
+        ),
+    )
+    parser.add_argument(
+        "--shared-sync-exclusive-checkout",
+        action="store_true",
+        help=(
+            "Make checkout_project_program (and commit_project_program's automatic checkout) request an "
+            "exclusive checkout when the caller does not pass exclusive explicitly. Headless Ghidra cannot "
+            "merge, so exclusive checkouts prevent the conflicts that would otherwise force a discard."
+        ),
+    )
     parser.add_argument("--log-level", default="INFO", help="Log level")
     args = parser.parse_args(argv)
+    if args.lock_timeout_seconds <= 0:
+        parser.error("--lock-timeout-seconds must be > 0")
     try:
         # Surface presentation-config range/cross-field errors as a standard
         # argparse usage error (exit 2) instead of an unhandled traceback.
@@ -317,6 +383,14 @@ def presentation_config_from_args(args) -> ToolPresentationConfig:
     )
 
 
+def path_policy_from_args(args) -> PathPolicy:
+    return PathPolicy.from_roots(
+        import_roots=getattr(args, "allowed_import_root", None),
+        project_roots=getattr(args, "allowed_project_root", None),
+        export_roots=getattr(args, "allowed_export_root", None),
+    )
+
+
 def resolve_tool_specs_from_args(args) -> dict[str, ToolSpec]:
     return filter_tool_specs(
         specs=_ALL_TOOL_SPECS,
@@ -330,24 +404,16 @@ def resolve_tool_specs_from_args(args) -> dict[str, ToolSpec]:
     )
 
 
-def _normalize_transport(transport: str) -> str:
-    return _normalize_transport_impl(transport)
+def redirect_java_stdout_to_stderr() -> None:
+    """Keep the JVM's System.out off the MCP stdio channel.
 
-
-def _normalize_streamable_http_path(path: str) -> str:
-    return _normalize_streamable_http_path_impl(path)
-
-
-def _normalize_host(host: str) -> str:
-    return _normalize_host_impl(host)
-
-
-def _resolve_transport_security_for_host(host: str) -> TransportSecuritySettings:
-    return _resolve_transport_security_for_host_impl(host)
-
-
-def _configure_transport_security_for_host(host: str) -> None:
-    _configure_transport_security_for_host_impl(mcp=mcp, host=host, logger=logger)
+    Ghidra components (analysis progress, log4j console appenders) write to
+    ``System.out``, which is the same fd 1 the stdio transport uses for
+    JSON-RPC framing.  Redirecting it to ``System.err`` keeps that output
+    visible without corrupting the protocol stream.
+    """
+    java_system = pycore.JClass("java.lang.System")
+    java_system.setOut(java_system.err)
 
 
 def configure_ghidra_server_auth(args) -> None:
@@ -360,8 +426,7 @@ def configure_ghidra_server_auth(args) -> None:
         return
     if not username or not (has_password_arg or has_password_env):
         raise ValueError(
-            "--ghidra-server-user and one of --ghidra-server-password/--ghidra-server-password-env "
-            "must be set together"
+            "--ghidra-server-user and one of --ghidra-server-password/--ghidra-server-password-env must be set together"
         )
     if has_password_arg and has_password_env:
         raise ValueError("--ghidra-server-password and --ghidra-server-password-env cannot be used together")
@@ -370,7 +435,7 @@ def configure_ghidra_server_auth(args) -> None:
         if password_arg == "":
             raise ValueError("--ghidra-server-password is empty")
         password = password_arg
-        password_log_hint = "password=<provided>"
+        password_log_hint = "password=<provided>"  # noqa: S105 - log label, not a secret
     else:
         password = os.environ.get(password_env_name)
         if password is None:
@@ -394,6 +459,12 @@ def _ensure_supported_ghidra_installation(ghidra_path: str | None) -> None:
     validate_linux_arm64_decompiler_install(ghidra_path)
 
 
+def _start_pyghidra_headless(ghidra_path: str | None) -> None:
+    """Start the JVM through the shared headless launcher (see ghidra_headless.launcher)."""
+
+    start_headless_jvm(ghidra_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     global _core_module
     if argv is None:
@@ -403,7 +474,21 @@ def main(argv: list[str] | None = None) -> int:
 
     selected_specs = resolve_tool_specs_from_args(args)
     presentation_config = presentation_config_from_args(args)
+    try:
+        path_policy = path_policy_from_args(args)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
+    configure_lock_timeout_seconds(args.lock_timeout_seconds)
+    configure_exclusive_checkout_default(bool(args.shared_sync_exclusive_checkout))
     ghidra_path = args.ghidra_path or os.environ.get("GHIDRA_INSTALL_DIR")
+    bsim_remote_cache_dir = args.bsim_remote_cache_dir
+    if bsim_remote_cache_dir:
+        try:
+            path_policy.validate_project_location(bsim_remote_cache_dir)
+        except Exception as exc:
+            logger.error("--bsim-remote-cache-dir is outside the allowed project roots: %s", exc)
+            return 2
     registry = _get_registry(
         selected_specs,
         bsim_config=BsimConfig(
@@ -411,9 +496,21 @@ def main(argv: list[str] | None = None) -> int:
             bsim_password=args.bsim_password,
             bsim_password_env=args.bsim_password_env,
             ghidra_install_dir=ghidra_path,
+            remote_cache_dir=bsim_remote_cache_dir,
         ),
         presentation_config=presentation_config,
+        server_log_level=args.log_level,
+        path_policy=path_policy,
     )
+    transport = _normalize_transport(args.transport)
+    if transport != "stdio" and path_policy.is_unrestricted:
+        logger.warning(
+            "No --allowed-import-root/--allowed-project-root/--allowed-export-root configured: every MCP "
+            "client on the %s transport can import any file readable by this process, open or create "
+            "projects anywhere it can write, and export programs to any path. Configure the roots for "
+            "network deployments.",
+            transport,
+        )
 
     logger.info(
         "Starting PyGhidra MCP server with %d tools (profile=%s)",
@@ -429,13 +526,15 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("%s", exc)
             return 1
         logger.debug("pyghidra.start install_dir=%s", ghidra_path)
-        pyghidra.start(install_dir=ghidra_path)
+        _start_pyghidra_headless(ghidra_path)
     else:
-        pyghidra.start()
+        _start_pyghidra_headless(None)
+    if transport == "stdio":
+        redirect_java_stdout_to_stderr()
 
     try:
         configure_ghidra_server_auth(args)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("Failed to configure Ghidra server authentication: %s", exc)
         return 1
 
@@ -459,7 +558,7 @@ def main(argv: list[str] | None = None) -> int:
                         project_name=config.get("project_name"),
                     )
                     logger.info("Registered target '%s' with project metadata only", config["name"])
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.error("Error while processing session definition '%s': %s", definition, exc)
                 registry.close_all()
                 return 1
@@ -484,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
                     "Registered default target '%s' with project metadata only (program not loaded)",
                     args.target_name,
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("Failed to initialize default session: %s", exc)
             registry.close_all()
             return 1
@@ -495,33 +594,25 @@ def main(argv: list[str] | None = None) -> int:
 
     _core_module = _core()
 
-    def _shutdown_handler(signum, frame):
-        logger.info("Received signal %s; starting shutdown", signum)
-        registry.close_all()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _shutdown_handler)
-    signal.signal(signal.SIGINT, _shutdown_handler)
-
-    transport = _normalize_transport(args.transport)
-    if transport == "sse":
-        configure_mcp_for_sse(args)
-    elif transport == "streamable-http":
-        configure_mcp_for_streamable_http(args)
-
+    # SIGINT/SIGTERM are handled by the SDK's transport loop (uvicorn for the
+    # HTTP transports, anyio for stdio); both unwind through the ``finally``
+    # below, so no extra signal handler is installed here.
+    run_kwargs = _run_kwargs_for_transport(transport=transport, args=args, logger=logger)
     try:
-        mcp.run(transport=transport)
+        mcp.run(transport=transport, **run_kwargs)
     finally:
         registry.close_all()
     return 0
 
 
-def configure_mcp_for_sse(args) -> None:
-    _configure_mcp_for_sse(mcp=mcp, args=args, logger=logger)
+def configure_mcp_for_sse(args) -> dict[str, Any]:
+    """Return the ``MCPServer.run("sse", ...)`` keyword arguments for ``args``."""
+    return _sse_run_kwargs(args=args, logger=logger)
 
 
-def configure_mcp_for_streamable_http(args) -> None:
-    _configure_mcp_for_streamable_http(mcp=mcp, args=args, logger=logger)
+def configure_mcp_for_streamable_http(args) -> dict[str, Any]:
+    """Return the ``MCPServer.run("streamable-http", ...)`` keyword arguments for ``args``."""
+    return _streamable_http_run_kwargs(args=args, logger=logger)
 
 
 # expose generated tool callables to static analysis/tests

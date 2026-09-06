@@ -13,14 +13,14 @@ from ghidra_mcp import cli
         (
             "create_project",
             lambda: cli.create_project(project_location="/tmp/sample.gpr", project_name=None, overwrite=False),
-            {"project_location": "/tmp/sample.gpr", "project_name": None, "overwrite": False},
+            {"project_location": "/tmp/sample.gpr", "overwrite": False},
             "default",
         ),
         ("list_project_programs", lambda: cli.list_project_programs("fw"), {}, "fw"),
         (
             "register_target",
             lambda: cli.register_target(target="fw", project_location="/tmp/sample.gpr", project_name=None),
-            {"project_location": "/tmp/sample.gpr", "project_name": None},
+            {"project_location": "/tmp/sample.gpr"},
             "fw",
         ),
         (
@@ -46,7 +46,6 @@ from ghidra_mcp import cli
             {
                 "project_location": "/tmp/sample.gpr",
                 "domain_path": "/folder/app",
-                "project_name": None,
             },
             "fw",
         ),
@@ -123,12 +122,6 @@ from ghidra_mcp import cli
             "fw",
         ),
         (
-            "reload_project_program",
-            lambda: cli.reload_project_program("fw", domain_path="/folder/app"),
-            {"domain_path": "/folder/app"},
-            "fw",
-        ),
-        (
             "get_version_history",
             lambda: cli.get_version_history("fw", limit=5, domain_path="/folder/app"),
             {"limit": 5, "domain_path": "/folder/app"},
@@ -137,7 +130,14 @@ from ghidra_mcp import cli
         (
             "get_version_diff",
             lambda: cli.get_version_diff("fw", from_version=1, to_version=2, range_limit=50, domain_path="/folder/app"),
-            {"from_version": 1, "to_version": 2, "range_limit": 50, "domain_path": "/folder/app"},
+            {
+                "from_version": 1,
+                "to_version": 2,
+                "range_limit": 50,
+                "include_details": False,
+                "details_limit": 20,
+                "domain_path": "/folder/app",
+            },
             "fw",
         ),
     ],

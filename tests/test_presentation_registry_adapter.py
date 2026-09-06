@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, get_args, get_origin
+from typing import Any, Literal, get_args, get_origin
 
 import pytest
 
 from ghidra_mcp import cli
-from ghidra_mcp.application.usecases.datatypes import DATATYPE_COMMANDS
-from ghidra_mcp.application.usecases.functions import FUNCTION_COMMANDS
-from ghidra_mcp.application.usecases.memory import MEMORY_COMMANDS
-from ghidra_mcp.application.usecases.symbols import SYMBOL_COMMANDS
+from ghidra_mcp.application.commands import DATATYPE_COMMANDS, FUNCTION_COMMANDS, MEMORY_COMMANDS, SYMBOL_COMMANDS
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolCategoryTag, get_all_tool_specs, get_tool_spec
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
-
 _LIST_CORE_COMMANDS = {
     "list_functions",
-    "list_classes",
-    "search_functions_by_name",
     "disassemble_function",
     "disassemble_range",
     "get_callee",
@@ -32,6 +26,7 @@ _LIST_CORE_COMMANDS = {
     "list_strings",
     "get_data_by_label",
     "search_bytes",
+    "search_symbols",
     "list_bookmarks",
 }
 _CORE_COMMANDS = set(FUNCTION_COMMANDS) | set(MEMORY_COMMANDS) | set(SYMBOL_COMMANDS) | set(DATATYPE_COMMANDS)
@@ -165,6 +160,7 @@ class RecordingService:
                     "discarded_local_changes": False,
                     "followed_latest": False,
                     "reloaded": False,
+                    "checked_out": False,
                     "version": 1,
                     "latest_version": 1,
                     "is_latest_version": True,
@@ -202,14 +198,6 @@ class RecordingService:
                     "latest_version": 1,
                     "atomic_version_guard": False,
                 }
-            if name == "reload_project_program":
-                target = args[0]
-                return {
-                    "status": "ok",
-                    "target": target,
-                    "program": kwargs.get("domain_path") or "/main",
-                    "reloaded": True,
-                }
             if name == "get_version_history":
                 target = args[0]
                 return {
@@ -232,6 +220,8 @@ class RecordingService:
                     "diff_types": [],
                     "ranges": [],
                     "ranges_truncated": False,
+                    "details": [],
+                    "details_truncated": False,
                     "warnings": None,
                 }
             if name == "bsim_load_matched_executable":
@@ -251,6 +241,9 @@ class RecordingService:
 
 def _sample_for_field(name: str, annotation: Any) -> Any:
     origin = get_origin(annotation)
+
+    if origin is Literal:
+        return get_args(annotation)[0]
 
     if origin in {list, tuple, set}:
         inner = get_args(annotation)[0] if get_args(annotation) else Any
@@ -291,13 +284,11 @@ def _sample_for_field(name: str, annotation: Any) -> Any:
         if name == "on_local_changes":
             return "abort"
         if name == "clear_mode":
-            return "clear_all_default_conflicts"
+            return "CLEAR_ALL_DEFAULT_CONFLICT_DATA"
         if name in {"data_type", "new_type"}:
             return "int"
         if name in {"type"}:
             return "Info"
-        if name in {"format"}:
-            return "json"
         if name in {"bytes"}:
             return "90"
         if name in {"message", "comment"}:
@@ -352,6 +343,13 @@ def test_service_registry_adapter_routes_all_tools(tool_name: str):
         return
 
     expected_kwargs = {**validated, **spec.static_kwargs}
+
+    if tool_name == "export_program":
+        # A registry method that polices the output path, then runs the core command.
+        assert target.calls == [("validate_export_path", (validated["output_path"],), {})]
+        assert core.calls == [("export_program", validated, target_name)]
+        assert sync.calls == [] and bsim.calls == []
+        return
 
     if spec.executor_kind == ExecutorKind.REGISTRY_METHOD:
         assert core.calls == []
@@ -423,7 +421,7 @@ def test_service_registry_adapter_forwards_close_remove_flag():
     assert target.calls == [("close_session", ("fw",), {"remove_program": True})]
 
 
-def test_service_registry_adapter_passes_domain_path_none_for_shared_sync_defaults():
+def test_service_registry_adapter_forwards_only_supplied_shared_sync_arguments():
     core = RecordingCoreService()
     target = RecordingService("target")
     sync = RecordingService("sync")
@@ -437,4 +435,6 @@ def test_service_registry_adapter_passes_domain_path_none_for_shared_sync_defaul
 
     dispatch_tool("get_project_sync_status", {}, "fw", registry=adapter)
 
-    assert sync.calls == [("get_project_sync_status", ("fw",), {"domain_path": None})]
+    # The adapter forwards exactly what the dispatcher supplies; the service's own
+    # ``domain_path=None`` default applies, so no synthetic None is injected.
+    assert sync.calls == [("get_project_sync_status", ("fw",), {})]

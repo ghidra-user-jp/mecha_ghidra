@@ -10,3 +10,18 @@ samples
 *.gpr
 *.rep
 *.gzf
+.env
+.env.*
+.git*
+.github
+.ruff_cache
+.venv*
+dist-ci-repro
+downloads
+docs
+tests
+scripts
+*.md
+!README.md
+# export_program output directory mounted by docker-compose
+exports/

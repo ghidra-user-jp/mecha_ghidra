@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES, INTERNAL_COMMAND_NAMES
+from ghidra_headless.handlers.core_command_registry import COMMAND_NAMES, INTERNAL_COMMAND_NAMES
 from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_all_tool_specs
-
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_PATH = ROOT / "src" / "ghidra_headless" / "handlers" / "core.py"
@@ -30,20 +29,6 @@ def test_supported_commands_are_built_from_registry_in_declared_order():
 
 def test_core_command_specs_match_supported_commands():
     assert set(_core_command_specs()) == set(COMMAND_NAMES) - set(INTERNAL_COMMAND_NAMES)
-
-
-def test_tool_spec_inputs_are_covered_by_command_dep_keys():
-    mismatches: list[str] = []
-    for command, input_keys in _core_command_specs().items():
-        dep_keys = set(COMMAND_DEP_KEYS.get(command, ()))
-        unknown = sorted(key for key in input_keys if key not in dep_keys)
-        if unknown:
-            mismatches.append(f"{command} has unused keys: {', '.join(unknown)}")
-    assert not mismatches, "\n".join(mismatches)
-
-
-def test_command_dep_keys_cover_all_supported_commands():
-    assert set(COMMAND_DEP_KEYS) == set(COMMAND_NAMES)
 
 
 def test_presentation_cli_does_not_import_legacy_services_module():

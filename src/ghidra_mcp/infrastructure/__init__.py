@@ -1,16 +1,7 @@
 """Infrastructure layer exports."""
 
-from .ghidra_adapter import CoreExecutor, CoreGateway, ProgramLease, ProjectGateway, RuntimeBackend, SyncGateway
-from .locks import LockManager
-from .repositories import TargetRepository
+from ghidra_mcp.application.locks import LockManager
 
-__all__ = [
-    "CoreExecutor",
-    "CoreGateway",
-    "LockManager",
-    "ProgramLease",
-    "ProjectGateway",
-    "RuntimeBackend",
-    "SyncGateway",
-    "TargetRepository",
-]
+from .ghidra_adapter import CoreGateway, ProgramLease, RuntimeBackend
+
+__all__ = ["CoreGateway", "LockManager", "ProgramLease", "RuntimeBackend"]

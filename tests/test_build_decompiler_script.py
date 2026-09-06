@@ -4,7 +4,6 @@ import re
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_decompiler_natives.sh"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-decompiler-natives.yml"
@@ -18,11 +17,7 @@ def _run_with_retry_source() -> str:
 
 
 def test_run_with_retry_preserves_final_failure_status():
-    command = (
-        "set -euo pipefail\n"
-        + _run_with_retry_source()
-        + "\nrun_with_retry 2 0 bash -c 'exit 7'\n"
-    )
+    command = "set -euo pipefail\n" + _run_with_retry_source() + "\nrun_with_retry 2 0 bash -c 'exit 7'\n"
 
     result = subprocess.run(
         ["bash", "-c", command],

@@ -2,25 +2,14 @@
 
 from __future__ import absolute_import, print_function
 
-from ghidra_headless.handlers.commands.pagination import normalize_pagination
-from ghidra_headless.handlers.commands.read_only_memory_data import validate_hex_payload_size
-
-
-def _bookmark_to_dict(bookmark):
-    return {
-        "id": int(bookmark.getId()),
-        "address": str(bookmark.getAddress()),
-        "type": bookmark.getTypeString(),
-        "category": bookmark.getCategory(),
-        "comment": bookmark.getComment() or "",
-    }
+from ghidra_headless.handlers.commands.read_only_memory_data import _bookmark_to_dict, validate_hex_payload_size
 
 
 def rename_function(params, *, ensure_context, get_address, find_function_by_name, txn, source_type):
     ctx = ensure_context()
     address_text = params.get("address")
     old_name = params.get("oldName")
-    new_name = params.get("newName") or params.get("new_name")
+    new_name = params.get("newName")
     if not new_name:
         raise ValueError("newName is required")
     if address_text:
@@ -64,10 +53,26 @@ def rename_data(params, *, ensure_context, get_address, txn, source_type):
     return {"name": symbol.getName(), "address": str(symbol.getAddress())}
 
 
+def _resolve_function(ctx, address_text, name, *, get_address, find_function_by_name):
+    """Find a function by address (wins) or by name; raise when neither resolves."""
+    if address_text:
+        function = ctx.function_manager.getFunctionContaining(get_address(ctx, address_text))
+        if function is None:
+            raise LookupError("No function found for address: %s" % address_text)
+        return function
+    if not name:
+        raise ValueError("function address or function name is required")
+    function = find_function_by_name(ctx, name)
+    if function is None:
+        raise LookupError("Function not found: %s" % name)
+    return function
+
+
 def rename_variable(
     params,
     *,
     ensure_context,
+    get_address,
     find_function_by_name,
     decompile_high_function,
     requires_full_param_commit,
@@ -77,14 +82,20 @@ def rename_variable(
 ):
     ctx = ensure_context()
     function_name = params.get("functionName")
+    function_address = params.get("functionAddress")
     old_name = params.get("oldName")
     new_name = params.get("newName")
-    if not function_name or not old_name or not new_name:
-        raise ValueError("functionName, oldName, and newName are required")
-
-    function = find_function_by_name(ctx, function_name)
-    if function is None:
-        raise LookupError("Function not found: %s" % function_name)
+    if not old_name or not new_name:
+        raise ValueError("oldName and newName are required")
+    if not function_name and not function_address:
+        raise ValueError("functionName or functionAddress is required")
+    function = _resolve_function(
+        ctx,
+        function_address,
+        function_name,
+        get_address=get_address,
+        find_function_by_name=find_function_by_name,
+    )
 
     if old_name == new_name:
         return {"name": new_name}
@@ -109,6 +120,7 @@ def rename_variable(
                 if symbol_name == old_name:
                     high_symbol = symbol
             if high_symbol is not None:
+
                 def _rename_high():
                     if requires_full_param_commit(high_symbol, high_function):
                         high_function_db_util.commitParamsToDatabase(
@@ -157,32 +169,32 @@ def rename_variable(
     return {"name": target.getName()}
 
 
-def set_decompiler_comment(params, *, ensure_context, get_address, txn, code_unit):
+COMMENT_KINDS = {
+    "pre": "PRE_COMMENT",  # shown above the line in the listing and in the decompiler
+    "eol": "EOL_COMMENT",  # end-of-line comment in the listing
+    "post": "POST_COMMENT",
+    "plate": "PLATE_COMMENT",  # function header block
+    "repeatable": "REPEATABLE_COMMENT",
+}
+
+
+def set_comment(params, *, ensure_context, get_address, txn, code_unit):
+    """Set (or clear with an empty string) one comment kind at an address."""
     ctx = ensure_context()
     address_text = params.get("address")
     comment = params.get("comment", "")
+    kind = str(params.get("kind") or "").strip().lower()
+    if kind not in COMMENT_KINDS:
+        raise ValueError("kind must be one of: %s" % ", ".join(sorted(COMMENT_KINDS)))
+    comment_type = getattr(code_unit, COMMENT_KINDS[kind])
     address = get_address(ctx, address_text)
 
     def _apply():
-        ctx.listing.setComment(address, code_unit.PRE_COMMENT, comment)
+        ctx.listing.setComment(address, comment_type, comment)
         return True
 
-    txn(ctx, "Set decompiler comment", _apply)
-    return {"address": address_text, "comment": comment}
-
-
-def set_disassembly_comment(params, *, ensure_context, get_address, txn, code_unit):
-    ctx = ensure_context()
-    address_text = params.get("address")
-    comment = params.get("comment", "")
-    address = get_address(ctx, address_text)
-
-    def _apply():
-        ctx.listing.setComment(address, code_unit.EOL_COMMENT, comment)
-        return True
-
-    txn(ctx, "Set disassembly comment", _apply)
-    return {"address": address_text, "comment": comment}
+    txn(ctx, "Set %s comment" % kind, _apply)
+    return {"address": address_text, "kind": kind, "comment": comment}
 
 
 def set_function_prototype(
@@ -190,6 +202,7 @@ def set_function_prototype(
     *,
     ensure_context,
     get_address,
+    find_function_by_name,
     build_signature_parser,
     safe_call,
     apply_function_signature_cmd,
@@ -198,13 +211,19 @@ def set_function_prototype(
 ):
     ctx = ensure_context()
     address_text = params.get("function_address")
+    function_name = params.get("function_name")
     prototype = params.get("prototype")
-    if not address_text or not prototype:
-        raise ValueError("function_address and prototype are required")
-    address = get_address(ctx, address_text)
-    function = ctx.function_manager.getFunctionContaining(address)
-    if function is None:
-        raise LookupError("Function not found: %s" % address_text)
+    if not prototype:
+        raise ValueError("prototype is required")
+    if not address_text and not function_name:
+        raise ValueError("function_address or function_name is required")
+    function = _resolve_function(
+        ctx,
+        address_text,
+        function_name,
+        get_address=get_address,
+        find_function_by_name=find_function_by_name,
+    )
 
     def _apply():
         parser = build_signature_parser(ctx)
@@ -233,6 +252,7 @@ def set_local_variable_type(
     *,
     ensure_context,
     get_address,
+    find_function_by_name,
     parse_data_type,
     decompile_high_function,
     requires_full_param_commit,
@@ -242,15 +262,20 @@ def set_local_variable_type(
 ):
     ctx = ensure_context()
     address_text = params.get("function_address")
+    function_name = params.get("function_name")
     variable_name = params.get("variable_name")
     type_text = params.get("new_type")
-    if not address_text or not variable_name or not type_text:
-        raise ValueError("function_address, variable_name, and new_type are required")
-
-    address = get_address(ctx, address_text)
-    function = ctx.function_manager.getFunctionContaining(address)
-    if function is None:
-        raise LookupError("Function not found: %s" % address_text)
+    if not variable_name or not type_text:
+        raise ValueError("variable_name and new_type are required")
+    if not address_text and not function_name:
+        raise ValueError("function_address or function_name is required")
+    function = _resolve_function(
+        ctx,
+        address_text,
+        function_name,
+        get_address=get_address,
+        find_function_by_name=find_function_by_name,
+    )
 
     data_type = parse_data_type(ctx, type_text)
 
@@ -381,15 +406,11 @@ def delete_function(params, *, ensure_context, get_address, txn):
 
 
 def analyze_program(params, *, ensure_context, analyze_program_impl):
+    """Run auto-analysis; ``force`` re-runs it on an already analyzed program."""
     ctx = ensure_context()
-    analyzed = analyze_program_impl(ctx, force=False)
-    return {"analyzed": bool(analyzed), "forced": False}
-
-
-def reanalyze_program(params, *, ensure_context, analyze_program_impl):
-    ctx = ensure_context()
-    analyzed = analyze_program_impl(ctx, force=True)
-    return {"analyzed": bool(analyzed), "forced": True}
+    force = bool(params.get("force", False))
+    analyzed = analyze_program_impl(ctx, force=force)
+    return {"analyzed": bool(analyzed), "forced": force}
 
 
 def add_bookmark(params, *, ensure_context, get_address, txn):
@@ -398,7 +419,6 @@ def add_bookmark(params, *, ensure_context, get_address, txn):
     category = params.get("category")
     comment = params.get("comment", "")
     bookmark_type = params.get("type")
-    _bookmark_format = params.get("format", "json")
     if not address_text or not category or bookmark_type is None:
         raise ValueError("address, category, and type are required")
 
@@ -416,34 +436,6 @@ def add_bookmark(params, *, ensure_context, get_address, txn):
         "type": bookmark_type,
         "comment": comment,
     }
-
-
-def list_bookmarks(params, *, ensure_context, get_address, to_int, collect, iter_items):
-    ctx = ensure_context()
-    offset, limit = normalize_pagination(params, to_int, 100)
-    address_text = params.get("address")
-    bookmark_type = params.get("type")
-    category = params.get("category")
-    manager = ctx.program.getBookmarkManager()
-
-    if address_text:
-        address = get_address(ctx, address_text)
-        if bookmark_type:
-            bookmarks = manager.getBookmarks(address, bookmark_type)
-        else:
-            bookmarks = manager.getBookmarks(address)
-        iterator = iter_items(bookmarks)
-    else:
-        iterator = manager.getBookmarksIterator()
-
-    def _matches(bookmark):
-        if bookmark_type and bookmark.getTypeString() != bookmark_type:
-            return False
-        if category and bookmark.getCategory() != category:
-            return False
-        return True
-
-    return collect((bookmark for bookmark in iter_items(iterator) if _matches(bookmark)), offset, limit, _bookmark_to_dict)
 
 
 def delete_bookmark(params, *, ensure_context, get_address, txn, iter_items):

@@ -88,6 +88,9 @@ class _Handle:
     def get_sync_status(self, _domain_path: str):
         return dict(self._status)
 
+    def get_key(self) -> tuple[str, str]:
+        return ("/tmp/prj", "sample")
+
 
 class _CheckedOutAfterRefreshHandle(_Handle):
     def refresh_project_data(self, *, force: bool = True):  # noqa: ARG002
@@ -235,17 +238,6 @@ def test_mutating_checkout_guard_aborts_when_refresh_fails():
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1
-    assert core.calls == []
-
-
-def test_mutating_checkout_guard_requires_refresh_capability(monkeypatch: pytest.MonkeyPatch):
-    handle = _Handle()
-    monkeypatch.setattr(handle, "refresh_project_data", None)
-    execution, _store, core = _build_core_execution(handle)
-
-    with pytest.raises(RuntimeError, match="SYNC_OPERATION_FAILED"):
-        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
-
     assert core.calls == []
 
 

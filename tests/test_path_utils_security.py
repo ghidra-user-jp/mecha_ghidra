@@ -18,4 +18,3 @@ def test_read_prp_basic_info_rejects_doctype(tmp_path):
     )
 
     assert path_utils._read_prp_basic_info(prp_path) is None
-

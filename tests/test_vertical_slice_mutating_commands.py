@@ -39,14 +39,29 @@ from ghidra_mcp import cli
             {"functionName": "main", "oldName": "old_var", "newName": "new_var"},
         ),
         (
-            "set_decompiler_comment",
-            lambda: cli.set_decompiler_comment(address="0x401000", comment="memo", target="fw"),
-            {"address": "0x401000", "comment": "memo"},
+            "set_comment",
+            lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
+            {"address": "0x401000", "comment": "memo", "kind": "pre"},
         ),
         (
-            "set_disassembly_comment",
-            lambda: cli.set_disassembly_comment(address="0x401000", comment="memo", target="fw"),
-            {"address": "0x401000", "comment": "memo"},
+            "set_comment",
+            lambda: cli.set_comment(address="0x401000", comment="memo", kind="plate", target="fw"),
+            {"address": "0x401000", "comment": "memo", "kind": "plate"},
+        ),
+        (
+            "rename_variable",
+            lambda: cli.rename_variable(
+                function_address="0x401000",
+                old_name="old_var",
+                new_name="new_var",
+                target="fw",
+            ),
+            {"functionAddress": "0x401000", "oldName": "old_var", "newName": "new_var"},
+        ),
+        (
+            "set_function_prototype",
+            lambda: cli.set_function_prototype(function_name="main", prototype="int main(void)", target="fw"),
+            {"function_name": "main", "prototype": "int main(void)"},
         ),
         (
             "set_function_prototype",
@@ -83,9 +98,9 @@ from ghidra_mcp import cli
             {},
         ),
         (
-            "reanalyze_program",
-            lambda: cli.reanalyze_program(target="fw"),
-            {},
+            "analyze_program",
+            lambda: cli.analyze_program(force=True, target="fw"),
+            {"force": True},
         ),
         (
             "create_struct",
@@ -118,14 +133,14 @@ from ghidra_mcp import cli
             },
         ),
         (
-            "clear_struct",
-            lambda: cli.clear_struct(struct_name="S", category="/types", target="fw"),
+            "remove_struct_members",
+            lambda: cli.remove_struct_members(struct_name="S", category="/types", target="fw"),
             {"struct_name": "S", "category": "/types"},
         ),
         (
-            "delete_struct",
-            lambda: cli.delete_struct(struct_name="S", category="/types", target="fw"),
-            {"struct_name": "S", "category": "/types"},
+            "delete_data_type",
+            lambda: cli.delete_data_type(name="S", category="/types", target="fw"),
+            {"name": "S", "category": "/types"},
         ),
         (
             "rename_data_type",
@@ -148,14 +163,14 @@ from ghidra_mcp import cli
                 address="0x403000",
                 data_type="int",
                 length=4,
-                clear_mode="clear_all_default_conflicts",
+                clear_mode="CLEAR_ALL_DEFAULT_CONFLICT_DATA",
                 target="fw",
             ),
             {
                 "address": "0x403000",
                 "data_type": "int",
                 "length": 4,
-                "clear_mode": "clear_all_default_conflicts",
+                "clear_mode": "CLEAR_ALL_DEFAULT_CONFLICT_DATA",
             },
         ),
         (
@@ -170,7 +185,6 @@ from ghidra_mcp import cli
                 category="Analysis",
                 comment="note",
                 type="Info",
-                format="json",
                 target="fw",
             ),
             {
@@ -178,7 +192,6 @@ from ghidra_mcp import cli
                 "category": "Analysis",
                 "comment": "note",
                 "type": "Info",
-                "format": "json",
             },
         ),
         (
@@ -229,8 +242,7 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
         lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
         lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
         lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
-        lambda: cli.set_decompiler_comment(address="0x401000", comment="memo", target="fw"),
-        lambda: cli.set_disassembly_comment(address="0x401000", comment="memo", target="fw"),
+        lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
         lambda: cli.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
         lambda: cli.set_local_variable_type(
             function_address="0x401000", variable_name="param_1", new_type="int", target="fw"
@@ -238,18 +250,22 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
         lambda: cli.create_function(address="0x401100", name="manual_fn", target="fw"),
         lambda: cli.delete_function(address="0x401100", target="fw"),
         lambda: cli.analyze_program(target="fw"),
-        lambda: cli.reanalyze_program(target="fw"),
-        lambda: cli.create_struct(name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"),
-        lambda: cli.add_struct_members(struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"),
-        lambda: cli.clear_struct(struct_name="S", category="/types", target="fw"),
-        lambda: cli.delete_struct(struct_name="S", category="/types", target="fw"),
+        lambda: cli.analyze_program(force=True, target="fw"),
+        lambda: cli.create_struct(
+            name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"
+        ),
+        lambda: cli.add_struct_members(
+            struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"
+        ),
+        lambda: cli.remove_struct_members(struct_name="S", category="/types", target="fw"),
+        lambda: cli.delete_data_type(name="S", category="/types", target="fw"),
         lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
         lambda: cli.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
         lambda: cli.set_global_data_type(
             address="0x403000",
             data_type="int",
             length=4,
-            clear_mode="clear_all_default_conflicts",
+            clear_mode="CLEAR_ALL_DEFAULT_CONFLICT_DATA",
             target="fw",
         ),
         lambda: cli.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
@@ -258,7 +274,6 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
             category="Analysis",
             comment="note",
             type="Info",
-            format="json",
             target="fw",
         ),
         lambda: cli.delete_bookmark(
@@ -290,8 +305,7 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
         lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
         lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
         lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
-        lambda: cli.set_decompiler_comment(address="0x401000", comment="memo", target="fw"),
-        lambda: cli.set_disassembly_comment(address="0x401000", comment="memo", target="fw"),
+        lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
         lambda: cli.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
         lambda: cli.set_local_variable_type(
             function_address="0x401000", variable_name="param_1", new_type="int", target="fw"
@@ -299,18 +313,22 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
         lambda: cli.create_function(address="0x401100", name="manual_fn", target="fw"),
         lambda: cli.delete_function(address="0x401100", target="fw"),
         lambda: cli.analyze_program(target="fw"),
-        lambda: cli.reanalyze_program(target="fw"),
-        lambda: cli.create_struct(name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"),
-        lambda: cli.add_struct_members(struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"),
-        lambda: cli.clear_struct(struct_name="S", category="/types", target="fw"),
-        lambda: cli.delete_struct(struct_name="S", category="/types", target="fw"),
+        lambda: cli.analyze_program(force=True, target="fw"),
+        lambda: cli.create_struct(
+            name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"
+        ),
+        lambda: cli.add_struct_members(
+            struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"
+        ),
+        lambda: cli.remove_struct_members(struct_name="S", category="/types", target="fw"),
+        lambda: cli.delete_data_type(name="S", category="/types", target="fw"),
         lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
         lambda: cli.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
         lambda: cli.set_global_data_type(
             address="0x403000",
             data_type="int",
             length=4,
-            clear_mode="clear_all_default_conflicts",
+            clear_mode="CLEAR_ALL_DEFAULT_CONFLICT_DATA",
             target="fw",
         ),
         lambda: cli.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
@@ -319,7 +337,6 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
             category="Analysis",
             comment="note",
             type="Info",
-            format="json",
             target="fw",
         ),
         lambda: cli.delete_bookmark(

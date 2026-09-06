@@ -4,40 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from ghidra_mcp.application.usecases.bsim import BSIM_COMMANDS, BsimUseCases
-from ghidra_mcp.application.usecases.datatypes import DATATYPE_COMMANDS, DatatypesUseCases
-from ghidra_mcp.application.usecases.functions import FUNCTION_COMMANDS, FunctionsUseCases
-from ghidra_mcp.application.usecases.memory import MEMORY_COMMANDS, MemoryUseCases
-from ghidra_mcp.application.usecases.symbols import SYMBOL_COMMANDS, SymbolsUseCases
+from ghidra_mcp.application.commands import CORE_COMMANDS
+from ghidra_mcp.application.services.ports import CoreGatewayPort
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.infrastructure.ghidra_adapter.core_gateway import CoreGateway
-
-
-_SUPPORTED_COMMANDS = frozenset(
-    (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS, *BSIM_COMMANDS)
-)
 
 
 class CoreCommandService:
-    def __init__(
-        self,
-        core_gateway: CoreGateway,
-        *,
-        functions_usecases: FunctionsUseCases | None = None,
-        memory_usecases: MemoryUseCases | None = None,
-        symbols_usecases: SymbolsUseCases | None = None,
-        datatypes_usecases: DatatypesUseCases | None = None,
-        bsim_usecases: BsimUseCases | None = None,
-    ) -> None:
-        self._functions_usecases = functions_usecases or FunctionsUseCases(core_gateway)
-        self._memory_usecases = memory_usecases or MemoryUseCases(core_gateway)
-        self._symbols_usecases = symbols_usecases or SymbolsUseCases(core_gateway)
-        self._datatypes_usecases = datatypes_usecases or DatatypesUseCases(core_gateway)
-        self._bsim_usecases = bsim_usecases or BsimUseCases(core_gateway)
+    """Validate a core command name and forward it to the gateway."""
+
+    def __init__(self, core_gateway: CoreGatewayPort) -> None:
+        self._core_gateway = core_gateway
 
     def call(self, command: str, params: dict[str, Any] | None = None, target: str = "default") -> Any:
-        normalized_params = params or {}
-        if command not in _SUPPORTED_COMMANDS:
+        if command not in CORE_COMMANDS:
             raise DomainError(
                 code=ErrorCode.CORE_EXECUTOR_UNAVAILABLE,
                 message=f"CORE_EXECUTOR_UNAVAILABLE: unsupported command '{command}'",
@@ -45,15 +24,7 @@ class CoreCommandService:
                 retryable=False,
                 details={"command": command, "target": target},
             )
-        if command in FUNCTION_COMMANDS:
-            return self._functions_usecases.execute(command, normalized_params, target=target)
-        if command in MEMORY_COMMANDS:
-            return self._memory_usecases.execute(command, normalized_params, target=target)
-        if command in SYMBOL_COMMANDS:
-            return self._symbols_usecases.execute(command, normalized_params, target=target)
-        if command in BSIM_COMMANDS:
-            return self._bsim_usecases.execute(command, normalized_params, target=target)
-        return self._datatypes_usecases.execute(command, normalized_params, target=target)
+        return self._core_gateway.execute(command, params or {}, target=target)
 
 
 __all__ = ["CoreCommandService"]

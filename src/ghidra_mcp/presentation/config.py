@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-
 ToolDescriptionMode = Literal["short", "full", "none"]
 LargeResultMode = Literal["resource", "inline"]
 
@@ -31,9 +30,7 @@ class ToolPresentationConfig:
         if self.large_result_preview_chars > self.large_result_threshold_chars:
             # A preview larger than the threshold would let compaction emit a
             # "truncated" result bigger than the original payload.
-            raise ValueError(
-                "large_result_preview_chars must be <= large_result_threshold_chars"
-            )
+            raise ValueError("large_result_preview_chars must be <= large_result_threshold_chars")
         if self.result_cache_max_entries < 1:
             raise ValueError("result_cache_max_entries must be >= 1")
         if self.result_cache_max_bytes < 1:

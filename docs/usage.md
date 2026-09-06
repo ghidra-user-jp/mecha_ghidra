@@ -119,6 +119,7 @@ GitHub releases publish both a ready-to-use `ghidra_12.1.2_decompiler_natives_al
 
 - Analysis targets: bind mount `./samples` to `/samples` (read-only)
 - Ghidra project: mount the named volume `ghidra-projects` at `/data/projects` (read-write)
+- Exports: bind mount `./exports` to `/data/exports`; `export_program` may only write below it (`--allowed-export-root`)
 
 This is the recommended default for two reasons.
 
@@ -136,12 +137,17 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 
 ## Notes
 
-- `--transport http` is recommended for HTTP connectivity. This starts FastMCP in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
+- `--transport http` is recommended for HTTP connectivity. This starts the MCP server in Streamable HTTP mode and serves `http://127.0.0.1:8081/mcp`.
 - `--transport sse` is still available for compatibility (`/sse`).
 - A wildcard bind (`--mcp-host 0.0.0.0` or `::`) keeps DNS-rebinding protection enabled and accepts only loopback Host/Origin values by default. For intentional remote access, bind a fixed IP/hostname matching the client-facing Host and combine it with TLS, authentication, and network access controls.
 - Tool exposure is controlled by `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, and `--disable-tool`.
 - `shared_sync` is a regular tool category. Add it with `--add-category shared_sync` or use `--tool-profile full` when you need to expose shared-project sync tools for `commit/pull/checkout/delete` operations.
-- No tool flags is equivalent to `--tool-profile default`, which keeps the default tool set and excludes `shared_sync`.
+- No tool flags is equivalent to `--tool-profile default`, which keeps the default tool set and excludes `shared_sync` and `bsim`. BSim tools need `--add-category bsim` plus `--bsim-url` (or a per-call `bsim_url`).
+- `--allowed-import-root DIR` and `--allowed-project-root DIR` (both repeatable) restrict which host paths `import_program`, `create_project`, `create_session`, and `register_target` may touch. Configure both for every HTTP/SSE deployment; the server warns at start-up when they are missing on a network transport. Requests outside the roots fail with `PATH_NOT_ALLOWED`.
+- `--allowed-export-root DIR` (repeatable) restricts where `export_program` may write. Configure it alongside the import and project roots for network deployments; the start-up warning covers all three.
+- `undo_program_change` reverts the most recent transactions of the loaded program (one mutating tool call is one transaction); the history is per session and disappears on reload. `get_program_info` reports `can_undo`/`can_redo`.
+- `--lock-timeout-seconds N` (default 30) bounds how long a tool call waits for a target that another call is using. Parallel calls from one agent queue up to this long and then receive a retryable `LOCK_TIMEOUT`.
+- Tool failures are returned as MCP tool errors (`isError: true`) whose text begins with a stable code (`CHECKOUT_REQUIRED:`, `PATH_NOT_ALLOWED:`, `PROGRAM_NOT_ANALYZED:`, ...). Agents should branch on that prefix rather than on the free text that follows it.
 - `--allow-category` replaces the current category set, `--add-category` extends it, same-type allow flags are OR, and different allow types are AND.
 - If shared-project authentication is required, specify `--ghidra-server-user` together with exactly one of `--ghidra-server-password` or `--ghidra-server-password-env`. Supplying only one side, or supplying both password options together, causes startup failure.
 - Startup also fails when `--ghidra-server-password` is empty or when the env var specified by `--ghidra-server-password-env` is unset or empty. The password value is never logged. If you want to avoid exposing secrets in process arguments, prefer `--ghidra-server-password-env`.
@@ -149,7 +155,7 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - If `--domain-path` is omitted, startup registers only the project target (works with empty projects). In this mode, import with `import_program` and open with `load_project_program`.
 - If the project does not exist yet, `create_project` can create an empty local `.gpr/.rep` before `register_target`, `import_program`, or `load_project_program`. It refuses existing projects unless `overwrite=true`.
 - Use `load_project_program` to load/switch programs on an existing target. Use `create_session` to create a new target. Use `register_target` when you want to register only project info first.
-- In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis; use `analyze_program` or `reanalyze_program` when you need an explicit analysis pass.
+- In `load_project_program` (and equivalent internal `create_session` path), analysis runs only on the first load per `target + domain_path`. Reloading the same program in the same target lifecycle does not re-run analysis; use `analyze_program` (with `force=true` to re-run it) when you need an explicit analysis pass.
 - After mutating tools such as `rename_function`, call `save_project_program(target="default")` to persist changes into `.gpr/.rep`. If the same program is already open in the Ghidra GUI, reopen or reload it there to see the saved state.
 - Use `add_project_program_to_version_control` when you want to put a private project program under shared version control (only when the option is enabled).
 - Shared-project sync tools target the currently loaded program when `domain_path` is omitted, and directly target the specified program when `domain_path` is provided.
@@ -159,8 +165,11 @@ If you place `./samples/hello.bin` on the host, use it from the MCP client like 
 - Due to Ghidra limitations, merge conflict resolution is not supported in headless mode (`checkin/merge` return `requires merge ... not supported in headless mode`).
 - `pull_project_program(on_local_changes="discard")` uses `undoCheckout(keep=False)` for local changes, and if `can_merge=true` on a checked-out program it follows the latest server state by dropping the stale checkout instead of calling `DomainFile.merge()`.
 - When `can_merge=true` but there is no disposable checkout to drop, `pull_project_program` fails with `UNSAFE_MERGE_REQUIRED` instead of invoking Ghidra's PropertyList merge path.
-- `commit_project_program` detects merge conflicts (`can_merge=true`) and now aborts by default with `UNSAFE_MERGE_REQUIRED`; pass `on_conflict="discard"` only when you explicitly want to drop the local checkout and follow the latest server state (`status=ok`, `committed=false`, `conflict_discarded=true`).
-- In the Docker setup, the defaults are `./samples:/samples:ro` and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
+- `commit_project_program` detects merge conflicts (`can_merge=true`) and aborts by default with `MERGE_REQUIRED`. Pass `on_conflict="keep"` to park the local edits in a `<name>.keep` copy (`kept_program`) and follow the latest server state, or `on_conflict="discard"` to drop them (`status=ok`, `committed=false`, `conflict_kept`/`conflict_discarded=true`). A loaded target follows the kept copy, so the edits stay open.
+- `--shared-sync-exclusive-checkout` makes checkouts exclusive unless a call passes `exclusive` explicitly. Because headless Ghidra cannot merge, an agent that shares programs with human analysts should run with it: nobody else can check the file out while the agent holds it, so no conflict can arise.
+- `load_project_program(version=N)` opens a past version of a shared-project program read-only in the target (`read_only=true`). Use it with `get_version_history` and `get_version_diff(include_details=true)` to review what a commit changed; mutating tools fail with `READ_ONLY_PROGRAM`. Loading the domain path a target already holds reloads it in place (`reloaded=true`).
+- BSim: `bsim_query_target` and `bsim_query_function` drop matches against the program's own database record (`exclude_self=false` keeps them); `bsim_query_function` accepts `addresses`/`function_names` lists; `bsim_apply_matches` renames default-named functions after their best match (`dry_run=true` previews); `bsim_update_target_signatures` pushes renamed functions back to the database; `bsim_delete_executable` removes a record before re-registering; `bsim_load_matched_executable` opens `ghidra://` matches through `--bsim-remote-cache-dir`.
+- In the Docker setup, the defaults are `./samples:/samples:ro`, `./exports:/data/exports`, and `ghidra-projects:/data/projects`. Pass input files as `/samples/<filename>`.
 - The Docker server starts with project metadata only, so create the project with `create_project` on a fresh volume, then import with `import_program` and open it with `load_project_program`.
 
 ### Tool Exposure Examples

@@ -6,11 +6,17 @@ import logging
 import threading
 from typing import Any, Callable
 
-from ghidra_mcp.application.services.runtime_state import RuntimeState
+from ghidra_headless.errors import HeadlessError, error_code_of
 from ghidra_headless.session import ProgramSession, ProjectHandle
-
+from ghidra_mcp.application.services.runtime_state import RuntimeState
 
 logger = logging.getLogger(__name__)
+
+# Close failures with these codes keep their own code; anything else is reported
+# as a generic SESSION_CLOSE_FAILED.
+_SURFACED_CLOSE_CODES = frozenset(
+    {"SAVE_FAILED", "PROGRAM_CLOSE_FAILED", "SESSION_CLOSE_FAILED", "REMOVE_PROGRAM_FAILED"}
+)
 
 
 class RuntimeSessionStore:
@@ -78,7 +84,7 @@ class RuntimeSessionStore:
             observed = current
         try:
             candidate.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(
                 "failed to close duplicate project handle for %s::%s: %s",
                 key[0],
@@ -139,7 +145,7 @@ class RuntimeSessionStore:
         try:
             if session is not None:
                 session.close(save=save, remove_program=remove_program)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             close_error = exc
 
         # A detached/stale session may finish closing after another session has
@@ -147,12 +153,8 @@ class RuntimeSessionStore:
         # remove the replacement session's context.
         with self.registry_lock.read_lock():
             current_session = self.sessions.get(name)
-        can_clear_dirty = owns_target_state and (
-            current_session is None or current_session is session
-        )
-        can_remove_context = owns_target_state and (
-            not remove_registry_entry or can_clear_dirty
-        )
+        can_clear_dirty = owns_target_state and (current_session is None or current_session is session)
+        can_remove_context = owns_target_state and (not remove_registry_entry or can_clear_dirty)
         if remove_context and can_remove_context:
             self.core_accessor().remove_context(name)
 
@@ -170,26 +172,14 @@ class RuntimeSessionStore:
                 if self.project_handles.get(handle_key) is handle:
                     self.project_handles.pop(handle_key, None)
             current_session = self.sessions.get(name)
-            can_clear_dirty = owns_target_state and (
-                current_session is None or current_session is session
-            )
-            if (
-                can_clear_dirty
-                and session_domain_path is not None
-                and (close_error is None or session_closed)
-            ):
+            can_clear_dirty = owns_target_state and (current_session is None or current_session is session)
+            if can_clear_dirty and session_domain_path is not None and (close_error is None or session_closed):
                 self.clear_dirty_program(name, session_domain_path)
 
         if close_error is not None:
-            message = str(close_error)
-            if (
-                message.startswith("SAVE_FAILED:")
-                or message.startswith("PROGRAM_CLOSE_FAILED:")
-                or message.startswith("SESSION_CLOSE_FAILED:")
-                or message.startswith("REMOVE_PROGRAM_FAILED:")
-            ):
-                raise RuntimeError(message) from close_error
-            raise RuntimeError(f"SESSION_CLOSE_FAILED: {close_error}")
+            if error_code_of(close_error) in _SURFACED_CLOSE_CODES:
+                raise HeadlessError(str(close_error)) from close_error
+            raise HeadlessError(f"SESSION_CLOSE_FAILED: {close_error}")
 
     def has_sessions(self) -> bool:
         with self.registry_lock.read_lock():

@@ -76,7 +76,9 @@ class DummyRuntime:
         return {"status": "ok"}
 
     def pull_project_program(self, name: str, *, on_local_changes: str = "abort", domain_path: str | None = None):
-        self.calls.append(("pull_project_program", (name,), {"on_local_changes": on_local_changes, "domain_path": domain_path}))
+        self.calls.append(
+            ("pull_project_program", (name,), {"on_local_changes": on_local_changes, "domain_path": domain_path})
+        )
         return {"status": "ok"}
 
     def undo_checkout_project_program(
@@ -96,7 +98,9 @@ class DummyRuntime:
         return {"status": "ok"}
 
     def terminate_project_program_checkout(self, name: str, *, checkout_id: int, domain_path: str | None = None):
-        self.calls.append(("terminate_project_program_checkout", (name,), {"checkout_id": checkout_id, "domain_path": domain_path}))
+        self.calls.append(
+            ("terminate_project_program_checkout", (name,), {"checkout_id": checkout_id, "domain_path": domain_path})
+        )
         return {"status": "ok"}
 
     def delete_shared_project_file(
@@ -124,10 +128,6 @@ class DummyRuntime:
         )
         return {"status": "ok"}
 
-    def reload_project_program(self, name: str, *, domain_path: str | None = None):
-        self.calls.append(("reload_project_program", (name,), {"domain_path": domain_path}))
-        return {"status": "ok"}
-
     def get_version_history(self, name: str, *, limit: int = 50, domain_path: str | None = None):
         self.calls.append(("get_version_history", (name,), {"limit": limit, "domain_path": domain_path}))
         return {"history": []}
@@ -139,6 +139,8 @@ class DummyRuntime:
         from_version: int,
         to_version: int,
         range_limit: int = 200,
+        include_details: bool = False,
+        details_limit: int = 20,
         domain_path: str | None = None,
     ):
         self.calls.append(
@@ -149,6 +151,8 @@ class DummyRuntime:
                     "from_version": from_version,
                     "to_version": to_version,
                     "range_limit": range_limit,
+                    "include_details": include_details,
+                    "details_limit": details_limit,
                     "domain_path": domain_path,
                 },
             )
@@ -169,11 +173,10 @@ def test_sync_service_lifecycle_and_lock_routing():
     assert service.undo_checkout_project_program("fw", discard_local_changes=False) == {"status": "ok"}
     assert service.terminate_project_program_checkout("fw", checkout_id=1) == {"status": "ok"}
     assert service.delete_shared_project_file("fw", domain_path="/main", confirm="/main") == {"status": "ok"}
-    assert service.reload_project_program("fw") == {"status": "ok"}
     assert service.get_version_history("fw", limit=10) == {"history": []}
     assert service.get_version_diff("fw", from_version=1, to_version=2) == {"diffs": []}
 
-    assert lock_manager.calls == [("fw", "/tmp/prj::sample")] * 11
+    assert lock_manager.calls == [("fw", "/tmp/prj::sample")] * 10
 
 
 def test_sync_service_preserves_runtime_domain_error_code():

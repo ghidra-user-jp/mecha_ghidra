@@ -3,14 +3,13 @@
 from __future__ import absolute_import, print_function
 
 from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
-from ghidra.program.model.data import CategoryPath, DataUtilities, StructureDataType
+from ghidra.program.model.data import CategoryPath, DataUtilities, EnumDataType, StructureDataType
 from ghidra.program.model.listing import CodeUnit
 from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 from ghidra.util.task import TaskMonitor
 
 from ghidra_headless.handlers.core_command_registry import (
-    COMMAND_DEP_KEYS,
     COMMAND_NAMES,
     COMMAND_PROFILE,
     COMMAND_TO_IMPL,
@@ -23,8 +22,8 @@ from ghidra_headless.handlers.core_helpers import (
     _decode_hex_bytes,
     _decompile_function_object,
     _decompile_high_function,
-    _describe_enum,
     _describe_data_type,
+    _describe_enum,
     _describe_struct,
     _dt_manager,
     _find_data_type_by_name,
@@ -80,6 +79,7 @@ _PROFILE_DEPENDENCIES = {
     "describe_data_type": _describe_data_type,
     "category_path": CategoryPath,
     "structure_data_type": StructureDataType,
+    "enum_data_type": EnumDataType,
     "component_length": _component_length,
     "describe_struct": _describe_struct,
     "get_struct_datatype": _get_struct_datatype,
@@ -91,11 +91,6 @@ _PROFILE_DEPENDENCIES = {
     "data_utilities": DataUtilities,
     "task_monitor": TaskMonitor,
 }
-
-
-def _touch_params(command, params):
-    for key in COMMAND_DEP_KEYS.get(command, ()):
-        params.get(key)
 
 
 def _build_profile_kwargs(profile):
@@ -116,9 +111,7 @@ def _make_handler(command):
     profile = COMMAND_PROFILE[command]
 
     def _handler(params):
-        normalized_params = params or {}
-        _touch_params(command, normalized_params)
-        return impl(normalized_params, **_build_profile_kwargs(profile))
+        return impl(params or {}, **_build_profile_kwargs(profile))
 
     _handler.__name__ = command
     _handler.__doc__ = "Generated core handler for %s" % command

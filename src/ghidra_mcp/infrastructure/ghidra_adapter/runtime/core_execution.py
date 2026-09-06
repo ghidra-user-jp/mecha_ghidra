@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from ghidra_mcp.infrastructure.locks import acquire_ordered_locks
+from ghidra_headless.errors import HeadlessError
+from ghidra_mcp.application.locks import acquire_ordered_locks
 
 from .session_store import RuntimeSessionStore
 
@@ -36,10 +37,8 @@ class RuntimeCoreExecution:
                 lock = self._store.ensure_lock(target)
                 project_key = self._store.target_projects.get(target)
                 if project_key is None:
-                    get_key = getattr(session.get_project_handle(), "get_key", None)
-                    if get_key is not None:
-                        project_key = get_key()
-                        self._store.target_projects[target] = project_key
+                    project_key = session.get_project_handle().get_key()
+                    self._store.target_projects[target] = project_key
                 project_lock = self._store.ensure_project_lock(project_key) if project_key is not None else None
 
             locks = [("target", lock)]
@@ -51,7 +50,7 @@ class RuntimeCoreExecution:
                     if current_session is None:
                         raise RuntimeError(f"Session '{target}' is not initialized")
                     if current_session is not session:
-                        raise RuntimeError(
+                        raise HeadlessError(
                             f"SESSION_CHANGED: target '{target}' session changed before core command execution"
                         )
                     current_project_key = self._store.target_projects.get(target)
@@ -60,7 +59,7 @@ class RuntimeCoreExecution:
                         and current_project_key is not None
                         and current_project_key != project_key
                     ):
-                        raise RuntimeError(
+                        raise HeadlessError(
                             f"SESSION_CHANGED: target '{target}' project changed before core command execution"
                         )
                 self._ensure_checkout_for_mutating_command_locked(command, target)
@@ -82,12 +81,18 @@ class RuntimeCoreExecution:
             session = self._store.sessions.get(target)
         if session is None:
             return
+        read_only_version = getattr(session, "read_only_version", None)
+        if read_only_version is not None:
+            raise HeadlessError(
+                f"READ_ONLY_PROGRAM: target '{target}' holds version {int(read_only_version)} opened read-only; "
+                "load the current version with load_project_program before mutating"
+            )
         handle = session.get_project_handle()
         domain_path = self._store.session_domain_path(session)
         self._refresh_project_sync_state_locked(handle, required=True)
         status = handle.get_sync_status(domain_path)
         if status.get("is_hijacked"):
-            raise RuntimeError(
+            raise HeadlessError(
                 "HIJACKED_PROGRAM: mutating operations are blocked because a private local file "
                 "shadows the repository version; recover it with "
                 "pull_project_program(on_local_changes='discard')"
@@ -101,7 +106,7 @@ class RuntimeCoreExecution:
                 handle = session.get_project_handle()
                 status = handle.get_sync_status(domain_path)
             if status.get("is_hijacked"):
-                raise RuntimeError(
+                raise HeadlessError(
                     "HIJACKED_PROGRAM: mutating operations are blocked because a private local file "
                     "shadows the repository version; recover it with "
                     "pull_project_program(on_local_changes='discard')"
@@ -109,14 +114,14 @@ class RuntimeCoreExecution:
             if status.get("is_versioned"):
                 if status.get("is_checked_out"):
                     return
-                raise RuntimeError(
+                raise HeadlessError(
                     "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects. "
                     "Run checkout_project_program first"
                 )
             return
         if status.get("is_checked_out"):
             return
-        raise RuntimeError(
+        raise HeadlessError(
             "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects. "
             "Run checkout_project_program first"
         )
@@ -140,7 +145,7 @@ class RuntimeCoreExecution:
         if runtime_dirty:
             return False
         if self._active_program_is_changed_locked(target, domain_path):
-            raise RuntimeError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
+            raise HeadlessError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
 
         handle = session.get_project_handle()
         project_key = handle.get_key()
@@ -162,14 +167,14 @@ class RuntimeCoreExecution:
                 with self._store.registry_lock.write_lock():
                     self._store.sessions[target] = reopened
                 reopened_session_bound = True
-            except Exception as init_error:  # noqa: BLE001
+            except Exception as init_error:
                 try:
                     reopened.close(save=False)
-                except Exception as close_exc:  # noqa: BLE001
+                except Exception as close_exc:
                     with self._store.registry_lock.write_lock():
                         self._store.sessions[target] = reopened
                     reopened_session_bound = True
-                    raise RuntimeError(
+                    raise HeadlessError(
                         "PROGRAM_CLOSE_FAILED: failed to close reopened session during "
                         f"checkout guard rollback for target '{target}': {close_exc}; "
                         f"original error: {init_error}"
@@ -198,7 +203,7 @@ class RuntimeCoreExecution:
             return False
         try:
             return bool(session.get_program().isChanged())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning(
                 "failed to determine active program dirty state for target '%s'; assuming changed: %s",
                 target,
@@ -206,7 +211,7 @@ class RuntimeCoreExecution:
             )
             return True
 
-    def _cleanup_reopenable_target_state_locked(self, target: str, *, handle=None) -> None:  # noqa: ANN001
+    def _cleanup_reopenable_target_state_locked(self, target: str, *, handle=None) -> None:
         with self._store.registry_lock.write_lock():
             self._store.sessions.pop(target, None)
             self._store.locks.pop(target, None)
@@ -218,18 +223,18 @@ class RuntimeCoreExecution:
             self._store.clear_dirty_programs_for_target(target)
         try:
             self._store.core_accessor().remove_context(target)
-        except Exception as remove_exc:  # noqa: BLE001
+        except Exception as remove_exc:
             logger.warning("failed to remove context while cleaning target '%s': %s", target, remove_exc)
 
     @staticmethod
-    def _handle_is_closed(handle) -> bool:  # noqa: ANN001
+    def _handle_is_closed(handle) -> bool:
         try:
             return bool(handle.is_closed())
         except Exception:
             return False
 
     @staticmethod
-    def _session_is_closed(session) -> bool:  # noqa: ANN001
+    def _session_is_closed(session) -> bool:
         try:
             session.get_project_handle()
             return False
@@ -237,20 +242,13 @@ class RuntimeCoreExecution:
             return True
 
     @staticmethod
-    def _refresh_project_sync_state_locked(handle, *, required: bool = False) -> bool:  # noqa: ANN001
-        refresh_project_data = getattr(handle, "refresh_project_data", None)
-        if refresh_project_data is None:
-            if required:
-                raise RuntimeError(
-                    "SYNC_OPERATION_FAILED: project handle does not support required sync refresh"
-                )
-            return False
+    def _refresh_project_sync_state_locked(handle, *, required: bool = False) -> bool:
         try:
-            refresh_project_data(force=True)
-        except Exception as exc:  # noqa: BLE001
+            handle.refresh_project_data(force=True)
+        except Exception as exc:
             logger.debug("failed to refresh project sync state before checkout guard: %s", exc)
             if required:
-                raise RuntimeError(f"SYNC_OPERATION_FAILED: failed to refresh project sync state: {exc}") from exc
+                raise HeadlessError(f"SYNC_OPERATION_FAILED: failed to refresh project sync state: {exc}") from exc
             return False
         return True
 

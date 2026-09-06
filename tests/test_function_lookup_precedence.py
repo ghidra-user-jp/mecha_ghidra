@@ -39,6 +39,16 @@ class _SourceType:
     USER_DEFINED = object()
 
 
+def _safe_call(obj, name, *args):
+    method = getattr(obj, name, None)
+    if method is None:
+        return None
+    try:
+        return method(*args)
+    except Exception:
+        return None
+
+
 def test_get_function_prefers_address_over_name():
     address_function = _Function("by_address", "0x401000")
     ctx = _Context(address_function)
@@ -51,9 +61,12 @@ def test_get_function_prefers_address_over_name():
         ensure_context=lambda: ctx,
         get_address=lambda _ctx, text: text,
         find_function_by_name=find_function_by_name,
+        safe_call=_safe_call,
+        iter_items=iter,
     )
 
-    assert result == {"name": "by_address", "entry": "0x401000"}
+    assert (result["name"], result["entry"]) == ("by_address", "0x401000")
+    assert result["parameters"] == [] and result["local_variables"] == []
 
 
 def test_get_function_accepts_name():
@@ -65,9 +78,11 @@ def test_get_function_accepts_name():
         ensure_context=lambda: ctx,
         get_address=lambda _ctx, text: text,
         find_function_by_name=lambda _ctx, _name: named_function,
+        safe_call=_safe_call,
+        iter_items=iter,
     )
 
-    assert result == {"name": "by_name", "entry": "0x402000"}
+    assert (result["name"], result["entry"]) == ("by_name", "0x402000")
 
 
 def test_decompile_function_prefers_address_over_name():

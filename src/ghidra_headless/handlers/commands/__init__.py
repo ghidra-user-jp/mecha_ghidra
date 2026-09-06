@@ -1,5 +1,48 @@
 """Command modules split from legacy core handler."""
 
+from .mutating_bsim import (
+    bsim_apply_matches,
+    bsim_register_target,
+    bsim_update_target_signatures,
+)
+from .mutating_data_types import (
+    add_struct_members,
+    create_enum,
+    create_struct,
+    delete_data_type,
+    parse_c_declarations,
+    remove_struct_members,
+    rename_data_type,
+    set_enum_values,
+    set_global_data_type,
+)
+from .mutating_symbols import (
+    add_bookmark,
+    analyze_program,
+    create_function,
+    delete_bookmark,
+    delete_function,
+    rename_data,
+    rename_function,
+    rename_variable,
+    set_bytes,
+    set_comment,
+    set_function_prototype,
+    set_local_variable_type,
+)
+from .program_tools import (
+    create_label,
+    export_program,
+    get_comments,
+    get_program_info,
+    redo_program_change,
+    search_symbols,
+    undo_program_change,
+)
+from .read_only_bsim import (
+    bsim_query_function,
+    bsim_query_target,
+)
 from .read_only_decompile import (
     decompile_function,
     disassemble_function,
@@ -8,16 +51,16 @@ from .read_only_decompile import (
 )
 from .read_only_functions import (
     get_function,
-    list_classes,
     list_functions,
-    search_functions_by_name,
 )
 from .read_only_memory_data import (
     get_bytes,
     get_data_by_label,
     get_enum,
     get_struct,
+    list_bookmarks,
     list_data_items,
+    list_data_types,
     list_exports,
     list_imports,
     list_namespaces,
@@ -30,43 +73,18 @@ from .read_only_xrefs import (
     get_xrefs_from,
     get_xrefs_to,
 )
-from .read_only_bsim import (
-    bsim_query_function,
-    bsim_query_target,
-)
-from .mutating_symbols import (
-    add_bookmark,
-    analyze_program,
-    create_function,
-    delete_bookmark,
-    delete_function,
-    list_bookmarks,
-    reanalyze_program,
-    rename_data,
-    rename_function,
-    rename_variable,
-    set_bytes,
-    set_decompiler_comment,
-    set_disassembly_comment,
-    set_function_prototype,
-    set_local_variable_type,
-)
-from .mutating_data_types import (
-    add_struct_members,
-    clear_struct,
-    create_struct,
-    delete_struct,
-    list_data_types,
-    remove_struct_members,
-    rename_data_type,
-    set_global_data_type,
-)
-from .mutating_bsim import (
-    bsim_register_target,
-    bsim_set_target_metadata,
-)
 
 __all__ = [
+    "create_enum",
+    "create_label",
+    "export_program",
+    "get_comments",
+    "get_program_info",
+    "parse_c_declarations",
+    "redo_program_change",
+    "search_symbols",
+    "set_enum_values",
+    "undo_program_change",
     "decompile_function",
     "disassemble_function",
     "disassemble_range",
@@ -90,14 +108,12 @@ __all__ = [
     "rename_function",
     "rename_data",
     "rename_variable",
-    "set_decompiler_comment",
-    "set_disassembly_comment",
+    "set_comment",
     "set_function_prototype",
     "set_local_variable_type",
     "create_struct",
     "add_struct_members",
-    "clear_struct",
-    "delete_struct",
+    "delete_data_type",
     "rename_data_type",
     "list_data_types",
     "remove_struct_members",
@@ -109,11 +125,9 @@ __all__ = [
     "create_function",
     "delete_function",
     "analyze_program",
-    "reanalyze_program",
     "bsim_register_target",
-    "bsim_set_target_metadata",
+    "bsim_apply_matches",
+    "bsim_update_target_signatures",
     "list_functions",
-    "list_classes",
-    "search_functions_by_name",
     "get_function",
 ]

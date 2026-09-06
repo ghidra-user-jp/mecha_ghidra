@@ -66,7 +66,7 @@ def disassemble_function(params, *, ensure_context, get_address, iter_items, cod
 
 def disassemble_range(params, *, ensure_context, get_address, to_int, iter_items, code_unit):
     ctx = ensure_context()
-    start_text = params.get("start_address") or params.get("address")
+    start_text = params.get("start_address")
     end_text = params.get("end_address")
     length = params.get("length")
     limit = normalize_limit(params, to_int, 200)
@@ -117,4 +117,12 @@ def get_callee(params, *, ensure_context, get_address, iter_items, task_monitor)
         thunked = function.getThunkedFunction(False)
         if thunked is not None:
             callees_list = list(iter_items(thunked.getCalledFunctions(task_monitor.DUMMY)))
-    return sorted(["%s @ %s" % (callee.getName(True), callee.getEntryPoint()) for callee in callees_list])
+    rows = [
+        {
+            "name": str(callee.getName(True)),
+            "entry": str(callee.getEntryPoint()),
+            "is_external": bool(callee.isExternal()),
+        }
+        for callee in callees_list
+    ]
+    return sorted(rows, key=lambda row: (row["name"], row["entry"]))

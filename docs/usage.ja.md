@@ -119,6 +119,7 @@ GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.2_d
 
 - 解析対象: `./samples` を `/samples` に bind mount（read-only）
 - Ghidra project: named volume `ghidra-projects` を `/data/projects` に mount（read-write）
+- 書き出し先: `./exports` を `/data/exports` に bind mount。`export_program` はこの配下にしか書けません（`--allowed-export-root`）
 
 推奨構成をこの形にしている理由は次のとおりです。
 
@@ -136,12 +137,12 @@ GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.2_d
 
 ## Notes
 
-- http接続時の推奨は `--transport http` です。FastMCP の Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
+- http接続時の推奨は `--transport http` です。MCP サーバーを Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
 - 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
 - `--mcp-host 0.0.0.0`（または `::`）で wildcard bind しても DNS rebinding protection は有効なままで、既定では loopback の Host/Origin だけを許可します。外部公開する場合は client-facing Host と一致する固定 IP/hostname を bind し、TLS、認証、ネットワークアクセス制御を併用してください。
 - ツール公開は `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, `--disable-tool` で制御します。
 - `shared_sync` は通常の tool category です。shared project の `commit/pull/checkout/delete` operations を行う同期ツールを公開したい場合は、`--add-category shared_sync` を追加するか、`--tool-profile full` を使ってください。
-- ツール制御引数を何も付けない場合は `--tool-profile default` と同じで、default のツール集合を使い、`shared_sync` は含みません。
+- ツール制御引数を何も付けない場合は `--tool-profile default` と同じで、default のツール集合を使い、`shared_sync` と `bsim` は含みません。BSim ツールは `--add-category bsim` に加えて `--bsim-url`（または呼び出しごとの `bsim_url`）が必要です。
 - `--allow-category` は現在の category 集合を置き換え、`--add-category` は追加します。同じ種類の allow は OR、異なる種類は AND で評価されます。
 - shared project の認証が必要な場合は `--ghidra-server-user` と、`--ghidra-server-password` または `--ghidra-server-password-env` のどちらか片方をセットで指定してください。片方だけ指定した場合や、両方のパスワード指定を同時に行った場合は起動エラーになります。
 - `--ghidra-server-password` が空文字の場合、または `--ghidra-server-password-env` で指定した環境変数が未設定/空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。プロセス引数へ秘密情報を出したくない場合は `--ghidra-server-password-env` を推奨します。
@@ -149,7 +150,7 @@ GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.2_d
 - `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
 - project がまだ存在しない場合は、`create_project` で空のローカル `.gpr/.rep` を作成してから `register_target` / `import_program` / `load_project_program` を実行できます。既存 project は `overwrite=true` を明示しない限り上書きしません。
 - 既存ターゲットへ program をロード/切り替える操作は `load_project_program` を使い、新規ターゲット作成は `create_session` を使います。program 未指定で先にターゲットだけ作る場合は `register_target` を使ってください。
-- `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。明示的な解析パスが必要な場合は `analyze_program` または `reanalyze_program` を使ってください。
+- `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。明示的な解析パスが必要な場合は `analyze_program`（再実行は `force=true`）を使ってください。
 - `rename_function` などの更新系 tool を使った後、変更を `.gpr/.rep` に残すには `save_project_program(target="default")` を呼んでください。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードが必要になることがあります。
 - private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
 - shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
@@ -159,8 +160,16 @@ GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.2_d
 - Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
 - `pull_project_program(on_local_changes="discard")` はローカル変更に対して `undoCheckout(keep=False)` を使用し、さらに checked-out 状態で `can_merge=true` の場合は `DomainFile.merge()` を呼ばず、古い checkout を破棄して最新サーバー状態へ追従します。
 - `can_merge=true` でも破棄できる checkout が無い場合、`pull_project_program` は Ghidra の PropertyList merge 経路を踏まずに `UNSAFE_MERGE_REQUIRED` で停止します。
-- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでは `UNSAFE_MERGE_REQUIRED` で停止します。ローカル checkout を破棄して最新サーバー状態へ追従したい場合のみ `on_conflict="discard"` を明示してください（`status=ok` / `committed=false` / `conflict_discarded=true`）。
-- Docker 構成では `./samples:/samples:ro` と `ghidra-projects:/data/projects` を既定で使います。入力ファイルは `/samples/<filename>` として指定してください。
+- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでは `MERGE_REQUIRED` で停止します。`on_conflict="keep"` を指定するとローカル編集を `<name>.keep` コピー（`kept_program`）に退避して最新サーバー状態へ追従し、`on_conflict="discard"` は編集を破棄します（`status=ok` / `committed=false` / `conflict_kept` または `conflict_discarded=true`）。ロード中のターゲットは退避したコピーを開き直すので、編集内容は開いたままになります。
+- `--shared-sync-exclusive-checkout` を付けると、`exclusive` を明示しない checkout が排他になります。headless の Ghidra は merge できないため、人と program を共有するエージェントはこのフラグ付きで動かすことを推奨します。エージェントが checkout している間は他者が checkout できないので、競合自体が起きません。
+- `load_project_program(version=N)` は shared project の過去バージョンを読み取り専用でターゲットに開きます（`read_only=true`）。`get_version_history` と `get_version_diff(include_details=true)` と組み合わせて、コミットで何が変わったかを確認できます。更新系ツールは `READ_ONLY_PROGRAM` で失敗します。ターゲットが既に保持している `domain_path` をロードすると、その場で再ロードします（`reloaded=true`）。
+- BSim: `bsim_query_target` と `bsim_query_function` は program 自身の DB record への一致を除外します（`exclude_self=false` で残せます）。`bsim_query_function` は `addresses` / `function_names` のリストを受け付けます。`bsim_apply_matches` は既定名のままの関数を最良一致の名前でリネームし（`dry_run=true` で事前確認）、`bsim_update_target_signatures` は付け直した関数名を DB に書き戻し、`bsim_delete_executable` は再登録前に record を削除します。`bsim_load_matched_executable` は `--bsim-remote-cache-dir` 経由で `ghidra://` の一致を開きます。
+- Docker 構成では `./samples:/samples:ro`、`./exports:/data/exports`、`ghidra-projects:/data/projects` を既定で使います。入力ファイルは `/samples/<filename>` として指定してください。
+- `--allowed-import-root DIR` と `--allowed-project-root DIR`（いずれも複数指定可）で、`import_program`、`create_project`、`create_session`、`register_target` が触れるホスト上のパスを制限できます。HTTP/SSE で公開する構成では必ず両方を設定してください。ネットワークトランスポートで未指定の場合は起動時に警告が出ます。ルート外を指定した要求は `PATH_NOT_ALLOWED` で失敗します。
+- `--allowed-export-root DIR`（複数指定可）は `export_program` の書き出し先を制限します。ネットワーク公開時は import / project のルートと合わせて設定してください。起動時の警告は 3 つのルートをまとめて扱います。
+- `undo_program_change` はロード中 program の直近トランザクション（更新系ツール 1 回が 1 トランザクション）を取り消します。履歴はセッション単位で、再ロードすると消えます。`get_program_info` の `can_undo` / `can_redo` で確認できます。
+- `--lock-timeout-seconds N`（デフォルト 30）は、別の呼び出しが使用中のターゲットを待つ上限秒数です。同一エージェントからの並列呼び出しはこの時間まで順番待ちし、超えると再試行可能な `LOCK_TIMEOUT` を受け取ります。
+- ツールの失敗は MCP のツールエラー（`isError: true`）として返り、本文は `CHECKOUT_REQUIRED:`、`PATH_NOT_ALLOWED:`、`PROGRAM_NOT_ANALYZED:` のような安定したコードで始まります。エージェント側では後続の自由文ではなく、この接頭辞で分岐してください。
 - Docker で初回起動する server は project のみを登録した状態で立ち上がるため、新規 volume では `create_project` で project を作成し、その後 `import_program` で取り込み、続けて `load_project_program` で program を開いてください。
 
 ### ツール公開制御の例

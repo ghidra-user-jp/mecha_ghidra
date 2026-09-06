@@ -138,9 +138,9 @@ def _to_iso8601_utc(timestamp_millis) -> Optional[str]:
         return None
     try:
         timestamp = int(timestamp_millis) / 1000.0
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     try:
         return _dt.datetime.fromtimestamp(timestamp, tz=_dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None

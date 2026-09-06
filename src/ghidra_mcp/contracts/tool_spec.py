@@ -65,16 +65,12 @@ class ToolSpec:
     command_or_method: str
     input_model: type[BaseModel]
     output_model: type[BaseModel]
-    public_signature: tuple[str, ...] = field(default_factory=tuple)
-    error_policy: str = "legacy_compatible"
-    annotations: dict[str, Any] = field(default_factory=dict)
     empty_list_policy: str = "normalize"
     include_target: bool = True
     static_kwargs: dict[str, Any] = field(default_factory=dict)
     result_adapter: str | None = None
     error_adapter: str | None = None
     public_name_overrides: dict[str, str] = field(default_factory=dict)
-    include_none_keys: frozenset[str] = field(default_factory=frozenset)
     omit_falsey_keys: frozenset[str] = field(default_factory=frozenset)
     description: str | None = None
     short_description: str | None = None
@@ -93,6 +89,33 @@ _NO_FIELDS: tuple[ToolFieldSpec, ...] = ()
 _PAGE_OFFSET = Annotated[int, Field(ge=0, le=1_000_000)]
 _PAGE_LIMIT = Annotated[int, Field(ge=1, le=10_000)]
 _RANGE_LIMIT = Annotated[int, Field(ge=0, le=10_000)]
+# Bounds below mirror the runtime checks so clients learn the limits from the
+# schema instead of from a failed call.
+_BYTE_COUNT = Annotated[int, Field(ge=1, le=1_048_576)]
+_POSITIVE_INT = Annotated[int, Field(ge=1)]
+_NON_NEGATIVE_INT = Annotated[int, Field(ge=0)]
+_VERSION_NUMBER = Annotated[int, Field(ge=1)]
+_UNIT_INTERVAL = Annotated[float, Field(ge=0.0, le=1.0)]
+_BSIM_MATCHES_PER_FUNCTION = Annotated[int, Field(ge=1, le=1_000)]
+_BSIM_MAX_RESULTS = Annotated[int, Field(ge=1, le=10_000)]
+_BSIM_MAX_APPLY_FUNCTIONS = Annotated[int, Field(ge=1, le=10_000)]
+_BSIM_MIN_FUNCTION_SIZE = Annotated[int, Field(ge=0, le=1_000_000)]
+_DETAILS_LIMIT = Annotated[int, Field(ge=0, le=200)]
+ConflictAction = Literal["abort", "discard"]
+# Ghidra listing/decompiler comment slots (CodeUnit.*_COMMENT).
+CommentKind = Literal["pre", "eol", "post", "plate", "repeatable"]
+ExportFormat = Literal["gzf", "binary"]
+_UNDO_STEPS = Annotated[int, Field(ge=1, le=100)]
+_ENUM_SIZE = Annotated[int, Field(ge=1, le=8)]
+# commit_project_program can also park the local edits in a .keep copy.
+CommitConflictAction = Literal["abort", "discard", "keep"]
+ClearDataMode = Literal[
+    "CHECK_FOR_SPACE",
+    "CLEAR_SINGLE_DATA",
+    "CLEAR_ALL_UNDEFINED_CONFLICT_DATA",
+    "CLEAR_ALL_DEFAULT_CONFLICT_DATA",
+    "CLEAR_ALL_CONFLICT_DATA",
+]
 _OFFSET_LIMIT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("offset", _PAGE_OFFSET, 0),
     ("limit", _PAGE_LIMIT, 100),
@@ -102,6 +125,16 @@ _STATUS_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("status", str, ...),
     ("target", str, ...),
     ("program", str, ...),
+)
+_LOAD_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("status", str, ...),
+    ("target", str, ...),
+    ("program", str, ...),
+    # True when the target already held this program and it was reopened in place.
+    ("reloaded", bool, False),
+    # Set when a past repository version was opened; such a session is read-only.
+    ("version", int | None, None),
+    ("read_only", bool, False),
 )
 _SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("status", str, ...),
@@ -169,13 +202,16 @@ _GET_VERSION_HISTORY_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
 _GET_VERSION_DIFF_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("target", str, ...),
     ("program", str, ...),
-    ("from_version", int, ...),
-    ("to_version", int, ...),
+    ("from_version", _VERSION_NUMBER, ...),
+    ("to_version", _VERSION_NUMBER, ...),
     ("total_diff_addresses", int, ...),
     ("total_diff_ranges", int, ...),
     ("diff_types", list[object], ...),
     ("ranges", list[object], ...),
     ("ranges_truncated", bool, ...),
+    # Populated only with include_details=true: Ghidra's Diff description per range start.
+    ("details", list[object], ...),
+    ("details_truncated", bool, ...),
     ("warnings", str | None, ...),
 )
 
@@ -218,6 +254,8 @@ _COMMIT_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("merged", bool | None, None),
     ("committed", bool | None, None),
     ("conflict_discarded", bool | None, None),
+    ("conflict_kept", bool | None, None),
+    ("kept_program", str | None, None),
 )
 
 _PULL_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
@@ -230,6 +268,9 @@ _PULL_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("discarded_hijacked_file", bool | None, None),
     ("followed_latest", bool, ...),
     ("reloaded", bool, ...),
+    # Following the latest version drops a stale checkout; the runtime reports
+    # whether the program is still checked out so callers know to re-checkout.
+    ("checked_out", bool, ...),
     ("version", int | None, ...),
     ("latest_version", int | None, ...),
     ("is_latest_version", bool | None, ...),
@@ -250,7 +291,7 @@ _TERMINATE_PROJECT_PROGRAM_CHECKOUT_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("status", str, ...),
     ("target", str, ...),
     ("program", str, ...),
-    ("checkout_id", int, ...),
+    ("checkout_id", _NON_NEGATIVE_INT, ...),
     ("active_checkouts", list[object], ...),
 )
 
@@ -267,20 +308,23 @@ _DELETE_SHARED_PROJECT_FILE_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("atomic_version_guard", bool, ...),
 )
 
-_RELOAD_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
-    ("status", str, ...),
-    ("target", str, ...),
-    ("program", str, ...),
-    ("reloaded", bool, ...),
-)
-
 _BSIM_URL_FIELD: ToolFieldSpec = ("bsim_url", str | None, None)
 _BSIM_QUERY_FIELDS: tuple[ToolFieldSpec, ...] = (
     _BSIM_URL_FIELD,
-    ("similarity_threshold", float, 0.7),
-    ("significance_threshold", float, 0.0),
-    ("matches_per_function", int, 10),
-    ("max_results", int, 500),
+    ("similarity_threshold", _UNIT_INTERVAL, 0.7),
+    ("significance_threshold", _UNIT_INTERVAL, 0.0),
+    ("matches_per_function", _BSIM_MATCHES_PER_FUNCTION, 10),
+    ("max_results", _BSIM_MAX_RESULTS, 500),
+    # The query program is usually in the database too; its own records match
+    # every function perfectly and would bury the useful results.
+    ("exclude_self", bool, True),
+    ("min_function_size", _BSIM_MIN_FUNCTION_SIZE, 0),
+)
+_BSIM_FUNCTION_SELECTOR_FIELDS: tuple[ToolFieldSpec, ...] = (
+    ("address", str | None, None),
+    ("function_name", str | None, None),
+    ("addresses", list[str] | None, None),
+    ("function_names", list[str] | None, None),
 )
 _BSIM_LOAD_MATCH_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("status", str, ...),
@@ -291,6 +335,7 @@ _BSIM_LOAD_MATCH_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("executable_md5", str | None, None),
     ("matched_ref_version", int, 1),
 )
+
 
 class ImportProgramInput(ToolInputModel):
     binary_path: str
@@ -386,20 +431,6 @@ def _build_output_model(
     return create_map_output_model(model_name, object, allow_empty_list=True)
 
 
-def _build_public_signature(
-    executor_kind: ExecutorKind,
-    *,
-    include_target: bool,
-    input_fields: tuple[ToolFieldSpec, ...],
-) -> tuple[str, ...]:
-    field_names = tuple(name for name, _, _ in input_fields)
-    if executor_kind == ExecutorKind.CORE_COMMAND and include_target:
-        return (*field_names, "target")
-    if include_target:
-        return ("target", *field_names)
-    return field_names
-
-
 def _tool(
     *,
     name: str,
@@ -417,7 +448,6 @@ def _tool(
     result_adapter: str | None = None,
     error_adapter: str | None = None,
     public_name_overrides: dict[str, str] | None = None,
-    include_none_keys: Iterable[str] = (),
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     short_description: str | None = None,
@@ -438,17 +468,11 @@ def _tool(
             scalar_output_type=scalar_output_type,
             output_fields=output_fields,
         ),
-        public_signature=_build_public_signature(
-            executor_kind,
-            include_target=include_target,
-            input_fields=input_fields,
-        ),
         include_target=include_target,
         static_kwargs=dict(static_kwargs or {}),
         result_adapter=result_adapter,
         error_adapter=error_adapter,
         public_name_overrides=dict(public_name_overrides or {}),
-        include_none_keys=frozenset(include_none_keys),
         omit_falsey_keys=frozenset(omit_falsey_keys),
         description=description,
         short_description=short_description,
@@ -468,7 +492,6 @@ def _core_tool(
     scalar_output_type: type[Any] | None = None,
     output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
     public_name_overrides: dict[str, str] | None = None,
-    include_none_keys: Iterable[str] = (),
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     short_description: str | None = None,
@@ -487,7 +510,6 @@ def _core_tool(
         scalar_output_type=scalar_output_type,
         output_fields=output_fields,
         public_name_overrides=public_name_overrides,
-        include_none_keys=include_none_keys,
         omit_falsey_keys=omit_falsey_keys,
         description=description,
         short_description=short_description,
@@ -512,7 +534,6 @@ def _registry_tool(
     result_adapter: str | None = None,
     error_adapter: str | None = None,
     public_name_overrides: dict[str, str] | None = None,
-    include_none_keys: Iterable[str] = (),
     omit_falsey_keys: Iterable[str] = (),
     description: str | None = None,
     short_description: str | None = None,
@@ -535,7 +556,6 @@ def _registry_tool(
         result_adapter=result_adapter,
         error_adapter=error_adapter,
         public_name_overrides=public_name_overrides,
-        include_none_keys=include_none_keys,
         omit_falsey_keys=omit_falsey_keys,
         description=description,
         short_description=short_description,
@@ -553,7 +573,6 @@ def _shared_sync_tool(
     input_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
     output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
     description: str | None = None,
-    include_none_keys: Iterable[str] = (),
     short_description: str | None = None,
     idempotent_hint: bool | None = None,
 ) -> ToolSpec:
@@ -566,7 +585,6 @@ def _shared_sync_tool(
         command_or_method=method_name,
         input_fields=input_fields,
         output_fields=output_fields,
-        include_none_keys=include_none_keys,
         description=description,
         short_description=short_description,
         idempotent_hint=idempotent_hint,
@@ -601,10 +619,8 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("overwrite", bool, False),
         ),
         include_target=False,
-        include_none_keys=("project_name",),
         description=(
-            "Create an empty local Ghidra project. Refuses to overwrite an existing .gpr/.rep "
-            "unless overwrite=true."
+            "Create an empty local Ghidra project. Refuses to overwrite an existing .gpr/.rep unless overwrite=true."
         ),
         idempotent_hint=False,
     ),
@@ -622,7 +638,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_CREATE_SESSION_OUTPUT_FIELDS,
         result_adapter="status_target_ok",
         error_adapter="create_session_error",
-        include_none_keys=("project_name",),
         description=(
             "Create a new target session by opening a program in a Ghidra project. "
             "This is non-idempotent and fails if the target already exists. "
@@ -640,7 +655,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("project_location", str, ...),
             ("project_name", str | None, None),
         ),
-        include_none_keys=("project_name",),
         description=(
             "Register a target with project information only, without loading a program yet. "
             "Use load_project_program later to open a domain path."
@@ -656,6 +670,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         output_fields=_CLOSE_SESSION_OUTPUT_FIELDS,
         result_adapter="status_target_ok",
         error_adapter="close_session_error",
+        description=(
+            "Close a target's program session. Unsaved changes are saved to the project first unless the program is unchanged."
+        ),
     ),
     _registry_tool(
         "close_session_and_remove_program",
@@ -667,6 +684,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         static_kwargs={"remove_program": True},
         result_adapter="status_target_ok",
         error_adapter="close_remove_error",
+        description=(
+            "Close a target's session and delete the program from the project. Refuses versioned shared-project "
+            "programs; use delete_shared_project_file (shared_sync) for those after closing the target."
+        ),
     ),
     _registry_tool(
         "list_project_programs",
@@ -675,6 +696,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         list_output=True,
+        description=(
+            "List the programs in the target's project with their domain paths and shared-project sync summary."
+        ),
     ),
     _registry_tool(
         "import_program",
@@ -697,13 +721,18 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         category_tag=ToolCategoryTag.CORE,
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
-        input_fields=(("domain_path", str, ...),),
-        output_fields=_STATUS_PROGRAM_OUTPUT_FIELDS,
+        input_fields=(
+            ("domain_path", str, ...),
+            ("version", _VERSION_NUMBER | None, None),
+        ),
+        output_fields=_LOAD_PROJECT_PROGRAM_OUTPUT_FIELDS,
         result_adapter="status_program_ok",
         description=(
             "Load or switch a program for an existing target by domain path. "
-            "Use this for targets that already exist (including project-only targets) "
-            "instead of create_session."
+            "Use this for targets that already exist (including project-only targets) instead of create_session. "
+            "Loading the program the target already holds reopens it in place (reloaded=true), saving unsaved edits "
+            "first. Pass version=N on a shared-project program to open that past repository version read-only "
+            "(read_only=true): read tools work, mutating tools fail with READ_ONLY_PROGRAM."
         ),
         idempotent_hint=False,
     ),
@@ -715,13 +744,67 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(_DOMAIN_PATH_FIELD,),
         output_fields=_SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
         description=(
             "Persist the currently loaded program for a target into its Ghidra project. "
             "Use this after mutating tools such as rename_function when changes "
             "must remain visible after reopening the project."
         ),
         idempotent_hint=True,
+    ),
+    _core_tool(
+        "get_program_info",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        description=(
+            "Describe the loaded program: name, domain path, executable path/format/md5/sha256, language and "
+            "compiler, endianness, image base and address range, memory size and block count, function and symbol "
+            "counts, entry points, whether auto-analysis ran, unsaved changes, and undo/redo availability."
+        ),
+        idempotent_hint=True,
+    ),
+    _core_tool(
+        "undo_program_change",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(("count", _UNDO_STEPS, 1),),
+        checkout_required=True,
+        description=(
+            "Undo the most recent count transactions on the loaded program (each mutating tool call is one "
+            "transaction). Returns the undone transaction names and what remains; status is noop when there is "
+            "nothing to undo. Undo history is per session and is lost when the program is reloaded."
+        ),
+        idempotent_hint=False,
+    ),
+    _core_tool(
+        "redo_program_change",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(("count", _UNDO_STEPS, 1),),
+        checkout_required=True,
+        description="Redo up to count transactions undone by undo_program_change.",
+        idempotent_hint=False,
+    ),
+    _registry_tool(
+        "export_program",
+        method_name="export_program",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("output_path", str, ...),
+            ("format", ExportFormat, "gzf"),
+            ("overwrite", bool, False),
+        ),
+        description=(
+            "Write the loaded program to output_path as a Ghidra .gzf archive (format='gzf', the saved state "
+            "including analysis) or as the raw bytes of its initialized memory (format='binary'). Refuses to "
+            "replace an existing file unless overwrite=true; --allowed-export-root can restrict where files go. "
+            "Save with save_project_program first so a .gzf includes recent edits."
+        ),
+        idempotent_hint=False,
     ),
     # bsim
     _registry_tool(
@@ -732,20 +815,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(_BSIM_URL_FIELD,),
         include_target=False,
-        include_none_keys=("bsim_url",),
-        description="Get BSim database metadata and executable count.",
-        idempotent_hint=True,
-    ),
-    _registry_tool(
-        "list_bsim_categories",
-        method_name="list_bsim_categories",
-        category_tag=ToolCategoryTag.BSIM,
-        safety_tag=ToolSafetyTag.READ_ONLY,
-        operation_level=ToolOperationLevel.BASIC,
-        input_fields=(_BSIM_URL_FIELD,),
-        include_target=False,
-        include_none_keys=("bsim_url",),
-        description="List executable category names and function tags configured in the BSim database.",
+        description=(
+            "Get BSim database metadata: executable count, configured executable categories, function tags, "
+            "and backend/server details."
+        ),
         idempotent_hint=True,
     ),
     _registry_tool(
@@ -759,7 +832,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             _BSIM_URL_FIELD,
         ),
         include_target=False,
-        include_none_keys=("bsim_url",),
         description="Add a user-defined executable metadata category to the BSim database.",
         idempotent_hint=True,
     ),
@@ -778,7 +850,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("limit", _PAGE_LIMIT, 100),
         ),
         include_target=False,
-        include_none_keys=("bsim_url",),
         omit_falsey_keys=("name", "md5", "arch", "compiler"),
         description="List BSim executable records with optional filters.",
         idempotent_hint=True,
@@ -795,7 +866,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("name", str | None, None),
         ),
         include_target=False,
-        include_none_keys=("bsim_url",),
         omit_falsey_keys=("md5", "name"),
         description="Get one BSim executable record by md5 or executable name.",
         idempotent_hint=True,
@@ -813,7 +883,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("name", str | None, None),
         ),
         include_target=False,
-        include_none_keys=("bsim_url",),
         omit_falsey_keys=("md5", "name"),
         description=(
             "Update executable metadata categories on an existing BSim executable record "
@@ -828,10 +897,11 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=_BSIM_QUERY_FIELDS,
-        include_none_keys=("bsim_url",),
         description=(
             "Compare every function in the loaded target program against the BSim database and "
-            "return matches with matched_ref values usable by bsim_load_matched_executable."
+            "return matches with matched_ref values usable by bsim_load_matched_executable. "
+            "Matches against the program's own database record are dropped unless exclude_self=false; "
+            "min_function_size skips functions whose body is smaller than that many bytes."
         ),
         idempotent_hint=True,
     ),
@@ -843,18 +913,18 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             _BSIM_URL_FIELD,
-            ("address", str | None, None),
-            ("function_name", str | None, None),
-            ("similarity_threshold", float, 0.7),
-            ("significance_threshold", float, 0.0),
-            ("matches_per_function", int, 10),
-            ("max_results", int, 100),
+            *_BSIM_FUNCTION_SELECTOR_FIELDS,
+            ("similarity_threshold", _UNIT_INTERVAL, 0.7),
+            ("significance_threshold", _UNIT_INTERVAL, 0.0),
+            ("matches_per_function", _BSIM_MATCHES_PER_FUNCTION, 10),
+            ("max_results", _BSIM_MAX_RESULTS, 100),
+            ("exclude_self", bool, True),
         ),
-        include_none_keys=("bsim_url",),
-        omit_falsey_keys=("address", "function_name"),
+        omit_falsey_keys=("address", "function_name", "addresses", "function_names"),
         description=(
-            "Compare one function in the loaded target program against the BSim database by "
-            "address or function_name."
+            "Compare one or more functions in the loaded target program against the BSim database. "
+            "Select them by address/function_name or, in one round trip, by the addresses/function_names "
+            "lists (up to 1000 functions). Every selector must resolve or the call fails with BSIM_FUNCTION_NOT_FOUND."
         ),
         idempotent_hint=True,
     ),
@@ -870,31 +940,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         output_fields=_BSIM_LOAD_MATCH_OUTPUT_FIELDS,
         include_target=False,
-        include_none_keys=("target",),
         description=(
             "Load the executable referenced by a BSim matched_ref into a reusable target. "
-            "If that executable is already loaded, returns the existing target instead of reloading it."
+            "If that executable is already loaded, returns the existing target instead of reloading it. "
+            "A matched_ref that points at a Ghidra Server (ghidra://host/repo) is opened through a local cache "
+            "project created under --bsim-remote-cache-dir; without that flag it fails with "
+            "BSIM_REMOTE_PROJECT_LOAD_UNSUPPORTED."
         ),
         idempotent_hint=True,
-    ),
-    _registry_tool(
-        "bsim_set_target_metadata",
-        method_name="bsim_set_target_metadata",
-        category_tag=ToolCategoryTag.BSIM,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(
-            ("categories", dict[str, object], ...),
-            _BSIM_URL_FIELD,
-        ),
-        include_none_keys=("bsim_url",),
-        description=(
-            "Set BSim executable metadata categories on the loaded target program before registration. "
-            "When a BSim URL is available the category names are validated against the configured "
-            "database categories so unconfigured names fail fast instead of being dropped at registration."
-        ),
-        idempotent_hint=True,
-        checkout_required=True,
     ),
     _registry_tool(
         "bsim_register_target",
@@ -902,9 +955,86 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         category_tag=ToolCategoryTag.BSIM,
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            _BSIM_URL_FIELD,
+            ("categories", dict[str, object] | None, None),
+        ),
+        omit_falsey_keys=("categories",),
+        description=(
+            "Generate signatures for the loaded target program and insert them into the BSim database. "
+            "Optional categories ({category: value}) are stored in Program Information first, so the record is "
+            "created with that metadata; category names must already exist in the database "
+            "(bsim_add_executable_category) and, on a shared project, storing them requires a checkout. "
+            "inserted_executables counts the program plus one stub record per library its call graph references "
+            "(inserted_library_executables); executable_count is the database total excluding libraries. "
+            "Re-registering an already ingested program fails with BSIM_ALREADY_REGISTERED."
+        ),
+        idempotent_hint=False,
+    ),
+    _registry_tool(
+        "bsim_apply_matches",
+        method_name="bsim_apply_matches",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            _BSIM_URL_FIELD,
+            ("similarity_threshold", _UNIT_INTERVAL, 0.9),
+            ("significance_threshold", _UNIT_INTERVAL, 0.0),
+            ("matches_per_function", _BSIM_MATCHES_PER_FUNCTION, 5),
+            ("max_functions", _BSIM_MAX_APPLY_FUNCTIONS, 500),
+            ("only_default_names", bool, True),
+            ("exclude_self", bool, True),
+            ("min_function_size", _BSIM_MIN_FUNCTION_SIZE, 0),
+            ("dry_run", bool, False),
+            ("addresses", list[str] | None, None),
+            ("function_names", list[str] | None, None),
+        ),
+        omit_falsey_keys=("addresses", "function_names"),
+        description=(
+            "Query the BSim database for the loaded program's functions and rename each one after its best match, "
+            "all in one transaction. By default only functions that still carry a Ghidra default name (FUN_...) "
+            "are renamed, matches whose own name is a default name are ignored, and a function whose top matches "
+            "disagree on the name is skipped as ambiguous. Restrict the scope with addresses/function_names; "
+            "dry_run=true returns the planned renames without changing the program. Requires a checkout on shared "
+            "projects; call save_project_program afterwards to persist."
+        ),
+        idempotent_hint=False,
+        checkout_required=True,
+    ),
+    _registry_tool(
+        "bsim_update_target_signatures",
+        method_name="bsim_update_target_signatures",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
         input_fields=(_BSIM_URL_FIELD,),
-        include_none_keys=("bsim_url",),
-        description="Generate signatures for the loaded target program and insert them into the BSim database.",
+        description=(
+            "Push the loaded program's current function names and metadata back to its existing BSim records "
+            "(Ghidra's generateupdates + commitupdates in one step). Feature vectors are not regenerated. "
+            "Fails with BSIM_EXECUTABLE_NOT_FOUND when the program was never registered."
+        ),
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "bsim_delete_executable",
+        method_name="bsim_delete_executable",
+        category_tag=ToolCategoryTag.BSIM,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("confirm", str, ...),
+            _BSIM_URL_FIELD,
+            ("md5", str | None, None),
+            ("name", str | None, None),
+        ),
+        include_target=False,
+        omit_falsey_keys=("md5", "name"),
+        description=(
+            "Delete one executable and all of its function records from the BSim database, looked up by md5 or "
+            "exact executable name. confirm must repeat the md5 (or the name when md5 is omitted). Use it before "
+            "re-registering a program whose analysis changed."
+        ),
         idempotent_hint=False,
     ),
     # function_analysis
@@ -913,39 +1043,33 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.STANDARD,
-        input_fields=_OFFSET_LIMIT_FIELDS,
+        input_fields=(
+            *_OFFSET_LIMIT_FIELDS,
+            ("filter", str | None, None),
+            ("only_default_names", bool, False),
+        ),
         list_output=True,
+        omit_falsey_keys=("filter", "only_default_names"),
         description=(
-            "List all functions in the loaded program for the target session. "
-            "Requires an initialized target with a loaded program; call list_targets first, "
-            "then use create_session or load_project_program when needed."
+            "List functions of the loaded program with name, entry, body size, and is_thunk (paginated). "
+            "filter is a case-insensitive name substring; only_default_names=true keeps only functions "
+            "Ghidra named itself (FUN_...), i.e. the ones still waiting for a real name. "
+            "Requires an initialized target with a loaded program; call list_targets first."
         ),
         idempotent_hint=True,
-    ),
-    _core_tool(
-        "list_classes",
-        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.READ_ONLY,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=_OFFSET_LIMIT_FIELDS,
-        list_output=True,
-        description="List class namespaces in the loaded target program.",
     ),
     _core_tool(
         "list_namespaces",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=_OFFSET_LIMIT_FIELDS,
+        input_fields=(*_OFFSET_LIMIT_FIELDS, ("classes_only", bool, False)),
         list_output=True,
-    ),
-    _core_tool(
-        "search_functions_by_name",
-        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.READ_ONLY,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(("query", str, ...), *_OFFSET_LIMIT_FIELDS),
-        list_output=True,
+        omit_falsey_keys=("classes_only",),
+        description=(
+            "List namespaces of the loaded program as {name, is_class} (paginated); classes_only=true returns "
+            "only class namespaces."
+        ),
     ),
     _core_tool(
         "decompile_function",
@@ -958,6 +1082,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         omit_falsey_keys=("address", "name"),
         scalar_output_type=str,
+        description=(
+            "Return C-like pseudocode for a function by address or name (address wins if both are set). Large output is compacted to a result_id."
+        ),
     ),
     _core_tool(
         "disassemble_function",
@@ -966,6 +1093,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...),),
         list_output=True,
+        description=(
+            "Return every instruction of the function containing the address as address, mnemonic, operands, and comment."
+        ),
     ),
     _core_tool(
         "disassemble_range",
@@ -975,10 +1105,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         input_fields=(
             ("start_address", str, ...),
             ("end_address", str | None, None),
-            ("length", int | None, None),
+            ("length", _POSITIVE_INT | None, None),
             ("limit", _PAGE_LIMIT, 200),
         ),
         list_output=True,
+        description=(
+            "Return instructions between start_address and end_address, or start_address plus length bytes, up to limit instructions."
+        ),
     ),
     _core_tool(
         "create_function",
@@ -990,6 +1123,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("name", str | None, None),
         ),
         checkout_required=True,
+        description=(
+            "Create a function at an address, disassembling it first when needed. Returns the existing function if one starts there."
+        ),
     ),
     _core_tool(
         "delete_function",
@@ -998,20 +1134,22 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(("address", str, ...),),
         checkout_required=True,
+        description=(
+            "Delete the function at or containing the address. The instructions stay; only the function definition is removed."
+        ),
     ),
     _core_tool(
         "analyze_program",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("force", bool, False),),
+        omit_falsey_keys=("force",),
         checkout_required=True,
-    ),
-    _core_tool(
-        "reanalyze_program",
-        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        checkout_required=True,
+        description=(
+            "Run Ghidra auto-analysis if the program has not been analyzed yet; force=true runs it again on an "
+            "already analyzed program. Can take minutes on large binaries."
+        ),
     ),
     _core_tool(
         "get_function",
@@ -1022,14 +1160,28 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("address", str | None, None),
             ("name", str | None, None),
         ),
+        description=(
+            "Describe a function by address or name (address wins if both are set): signature, return type, "
+            "calling convention, parameters and local variables with types and storage, body range and size, "
+            "thunk target, namespace, name source, and plate comment."
+        ),
     ),
     _core_tool(
         "get_function_xrefs",
         category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.BASIC,
-        input_fields=(("name", str, ...), *_OFFSET_LIMIT_FIELDS),
+        input_fields=(
+            ("address", str | None, None),
+            ("name", str | None, None),
+            *_OFFSET_LIMIT_FIELDS,
+        ),
         list_output=True,
+        omit_falsey_keys=("address", "name"),
+        description=(
+            "List the references to a function's entry point (its callers) as from address, from_function, and "
+            "reference type, looked up by address or name (paginated). Outgoing calls come from get_callee."
+        ),
     ),
     _core_tool(
         "get_callee",
@@ -1038,6 +1190,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...),),
         list_output=True,
+        description=(
+            "List the functions called from the function containing the address as {name, entry, is_external}; "
+            "thunks resolve to their thunked target."
+        ),
     ),
     # memory_data
     _core_tool(
@@ -1047,6 +1203,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
+        description=("List memory blocks with start, end, length, and read/write/execute permissions (paginated)."),
     ),
     _core_tool(
         "list_imports",
@@ -1055,6 +1212,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.BASIC,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
+        description=(
+            "List imported (external) symbols of the loaded program as {name, library, full_name, address} (paginated)."
+        ),
     ),
     _core_tool(
         "list_exports",
@@ -1063,6 +1223,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.BASIC,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
+        description=("List exported symbols and external entry points as {name, address} (paginated)."),
     ),
     _core_tool(
         "list_data_items",
@@ -1071,6 +1232,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=_OFFSET_LIMIT_FIELDS,
         list_output=True,
+        description=("List defined data items with address, data type, label, length, and value (paginated)."),
     ),
     _core_tool(
         "list_strings",
@@ -1084,6 +1246,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         list_output=True,
         omit_falsey_keys=("filter",),
+        description=(
+            "List defined strings with addresses, optionally filtered by a case-insensitive substring "
+            "(paginated, default limit 2000)."
+        ),
     ),
     _core_tool(
         "get_xrefs_to",
@@ -1092,6 +1258,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...), *_OFFSET_LIMIT_FIELDS),
         list_output=True,
+        description=("List references to an address with the referencing address and reference type (paginated)."),
     ),
     _core_tool(
         "get_xrefs_from",
@@ -1100,6 +1267,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("address", str, ...), *_OFFSET_LIMIT_FIELDS),
         list_output=True,
+        description=("List references made from an address (paginated)."),
     ),
     _core_tool(
         "get_data_by_label",
@@ -1108,6 +1276,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(("label", str, ...),),
         list_output=True,
+        description=("Return defined data items whose symbol matches the label, with their value representation."),
     ),
     _core_tool(
         "list_data_types",
@@ -1122,6 +1291,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         list_output=True,
         omit_falsey_keys=("filter", "category"),
+        description=(
+            "List data types in the program's data type manager, optionally filtered by name substring or category path (paginated)."
+        ),
     ),
     _core_tool(
         "get_bytes",
@@ -1130,9 +1302,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("address", str, ...),
-            ("size", int, 16),
+            ("size", _BYTE_COUNT, 16),
         ),
         scalar_output_type=str,
+        description=("Return a hex dump of size bytes starting at address (1 to 1,048,576 bytes)."),
     ),
     _core_tool(
         "search_bytes",
@@ -1145,6 +1318,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         list_output=True,
         public_name_overrides={"bytes": "pattern"},
+        description=(
+            "Find occurrences of a hex byte pattern in memory and return their addresses (paginated). "
+            "Use ?? for a wildcard byte, e.g. '48 8b ?? 24'."
+        ),
     ),
     # symbol_comment_edit
     _core_tool(
@@ -1162,6 +1339,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "newName": "new_name",
         },
         checkout_required=True,
+        description=("Rename a function found by address or old_name (address wins if both are set)."),
     ),
     _core_tool(
         "rename_variable",
@@ -1169,16 +1347,23 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
-            ("functionName", str, ...),
             ("oldName", str, ...),
             ("newName", str, ...),
+            ("functionAddress", str | None, None),
+            ("functionName", str | None, None),
         ),
         public_name_overrides={
+            "functionAddress": "function_address",
             "functionName": "function_name",
             "oldName": "old_name",
             "newName": "new_name",
         },
+        omit_falsey_keys=("functionAddress", "functionName"),
         checkout_required=True,
+        description=(
+            "Rename a local variable or parameter of the function given by function_address or function_name "
+            "(address wins). Decompiler-level symbols are renamed first; database variables are the fallback."
+        ),
     ),
     _core_tool(
         "rename_data",
@@ -1191,6 +1376,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         public_name_overrides={"newName": "new_name"},
         checkout_required=True,
+        description=("Rename the primary data symbol at an address. Function entry points must use rename_function."),
     ),
     _core_tool(
         "set_function_prototype",
@@ -1198,10 +1384,16 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
-            ("function_address", str, ...),
             ("prototype", str, ...),
+            ("function_address", str | None, None),
+            ("function_name", str | None, None),
         ),
+        omit_falsey_keys=("function_address", "function_name"),
         checkout_required=True,
+        description=(
+            "Apply a C prototype string to the function given by function_address or function_name (address wins), "
+            "replacing its signature."
+        ),
     ),
     _core_tool(
         "set_local_variable_type",
@@ -1209,11 +1401,17 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
-            ("function_address", str, ...),
             ("variable_name", str, ...),
             ("new_type", str, ...),
+            ("function_address", str | None, None),
+            ("function_name", str | None, None),
         ),
+        omit_falsey_keys=("function_address", "function_name"),
         checkout_required=True,
+        description=(
+            "Set the data type of a local variable or parameter by name in the function given by function_address "
+            "or function_name (address wins)."
+        ),
     ),
     _core_tool(
         "set_global_data_type",
@@ -1224,10 +1422,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("address", str, ...),
             ("data_type", str, ...),
             ("length", int | None, None),
-            ("clear_mode", str | None, None),
+            ("clear_mode", ClearDataMode | None, None),
         ),
         omit_falsey_keys=("clear_mode",),
         checkout_required=True,
+        description=(
+            "Apply a data type at an address; clear_mode controls how conflicting existing data is cleared (default CHECK_FOR_SPACE)."
+        ),
     ),
     _core_tool(
         "set_bytes",
@@ -1240,28 +1441,72 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         public_name_overrides={"bytes": "bytes_hex"},
         checkout_required=True,
+        description=(
+            "Overwrite memory at address with the given hex bytes (up to 1 MiB). This changes the program image."
+        ),
     ),
     _core_tool(
-        "set_decompiler_comment",
+        "set_comment",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("address", str, ...),
             ("comment", str, ...),
+            ("kind", CommentKind, ...),
         ),
         checkout_required=True,
+        description=(
+            "Set a comment at an address. kind selects the slot: 'pre' (above the line; this is what the "
+            "decompiler shows), 'eol' (end of line in the listing), 'post', 'plate' (function header block), or "
+            "'repeatable'. An empty comment clears that slot."
+        ),
     ),
     _core_tool(
-        "set_disassembly_comment",
+        "get_comments",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("address", str, ...),),
+        description="Return the pre, eol, post, plate, and repeatable comments at an address (null when unset).",
+        idempotent_hint=True,
+    ),
+    _core_tool(
+        "search_symbols",
+        category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("query", str, ...),
+            ("type", str | None, None),
+            *_OFFSET_LIMIT_FIELDS,
+        ),
+        list_output=True,
+        omit_falsey_keys=("type",),
+        description=(
+            "Search all symbols (functions, labels, data, namespaces, classes, ...) by name, case-insensitively; "
+            "query may use * and ? globs, otherwise it matches as a substring. type filters by symbol kind such as "
+            "Function, Label, Class, Namespace, Parameter, or LocalVar. Returns name, address, type, namespace, "
+            "source, and whether the symbol is primary (paginated)."
+        ),
+        idempotent_hint=True,
+    ),
+    _core_tool(
+        "create_label",
         category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("address", str, ...),
-            ("comment", str, ...),
+            ("name", str, ...),
+            ("make_primary", bool, True),
         ),
         checkout_required=True,
+        description=(
+            "Create a user-defined label at an address, even where no symbol exists yet; rename_data only renames "
+            "existing symbols. make_primary=false keeps an existing primary label in place."
+        ),
+        idempotent_hint=True,
     ),
     _core_tool(
         "add_bookmark",
@@ -1273,9 +1518,9 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("category", str, ...),
             ("comment", str, ...),
             ("type", str, ...),
-            ("format", str, "json"),
         ),
         checkout_required=True,
+        description=("Add a bookmark of the given type and category at an address."),
     ),
     _core_tool(
         "list_bookmarks",
@@ -1291,6 +1536,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         list_output=True,
         omit_falsey_keys=("address", "type", "category"),
+        description=("List bookmarks, optionally filtered by address, type, and category (paginated)."),
     ),
     _core_tool(
         "delete_bookmark",
@@ -1298,7 +1544,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
-            ("id", int | None, None),
+            ("id", _NON_NEGATIVE_INT | None, None),
             ("address", str | None, None),
             ("category", str | None, None),
             ("comment", str | None, None),
@@ -1306,6 +1552,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         omit_falsey_keys=("address", "category", "comment", "type"),
         checkout_required=True,
+        description=("Delete bookmarks by id, or by address plus type and category (optionally matching comment)."),
     ),
     # datatype_ops
     _core_tool(
@@ -1315,12 +1562,13 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("name", str, ...),
-            ("size", int, 0),
+            ("size", _NON_NEGATIVE_INT, 0),
             ("category", str | None, None),
             ("members", list[dict] | None, None),
         ),
         omit_falsey_keys=("category", "members"),
         checkout_required=True,
+        description=("Create a structure data type; members is a list of {name, type, comment?, offset?} objects."),
     ),
     _core_tool(
         "add_struct_members",
@@ -1334,30 +1582,23 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         omit_falsey_keys=("category",),
         checkout_required=True,
+        description=("Append or place members ({name, type, comment?, offset?}) in an existing structure."),
     ),
     _core_tool(
-        "clear_struct",
-        category_tag=ToolCategoryTag.DATATYPE_OPS,
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(
-            ("struct_name", str, ...),
-            ("category", str | None, None),
-        ),
-        omit_falsey_keys=("category",),
-        checkout_required=True,
-    ),
-    _core_tool(
-        "delete_struct",
+        "delete_data_type",
         category_tag=ToolCategoryTag.DATATYPE_OPS,
         safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
-            ("struct_name", str, ...),
+            ("name", str, ...),
             ("category", str | None, None),
         ),
         omit_falsey_keys=("category",),
         checkout_required=True,
+        description=(
+            "Delete a data type (structure, union, enum, typedef, ...) from the program's data type manager, "
+            "found by name and optionally category."
+        ),
     ),
     _core_tool(
         "remove_struct_members",
@@ -1366,11 +1607,15 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.STANDARD,
         input_fields=(
             ("struct_name", str, ...),
-            ("members", list[str], ...),
+            ("members", list[str | dict] | None, None),
             ("category", str | None, None),
         ),
-        omit_falsey_keys=("category",),
+        omit_falsey_keys=("category", "members"),
         checkout_required=True,
+        description=(
+            "Remove members from a structure; members accepts names or {name} objects, and omitting it removes "
+            "every member while keeping the type."
+        ),
     ),
     _core_tool(
         "get_struct",
@@ -1382,6 +1627,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("category", str | None, None),
         ),
         omit_falsey_keys=("category",),
+        description=("Return a structure's members with offsets, lengths, types, and comments."),
     ),
     _core_tool(
         "rename_data_type",
@@ -1395,6 +1641,59 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         omit_falsey_keys=("category",),
         checkout_required=True,
+        description=("Rename a data type found by name (optionally within a category)."),
+    ),
+    _core_tool(
+        "create_enum",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("name", str, ...),
+            ("values", dict[str, object] | None, None),
+            ("size", _ENUM_SIZE, 4),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("values", "category"),
+        checkout_required=True,
+        description=(
+            "Create an enum data type of size 1, 2, 4, or 8 bytes; values maps each name to an integer (or to "
+            "{value, comment}); hex strings such as '0x10' are accepted."
+        ),
+        idempotent_hint=False,
+    ),
+    _core_tool(
+        "set_enum_values",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("name", str, ...),
+            ("values", dict[str, object] | None, None),
+            ("remove", list[str] | None, None),
+            ("category", str | None, None),
+        ),
+        omit_falsey_keys=("values", "remove", "category"),
+        checkout_required=True,
+        description=(
+            "Add or replace named values on an existing enum and/or remove names listed in remove; at least one of "
+            "values or remove is required."
+        ),
+        idempotent_hint=True,
+    ),
+    _core_tool(
+        "parse_c_declarations",
+        category_tag=ToolCategoryTag.DATATYPE_OPS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("source", str, ...),),
+        checkout_required=True,
+        description=(
+            "Parse C declarations (structs, unions, enums, typedefs, function prototypes) with Ghidra's C parser "
+            "and add the resulting data types to the program. Returns the names created per kind; a syntax error "
+            "fails with C_PARSE_FAILED and adds nothing."
+        ),
+        idempotent_hint=True,
     ),
     _core_tool(
         "get_enum",
@@ -1406,6 +1705,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("category", str | None, None),
         ),
         omit_falsey_keys=("category",),
+        description=("Return an enum's values, comments, and size."),
     ),
     # shared_sync
     _shared_sync_tool(
@@ -1415,7 +1715,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(_DOMAIN_PATH_FIELD,),
         output_fields=_GET_PROJECT_SYNC_STATUS_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
         description="Get shared-project version-control status for the target program",
         idempotent_hint=True,
     ),
@@ -1429,7 +1728,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_GET_VERSION_HISTORY_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
         description="Get version history metadata for the target program in a shared project",
         idempotent_hint=True,
     ),
@@ -1439,14 +1737,19 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.READ_ONLY,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
-            ("from_version", int, ...),
-            ("to_version", int, ...),
+            ("from_version", _VERSION_NUMBER, ...),
+            ("to_version", _VERSION_NUMBER, ...),
             ("range_limit", _RANGE_LIMIT, 200),
+            ("include_details", bool, False),
+            ("details_limit", _DETAILS_LIMIT, 20),
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_GET_VERSION_DIFF_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
-        description="Get a summary of differences between two shared-project versions of the target program",
+        description=(
+            "Get a summary of differences between two shared-project versions of the target program: counts, "
+            "difference types, and address ranges. include_details=true adds Ghidra's Diff description (symbols, "
+            "comments, code units, functions) at the start of the first details_limit ranges."
+        ),
         idempotent_hint=True,
     ),
     _shared_sync_tool(
@@ -1455,12 +1758,15 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
-            ("exclusive", bool, False),
+            ("exclusive", bool | None, None),
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
-        description="Checkout the target program in a shared project",
+        description=(
+            "Checkout the target program in a shared project. exclusive omitted uses the server default "
+            "(--shared-sync-exclusive-checkout); an exclusive checkout blocks other users' checkouts so no merge "
+            "can become necessary."
+        ),
         idempotent_hint=True,
     ),
     _shared_sync_tool(
@@ -1474,7 +1780,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_ADD_PROJECT_PROGRAM_TO_VERSION_CONTROL_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
         description="Add the target program to shared-project version control",
         idempotent_hint=True,
     ),
@@ -1487,14 +1792,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             ("message", str, ...),
             ("keep_checked_out", bool, False),
             ("auto_checkout", bool, True),
-            ("on_conflict", str, "abort"),
+            ("on_conflict", CommitConflictAction, "abort"),
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_COMMIT_PROJECT_PROGRAM_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
         description=(
-            "Check-in changes of the target program to the shared project server; "
-            "on_conflict controls stale checkout handling"
+            "Check-in changes of the target program to the shared project server. When the checkout is stale "
+            "(someone else committed first) on_conflict decides: 'abort' fails with MERGE_REQUIRED, 'keep' parks the "
+            "local edits in a <name>.keep copy (kept_program) and follows the latest version, 'discard' drops them."
         ),
         idempotent_hint=False,
     ),
@@ -1504,12 +1809,15 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.BASIC,
         input_fields=(
-            ("on_local_changes", str, "abort"),
+            ("on_local_changes", ConflictAction, "abort"),
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_PULL_PROJECT_PROGRAM_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
-        description="Pull/merge latest remote changes for the target program",
+        description=(
+            "Follow the latest repository version of the target program. A stale checkout is dropped "
+            "and the program is reopened at the latest version, so checked_out is false afterwards and a new "
+            "checkout is required before mutating; on_local_changes controls whether local edits are discarded"
+        ),
         idempotent_hint=False,
     ),
     _shared_sync_tool(
@@ -1522,7 +1830,6 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_UNDO_CHECKOUT_PROJECT_PROGRAM_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
         description="Undo checkout for the target program (optionally discard local changes)",
         idempotent_hint=False,
     ),
@@ -1532,11 +1839,10 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
         operation_level=ToolOperationLevel.ADVANCED,
         input_fields=(
-            ("checkout_id", int, ...),
+            ("checkout_id", _NON_NEGATIVE_INT, ...),
             _DOMAIN_PATH_FIELD,
         ),
         output_fields=_TERMINATE_PROJECT_PROGRAM_CHECKOUT_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
         description="Terminate a stale checkout by checkout id for the target program",
         idempotent_hint=False,
     ),
@@ -1548,27 +1854,17 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         input_fields=(
             ("domain_path", str, ...),
             ("confirm", str, ...),
-            ("expected_latest_version", int | None, None),
+            ("expected_latest_version", _VERSION_NUMBER | None, None),
             ("allow_private", bool, False),
             ("allow_non_atomic_versioned_delete", bool, False),
         ),
         output_fields=_DELETE_SHARED_PROJECT_FILE_OUTPUT_FIELDS,
         description=(
-            "Delete a shared-project file after confirmation and checkout safety checks; "
-            "versioned deletion requires an explicit non-atomic-risk acknowledgement"
+            "Delete a project file that no target has loaded, after confirmation and checkout safety checks; "
+            "versioned deletion requires an explicit non-atomic-risk acknowledgement. For the program a target "
+            "currently holds use close_session_and_remove_program instead (private programs only)."
         ),
         idempotent_hint=False,
-    ),
-    _shared_sync_tool(
-        "reload_project_program",
-        method_name="reload_project_program",
-        safety_tag=ToolSafetyTag.WRITE,
-        operation_level=ToolOperationLevel.ADVANCED,
-        input_fields=(_DOMAIN_PATH_FIELD,),
-        output_fields=_RELOAD_PROJECT_PROGRAM_OUTPUT_FIELDS,
-        include_none_keys=("domain_path",),
-        description="Reload the target program by closing and reopening the current domain path",
-        idempotent_hint=True,
     ),
 )
 _TOOL_SPECS: dict[str, ToolSpec] = {spec.name: spec for spec in _TOOL_SPEC_LIST}
@@ -1651,13 +1947,12 @@ def get_checkout_required_tool_names(specs: dict[str, ToolSpec] | None = None) -
     available_specs = _TOOL_SPECS if specs is None else specs
     # Checkout enforcement keys on the core command name. CORE_COMMAND tools expose it
     # directly as command_or_method; REGISTRY_METHOD tools that wrap a core command (e.g.
-    # bsim_set_target_metadata) use a method_name identical to that core command, so they
+    # bsim_apply_matches) use a method_name identical to that core command, so they
     # contribute the same name here.
     return {
         spec.command_or_method
         for spec in available_specs.values()
-        if spec.checkout_required
-        and spec.executor_kind in (ExecutorKind.CORE_COMMAND, ExecutorKind.REGISTRY_METHOD)
+        if spec.checkout_required and spec.executor_kind in (ExecutorKind.CORE_COMMAND, ExecutorKind.REGISTRY_METHOD)
     }
 
 
@@ -1719,6 +2014,10 @@ def filter_tool_specs(
 
 
 __all__ = [
+    "CommentKind",
+    "ExportFormat",
+    "CommitConflictAction",
+    "ConflictAction",
     "ExecutorKind",
     "ToolCategoryTag",
     "ToolOperationLevel",

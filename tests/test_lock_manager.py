@@ -76,3 +76,40 @@ def test_lock_manager_does_not_cache_completed_invalid_target_names():
             pass
 
     assert manager.cached_lock_counts == {"target": 0, "project": 0}
+
+
+def test_lock_timeout_policy_is_configurable_at_runtime():
+    from ghidra_mcp.domain import (
+        DEFAULT_LOCK_TIMEOUT_SECONDS,
+        configure_lock_timeout_seconds,
+        get_lock_timeout_seconds,
+    )
+
+    assert DEFAULT_LOCK_TIMEOUT_SECONDS >= 1.0
+    previous = get_lock_timeout_seconds()
+    try:
+        configure_lock_timeout_seconds(0.02)
+        manager = LockManager()
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def _holder():
+            with manager.acquire(target="fw"):
+                acquired.set()
+                release.wait(timeout=1.0)
+
+        thread = threading.Thread(target=_holder)
+        thread.start()
+        assert acquired.wait(timeout=1.0)
+        try:
+            with pytest.raises(DomainError) as exc_info:
+                with manager.acquire(target="fw"):
+                    pass
+        finally:
+            release.set()
+            thread.join(timeout=1.0)
+        assert exc_info.value.details == {"lock": "target", "timeout": 0.02}
+        with pytest.raises(ValueError):
+            configure_lock_timeout_seconds(0)
+    finally:
+        configure_lock_timeout_seconds(previous)

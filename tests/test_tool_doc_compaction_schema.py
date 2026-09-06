@@ -27,15 +27,13 @@ def test_tool_docs_keep_logical_schema_and_publish_large_result_transport_schema
     Draft202012Validator.check_schema(transport_schema)
     assert len(transport_schema["oneOf"]) == 2
     assert all(
-        "metadata_truncated"
-        in variant["properties"]["structuredContent"]["required"]
+        "metadata_truncated" in variant["properties"]["structuredContent"]["required"]
         for variant in transport_schema["oneOf"]
     )
     unavailable_schema = next(
         variant
         for variant in transport_schema["oneOf"]
-        if "result_unavailable"
-        in variant["properties"]["structuredContent"]["required"]
+        if "result_unavailable" in variant["properties"]["structuredContent"]["required"]
     )
     unavailable_metadata = unavailable_schema["properties"]["structuredContent"]
     assert "operation_succeeded" in unavailable_metadata["required"]
@@ -49,9 +47,7 @@ def test_tool_docs_keep_logical_schema_and_publish_large_result_transport_schema
     )
     content_schema = stored_schema["properties"]["content"]
     assert content_schema["minItems"] == content_schema["maxItems"] == 2
-    assert [
-        item["properties"]["type"]["const"] for item in content_schema["prefixItems"]
-    ] == ["text", "resource_link"]
+    assert [item["properties"]["type"]["const"] for item in content_schema["prefixItems"]] == ["text", "resource_link"]
 
     metadata_schema = stored_schema["properties"]["structuredContent"]
     assert metadata_schema["properties"]["truncated"]["const"] is True
@@ -77,21 +73,17 @@ def test_large_result_transport_schema_matches_compacted_runtime_result():
     assert isinstance(result.content[1], ResourceLink)
 
     schema = tool_docs_detail(spec)["large_result_output_schema"]
-    Draft202012Validator(schema).validate(
-        result.model_dump(mode="json", by_alias=True)
-    )
+    Draft202012Validator(schema).validate(result.model_dump(mode="json", by_alias=True))
     stored_schema = next(
-        variant
-        for variant in schema["oneOf"]
-        if "result_id" in variant["properties"]["structuredContent"]["required"]
+        variant for variant in schema["oneOf"] if "result_id" in variant["properties"]["structuredContent"]["required"]
     )
     metadata_schema = stored_schema["properties"]["structuredContent"]
-    metadata = result.structuredContent
+    metadata = result.structured_content
     assert metadata is not None
     assert set(metadata_schema["required"]) <= set(metadata)
     assert metadata["truncated"] is metadata_schema["properties"]["truncated"]["const"]
     assert metadata["resource_uri"] == str(result.content[1].uri)
-    assert metadata["mime_type"] == result.content[1].mimeType
+    assert metadata["mime_type"] == result.content[1].mime_type
     assert metadata["item_count"] is None
 
 
@@ -106,12 +98,10 @@ def test_large_result_transport_schema_matches_uncacheable_runtime_notice():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
+    assert result.is_error is False
     assert len(result.content) == 1
-    assert result.structuredContent["result_unavailable"] is True
-    assert result.structuredContent["operation_succeeded"] is True
+    assert result.structured_content["result_unavailable"] is True
+    assert result.structured_content["operation_succeeded"] is True
 
     schema = tool_docs_detail(spec)["large_result_output_schema"]
-    Draft202012Validator(schema).validate(
-        result.model_dump(mode="json", by_alias=True)
-    )
+    Draft202012Validator(schema).validate(result.model_dump(mode="json", by_alias=True))
