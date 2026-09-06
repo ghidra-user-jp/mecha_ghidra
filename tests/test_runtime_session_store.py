@@ -6,6 +6,7 @@ import pytest
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
+from runtime_fakes import FakeProgram as _FakeProgram
 
 
 class _DummyCore:
@@ -47,22 +48,6 @@ class _FakeSession:
 
     def get_project_handle(self):  # noqa: ANN001
         return _FakeProjectHandle("/tmp/prj", "sample")
-
-
-class _FakeDomainFile:
-    def __init__(self, path: str) -> None:
-        self._path = path
-
-    def getPathname(self) -> str:
-        return self._path
-
-
-class _FakeProgram:
-    def __init__(self, path: str) -> None:
-        self._path = path
-
-    def getDomainFile(self):  # noqa: ANN201
-        return _FakeDomainFile(self._path)
 
 
 class _PathSession(_FakeSession):

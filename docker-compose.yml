@@ -10,6 +10,8 @@ services:
         GHIDRA_DECOMPILER_NATIVES_URL: ${GHIDRA_DECOMPILER_NATIVES_URL-}
         GHIDRA_DECOMPILER_NATIVES_SHA256: ${GHIDRA_DECOMPILER_NATIVES_SHA256-}
     image: ghidra-mcp:local
+    restart: unless-stopped
+    user: "10001:10001"
     ports:
       # Keep the unauthenticated MCP endpoint local by default. Operators who
       # intentionally expose it must add TLS and access controls explicitly.
@@ -19,6 +21,7 @@ services:
       GHIDRA_SERVER_PASSWORD: ${GHIDRA_SERVER_PASSWORD:-}
     volumes:
       - ./samples:/samples:ro
+      - ./exports:/data/exports
       - ghidra-projects:/data/projects
 
 volumes:

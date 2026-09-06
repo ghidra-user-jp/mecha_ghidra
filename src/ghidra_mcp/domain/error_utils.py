@@ -40,8 +40,7 @@ def is_project_lock_error(exc: Exception) -> bool:
     cause_type = details["cause_type"]
     cause_message = details["cause_message"]
     return (
-        "LockException" in cause_type
-        and "Unable to lock project" in cause_message
+        "LockException" in cause_type and "Unable to lock project" in cause_message
     ) or "Unable to lock project" in cause_message
 
 

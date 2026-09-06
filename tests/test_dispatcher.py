@@ -4,6 +4,7 @@ import pytest
 from mcp.types import CallToolResult
 
 import ghidra_mcp.presentation.tool_dispatcher as tool_dispatcher_module
+from ghidra_mcp.contracts.tool_models import create_typed_input_model, create_typed_output_model
 from ghidra_mcp.contracts.tool_spec import (
     ExecutorKind,
     ToolCategoryTag,
@@ -11,7 +12,6 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSafetyTag,
     ToolSpec,
 )
-from ghidra_mcp.contracts.tool_models import create_typed_input_model, create_typed_output_model
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
@@ -177,15 +177,6 @@ class DummyRegistry:
             "atomic_version_guard": False,
         }
 
-    def reload_project_program(self, target, **kwargs):
-        self.registry_calls.append(("reload_project_program", {"target": target, **kwargs}))
-        return {
-            "status": "ok",
-            "target": target,
-            "program": kwargs.get("domain_path") or "/main",
-            "reloaded": True,
-        }
-
     def get_version_history(self, target, **kwargs):
         self.registry_calls.append(("get_version_history", {"target": target, **kwargs}))
         return {
@@ -230,12 +221,10 @@ def test_dispatch_tool_validation_error():
 @pytest.mark.parametrize(
     ("spec_name", "raw_args"),
     [
-        ("search_functions_by_name", {"offset": 0, "limit": 5}),
         ("disassemble_function", {}),
         ("get_callee", {}),
         ("get_xrefs_to", {"offset": 0, "limit": 10}),
         ("get_xrefs_from", {"offset": 0, "limit": 10}),
-        ("get_function_xrefs", {"offset": 0, "limit": 10}),
         ("get_data_by_label", {}),
         ("get_bytes", {"size": 8}),
         ("search_bytes", {"offset": 0, "limit": 10}),
@@ -245,14 +234,12 @@ def test_dispatch_tool_validation_error():
         ("rename_function", {"address": "0x1"}),
         ("rename_data", {"address": "0x1"}),
         ("rename_variable", {"functionName": "main", "oldName": "old"}),
-        ("set_decompiler_comment", {"address": "0x1"}),
-        ("set_disassembly_comment", {"address": "0x1"}),
+        ("set_comment", {"address": "0x1", "comment": "memo"}),
         ("set_function_prototype", {"function_address": "0x1"}),
         ("set_local_variable_type", {"function_address": "0x1", "variable_name": "v"}),
         ("create_struct", {}),
         ("add_struct_members", {"struct_name": "S"}),
-        ("clear_struct", {}),
-        ("remove_struct_members", {"struct_name": "S"}),
+        ("delete_data_type", {}),
         ("set_global_data_type", {"address": "0x1"}),
         ("set_bytes", {"address": "0x1"}),
         ("add_bookmark", {"address": "0x1", "category": "cat", "comment": "memo"}),
@@ -278,7 +265,8 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
 @pytest.mark.parametrize(
     ("spec_name", "raw_args"),
     [
-        ("search_functions_by_name", {"query": 123, "offset": 0, "limit": 5}),
+        ("list_functions", {"filter": 123, "offset": 0, "limit": 5}),
+        ("list_functions", {"only_default_names": "yes", "offset": 0, "limit": 5}),
         ("get_function", {"address": 123}),
         ("get_function", {"name": 123}),
         ("decompile_function", {"name": 123}),
@@ -303,13 +291,13 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("rename_function", {"address": 1, "newName": "new"}),
         ("rename_data", {"address": 1, "newName": "new"}),
         ("rename_variable", {"functionName": "main", "oldName": "old", "newName": 1}),
-        ("set_decompiler_comment", {"address": "0x1", "comment": 1}),
-        ("set_disassembly_comment", {"address": "0x1", "comment": 1}),
+        ("set_comment", {"address": "0x1", "comment": 1, "kind": "pre"}),
+        ("set_comment", {"address": "0x1", "comment": "memo", "kind": "sideways"}),
         ("set_function_prototype", {"function_address": "0x1", "prototype": 1}),
         ("set_local_variable_type", {"function_address": "0x1", "variable_name": "v", "new_type": 1}),
         ("create_struct", {"name": "S", "size": "x"}),
         ("add_struct_members", {"struct_name": "S", "members": "bad"}),
-        ("clear_struct", {"struct_name": 1}),
+        ("delete_data_type", {"name": 1}),
         ("remove_struct_members", {"struct_name": "S", "members": "bad"}),
         ("set_global_data_type", {"address": "0x1", "data_type": "int", "length": "x"}),
         ("set_bytes", {"address": "0x1", "bytes": 1}),
@@ -325,7 +313,10 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("get_project_sync_status", {"domain_path": 1}),
         ("checkout_project_program", {"exclusive": "yes", "domain_path": None}),
         ("add_project_program_to_version_control", {"comment": 1, "keep_checked_out": False}),
-        ("commit_project_program", {"message": 1, "keep_checked_out": False, "auto_checkout": True, "on_conflict": "abort"}),
+        (
+            "commit_project_program",
+            {"message": 1, "keep_checked_out": False, "auto_checkout": True, "on_conflict": "abort"},
+        ),
         ("pull_project_program", {"on_local_changes": 1, "domain_path": None}),
         ("undo_checkout_project_program", {"discard_local_changes": "x", "domain_path": None}),
         ("terminate_project_program_checkout", {"checkout_id": "x", "domain_path": None}),
@@ -341,7 +332,6 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
                 "allow_non_atomic_versioned_delete": "x",
             },
         ),
-        ("reload_project_program", {"domain_path": 1}),
         ("get_version_history", {"limit": "x", "domain_path": None}),
         ("get_version_diff", {"from_version": "x", "to_version": 2, "range_limit": 1}),
     ],
@@ -368,8 +358,8 @@ def test_dispatch_tool_accepts_pre_normalized_empty_list_result():
             return tool_dispatcher_module.normalize_empty_list_result([])
 
     result = dispatch_tool(
-        "search_functions_by_name",
-        {"query": "missing", "offset": 0, "limit": 5},
+        "list_functions",
+        {"filter": "missing", "offset": 0, "limit": 5},
         "fw",
         registry=Registry(),
     )
@@ -389,7 +379,9 @@ def test_dispatch_tool_routes_target_to_core_command():
     )
 
     assert result == [{"name": "main", "entry": "0x401000"}]
-    assert registry.core_calls == [("list_functions", {"offset": 0, "limit": 10}, "firmware")]
+    assert registry.core_calls == [
+        ("list_functions", {"offset": 0, "limit": 10, "only_default_names": False}, "firmware")
+    ]
 
 
 def test_dispatch_tool_routes_import_program_with_raw_binary_kwargs():
@@ -541,7 +533,10 @@ def test_dispatch_tool_preserves_domain_error_for_create_session():
             registry=FailingRegistry(),
         )
 
-    assert str(exc_info.value) == "PROJECT_LOCKED: project is locked by another process (RuntimeError: Unable to lock project)"
+    assert (
+        str(exc_info.value)
+        == "PROJECT_LOCKED: project is locked by another process (RuntimeError: Unable to lock project)"
+    )
     assert getattr(exc_info.value, "domain_error")["code"] == ErrorCode.PROJECT_LOCKED.value
     assert getattr(exc_info.value, "domain_error")["details"] == {
         "target": "fw",
@@ -725,7 +720,7 @@ def test_dispatch_tool_validates_output_after_result_adapter(monkeypatch):
         (
             "load_project_program",
             {"domain_path": "/folder/app"},
-            {"load_program_result": {"program": "/folder/app"}},
+            {"load_program_result": {"program": "/folder/app", "unexpected": True}},
             ValueError,
             "load_project_program output validation failed",
         ),

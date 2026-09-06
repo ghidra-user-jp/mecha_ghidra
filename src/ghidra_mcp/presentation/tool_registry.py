@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import re
 from typing import Any, Callable
 
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.tools.base import Tool
 from mcp.types import ToolAnnotations
 
 from ghidra_mcp.contracts.tool_models import PayloadToolOutputModel
@@ -15,7 +18,6 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSpec,
 )
 from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentationConfig
-
 
 _SHORT_DESCRIPTION_MAX_CHARS = 180
 _SENTENCE_ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no.", "al.")
@@ -69,7 +71,9 @@ def _build_raw_args(spec: ToolSpec, bound: inspect.BoundArguments) -> tuple[dict
         value = bound.arguments.get(public_key)
         if raw_key in spec.omit_falsey_keys and not value:
             continue
-        if value is None and raw_key not in spec.include_none_keys:
+        if value is None:
+            # The dispatcher validates and re-dumps with exclude_none, so a None
+            # never reaches the executor; drop it here to keep raw_args honest.
             continue
         raw_args[raw_key] = value
 
@@ -105,9 +109,7 @@ def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
     raw_props: dict[str, Any] = schema.get("properties", {})
     raw_required = schema.get("required", [])
 
-    properties: dict[str, Any] = {
-        _public_name(spec, raw_key): prop for raw_key, prop in raw_props.items()
-    }
+    properties: dict[str, Any] = {_public_name(spec, raw_key): prop for raw_key, prop in raw_props.items()}
     required = [_public_name(spec, raw_key) for raw_key in raw_required]
 
     if spec.include_target:
@@ -163,8 +165,6 @@ def _build_callable(
     def _tool_callable(*args: Any, **kwargs: Any) -> Any:
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        if spec.name == "search_functions_by_name" and not bound.arguments.get("query"):
-            raise ValueError("query is required")
         raw_args, target = _build_raw_args(spec, bound)
         dispatcher = dispatcher_provider()
         return dispatcher(spec.name, raw_args, target, registry=registry_provider())
@@ -229,10 +229,10 @@ def _first_sentence_or_truncate(text: str) -> str:
     # Take the first real sentence, skipping terminators that belong to a known
     # abbreviation (so "... e.g. 0x40, ..." is not cut at "e.g."). CJK
     # terminators end a sentence on their own — Japanese never puts a space
-    # after 。/！/？ — while ASCII ones need trailing whitespace or end-of-text.
+    # after 。/！/？ — while ASCII ones need trailing whitespace or end-of-text.  # noqa: RUF003
     # Always cap the result so a single long sentence cannot blow past the
     # short-mode bound.
-    for match in re.finditer(r"[.!?](?:\s|$)|[。！？]", normalized):
+    for match in re.finditer(r"[.!?](?:\s|$)|[。！？]", normalized):  # noqa: RUF001 - CJK terminators
         candidate = normalized[: match.end()].strip()
         if _ends_with_abbreviation(candidate):
             continue
@@ -261,94 +261,111 @@ def select_tool_description(spec: ToolSpec, mode: ToolDescriptionMode) -> str | 
 def tool_annotations_for_spec(spec: ToolSpec) -> ToolAnnotations | None:
     read_only_hint = True if spec.safety_tag == ToolSafetyTag.READ_ONLY else None
     destructive_hint = True if spec.safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE else None
+    idempotent_hint = spec.idempotent_hint
+    if idempotent_hint is None and read_only_hint:
+        # A read-only tool is idempotent by definition; clients treat an
+        # unset hint as ``False`` and may refuse to retry it.
+        idempotent_hint = True
 
-    if (
-        read_only_hint is not None
-        or destructive_hint is not None
-        or spec.idempotent_hint is not None
-    ):
+    if read_only_hint is not None or destructive_hint is not None or idempotent_hint is not None:
         return ToolAnnotations(
-            readOnlyHint=read_only_hint,
-            destructiveHint=destructive_hint,
-            idempotentHint=spec.idempotent_hint,
+            read_only_hint=read_only_hint,
+            destructive_hint=destructive_hint,
+            idempotent_hint=idempotent_hint,
         )
     return None
 
 
-def _tool_registration_options(
+def as_anticipated_tool_failure(tool_fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a tool callable so its failures reach MCP clients as ``ToolError``.
+
+    mcp 2.x treats every exception other than ``ToolError`` as a crash and
+    replaces its message with ``Error executing tool <name>``.  The dispatcher
+    already maps domain errors to public-safe messages (error codes, hints, and
+    sanitized causes), so those messages must travel as anticipated failures.
+    The ``domain_error`` payload attached by ``error_mapper`` is carried over.
+    """
+
+    @functools.wraps(tool_fn)
+    def _entry(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return tool_fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            failure = ToolError(str(exc))
+            payload = getattr(exc, "domain_error", None)
+            if payload is not None:
+                failure.domain_error = payload  # type: ignore[attr-defined]
+            raise failure from exc
+
+    return _entry
+
+
+def build_tool_object(
     spec: ToolSpec,
+    tool_fn: Callable[..., Any],
     presentation_config: ToolPresentationConfig | None = None,
-) -> dict[str, Any]:
+) -> Tool:
+    """Build the SDK ``Tool`` for one spec through the public ``Tool.from_function``.
+
+    ``Tool.from_function`` substitutes an empty string for a missing description,
+    so the description is reset to ``None`` afterwards: a description-less tool
+    costs less context as an omitted field than as boilerplate, and the docs
+    resource carries the details.
+    """
     effective_config = presentation_config or ToolPresentationConfig()
-    options: dict[str, Any] = {}
     description = select_tool_description(spec, effective_config.description_mode)
-    if description is not None:
-        options["description"] = description
-
-    annotations = tool_annotations_for_spec(spec)
-    if annotations is not None:
-        options["annotations"] = annotations
-    return options
-
-
-def _clear_registered_tool_description(mcp, tool_name: str) -> None:
-    tool_manager = getattr(mcp, "_tool_manager", None)
-    if tool_manager is None:
-        return
-    get_tool = getattr(tool_manager, "get_tool", None)
-    if get_tool is None:
-        return
-    tool = get_tool(tool_name)
-    if tool is not None:
-        tool.description = None  # type: ignore[assignment]
+    tool_fn.__doc__ = description
+    tool = Tool.from_function(
+        as_anticipated_tool_failure(tool_fn),
+        name=spec.name,
+        description=description,
+        annotations=tool_annotations_for_spec(spec),
+    )
+    if description is None:
+        tool.description = None
+    return tool
 
 
-def register_tool_functions(
-    mcp,
+def build_tool_objects(
     *,
     tools: dict[str, Callable[..., Any]],
     specs: dict[str, ToolSpec],
     presentation_config: ToolPresentationConfig | None = None,
-) -> None:
-    effective_config = presentation_config or ToolPresentationConfig()
-    for spec in specs.values():
-        tool_fn = tools[spec.name]
-        description = select_tool_description(spec, effective_config.description_mode)
-        tool_fn.__doc__ = description
-        decorator = mcp.tool(**_tool_registration_options(spec, effective_config))
-        decorator(tool_fn)
-        if description is None:
-            # FastMCP falls back to fn.__doc__ or "" when no description is
-            # passed; force the registered tool back to None either way.
-            _clear_registered_tool_description(mcp, spec.name)
+) -> list[Tool]:
+    return [build_tool_object(spec, tools[spec.name], presentation_config) for spec in specs.values()]
 
 
 class ToolRegistry:
     @staticmethod
-    def register_all(
-        mcp,
+    def build(
         specs: dict[str, ToolSpec],
         dispatcher_provider: Callable[[], Callable[..., Any]],
         registry_provider: Callable[[], Any],
         presentation_config: ToolPresentationConfig | None = None,
-    ) -> dict[str, Callable[..., Any]]:
+    ) -> tuple[dict[str, Callable[..., Any]], list[Tool]]:
+        """Return the public tool callables and the SDK ``Tool`` objects for ``specs``."""
+
         tools = build_tool_functions(
             specs=specs,
             dispatcher_provider=dispatcher_provider,
             registry_provider=registry_provider,
             presentation_config=presentation_config,
         )
-        register_tool_functions(mcp, tools=tools, specs=specs, presentation_config=presentation_config)
-        return tools
+        tool_objects = build_tool_objects(tools=tools, specs=specs, presentation_config=presentation_config)
+        return tools, tool_objects
 
 
 __all__ = [
     "ToolRegistry",
+    "as_anticipated_tool_failure",
     "build_tool_functions",
+    "build_tool_object",
+    "build_tool_objects",
     "public_input_schema",
     "public_output_schema",
     "public_parameter_names",
-    "register_tool_functions",
     "select_tool_description",
     "tool_annotations_for_spec",
 ]

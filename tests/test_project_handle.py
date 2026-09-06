@@ -15,17 +15,29 @@ class DummyFlatAPI:
 
 
 class DummyDomainFile:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, project=None) -> None:
         self._path = path
+        self._project = project
 
     def getPathname(self) -> str:
         return self._path
+
+    def getDomainObject(self, consumer, _ok_to_upgrade, _ok_to_recover, _monitor):
+        # Production opens programs through DomainFile.getDomainObject; the dummy
+        # project keeps openProgram as the seam tests override.
+        parts = pathlib.PurePosixPath(self._path)
+        program = self._project.openProgram(parts.parent.as_posix(), parts.name, False)
+        if program is not None:
+            program._project = self._project
+            program._consumer = consumer
+        return program
 
 
 class DummyProgram:
     def __init__(self, path: str, *, changed: bool = True) -> None:
         self._domain_file = DummyDomainFile(path)
         self._changed = changed
+        self._project = None
 
     def getDomainFile(self):
         return self._domain_file
@@ -36,6 +48,20 @@ class DummyProgram:
     def isChanged(self) -> bool:
         return self._changed
 
+    def release(self, consumer):
+        # Mirror GhidraProject.close(program) bookkeeping so existing assertions on
+        # project.closed keep describing the release sequence.
+        project = self._project if self._project is not None else consumer
+        project.close(self)
+
+
+class DummyProjectData:
+    def __init__(self, project) -> None:
+        self._project = project
+
+    def getFile(self, domain_path):
+        return DummyDomainFile(domain_path, self._project)
+
 
 class DummyProject:
     def __init__(self) -> None:
@@ -45,6 +71,9 @@ class DummyProject:
 
     def openProgram(self, domain_dir, domain_name, flag):
         return DummyProgram((pathlib.PurePosixPath(domain_dir) / domain_name).as_posix())
+
+    def getProjectData(self):
+        return DummyProjectData(self)
 
     def save(self, program):
         self.saved.append(program)
@@ -2706,7 +2735,8 @@ def test_post_process_imported_program_bootstraps_entry_and_analysis(monkeypatch
     ]
     assert utilities.marked == [imported_program]
     assert script_util.calls == ["acquire", "release"]
-    assert imported_program.transactions == [(1, True)]
+    # Entry bootstrap and auto-analysis each run in their own transaction.
+    assert imported_program.transactions == [(1, True), (2, True)]
     assert handle.project.saved == [imported_program]
     assert handle.project.closed == [imported_program]
 

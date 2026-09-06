@@ -5,38 +5,66 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from mcp.types import CallToolResult, TextContent
-
-from ghidra_mcp.application.services.core_command_service import CoreCommandService
 from ghidra_mcp.application.services.bsim_service import BsimConfig, BsimService
+from ghidra_mcp.application.services.core_command_service import CoreCommandService
+from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.application.services.sync_service import SyncService
 from ghidra_mcp.application.services.target_service import TargetService
 from ghidra_mcp.contracts.tool_spec import ToolSpec
-from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.infrastructure import CoreGateway, LockManager, RuntimeBackend
+from ghidra_mcp.infrastructure.bsim import BsimJavaBackend
+from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.mcp_server import MCPServerRuntime, create_mcp_server
-from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
-
-
-def _normalize_empty_list_result(result: Any) -> Any:
-    if isinstance(result, list) and len(result) == 0:
-        return CallToolResult(content=[TextContent(type="text", text="[]")])
-    return result
-
-
-class _RuntimeBackendCoreExecutor:
-    """Delegate core commands through RuntimeBackend for consistent state tracking."""
-
-    def __init__(self, runtime_backend: RuntimeBackend) -> None:
-        self._runtime_backend = runtime_backend
-
-    def execute(self, command: str, params: dict[str, Any], key: str) -> Any:
-        return self._runtime_backend.execute_core_command(command, params, target=key)
+from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool, normalize_empty_list_result
 
 
 class ServiceRegistryAdapter:
-    """Facade bridging dispatcher calls to core/target/sync services."""
+    """Facade the tool dispatcher calls by method name.
+
+    Every registry/shared-sync tool spec names a method here.  Most of them are
+    straight pass-throughs to one service, so they are declared in
+    ``_FORWARDED`` (method name -> service attribute) and resolved by
+    ``__getattr__``; only methods that add behaviour are written out.
+    """
+
+    _FORWARDED: dict[str, str] = {
+        # target/project lifecycle
+        "list_targets": "_target_service",
+        "create_project": "_target_service",
+        "list_programs": "_target_service",
+        "register_target": "_target_service",
+        "load_program": "_target_service",
+        "import_program": "_target_service",
+        "save_project_program": "_target_service",
+        "close_session": "_target_service",
+        "has_targets": "_target_service",
+        "close_all": "_target_service",
+        # shared-project sync
+        "get_project_sync_status": "_sync_service",
+        "checkout_project_program": "_sync_service",
+        "add_project_program_to_version_control": "_sync_service",
+        "commit_project_program": "_sync_service",
+        "pull_project_program": "_sync_service",
+        "undo_checkout_project_program": "_sync_service",
+        "terminate_project_program_checkout": "_sync_service",
+        "delete_shared_project_file": "_sync_service",
+        "get_version_history": "_sync_service",
+        "get_version_diff": "_sync_service",
+        # bsim
+        "get_bsim_database_status": "_bsim_service",
+        "bsim_add_executable_category": "_bsim_service",
+        "list_bsim_executables": "_bsim_service",
+        "get_bsim_executable": "_bsim_service",
+        "bsim_update_executable_metadata": "_bsim_service",
+        "bsim_query_target": "_bsim_service",
+        "bsim_query_function": "_bsim_service",
+        "bsim_load_matched_executable": "_bsim_service",
+        "bsim_register_target": "_bsim_service",
+        "bsim_apply_matches": "_bsim_service",
+        "bsim_update_target_signatures": "_bsim_service",
+        "bsim_delete_executable": "_bsim_service",
+    }
 
     def __init__(
         self,
@@ -51,45 +79,34 @@ class ServiceRegistryAdapter:
         self._sync_service = sync_service
         self._bsim_service = bsim_service
 
+    def __getattr__(self, name: str) -> Any:
+        service_attr = self._FORWARDED.get(name)
+        if service_attr is None:
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+        return getattr(getattr(self, service_attr), name)
+
+    def __dir__(self) -> list[str]:
+        return sorted(set(super().__dir__()) | set(self._FORWARDED))
+
     # core command path
     def call(self, command: str, params: dict[str, Any], target: str):
         return self._core_command_service.call(command, params, target)
 
-    # target/project path
-    def list_targets(self):
-        return self._target_service.list_targets()
-
-    def create_project(
+    def export_program(
         self,
+        target: str,
+        output_path: str,
         *,
-        project_location: str,
-        project_name: str | None = None,
+        format: str = "gzf",
         overwrite: bool = False,
     ):
-        return self._target_service.create_project(
-            project_location=project_location,
-            project_name=project_name,
-            overwrite=overwrite,
-        )
-
-    def list_programs(self, target: str):
-        return self._target_service.list_programs(target)
-
-    def register_target(self, target: str, *, project_location: str, project_name: str | None = None):
-        return self._target_service.register_target(
+        """Export runs in the JVM, but the output path is an operator-policed filesystem write."""
+        self._target_service.validate_export_path(output_path)
+        return self._core_command_service.call(
+            "export_program",
+            {"output_path": output_path, "format": format, "overwrite": overwrite},
             target,
-            project_location,
-            project_name=project_name,
         )
-
-    def load_program(self, target: str, domain_path: str):
-        return self._target_service.load_program(target, domain_path)
-
-    def import_program(self, target: str, binary_path: str, **kwargs):
-        return self._target_service.import_program(target, binary_path, **kwargs)
-
-    def save_project_program(self, target: str, *, domain_path: str | None = None):
-        return self._target_service.save_project_program(target, domain_path=domain_path)
 
     def create_session(
         self,
@@ -107,264 +124,6 @@ class ServiceRegistryAdapter:
             project_name=project_name,
             domain_path=domain_path,
         )
-
-    def close_session(self, target: str, *, remove_program: bool = False):
-        return self._target_service.close_session(target, remove_program=remove_program)
-
-    # shared-sync path
-    def get_project_sync_status(self, target: str, *, domain_path: str | None = None):
-        return self._sync_service.get_project_sync_status(target, domain_path=domain_path)
-
-    def checkout_project_program(self, target: str, *, exclusive: bool = False, domain_path: str | None = None):
-        return self._sync_service.checkout_project_program(target, exclusive=exclusive, domain_path=domain_path)
-
-    def add_project_program_to_version_control(
-        self,
-        target: str,
-        *,
-        comment: str,
-        keep_checked_out: bool = False,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.add_project_program_to_version_control(
-            target,
-            comment,
-            keep_checked_out=keep_checked_out,
-            domain_path=domain_path,
-        )
-
-    def commit_project_program(
-        self,
-        target: str,
-        *,
-        message: str,
-        keep_checked_out: bool = False,
-        auto_checkout: bool = True,
-        on_conflict: str = "abort",
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.commit_project_program(
-            target,
-            message,
-            keep_checked_out=keep_checked_out,
-            auto_checkout=auto_checkout,
-            on_conflict=on_conflict,
-            domain_path=domain_path,
-        )
-
-    def pull_project_program(
-        self,
-        target: str,
-        *,
-        on_local_changes: str = "abort",
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.pull_project_program(
-            target,
-            on_local_changes=on_local_changes,
-            domain_path=domain_path,
-        )
-
-    def undo_checkout_project_program(
-        self,
-        target: str,
-        *,
-        discard_local_changes: bool = True,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.undo_checkout_project_program(
-            target,
-            discard_local_changes=discard_local_changes,
-            domain_path=domain_path,
-        )
-
-    def terminate_project_program_checkout(
-        self,
-        target: str,
-        *,
-        checkout_id: int,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.terminate_project_program_checkout(
-            target,
-            checkout_id=checkout_id,
-            domain_path=domain_path,
-        )
-
-    def delete_shared_project_file(
-        self,
-        target: str,
-        *,
-        domain_path: str,
-        confirm: str,
-        expected_latest_version: int | None = None,
-        allow_private: bool = False,
-        allow_non_atomic_versioned_delete: bool = False,
-    ):
-        return self._sync_service.delete_shared_project_file(
-            target,
-            domain_path=domain_path,
-            confirm=confirm,
-            expected_latest_version=expected_latest_version,
-            allow_private=allow_private,
-            allow_non_atomic_versioned_delete=allow_non_atomic_versioned_delete,
-        )
-
-    def reload_project_program(self, target: str, *, domain_path: str | None = None):
-        return self._sync_service.reload_project_program(target, domain_path=domain_path)
-
-    def get_version_history(self, target: str, *, limit: int = 50, domain_path: str | None = None):
-        return self._sync_service.get_version_history(target, limit=limit, domain_path=domain_path)
-
-    def get_version_diff(
-        self,
-        target: str,
-        *,
-        from_version: int,
-        to_version: int,
-        range_limit: int = 200,
-        domain_path: str | None = None,
-    ):
-        return self._sync_service.get_version_diff(
-            target,
-            from_version=from_version,
-            to_version=to_version,
-            range_limit=range_limit,
-            domain_path=domain_path,
-        )
-
-    # bsim path
-    def get_bsim_database_status(self, *, bsim_url: str | None = None):
-        return self._bsim_service.get_bsim_database_status(bsim_url=bsim_url)
-
-    def list_bsim_categories(self, *, bsim_url: str | None = None):
-        return self._bsim_service.list_bsim_categories(bsim_url=bsim_url)
-
-    def bsim_add_executable_category(
-        self,
-        *,
-        category: str,
-        bsim_url: str | None = None,
-    ):
-        return self._bsim_service.bsim_add_executable_category(
-            category=category,
-            bsim_url=bsim_url,
-        )
-
-    def list_bsim_executables(
-        self,
-        *,
-        bsim_url: str | None = None,
-        name: str | None = None,
-        md5: str | None = None,
-        arch: str | None = None,
-        compiler: str | None = None,
-        limit: int = 100,
-    ):
-        return self._bsim_service.list_bsim_executables(
-            bsim_url=bsim_url,
-            name=name,
-            md5=md5,
-            arch=arch,
-            compiler=compiler,
-            limit=limit,
-        )
-
-    def get_bsim_executable(
-        self,
-        *,
-        bsim_url: str | None = None,
-        md5: str | None = None,
-        name: str | None = None,
-    ):
-        return self._bsim_service.get_bsim_executable(bsim_url=bsim_url, md5=md5, name=name)
-
-    def bsim_update_executable_metadata(
-        self,
-        *,
-        categories: dict[str, object],
-        bsim_url: str | None = None,
-        md5: str | None = None,
-        name: str | None = None,
-    ):
-        return self._bsim_service.bsim_update_executable_metadata(
-            categories=categories,
-            bsim_url=bsim_url,
-            md5=md5,
-            name=name,
-        )
-
-    def bsim_query_target(
-        self,
-        target: str,
-        *,
-        bsim_url: str | None = None,
-        similarity_threshold: float = 0.7,
-        significance_threshold: float = 0.0,
-        matches_per_function: int = 10,
-        max_results: int = 500,
-    ):
-        return self._bsim_service.bsim_query_target(
-            target,
-            bsim_url=bsim_url,
-            similarity_threshold=similarity_threshold,
-            significance_threshold=significance_threshold,
-            matches_per_function=matches_per_function,
-            max_results=max_results,
-        )
-
-    def bsim_query_function(
-        self,
-        target: str,
-        *,
-        bsim_url: str | None = None,
-        address: str | None = None,
-        function_name: str | None = None,
-        similarity_threshold: float = 0.7,
-        significance_threshold: float = 0.0,
-        matches_per_function: int = 10,
-        max_results: int = 100,
-    ):
-        return self._bsim_service.bsim_query_function(
-            target,
-            bsim_url=bsim_url,
-            address=address,
-            function_name=function_name,
-            similarity_threshold=similarity_threshold,
-            significance_threshold=significance_threshold,
-            matches_per_function=matches_per_function,
-            max_results=max_results,
-        )
-
-    def bsim_load_matched_executable(
-        self,
-        *,
-        matched_ref: dict[str, object],
-        target: str | None = None,
-    ):
-        return self._bsim_service.bsim_load_matched_executable(matched_ref=matched_ref, target=target)
-
-    def bsim_set_target_metadata(
-        self,
-        target: str,
-        *,
-        categories: dict[str, object],
-        bsim_url: str | None = None,
-    ):
-        return self._bsim_service.bsim_set_target_metadata(
-            target,
-            categories=categories,
-            bsim_url=bsim_url,
-        )
-
-    def bsim_register_target(self, target: str, *, bsim_url: str | None = None):
-        return self._bsim_service.bsim_register_target(target, bsim_url=bsim_url)
-
-    def has_targets(self) -> bool:
-        return self._target_service.has_targets()
-
-    def close_all(self) -> None:
-        self._target_service.close_all()
 
 
 @dataclass(slots=True)
@@ -388,22 +147,25 @@ def create_cli_runtime(
     presentation_config: ToolPresentationConfig | None = None,
     dispatcher_provider: Callable[[], Callable[..., Any]] | None = None,
     registry_provider: Callable[[], Any] | None = None,
+    server_log_level: str | None = None,
+    path_policy: PathPolicy | None = None,
 ) -> CLIRuntimeBundle:
     runtime_state = RuntimeState(
         core_accessor=core_accessor,
         checkout_required_commands=set(checkout_required_commands),
-        normalize_result=_normalize_empty_list_result,
+        normalize_result=normalize_empty_list_result,
     )
     runtime_backend = RuntimeBackend(state=runtime_state)
     lock_manager = LockManager()
-    target_service = TargetService(runtime_backend, lock_manager=lock_manager)
+    target_service = TargetService(runtime_backend, lock_manager=lock_manager, path_policy=path_policy)
     sync_service = SyncService(runtime_backend, lock_manager=lock_manager)
-    core_gateway = CoreGateway(_RuntimeBackendCoreExecutor(runtime_backend))
+    core_gateway = CoreGateway(runtime_backend)
     core_command_service = CoreCommandService(core_gateway)
     bsim_service = BsimService(
         core_command_service=core_command_service,
         target_service=target_service,
         config=bsim_config,
+        java_backend=BsimJavaBackend(),
     )
     registry = ServiceRegistryAdapter(
         core_command_service=core_command_service,
@@ -418,6 +180,7 @@ def create_cli_runtime(
         registry_provider=effective_registry_provider,
         dispatcher_provider=effective_dispatcher_provider,
         presentation_config=presentation_config,
+        server_log_level=server_log_level,
     )
     return CLIRuntimeBundle(
         registry=registry,

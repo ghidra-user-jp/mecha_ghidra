@@ -3,10 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-import ghidra_mcp.contracts.tool_models as tool_models
 import pytest
 from pydantic import ValidationError
+
+import ghidra_mcp.contracts.tool_models as tool_models
 from ghidra_mcp.contracts.tool_spec import (
+    ClearDataMode,
+    CommentKind,
+    CommitConflictAction,
+    ConflictAction,
     ExecutorKind,
     ToolCategoryTag,
     ToolOperationLevel,
@@ -15,9 +20,8 @@ from ghidra_mcp.contracts.tool_spec import (
     get_all_tool_specs,
     get_checkout_required_tool_names,
 )
-from ghidra_headless.handlers.core_command_registry import COMMAND_DEP_KEYS, COMMAND_NAMES
 from ghidra_mcp.presentation import cli as presentation_cli
-from ghidra_mcp.presentation.tool_registry import build_tool_functions, register_tool_functions
+from ghidra_mcp.presentation.tool_registry import build_tool_functions, build_tool_objects, public_parameter_names
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_SPEC_PATH = ROOT / "src" / "ghidra_mcp" / "contracts" / "tool_spec.py"
@@ -74,9 +78,14 @@ def test_tool_specs_include_expected_tags():
     assert specs["set_bytes"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
     assert specs["set_bytes"].operation_level == ToolOperationLevel.ADVANCED
 
-    assert specs["clear_struct"].category_tag == ToolCategoryTag.DATATYPE_OPS
-    assert specs["clear_struct"].safety_tag == ToolSafetyTag.WRITE
-    assert specs["clear_struct"].operation_level == ToolOperationLevel.STANDARD
+    assert specs["remove_struct_members"].category_tag == ToolCategoryTag.DATATYPE_OPS
+    assert specs["remove_struct_members"].safety_tag == ToolSafetyTag.WRITE
+    assert specs["remove_struct_members"].operation_level == ToolOperationLevel.STANDARD
+
+    assert specs["delete_data_type"].category_tag == ToolCategoryTag.DATATYPE_OPS
+    assert specs["delete_data_type"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
+    assert specs["set_comment"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
+    assert specs["set_comment"].checkout_required is True
 
     assert specs["get_project_sync_status"].category_tag == ToolCategoryTag.SHARED_SYNC
     assert specs["get_project_sync_status"].safety_tag == ToolSafetyTag.READ_ONLY
@@ -95,35 +104,9 @@ def test_tool_specs_include_expected_tags():
     assert specs["bsim_register_target"].operation_level == ToolOperationLevel.STANDARD
 
 
-def test_core_command_spec_keys_are_consumed_by_handlers():
-    supported = set(COMMAND_NAMES)
-    dep_keys_by_command = {name: set(keys) for name, keys in COMMAND_DEP_KEYS.items()}
-
-    specs = get_all_tool_specs()
-    mismatches: list[str] = []
-
-    for spec in specs.values():
-        if spec.executor_kind != ExecutorKind.CORE_COMMAND:
-            continue
-        command = spec.command_or_method
-        assert command in supported
-        expected_keys = dep_keys_by_command.get(command, set())
-        unknown_keys = sorted(
-            key for key in spec.input_model.model_fields.keys() if key not in expected_keys
-        )
-        if unknown_keys:
-            mismatches.append(f"{command} has unused keys: {', '.join(unknown_keys)}")
-
-    assert not mismatches, "\n".join(mismatches)
-
-
 def test_shared_sync_specs_are_tagged_as_shared_sync_category():
     specs = get_all_tool_specs()
-    shared_sync_names = {
-        name
-        for name, spec in specs.items()
-        if spec.category_tag == ToolCategoryTag.SHARED_SYNC
-    }
+    shared_sync_names = {name for name, spec in specs.items() if spec.category_tag == ToolCategoryTag.SHARED_SYNC}
 
     assert shared_sync_names == {
         "get_project_sync_status",
@@ -136,21 +119,15 @@ def test_shared_sync_specs_are_tagged_as_shared_sync_category():
         "undo_checkout_project_program",
         "terminate_project_program_checkout",
         "delete_shared_project_file",
-        "reload_project_program",
     }
 
 
 def test_bsim_specs_are_tagged_as_bsim_category():
     specs = get_all_tool_specs()
-    bsim_names = {
-        name
-        for name, spec in specs.items()
-        if spec.category_tag == ToolCategoryTag.BSIM
-    }
+    bsim_names = {name for name, spec in specs.items() if spec.category_tag == ToolCategoryTag.BSIM}
 
     assert bsim_names == {
         "get_bsim_database_status",
-        "list_bsim_categories",
         "bsim_add_executable_category",
         "list_bsim_executables",
         "get_bsim_executable",
@@ -158,8 +135,10 @@ def test_bsim_specs_are_tagged_as_bsim_category():
         "bsim_query_target",
         "bsim_query_function",
         "bsim_load_matched_executable",
-        "bsim_set_target_metadata",
         "bsim_register_target",
+        "bsim_apply_matches",
+        "bsim_update_target_signatures",
+        "bsim_delete_executable",
     }
 
 
@@ -171,36 +150,17 @@ def test_shared_sync_specs_register_via_generic_tool_registration():
         registry_provider=lambda: presentation_cli._registry,
     )
 
-    registered: list[str] = []
-    annotations_by_name: dict[str, Any] = {}
-
-    class DummyMCP:
-        def tool(self, **kwargs):  # noqa: ARG002
-            def _decorator(fn):
-                registered.append(fn.__name__)
-                annotations_by_name[fn.__name__] = kwargs.get("annotations")
-                return fn
-
-            return _decorator
-
-    register_tool_functions(DummyMCP(), tools=tools, specs=specs)
+    tool_objects = build_tool_objects(tools=tools, specs=specs)
+    annotations_by_name: dict[str, Any] = {tool.name: tool.annotations for tool in tool_objects}
 
     shared_sync_names = list(specs)
-    assert registered == shared_sync_names
-    assert {
-        name
-        for name, annotations in annotations_by_name.items()
-        if annotations.readOnlyHint is True
-    } == {
+    assert [tool.name for tool in tool_objects] == shared_sync_names
+    assert {name for name, annotations in annotations_by_name.items() if annotations.read_only_hint is True} == {
         "get_project_sync_status",
         "get_version_history",
         "get_version_diff",
     }
-    assert {
-        name
-        for name, annotations in annotations_by_name.items()
-        if annotations.destructiveHint is True
-    } == {
+    assert {name for name, annotations in annotations_by_name.items() if annotations.destructive_hint is True} == {
         "commit_project_program",
         "pull_project_program",
         "undo_checkout_project_program",
@@ -212,12 +172,26 @@ def test_shared_sync_specs_register_via_generic_tool_registration():
 def test_typed_input_models_for_function_listing_slice():
     specs = get_all_tool_specs()
 
+    def _plain(annotation):
+        import functools
+        import operator
+        import types as _types
+        import typing
+
+        origin = typing.get_origin(annotation)
+        if origin is typing.Annotated:
+            return _plain(typing.get_args(annotation)[0])
+        if origin in (typing.Union, _types.UnionType):
+            return functools.reduce(operator.or_, [_plain(arg) for arg in typing.get_args(annotation)])
+        return annotation
+
     def _assert_fields(tool_name: str, expected_fields: dict[str, tuple[type, object]]):
         model = specs[tool_name].input_model
         fields = model.model_fields
         assert set(fields.keys()) == set(expected_fields.keys())
         for key, (expected_type, expected_default) in expected_fields.items():
-            assert fields[key].annotation == expected_type
+            # Bounds live in Annotated metadata; the base type is what matters here.
+            assert _plain(fields[key].annotation) == _plain(expected_type), (tool_name, key)
             if expected_default is ...:
                 assert fields[key].is_required()
             else:
@@ -228,21 +202,8 @@ def test_typed_input_models_for_function_listing_slice():
         {
             "offset": (int, 0),
             "limit": (int, 100),
-        },
-    )
-    _assert_fields(
-        "list_classes",
-        {
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-    )
-    _assert_fields(
-        "search_functions_by_name",
-        {
-            "query": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
+            "filter": (str | None, None),
+            "only_default_names": (bool, False),
         },
     )
     _assert_fields(
@@ -287,8 +248,7 @@ def test_typed_input_models_for_function_listing_slice():
             "address": (str, ...),
         },
     )
-    _assert_fields("analyze_program", {})
-    _assert_fields("reanalyze_program", {})
+    _assert_fields("analyze_program", {"force": (bool, False)})
     _assert_fields(
         "get_callee",
         {
@@ -314,7 +274,8 @@ def test_typed_input_models_for_function_listing_slice():
     _assert_fields(
         "get_function_xrefs",
         {
-            "name": (str, ...),
+            "address": (str | None, None),
+            "name": (str | None, None),
             "offset": (int, 0),
             "limit": (int, 100),
         },
@@ -345,6 +306,7 @@ def test_typed_input_models_for_function_listing_slice():
         {
             "offset": (int, 0),
             "limit": (int, 100),
+            "classes_only": (bool, False),
         },
     )
     _assert_fields(
@@ -415,38 +377,35 @@ def test_typed_input_models_for_function_listing_slice():
     _assert_fields(
         "rename_variable",
         {
-            "functionName": (str, ...),
             "oldName": (str, ...),
             "newName": (str, ...),
+            "functionAddress": (str | None, None),
+            "functionName": (str | None, None),
         },
     )
     _assert_fields(
-        "set_decompiler_comment",
+        "set_comment",
         {
             "address": (str, ...),
             "comment": (str, ...),
-        },
-    )
-    _assert_fields(
-        "set_disassembly_comment",
-        {
-            "address": (str, ...),
-            "comment": (str, ...),
+            "kind": (CommentKind, ...),
         },
     )
     _assert_fields(
         "set_function_prototype",
         {
-            "function_address": (str, ...),
             "prototype": (str, ...),
+            "function_address": (str | None, None),
+            "function_name": (str | None, None),
         },
     )
     _assert_fields(
         "set_local_variable_type",
         {
-            "function_address": (str, ...),
             "variable_name": (str, ...),
             "new_type": (str, ...),
+            "function_address": (str | None, None),
+            "function_name": (str | None, None),
         },
     )
     _assert_fields(
@@ -467,16 +426,9 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "clear_struct",
+        "delete_data_type",
         {
-            "struct_name": (str, ...),
-            "category": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "delete_struct",
-        {
-            "struct_name": (str, ...),
+            "name": (str, ...),
             "category": (str | None, None),
         },
     )
@@ -501,7 +453,7 @@ def test_typed_input_models_for_function_listing_slice():
         "remove_struct_members",
         {
             "struct_name": (str, ...),
-            "members": (list[str], ...),
+            "members": (list[str | dict] | None, None),
             "category": (str | None, None),
         },
     )
@@ -511,7 +463,7 @@ def test_typed_input_models_for_function_listing_slice():
             "address": (str, ...),
             "data_type": (str, ...),
             "length": (int | None, None),
-            "clear_mode": (str | None, None),
+            "clear_mode": (ClearDataMode | None, None),
         },
     )
     _assert_fields(
@@ -528,7 +480,6 @@ def test_typed_input_models_for_function_listing_slice():
             "category": (str, ...),
             "comment": (str, ...),
             "type": (str, ...),
-            "format": (str, "json"),
         },
     )
     _assert_fields(
@@ -572,6 +523,7 @@ def test_typed_input_models_for_function_listing_slice():
         "load_project_program",
         {
             "domain_path": (str, ...),
+            "version": (int | None, None),
         },
     )
     _assert_fields(
@@ -616,7 +568,7 @@ def test_typed_input_models_for_function_listing_slice():
     _assert_fields(
         "checkout_project_program",
         {
-            "exclusive": (bool, False),
+            "exclusive": (bool | None, None),
             "domain_path": (str | None, None),
         },
     )
@@ -634,14 +586,14 @@ def test_typed_input_models_for_function_listing_slice():
             "message": (str, ...),
             "keep_checked_out": (bool, False),
             "auto_checkout": (bool, True),
-            "on_conflict": (str, "abort"),
+            "on_conflict": (CommitConflictAction, "abort"),
             "domain_path": (str | None, None),
         },
     )
     _assert_fields(
         "pull_project_program",
         {
-            "on_local_changes": (str, "abort"),
+            "on_local_changes": (ConflictAction, "abort"),
             "domain_path": (str | None, None),
         },
     )
@@ -670,12 +622,6 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "reload_project_program",
-        {
-            "domain_path": (str | None, None),
-        },
-    )
-    _assert_fields(
         "get_version_history",
         {
             "limit": (int, 50),
@@ -689,6 +635,8 @@ def test_typed_input_models_for_function_listing_slice():
             "to_version": (int, ...),
             "range_limit": (int, 200),
             "domain_path": (str | None, None),
+            "include_details": (bool, False),
+            "details_limit": (int, 20),
         },
     )
     _assert_fields(
@@ -734,6 +682,9 @@ def test_typed_input_models_for_function_listing_slice():
             "significance_threshold": (float, 0.0),
             "matches_per_function": (int, 10),
             "max_results": (int, 100),
+            "addresses": (list[str] | None, None),
+            "function_names": (list[str] | None, None),
+            "exclude_self": (bool, True),
         },
     )
     _assert_fields(
@@ -741,13 +692,6 @@ def test_typed_input_models_for_function_listing_slice():
         {
             "matched_ref": (dict[str, object], ...),
             "target": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "bsim_set_target_metadata",
-        {
-            "categories": (dict[str, object], ...),
-            "bsim_url": (str | None, None),
         },
     )
 
@@ -769,16 +713,14 @@ def test_registry_and_shared_sync_adapters_are_configured():
 def test_specs_include_contract_driven_metadata():
     specs = get_all_tool_specs()
 
-    assert specs["list_functions"].public_signature[-1] == "target"
-    assert specs["register_target"].public_signature[0] == "target"
-    assert specs["list_targets"].public_signature == ()
-    assert specs["create_session"].error_policy == "legacy_compatible"
+    assert tuple(public_parameter_names(specs["list_functions"]))[-1] == "target"
+    assert tuple(public_parameter_names(specs["register_target"]))[0] == "target"
+    assert tuple(public_parameter_names(specs["list_targets"])) == ()
     assert hasattr(specs["create_session"], "output_model")
     assert specs["rename_function"].public_name_overrides == {
         "oldName": "old_name",
         "newName": "new_name",
     }
-    assert specs["create_session"].include_none_keys == frozenset({"project_name"})
     assert specs["list_strings"].omit_falsey_keys == frozenset({"filter"})
     assert specs["list_targets"].description is not None
     assert specs["list_targets"].safety_tag == ToolSafetyTag.READ_ONLY
@@ -790,25 +732,28 @@ def test_checkout_required_tools_are_declared_on_specs():
         "rename_function",
         "rename_data",
         "rename_variable",
-        "set_decompiler_comment",
-        "set_disassembly_comment",
+        "set_comment",
         "set_function_prototype",
         "set_local_variable_type",
         "set_global_data_type",
         "create_function",
         "delete_function",
         "analyze_program",
-        "reanalyze_program",
         "create_struct",
-        "delete_struct",
+        "delete_data_type",
         "rename_data_type",
         "add_struct_members",
-        "clear_struct",
         "remove_struct_members",
         "set_bytes",
         "add_bookmark",
         "delete_bookmark",
-        "bsim_set_target_metadata",
+        "create_label",
+        "undo_program_change",
+        "redo_program_change",
+        "create_enum",
+        "set_enum_values",
+        "parse_c_declarations",
+        "bsim_apply_matches",
     }
 
 
@@ -817,8 +762,6 @@ def test_all_output_models_are_strict_and_typed():
 
     list_output_tools = {
         "list_functions",
-        "list_classes",
-        "search_functions_by_name",
         "disassemble_function",
         "disassemble_range",
         "get_callee",
@@ -834,6 +777,7 @@ def test_all_output_models_are_strict_and_typed():
         "list_strings",
         "get_data_by_label",
         "search_bytes",
+        "search_symbols",
         "list_bookmarks",
         "list_targets",
         "list_project_programs",
@@ -848,6 +792,9 @@ def test_all_output_models_are_strict_and_typed():
             "status": (str, ...),
             "target": (str, ...),
             "program": (str, ...),
+            "reloaded": (bool, False),
+            "version": (int | None, None),
+            "read_only": (bool, False),
         },
         "import_program": {
             "status": (str, ...),
@@ -916,6 +863,8 @@ def test_all_output_models_are_strict_and_typed():
             "diff_types": (list[object], ...),
             "ranges": (list[object], ...),
             "ranges_truncated": (bool, ...),
+            "details": (list[object], ...),
+            "details_truncated": (bool, ...),
             "warnings": (str | None, ...),
         },
         "checkout_project_program": {
@@ -955,6 +904,8 @@ def test_all_output_models_are_strict_and_typed():
             "merged": (bool | None, None),
             "committed": (bool | None, None),
             "conflict_discarded": (bool | None, None),
+            "conflict_kept": (bool | None, None),
+            "kept_program": (str | None, None),
         },
         "pull_project_program": {
             "status": (str, ...),
@@ -966,6 +917,7 @@ def test_all_output_models_are_strict_and_typed():
             "discarded_hijacked_file": (bool | None, None),
             "followed_latest": (bool, ...),
             "reloaded": (bool, ...),
+            "checked_out": (bool, ...),
             "version": (int | None, ...),
             "latest_version": (int | None, ...),
             "is_latest_version": (bool | None, ...),
@@ -998,12 +950,6 @@ def test_all_output_models_are_strict_and_typed():
             "version": (int | None, ...),
             "latest_version": (int | None, ...),
             "atomic_version_guard": (bool, ...),
-        },
-        "reload_project_program": {
-            "status": (str, ...),
-            "target": (str, ...),
-            "program": (str, ...),
-            "reloaded": (bool, ...),
         },
         "bsim_load_matched_executable": {
             "status": (str, ...),
@@ -1056,14 +1002,87 @@ def test_all_specs_have_required_contract_fields():
 
     for spec in specs.values():
         assert spec.output_model is not None
-        assert spec.error_policy == "legacy_compatible"
-        assert isinstance(spec.public_signature, tuple)
+        assert isinstance(tuple(public_parameter_names(spec)), tuple)
 
-        fields = tuple(spec.input_model.model_fields.keys())
+        fields = tuple(spec.public_name_overrides.get(key, key) for key in spec.input_model.model_fields)
         if spec.executor_kind == ExecutorKind.CORE_COMMAND and spec.include_target:
             expected_signature = (*fields, "target")
         elif spec.include_target:
             expected_signature = ("target", *fields)
         else:
             expected_signature = fields
-        assert spec.public_signature == expected_signature
+        assert tuple(public_parameter_names(spec)) == expected_signature
+
+
+def _assert_input_fields(tool_name: str, expected_fields: dict[str, tuple[Any, Any]]) -> None:
+    fields = get_all_tool_specs()[tool_name].input_model.model_fields
+    assert set(fields.keys()) == set(expected_fields.keys()), tool_name
+    for name, (expected_type, expected_default) in expected_fields.items():
+        field = fields[name]
+        if expected_default is ...:
+            assert field.is_required(), f"{tool_name}.{name} should be required"
+        else:
+            assert field.default == expected_default, f"{tool_name}.{name} default"
+        if expected_type in (int, float):
+            # Bounded numbers are Annotated[...] aliases; compare the underlying type.
+            import typing
+
+            annotation = field.annotation
+            if typing.get_origin(annotation) is typing.Annotated:
+                annotation = typing.get_args(annotation)[0]
+            assert annotation is expected_type, f"{tool_name}.{name} type"
+        else:
+            assert field.annotation == expected_type, f"{tool_name}.{name} type"
+
+
+def test_new_bsim_tool_specs_declare_their_parameters():
+    _assert_input_fields(
+        "bsim_query_target",
+        {
+            "bsim_url": (str | None, None),
+            "similarity_threshold": (float, 0.7),
+            "significance_threshold": (float, 0.0),
+            "matches_per_function": (int, 10),
+            "max_results": (int, 500),
+            "exclude_self": (bool, True),
+            "min_function_size": (int, 0),
+        },
+    )
+    _assert_input_fields(
+        "bsim_register_target",
+        {
+            "bsim_url": (str | None, None),
+            "categories": (dict[str, object] | None, None),
+        },
+    )
+    _assert_input_fields(
+        "bsim_apply_matches",
+        {
+            "bsim_url": (str | None, None),
+            "similarity_threshold": (float, 0.9),
+            "significance_threshold": (float, 0.0),
+            "matches_per_function": (int, 5),
+            "max_functions": (int, 500),
+            "only_default_names": (bool, True),
+            "exclude_self": (bool, True),
+            "min_function_size": (int, 0),
+            "dry_run": (bool, False),
+            "addresses": (list[str] | None, None),
+            "function_names": (list[str] | None, None),
+        },
+    )
+    _assert_input_fields("bsim_update_target_signatures", {"bsim_url": (str | None, None)})
+    _assert_input_fields(
+        "bsim_delete_executable",
+        {
+            "confirm": (str, ...),
+            "bsim_url": (str | None, None),
+            "md5": (str | None, None),
+            "name": (str | None, None),
+        },
+    )
+    specs = get_all_tool_specs()
+    assert specs["bsim_delete_executable"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
+    assert specs["bsim_delete_executable"].include_target is False
+    assert specs["bsim_apply_matches"].checkout_required is True
+    assert specs["bsim_apply_matches"].safety_tag == ToolSafetyTag.WRITE

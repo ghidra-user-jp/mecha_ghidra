@@ -15,14 +15,14 @@ from ghidra_mcp import cli
             {"offset": 3, "limit": 7},
         ),
         (
-            "list_classes",
-            lambda: cli.list_classes(offset=3, limit=7, target="fw"),
-            {"offset": 3, "limit": 7},
+            "list_functions",
+            lambda: cli.list_functions(filter="main", only_default_names=True, offset=3, limit=7, target="fw"),
+            {"filter": "main", "only_default_names": True, "offset": 3, "limit": 7},
         ),
         (
-            "search_functions_by_name",
-            lambda: cli.search_functions_by_name(query="main", offset=3, limit=7, target="fw"),
-            {"query": "main", "offset": 3, "limit": 7},
+            "list_namespaces",
+            lambda: cli.list_namespaces(classes_only=True, offset=3, limit=7, target="fw"),
+            {"classes_only": True, "offset": 3, "limit": 7},
         ),
         (
             "get_function",
@@ -73,6 +73,11 @@ from ghidra_mcp import cli
             "get_function_xrefs",
             lambda: cli.get_function_xrefs(name="main", offset=3, limit=7, target="fw"),
             {"name": "main", "offset": 3, "limit": 7},
+        ),
+        (
+            "get_function_xrefs",
+            lambda: cli.get_function_xrefs(address="0x401000", offset=3, limit=7, target="fw"),
+            {"address": "0x401000", "offset": 3, "limit": 7},
         ),
         (
             "list_segments",
@@ -136,7 +141,9 @@ from ghidra_mcp import cli
         ),
         (
             "list_bookmarks",
-            lambda: cli.list_bookmarks(offset=1, limit=5, address="0x401000", type="Info", category="Analysis", target="fw"),
+            lambda: cli.list_bookmarks(
+                offset=1, limit=5, address="0x401000", type="Info", category="Analysis", target="fw"
+            ),
             {"offset": 1, "limit": 5, "address": "0x401000", "type": "Info", "category": "Analysis"},
         ),
     ],
@@ -168,8 +175,7 @@ def test_function_listing_slice_uses_dispatcher(monkeypatch, tool_name, call, ex
     "call",
     [
         lambda: cli.list_functions(offset=0, limit=10, target="fw"),
-        lambda: cli.list_classes(offset=0, limit=10, target="fw"),
-        lambda: cli.search_functions_by_name(query="main", offset=0, limit=10, target="fw"),
+        lambda: cli.list_functions(filter="main", offset=0, limit=10, target="fw"),
         lambda: cli.get_function(address="0x401000", target="fw"),
         lambda: cli.decompile_function(name="main", target="fw"),
         lambda: cli.decompile_function(address="0x401000", target="fw"),
@@ -183,6 +189,7 @@ def test_function_listing_slice_uses_dispatcher(monkeypatch, tool_name, call, ex
         lambda: cli.list_imports(offset=0, limit=10, target="fw"),
         lambda: cli.list_exports(offset=0, limit=10, target="fw"),
         lambda: cli.list_namespaces(offset=0, limit=10, target="fw"),
+        lambda: cli.list_namespaces(classes_only=True, offset=0, limit=10, target="fw"),
         lambda: cli.list_data_items(offset=0, limit=10, target="fw"),
         lambda: cli.list_strings(offset=0, limit=10, filter="main", target="fw"),
         lambda: cli.get_data_by_label(label="main", target="fw"),
@@ -211,8 +218,7 @@ def test_function_listing_slice_empty_result_keeps_compatibility(monkeypatch, ca
     "call",
     [
         lambda: cli.list_functions(offset=0, limit=10, target="fw"),
-        lambda: cli.list_classes(offset=0, limit=10, target="fw"),
-        lambda: cli.search_functions_by_name(query="main", offset=0, limit=10, target="fw"),
+        lambda: cli.list_namespaces(classes_only=True, offset=0, limit=10, target="fw"),
         lambda: cli.get_function(address="0x401000", target="fw"),
         lambda: cli.decompile_function(name="main", target="fw"),
         lambda: cli.decompile_function(address="0x401000", target="fw"),
@@ -246,8 +252,3 @@ def test_function_listing_slice_error_message_is_unchanged(monkeypatch, call):
 
     with pytest.raises(RuntimeError, match="Session 'fw' is not initialized"):
         call()
-
-
-def test_search_functions_by_name_query_guard_message_is_unchanged():
-    with pytest.raises(ValueError, match="query is required"):
-        cli.search_functions_by_name(query="", offset=0, limit=10, target="fw")

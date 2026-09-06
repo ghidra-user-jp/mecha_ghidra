@@ -22,6 +22,8 @@ def _status_target_ok(result: Any, target: str) -> dict[str, Any]:
 
 
 def _status_program_ok(result: Any, target: str) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return {"status": "ok", "target": target, **result}
     return {"status": "ok", "target": target, "program": result}
 
 
@@ -31,31 +33,22 @@ _RESULT_ADAPTERS = {
 }
 
 
-def _create_session_error(_exc: Exception, target: str) -> Exception:
-    mapped = map_exception(_exc)
-    if mapped is not _exc:
-        return mapped
-    return RuntimeError(f"Failed to create session '{target}'")
+def _fallback_error_adapter(message_template: str):
+    """Map domain errors publicly; wrap anything else in a generic per-target message."""
 
+    def adapter(exc: Exception, target: str) -> Exception:
+        mapped = map_exception(exc)
+        if mapped is not exc:
+            return mapped
+        return RuntimeError(message_template.format(target=target))
 
-def _close_session_error(_exc: Exception, target: str) -> Exception:
-    mapped = map_exception(_exc)
-    if mapped is not _exc:
-        return mapped
-    return RuntimeError(f"Failed to close session '{target}'")
-
-
-def _close_remove_error(_exc: Exception, target: str) -> Exception:
-    mapped = map_exception(_exc)
-    if mapped is not _exc:
-        return mapped
-    return RuntimeError(f"Failed to close/remove session '{target}'")
+    return adapter
 
 
 _ERROR_ADAPTERS = {
-    "create_session_error": _create_session_error,
-    "close_session_error": _close_session_error,
-    "close_remove_error": _close_remove_error,
+    "create_session_error": _fallback_error_adapter("Failed to create session '{target}'"),
+    "close_session_error": _fallback_error_adapter("Failed to close session '{target}'"),
+    "close_remove_error": _fallback_error_adapter("Failed to close/remove session '{target}'"),
 }
 
 
@@ -68,7 +61,7 @@ def normalize_empty_list_result(result: Any) -> Any:
 def _empty_list_payload_from_call_tool_result(result: Any) -> list[Any] | None:
     if not isinstance(result, CallToolResult):
         return None
-    if result.isError:
+    if result.is_error:
         return None
     if len(result.content) != 1:
         return None

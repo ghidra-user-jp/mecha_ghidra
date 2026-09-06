@@ -66,11 +66,36 @@ class FakeTargetService:
             "domain_path": domain_path,
         }
 
+    def create_repository_cache_project(
+        self,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        repository_url: str,
+    ):
+        self.cache_projects.append((project_location, project_name, repository_url))
+        return {"status": "ok", "project_location": project_location, "project_name": project_name}
+
+    cache_projects: list[tuple[str, str | None, str]] = []
+
 
 class FakeJavaBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.errors: dict[str, Exception] = {}
+        self.deleted: list[tuple[str, dict[str, Any]]] = []
+
+    def delete_executable(self, bsim_url: str, **kwargs):
+        self.deleted.append((bsim_url, dict(kwargs)))
+        if "delete_executable" in self.errors:
+            raise self.errors["delete_executable"]
+        return {
+            "status": "deleted",
+            "executable": {"md5": kwargs.get("md5") or "0" * 32, "name": kwargs.get("name") or "sample"},
+            "deleted": [{"md5": kwargs.get("md5") or "0" * 32, "name": "sample", "deleted_functions": 3}],
+            "deleted_functions": 3,
+            "missed": [],
+        }
 
     def get_database_status(self, bsim_url: str):
         return {
@@ -121,10 +146,13 @@ def _service(
     bsim_password_env: str | None = None,
     ghidra_install_dir: str | None = None,
     target_service: FakeTargetService | None = None,
+    remote_cache_dir: str | None = None,
+    java_backend: FakeJavaBackend | None = None,
 ) -> tuple[BsimService, FakeCoreCommandService, FakeTargetService]:
     core = FakeCoreCommandService()
     target = target_service or FakeTargetService()
-    java_backend = FakeJavaBackend()
+    target.cache_projects = []
+    java_backend = java_backend or FakeJavaBackend()
     service = BsimService(
         core_command_service=core,
         target_service=target,  # type: ignore[arg-type]
@@ -133,6 +161,7 @@ def _service(
             bsim_password=bsim_password,
             bsim_password_env=bsim_password_env,
             ghidra_install_dir=ghidra_install_dir,
+            remote_cache_dir=remote_cache_dir,
         ),
         java_backend=java_backend,  # type: ignore[arg-type]
     )
@@ -155,6 +184,7 @@ def test_bsim_query_function_uses_configured_url_and_masks_response():
         "matches_per_function": 10,
         "max_results": 3,
         "address": "0x401000",
+        "exclude_self": True,
     }
     assert core.calls == [
         (
@@ -164,21 +194,53 @@ def test_bsim_query_function_uses_configured_url_and_masks_response():
                 "query_target": "fw",
                 "address": "0x401000",
                 "function_name": None,
+                "addresses": [],
+                "function_names": [],
                 "similarity_threshold": 0.7,
                 "significance_threshold": 0.0,
                 "matches_per_function": 10,
                 "max_results": 3,
+                "exclude_self": True,
             },
             "fw",
         )
     ]
 
 
+def test_bsim_query_function_accepts_batch_selectors():
+    service, core, _target = _service()
+
+    result = service.query_function(
+        "fw",
+        addresses=["0x401000", " 0x402000 ", "0x401000"],
+        function_names=["main"],
+        exclude_self=False,
+    )
+
+    params = core.calls[0][1]
+    assert params["addresses"] == ["0x401000", "0x402000"]
+    assert params["function_names"] == ["main"]
+    assert params["exclude_self"] is False
+    assert result["query"]["addresses"] == ["0x401000", "0x402000"]
+    assert result["query"]["function_names"] == ["main"]
+    assert result["query"]["exclude_self"] is False
+
+
+def test_bsim_query_function_requires_a_selector_and_bounds_batch_size():
+    service, core, _target = _service()
+
+    with pytest.raises(ValueError, match="BSIM_PARAMETER_INVALID: address, function_name"):
+        service.query_function("fw")
+    with pytest.raises(ValueError, match="at most 1000 functions"):
+        service.query_function("fw", addresses=[f"0x{index:x}" for index in range(1001)])
+    with pytest.raises(ValueError, match="addresses must be a list"):
+        service.query_function("fw", addresses="0x401000")  # type: ignore[arg-type]
+    assert core.calls == []
+
+
 def test_bsim_success_payload_masks_all_url_credentials():
     service, _core, _target = _service(
-        bsim_url=(
-            "postgresql://localhost/bsim?user=alice&password=topsecret&token=opaque&mode=ro"
-        )
+        bsim_url=("postgresql://localhost/bsim?user=alice&password=topsecret&token=opaque&mode=ro")
     )
 
     result = service.get_database_status()
@@ -195,8 +257,7 @@ def test_bsim_backend_exception_masks_url_credentials_and_raw_cause():
     class CredentialFailBackend(FakeJavaBackend):
         def get_database_status(self, bsim_url: str):
             raise RuntimeError(
-                "connection failed for "
-                "postgresql://alice:topsecret@host:99999/db?password=second&token=opaque"
+                "connection failed for postgresql://alice:topsecret@host:99999/db?password=second&token=opaque"
             )
 
     service = BsimService(
@@ -637,7 +698,24 @@ def test_bsim_query_target_adds_query_provenance():
         "significance_threshold": 2.5,
         "matches_per_function": 4,
         "max_results": 12,
+        "exclude_self": True,
+        "min_function_size": 0,
     }
+    params = core.calls[0][1]
+    assert params["exclude_self"] is True
+    assert params["min_function_size"] == 0
+
+
+def test_bsim_query_target_forwards_self_exclusion_and_size_filter():
+    service, core, _target = _service()
+
+    service.query_target("fw", exclude_self=False, min_function_size=32)
+
+    params = core.calls[0][1]
+    assert params["exclude_self"] is False
+    assert params["min_function_size"] == 32
+    with pytest.raises(ValueError, match="min_function_size must be >= 0"):
+        service.query_target("fw", min_function_size=-1)
 
 
 def test_bsim_load_matched_executable_requires_versioned_ref():
@@ -779,9 +857,7 @@ def test_bsim_invalid_port_raises_coded_url_error():
 
 
 def test_bsim_unparseable_url_raises_fixed_error_without_credentials():
-    service, _core, _target = _service(
-        bsim_url="postgresql://alice:topsecret@host／evil/db?password=second"
-    )
+    service, _core, _target = _service(bsim_url="postgresql://alice:topsecret@host／evil/db?password=second")
 
     with pytest.raises(ValueError) as raised:
         service.get_database_status()
@@ -794,9 +870,7 @@ def test_bsim_unparseable_url_raises_fixed_error_without_credentials():
 def test_bsim_status_reclassifies_prefixed_authentication_error():
     class AuthFailBackend(FakeJavaBackend):
         def get_database_status(self, bsim_url: str):
-            raise RuntimeError(
-                "BSIM_DATABASE_INIT_FAILED: FATAL: password authentication failed for user \"x\""
-            )
+            raise RuntimeError('BSIM_DATABASE_INIT_FAILED: FATAL: password authentication failed for user "x"')
 
     core = FakeCoreCommandService()
     service = BsimService(
@@ -912,48 +986,159 @@ class _CategoriesBackend(FakeJavaBackend):
         return {"items": list(self._items)}
 
 
-def test_bsim_set_target_metadata_rejects_unconfigured_category():
-    core = FakeCoreCommandService()
-    service = BsimService(
-        core_command_service=core,
-        target_service=FakeTargetService(),  # type: ignore[arg-type]
-        config=BsimConfig(bsim_url="postgresql://user:secret@localhost/bsim"),
-        java_backend=_CategoriesBackend(["FAMILY", "SOURCE"]),  # type: ignore[arg-type]
-    )
+def test_bsim_register_target_rejects_unconfigured_category():
+    service, core, _target = _service()
+    service._java_backend = _CategoriesBackend(["FAMILY"])
 
-    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED"):
-        service.bsim_set_target_metadata("fw", categories={"Famly": "Emotet"})
+    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED: Famly"):
+        service.bsim_register_target("fw", categories={"Famly": "Emotet"})
+
     assert core.calls == []
 
 
-def test_bsim_set_target_metadata_allows_configured_category():
-    core = FakeCoreCommandService()
-    service = BsimService(
-        core_command_service=core,
-        target_service=FakeTargetService(),  # type: ignore[arg-type]
-        config=BsimConfig(bsim_url="postgresql://user:secret@localhost/bsim"),
-        java_backend=_CategoriesBackend(["FAMILY", "SOURCE"]),  # type: ignore[arg-type]
+def test_bsim_register_target_passes_configured_categories_to_core():
+    service, core, _target = _service()
+    service._java_backend = _CategoriesBackend(["FAMILY"])
+
+    result = service.bsim_register_target("fw", categories={"FAMILY": "Emotet"})
+
+    assert result["bsim_url"] == "postgresql://***:***@localhost/bsim"
+    assert core.calls == [
+        (
+            "bsim_register_target",
+            {
+                "bsim_url": "postgresql://user:secret@localhost/bsim",
+                "query_target": "fw",
+                "categories": {"FAMILY": "Emotet"},
+            },
+            "fw",
+        )
+    ]
+
+
+def test_bsim_register_target_without_categories_does_not_send_them():
+    service, core, _target = _service()
+
+    service.bsim_register_target("fw")
+
+    assert core.calls == [
+        (
+            "bsim_register_target",
+            {"bsim_url": "postgresql://user:secret@localhost/bsim", "query_target": "fw"},
+            "fw",
+        )
+    ]
+
+
+def test_bsim_apply_matches_validates_and_forwards_parameters():
+    service, core, _target = _service()
+    core.responses["bsim_apply_matches"] = {"status": "dry_run", "program": "/q", "applied": [], "applied_count": 0}
+
+    result = service.bsim_apply_matches(
+        "fw",
+        similarity_threshold=0.95,
+        matches_per_function=3,
+        max_functions=10,
+        only_default_names=False,
+        dry_run=True,
+        function_names=["FUN_00401000"],
     )
 
-    result = service.bsim_set_target_metadata("fw", categories={"FAMILY": "Emotet"})
+    command, params, target = core.calls[0]
+    assert command == "bsim_apply_matches" and target == "fw"
+    assert params["similarity_threshold"] == 0.95
+    assert params["matches_per_function"] == 3
+    assert params["max_functions"] == 10
+    assert params["only_default_names"] is False
+    assert params["dry_run"] is True
+    assert params["function_names"] == ["FUN_00401000"]
+    assert params["addresses"] == []
+    assert result["query"]["scope"] == "apply"
+    assert result["query"]["max_results"] == 10
 
-    assert result["status"] == "ok"
-    assert core.calls == [("bsim_set_target_metadata", {"categories": {"FAMILY": "Emotet"}}, "fw")]
+    with pytest.raises(ValueError, match="max_functions must be <= 10000"):
+        service.bsim_apply_matches("fw", max_functions=10_001)
 
 
-def test_bsim_set_target_metadata_skips_validation_without_url():
-    core = FakeCoreCommandService()
-    service = BsimService(
-        core_command_service=core,
-        target_service=FakeTargetService(),  # type: ignore[arg-type]
-        config=BsimConfig(bsim_url=""),
-        java_backend=FakeJavaBackend(),  # type: ignore[arg-type]
-    )
+def test_bsim_update_target_signatures_uses_configured_url():
+    service, core, _target = _service()
 
-    result = service.bsim_set_target_metadata("fw", categories={"AnyKey": "value"})
+    result = service.bsim_update_target_signatures("fw")
 
-    assert result["status"] == "ok"
-    assert core.calls == [("bsim_set_target_metadata", {"categories": {"AnyKey": "value"}}, "fw")]
+    assert core.calls == [
+        (
+            "bsim_update_target_signatures",
+            {"bsim_url": "postgresql://user:secret@localhost/bsim", "query_target": "fw"},
+            "fw",
+        )
+    ]
+    assert result["bsim_url"] == "postgresql://***:***@localhost/bsim"
+
+
+def test_bsim_delete_executable_requires_matching_confirmation():
+    backend = FakeJavaBackend()
+    service, _core, _target = _service(java_backend=backend)
+    md5 = "0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(ValueError, match="BSIM_DELETE_CONFIRMATION_MISMATCH"):
+        service.bsim_delete_executable(confirm="wrong", md5=md5)
+    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_REQUIRED"):
+        service.bsim_delete_executable(confirm="x")
+    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_INVALID"):
+        service.bsim_delete_executable(confirm="abc", md5="abc")
+    assert backend.deleted == []
+
+    result = service.bsim_delete_executable(confirm=md5.upper(), md5=md5)
+    assert result["status"] == "deleted"
+    assert result["deleted_functions"] == 3
+    assert backend.deleted == [("postgresql://user:secret@localhost/bsim", {"md5": md5, "name": None})]
+
+    by_name = service.bsim_delete_executable(confirm="sample", name="sample")
+    assert by_name["status"] == "deleted"
+    assert backend.deleted[-1][1] == {"md5": None, "name": "sample"}
+
+
+def test_bsim_delete_executable_classifies_not_found():
+    backend = FakeJavaBackend()
+    backend.errors["delete_executable"] = LookupError("BSIM_EXECUTABLE_NOT_FOUND")
+    service, _core, _target = _service(java_backend=backend)
+
+    with pytest.raises(LookupError, match="BSIM_EXECUTABLE_NOT_FOUND"):
+        service.bsim_delete_executable(confirm="sample", name="sample")
+
+
+def test_bsim_load_remote_ref_creates_cache_project_when_configured(tmp_path):
+    service, _core, target = _service(remote_cache_dir=str(tmp_path / "caches"))
+    matched_ref = {
+        "matched_ref_version": 1,
+        "executable_md5": "deadbeefcafebabedeadbeefcafebabe",
+        "executable_name": "remote.exe",
+        "repository": "ghidra://server.example:13100/Corpus",
+        "domain_path": "/samples/remote.exe",
+        "address": "0x401000",
+        "name": "entry",
+    }
+
+    result = service.load_matched_executable(matched_ref=matched_ref)
+
+    expected_location = str(tmp_path / "caches" / "server.example_13100_Corpus")
+    assert result["status"] == "loaded"
+    assert target.cache_projects == [
+        (expected_location, "server.example_13100_Corpus", "ghidra://server.example:13100/Corpus")
+    ]
+    assert target.created == [
+        (
+            result["target"],
+            expected_location,
+            {"project_name": "server.example_13100_Corpus", "domain_path": "/samples/remote.exe"},
+        )
+    ]
+
+    # The second load finds the target through the cache identity instead of recreating it.
+    again = service.load_matched_executable(matched_ref=matched_ref)
+    assert again["status"] == "already_loaded"
+    assert again["target"] == result["target"]
+    assert len(target.cache_projects) == 1
 
 
 def test_bsim_load_matched_executable_reuses_loaded_remote_ref_target():
@@ -1001,7 +1186,7 @@ def test_bsim_load_remote_ref_does_not_reuse_unrelated_same_domain_target():
     )
     service, _core, target = _service(target_service=target)
 
-    with pytest.raises(ValueError, match="BSIM_REMOTE_PROJECT_LOAD_UNSUPPORTED"):
+    with pytest.raises(ValueError, match="BSIM_REMOTE_PROJECT_LOAD_UNSUPPORTED.*--bsim-remote-cache-dir"):
         service.load_matched_executable(
             matched_ref={
                 "matched_ref_version": 1,
@@ -1044,3 +1229,13 @@ def test_bsim_load_invalid_non_remote_ref_does_not_use_manual_domain_fallback():
         )
 
     assert target.created == []
+
+
+def test_register_target_reports_already_registered_for_duplicate_insert():
+    from ghidra_mcp.application.services.bsim_service import _classify_bsim_message
+
+    message = _classify_bsim_message("BSIM_INSERT_FAILED: Skipping -insert- : ls is already ingested")
+    assert message.startswith("BSIM_ALREADY_REGISTERED:")
+    assert "already ingested" in message
+    # Other insert failures keep the generic insert code.
+    assert _classify_bsim_message("BSIM_INSERT_FAILED: disk full").startswith("BSIM_OPERATION_FAILED:")

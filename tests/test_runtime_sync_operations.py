@@ -10,6 +10,8 @@ from ghidra_mcp.infrastructure.ghidra_adapter.runtime.core_execution import Runt
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.sync_operations import RuntimeSyncOperations
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.target_lifecycle import RuntimeTargetLifecycle
+from runtime_fakes import FakeDomainFile as _FakeDomainFile
+from runtime_fakes import FakeProgram as _FakeProgram
 
 
 class _DummyCore:
@@ -41,25 +43,6 @@ class _FailingSaveProject(_FakeProject):
     def save(self, _program) -> None:  # noqa: ANN001
         super().save(_program)
         raise RuntimeError("disk full")
-
-
-class _FakeDomainFile:
-    def __init__(self, path: str) -> None:
-        self._path = path
-
-    def getPathname(self) -> str:
-        return self._path
-
-
-class _FakeProgram:
-    def __init__(self, path: str) -> None:
-        self._path = path
-
-    def getDomainFile(self):
-        return _FakeDomainFile(self._path)
-
-    def isChanged(self) -> bool:
-        return False
 
 
 class _FakeSession:
@@ -274,11 +257,15 @@ class _FakeHandle:
         from_version: int,
         to_version: int,
         range_limit: int = 200,
+        include_details: bool = False,
+        details_limit: int = 20,
     ):
         return {
             "from_version": from_version,
             "to_version": to_version,
             "range_limit": range_limit,
+            "include_details": include_details,
+            "details_limit": details_limit,
             "ranges": [],
         }
 
@@ -748,11 +735,7 @@ class _UndoKeepHandle(_FakeHandle):
         super().undo_checkout_program(domain_path, keep=keep)
         self._status["is_checked_out"] = False
         self.kept_local_changes = bool(
-            keep
-            and (
-                was_modified_since_checkout
-                or (self.saved_before_keep and self.active_program_changed)
-            )
+            keep and (was_modified_since_checkout or (self.saved_before_keep and self.active_program_changed))
         )
         self.active_program_changed = False
         self.program_reports_changed = False
@@ -794,9 +777,7 @@ class _TerminateCheckoutHandle(_FakeHandle):
     def terminate_checkout_program(self, domain_path: str, checkout_id: int):  # noqa: ARG002
         self.terminated_checkout_ids.append(int(checkout_id))
         self._status["checkouts"] = [
-            item
-            for item in self._status.get("checkouts", [])
-            if int(item.get("checkout_id")) != int(checkout_id)
+            item for item in self._status.get("checkouts", []) if int(item.get("checkout_id")) != int(checkout_id)
         ]
         if int(checkout_id) == 7:
             self.needs_reopen_after_terminate = True
@@ -1790,7 +1771,7 @@ def test_commit_discard_on_conflict_does_not_save_unsaved_active_changes(monkeyp
 def test_commit_rejects_invalid_conflict_action(monkeypatch: pytest.MonkeyPatch):
     sync, _store, _core, _handle = _build_sync_runtime(monkeypatch)
 
-    with pytest.raises(ValueError, match="on_conflict must be either 'abort' or 'discard'"):
+    with pytest.raises(ValueError, match="on_conflict must be 'abort', 'discard', or 'keep'"):
         sync.commit_project_program("fw", "rename functions", on_conflict="merge", domain_path="/main")
 
 
@@ -2075,7 +2056,7 @@ def test_sync_status_fails_closed_when_refresh_fails(monkeypatch: pytest.MonkeyP
 
 
 def test_sync_runtime_target_lock_respects_deadline(monkeypatch: pytest.MonkeyPatch):
-    import ghidra_mcp.infrastructure.ghidra_adapter.runtime.sync_operations as sync_module
+    import ghidra_mcp.infrastructure.ghidra_adapter.runtime.sync_locking as sync_module
     from ghidra_mcp.infrastructure.locks import acquire_ordered_locks as acquire_with_timeout
 
     sync, store, _core, _handle = _build_sync_runtime(monkeypatch)
@@ -2163,17 +2144,13 @@ def test_add_to_version_control_noops_after_external_add_to_version_control(
     ("operation", "expected_refreshes"),
     [
         (
-            lambda sync: sync.commit_project_program(
-                "fw", "rename functions", auto_checkout=True, domain_path="/main"
-            ),
+            lambda sync: sync.commit_project_program("fw", "rename functions", auto_checkout=True, domain_path="/main"),
             4,
         ),
         (lambda sync: sync.pull_project_program("fw", domain_path="/main"), 2),
         (lambda sync: sync.get_version_history("fw", domain_path="/main"), 1),
         (
-            lambda sync: sync.get_version_diff(
-                "fw", from_version=1, to_version=1, domain_path="/main"
-            ),
+            lambda sync: sync.get_version_diff("fw", from_version=1, to_version=1, domain_path="/main"),
             1,
         ),
     ],
@@ -2329,12 +2306,13 @@ def test_cross_target_sync_uses_project_lock_without_nested_active_target_lock(m
     assert handle.get_key() in store.project_locks
 
 
-def test_reload_reopen_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatch):
-    sync, store, core, handle = _build_sync_runtime(monkeypatch)
+def test_load_program_reload_reopen_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatch):
+    _sync, store, core, handle = _build_sync_runtime(monkeypatch)
+    lifecycle = RuntimeTargetLifecycle(store=store)
     handle.fail_reopen = True
 
     with pytest.raises(RuntimeError, match="REOPEN_FAILED"):
-        sync.reload_project_program("fw", domain_path="/main")
+        lifecycle.load_program("fw", "/main")
 
     assert "fw" not in store.sessions
     assert "fw" not in store.locks
@@ -2342,11 +2320,12 @@ def test_reload_reopen_failure_cleans_target_state(monkeypatch: pytest.MonkeyPat
     assert core.removed == ["fw"]
 
 
-def test_reload_close_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatch):
-    sync, store, core, _handle = _build_sync_runtime(monkeypatch, session_cls=_FailingCloseSession)
+def test_load_program_reload_close_failure_cleans_target_state(monkeypatch: pytest.MonkeyPatch):
+    _sync, store, core, _handle = _build_sync_runtime(monkeypatch, session_cls=_FailingCloseSession)
+    lifecycle = RuntimeTargetLifecycle(store=store)
 
     with pytest.raises(RuntimeError, match="SESSION_CLOSE_FAILED: failed to close program: close failed"):
-        sync.reload_project_program("fw", domain_path="/main")
+        lifecycle.load_program("fw", "/main")
 
     assert "fw" not in store.sessions
     assert "fw" not in store.locks
@@ -2381,63 +2360,6 @@ def test_sync_reopen_init_failure_preserves_reopened_session_when_close_fails(mo
     assert "fw" in store.locks
     assert store.target_projects["fw"] == handle.get_key()
     assert core.removed == []
-
-
-def test_reload_registered_only_target_reports_target_already_loaded(monkeypatch: pytest.MonkeyPatch):
-    sync, store, core, handle = _build_sync_runtime(monkeypatch, handle_cls=_DuplicateSessionRejectingHandle)
-    assert isinstance(handle, _DuplicateSessionRejectingHandle)
-    store.locks["fw-shadow"] = threading.RLock()
-    store.target_projects["fw-shadow"] = handle.get_key()
-
-    with pytest.raises(DomainError) as exc_info:
-        sync.reload_project_program("fw-shadow", domain_path="main")
-
-    err = exc_info.value
-    assert err.code == ErrorCode.TARGET_ALREADY_LOADED
-    assert err.details == {
-        "operation": "reload_project_program",
-        "target": "fw-shadow",
-        "domain_path": "/main",
-        "owner_target": "fw",
-    }
-    assert handle.open_program_calls == 0
-    assert store.session_domain_path(store.sessions["fw"]) == "/main"
-    assert core.initialized == []
-
-
-def test_reload_registered_only_target_fails_closed_when_loaded_target_inspection_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_BrokenDomainPathSession)
-    store.locks["fw-shadow"] = threading.RLock()
-    store.target_projects["fw-shadow"] = handle.get_key()
-
-    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE: failed to inspect loaded target 'fw'"):
-        sync.reload_project_program("fw-shadow", domain_path="/main")
-
-    assert "fw" in store.sessions
-    assert core.initialized == []
-
-
-def test_reload_registered_only_target_preserves_live_session_when_close_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    sync, store, core, handle = _build_sync_runtime(
-        monkeypatch,
-        handle_cls=_RegisteredOnlyCloseFailureHandle,
-    )
-    assert isinstance(handle, _RegisteredOnlyCloseFailureHandle)
-    store.locks["fw-shadow"] = threading.RLock()
-    store.target_projects["fw-shadow"] = handle.get_key()
-
-    with pytest.raises(RuntimeError, match="PROGRAM_CLOSE_FAILED"):
-        sync.reload_project_program("fw-shadow", domain_path="/shadow")
-
-    leaked_session = handle.opened_sessions[-1]
-    assert leaked_session.close_saves == [False]
-    assert store.sessions["fw-shadow"] is leaked_session
-    assert store.target_projects["fw-shadow"] == handle.get_key()
-    assert core.initialized == []
 
 
 def test_commit_operation_failure_after_reopen_preserves_reopened_target(monkeypatch: pytest.MonkeyPatch):
@@ -3166,8 +3088,8 @@ def test_sync_status_reports_runtime_marked_dirty_without_side_effects(monkeypat
 @pytest.mark.parametrize(
     ("command", "params"),
     [
-        ("set_decompiler_comment", {"address": "0x401000", "comment": "memo"}),
-        ("set_disassembly_comment", {"address": "0x401000", "comment": "memo"}),
+        ("set_comment", {"address": "0x401000", "comment": "memo", "kind": "pre"}),
+        ("set_comment", {"address": "0x401000", "comment": "memo", "kind": "eol"}),
         (
             "set_function_prototype",
             {"function_address": "0x401000", "prototype": "void FUN_401000(void)"},
@@ -3352,3 +3274,122 @@ def test_undo_checkout_registered_only_target_reopens_loaded_owner(monkeypatch: 
     assert result["checked_out"] is False
     assert core.initialized and core.initialized[-1][1] == "fw"
     assert store.sessions["fw"] is not original_session
+
+
+def test_commit_keep_on_conflict_preserves_unloaded_program_edits(monkeypatch: pytest.MonkeyPatch):
+    sync, store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_UndoKeepPathHandle)
+    assert isinstance(handle, _UndoKeepPathHandle)
+    store.sessions.pop("fw")
+    handle._status.update(  # noqa: SLF001
+        {
+            "is_checked_out": True,
+            "modified_since_checkout": True,
+            "can_merge": True,
+            "version": 1,
+            "latest_version": 2,
+            "is_latest_version": False,
+        }
+    )
+
+    result = sync.commit_project_program("fw", "rename functions", on_conflict="keep", domain_path="/main")
+
+    assert result["status"] == "ok"
+    assert result["reason"] == "conflict_kept"
+    assert result["committed"] is False
+    assert result["conflict_kept"] is True
+    assert result["conflict_discarded"] is False
+    assert result["kept_program"] == "/main.keep"
+    assert result["checked_out"] is False
+    assert result["version"] == 2 and result["is_latest_version"] is True
+    assert handle.undo_keep_values == [True]
+    assert "/main.keep" in handle.program_paths
+
+
+def test_commit_keep_on_conflict_follows_kept_copy_for_loaded_program(monkeypatch: pytest.MonkeyPatch):
+    sync, store, core, handle = _build_sync_runtime(
+        monkeypatch,
+        handle_cls=_UndoKeepPathHandle,
+        session_cls=_DirtyAwareFakeSession,
+    )
+    assert isinstance(handle, _UndoKeepPathHandle)
+    handle.mark_active_change()
+    handle._status.update({"can_merge": True, "version": 1, "latest_version": 2, "is_latest_version": False})  # noqa: SLF001
+
+    result = sync.commit_project_program("fw", "rename functions", on_conflict="keep", domain_path="/main")
+
+    assert result["reason"] == "conflict_kept"
+    assert result["kept_program"] == "/main.keep"
+    assert result["discarded_local_changes"] is False
+    # The unsaved edits were saved before the checkout was undone with keep=True ...
+    assert handle.saved_before_keep is True
+    assert handle.undo_keep_values == [True]
+    # ... and the loaded target now follows the preserved copy.
+    assert store.session_domain_path(store.sessions["fw"]) == "/main.keep"
+    assert core.initialized and core.initialized[-1][1] == "fw"
+
+
+def test_commit_keep_on_clean_conflict_has_nothing_to_preserve(monkeypatch: pytest.MonkeyPatch):
+    sync, store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_UndoKeepPathHandle)
+    assert isinstance(handle, _UndoKeepPathHandle)
+    store.sessions.pop("fw")
+    handle._status.update({"is_checked_out": True, "can_merge": True})  # noqa: SLF001
+
+    result = sync.commit_project_program("fw", "rename functions", on_conflict="keep", domain_path="/main")
+
+    assert result["reason"] == "conflict_kept"
+    assert result["kept_program"] is None
+    assert handle.undo_keep_values == [False]
+
+
+def test_checkout_uses_exclusive_policy_default_when_unspecified(monkeypatch: pytest.MonkeyPatch):
+    from ghidra_mcp.domain import configure_exclusive_checkout_default, get_exclusive_checkout_default
+
+    previous = get_exclusive_checkout_default()
+    try:
+        configure_exclusive_checkout_default(True)
+        sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+        result = sync.checkout_project_program("fw", domain_path="/main")
+        assert result["exclusive"] is True
+        assert handle._status["is_checked_out_exclusive"] is True  # noqa: SLF001
+
+        sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+        result = sync.checkout_project_program("fw", exclusive=False, domain_path="/main")
+        assert result["exclusive"] is False
+    finally:
+        configure_exclusive_checkout_default(previous)
+
+
+def test_commit_auto_checkout_follows_exclusive_policy_default(monkeypatch: pytest.MonkeyPatch):
+    from ghidra_mcp.domain import configure_exclusive_checkout_default, get_exclusive_checkout_default
+
+    previous = get_exclusive_checkout_default()
+    try:
+        configure_exclusive_checkout_default(True)
+        sync, store, _core, handle = _build_sync_runtime(monkeypatch)
+        store.sessions.pop("fw")
+        handle._status.update({"is_checked_out": False, "modified_since_checkout": True})  # noqa: SLF001
+
+        result = sync.commit_project_program("fw", "rename functions", domain_path="/main")
+
+        assert result["status"] == "ok"
+        assert handle.checkout_calls == 1
+        # The automatic checkout honoured the operator default.
+        assert handle._status["is_checked_out_exclusive"] is True  # noqa: SLF001
+    finally:
+        configure_exclusive_checkout_default(previous)
+
+
+def test_get_version_diff_forwards_detail_options(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, _handle = _build_sync_runtime(monkeypatch)
+
+    result = sync.get_version_diff(
+        "fw",
+        from_version=1,
+        to_version=2,
+        include_details=True,
+        details_limit=3,
+        domain_path="/main",
+    )
+
+    assert result["include_details"] is True
+    assert result["details_limit"] == 3

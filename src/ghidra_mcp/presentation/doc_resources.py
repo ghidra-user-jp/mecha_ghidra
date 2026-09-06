@@ -22,7 +22,7 @@ def _annotation_payload(spec: ToolSpec) -> dict[str, Any] | None:
     annotations = tool_annotations_for_spec(spec)
     if annotations is None:
         return None
-    return annotations.model_dump(exclude_none=True)
+    return annotations.model_dump(by_alias=True, exclude_none=True)
 
 
 def _large_result_output_schema() -> dict[str, Any]:
@@ -59,12 +59,8 @@ def _large_result_output_schema() -> dict[str, Any]:
                 "type": "string",
                 "pattern": "^ghidra://results/[0-9a-f]{16}$",
             },
-            "description": {
-                "anyOf": [{"type": "string"}, {"type": "null"}]
-            },
-            "mimeType": {
-                "anyOf": [{"type": "string"}, {"type": "null"}]
-            },
+            "description": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "mimeType": {"anyOf": [{"type": "string"}, {"type": "null"}]},
             "size": {
                 "anyOf": [
                     {"type": "integer", "minimum": 0},

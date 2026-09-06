@@ -2,7 +2,6 @@
 
 from __future__ import absolute_import, print_function
 
-
 MAX_PAGE_OFFSET = 1000000
 MAX_PAGE_LIMIT = 10000
 

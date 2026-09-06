@@ -6,18 +6,15 @@ import types
 
 import pytest
 
-from ghidra_headless.handlers.commands.mutating_data_types import list_data_types
-from ghidra_headless.handlers.commands.mutating_symbols import list_bookmarks, set_bytes
+from ghidra_headless.handlers.commands.mutating_symbols import set_bytes
 from ghidra_headless.handlers.commands.read_only_decompile import disassemble_range
-from ghidra_headless.handlers.commands.read_only_functions import (
-    list_classes,
-    list_functions,
-    search_functions_by_name,
-)
+from ghidra_headless.handlers.commands.read_only_functions import list_functions
 from ghidra_headless.handlers.commands.read_only_memory_data import (
     get_bytes,
     get_data_by_label,
+    list_bookmarks,
     list_data_items,
+    list_data_types,
     list_exports,
     list_imports,
     list_namespaces,
@@ -146,9 +143,7 @@ def test_get_bytes_rejects_oversized_request_before_allocating():
 
 def test_get_bytes_allows_request_at_size_limit():
     memory = object()
-    ctx = types.SimpleNamespace(
-        program=types.SimpleNamespace(getMemory=lambda: memory)
-    )
+    ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory))
     calls = []
 
     result = get_bytes(
@@ -223,53 +218,87 @@ def test_paginated_commands_reject_invalid_limit_before_runtime_access():
 
     def no_items(items):
         return iter(items)
+
     commands = [
         lambda: list_functions(
-            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int, collect=unexpected_collect
+            {"limit": 0},
+            ensure_context=checked_context,
+            to_int=noop_to_int,
+            collect=unexpected_collect,
+            iter_items=no_items,
+            source_type=types.SimpleNamespace(DEFAULT="default"),
         ),
-        lambda: list_classes(
-            {"limit": 0}, context=object(), to_int=noop_to_int,
-            iter_namespaces=unexpected_iter, safe_call=lambda *_args: None,
-        ),
-        lambda: search_functions_by_name(
-            {"query": "entry", "limit": 0}, ensure_context=checked_context, to_int=noop_to_int
+        lambda: list_functions(
+            {"filter": "entry", "limit": 0},
+            ensure_context=checked_context,
+            to_int=noop_to_int,
+            collect=unexpected_collect,
+            iter_items=no_items,
+            source_type=types.SimpleNamespace(DEFAULT="default"),
         ),
         lambda: list_segments({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
         lambda: list_imports({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
         lambda: list_exports(
-            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
-            iter_items=no_items, is_exported_symbol=lambda *_args: True,
+            {"limit": 0},
+            ensure_context=checked_context,
+            to_int=noop_to_int,
+            iter_items=no_items,
+            is_exported_symbol=lambda *_args: True,
         ),
         lambda: list_namespaces(
-            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
-            iter_namespaces=unexpected_iter, safe_call=lambda *_args: None,
+            {"limit": 0},
+            ensure_context=checked_context,
+            to_int=noop_to_int,
+            iter_namespaces=unexpected_iter,
+            safe_call=lambda *_args: None,
         ),
         lambda: list_data_items({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
         lambda: list_strings({"limit": 0}, ensure_context=checked_context, to_int=noop_to_int),
         lambda: search_bytes(
-            {"bytes": "90", "limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
+            {"bytes": "90", "limit": 0},
+            ensure_context=checked_context,
+            to_int=noop_to_int,
             decode_hex_bytes=bytearray.fromhex,
         ),
         lambda: get_xrefs_to(
-            {"address": "0x1000", "limit": 0}, ensure_context=checked_context,
-            get_address=lambda *_args: None, to_int=noop_to_int, iter_items=no_items,
+            {"address": "0x1000", "limit": 0},
+            ensure_context=checked_context,
+            get_address=lambda *_args: None,
+            to_int=noop_to_int,
+            iter_items=no_items,
         ),
         lambda: get_xrefs_from(
-            {"address": "0x1000", "limit": 0}, ensure_context=checked_context,
-            get_address=lambda *_args: None, to_int=noop_to_int, iter_items=no_items,
+            {"address": "0x1000", "limit": 0},
+            ensure_context=checked_context,
+            get_address=lambda *_args: None,
+            to_int=noop_to_int,
+            iter_items=no_items,
         ),
         lambda: get_function_xrefs(
-            {"name": "entry", "limit": 0}, ensure_context=checked_context,
-            find_function_by_name=lambda *_args: None, to_int=noop_to_int, iter_items=no_items,
+            {"name": "entry", "limit": 0},
+            ensure_context=checked_context,
+            get_address=lambda *_args: None,
+            find_function_by_name=lambda *_args: None,
+            to_int=noop_to_int,
+            iter_items=no_items,
         ),
         lambda: list_data_types(
-            {"limit": 0}, ensure_context=checked_context, to_int=noop_to_int,
-            dt_manager=lambda *_args: None, collect=unexpected_collect, iter_items=no_items,
-            safe_call=lambda *_args: None, describe_data_type=lambda item: item,
+            {"limit": 0},
+            ensure_context=checked_context,
+            to_int=noop_to_int,
+            dt_manager=lambda *_args: None,
+            collect=unexpected_collect,
+            iter_items=no_items,
+            safe_call=lambda *_args: None,
+            describe_data_type=lambda item: item,
         ),
         lambda: list_bookmarks(
-            {"limit": 0}, ensure_context=checked_context, get_address=lambda *_args: None,
-            to_int=noop_to_int, collect=unexpected_collect, iter_items=no_items,
+            {"limit": 0},
+            ensure_context=checked_context,
+            get_address=lambda *_args: None,
+            to_int=noop_to_int,
+            collect=unexpected_collect,
+            iter_items=no_items,
         ),
     ]
 
@@ -278,30 +307,69 @@ def test_paginated_commands_reject_invalid_limit_before_runtime_access():
             command()
 
 
-@pytest.mark.parametrize("offset", [-7, -1])
-def test_search_functions_rejects_negative_offset(offset):
-    class _Iterator:
-        def __init__(self):
-            self.items = [
-                types.SimpleNamespace(getName=lambda: "first", getEntryPoint=lambda: "0x1000"),
-                types.SimpleNamespace(getName=lambda: "second", getEntryPoint=lambda: "0x2000"),
-            ]
+def _collect_python(iterator, offset, limit, to_value):
+    if limit <= 0:
+        return []
+    result = []
+    for index, item in enumerate(iterator):
+        if index < offset:
+            continue
+        result.append(to_value(item))
+        if len(result) >= limit:
+            break
+    return result
 
-        def hasNext(self):
-            return bool(self.items)
 
-        def next(self):
-            return self.items.pop(0)
+def _fake_function(name: str, entry: str, *, default_name: bool = False, size: int = 4, thunk: bool = False):
+    symbol = types.SimpleNamespace(getSource=lambda: "default" if default_name else "user")
+    body = types.SimpleNamespace(getNumAddresses=lambda: size)
+    return types.SimpleNamespace(
+        getName=lambda: name,
+        getEntryPoint=lambda: entry,
+        getSymbol=lambda: symbol,
+        getBody=lambda: body,
+        isThunk=lambda: thunk,
+    )
 
-    manager = types.SimpleNamespace(getFunctions=lambda _forward: _Iterator())
+
+def _list_functions(params, functions):
+    manager = types.SimpleNamespace(getFunctions=lambda _forward: iter(functions))
     context = types.SimpleNamespace(function_manager=manager)
+    return list_functions(
+        params,
+        ensure_context=lambda: context,
+        to_int=lambda value, default: default if value is None else int(value),
+        collect=_collect_python,
+        iter_items=iter,
+        source_type=types.SimpleNamespace(DEFAULT="default"),
+    )
+
+
+@pytest.mark.parametrize("offset", [-7, -1])
+def test_list_functions_rejects_negative_offset(offset):
+    functions = [_fake_function("first", "0x1000"), _fake_function("second", "0x2000")]
 
     with pytest.raises(ValueError, match="offset must be >= 0"):
-        search_functions_by_name(
-            {"query": "first", "offset": offset, "limit": 1},
-            ensure_context=lambda: context,
-            to_int=lambda value, default: default if value is None else int(value),
-        )
+        _list_functions({"filter": "first", "offset": offset, "limit": 1}, functions)
+
+
+def test_list_functions_filters_case_insensitively_and_reports_size():
+    functions = [
+        _fake_function("Main", "0x1000", size=32),
+        _fake_function("FUN_00002000", "0x2000", default_name=True, size=8, thunk=True),
+        _fake_function("helper_main", "0x3000", size=16),
+    ]
+
+    assert _list_functions({"filter": "MAIN"}, functions) == [
+        {"name": "Main", "entry": "0x1000", "size": 32, "is_thunk": False},
+        {"name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
+    ]
+    assert _list_functions({"only_default_names": True}, functions) == [
+        {"name": "FUN_00002000", "entry": "0x2000", "size": 8, "is_thunk": True},
+    ]
+    assert _list_functions({"filter": "main", "offset": 1, "limit": 5}, functions) == [
+        {"name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -313,9 +381,7 @@ def test_search_functions_rejects_negative_offset(offset):
 )
 def test_list_segments_rejects_unbounded_pagination(params, message):
     memory = types.SimpleNamespace(
-        getBlocks=lambda: (_ for _ in ()).throw(
-            AssertionError("invalid pagination must not enumerate memory blocks")
-        )
+        getBlocks=lambda: (_ for _ in ()).throw(AssertionError("invalid pagination must not enumerate memory blocks"))
     )
     ctx = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory))
 
@@ -349,9 +415,7 @@ def test_search_bytes_stops_at_memory_max_address():
         getMaxAddress=lambda: address,
         findBytes=lambda *_args: address,
     )
-    context = types.SimpleNamespace(
-        program=types.SimpleNamespace(getMemory=lambda: memory), monitor=lambda: object()
-    )
+    context = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory), monitor=lambda: object())
 
     result = search_bytes(
         {"bytes": "ff", "limit": 2},
@@ -371,9 +435,7 @@ def test_disassemble_range_maps_address_overflow_to_validation_error():
 
     context = types.SimpleNamespace(
         listing=types.SimpleNamespace(
-            getInstructions=lambda *_args: pytest.fail(
-                "an invalid range must not enumerate instructions"
-            )
+            getInstructions=lambda *_args: pytest.fail("an invalid range must not enumerate instructions")
         )
     )
 
@@ -410,9 +472,7 @@ def test_search_bytes_does_not_materialize_skipped_matches():
         getMaxAddress=lambda: end,
         findBytes=lambda current, *_args: _Address(current.value),
     )
-    context = types.SimpleNamespace(
-        program=types.SimpleNamespace(getMemory=lambda: memory), monitor=lambda: object()
-    )
+    context = types.SimpleNamespace(program=types.SimpleNamespace(getMemory=lambda: memory), monitor=lambda: object())
 
     result = search_bytes(
         {"bytes": "00", "offset": 10_000, "limit": 1},
@@ -433,9 +493,7 @@ def test_get_data_by_label_excludes_non_data_symbols():
     ]
     context = types.SimpleNamespace(
         symbol_table=types.SimpleNamespace(getSymbols=lambda _label: symbols),
-        listing=types.SimpleNamespace(
-            getDefinedDataAt=lambda address: data if address == "0x2000" else None
-        ),
+        listing=types.SimpleNamespace(getDefinedDataAt=lambda address: data if address == "0x2000" else None),
     )
 
     result = get_data_by_label(
@@ -444,9 +502,7 @@ def test_get_data_by_label_excludes_non_data_symbols():
         iter_items=iter,
     )
 
-    assert result == [
-        {"name": "global_data", "address": "0x2000", "value": '"value"'}
-    ]
+    assert result == [{"name": "global_data", "address": "0x2000", "value": '"value"'}]
 
 
 def test_list_exports_includes_exported_data_symbols():
@@ -467,7 +523,10 @@ def test_list_exports_includes_exported_data_symbols():
         is_exported_symbol=lambda _ctx, symbol: symbol in (function_symbol, data_symbol),
     )
 
-    assert result == ["exported_function", "exported_data"]
+    assert result == [
+        {"name": "exported_function", "address": "0x1000"},
+        {"name": "exported_data", "address": "0x2000"},
+    ]
 
 
 @pytest.mark.parametrize("command", ["search", "set"])
@@ -571,9 +630,7 @@ def test_iter_items_bare_next_treats_java_no_such_element_as_end(monkeypatch: py
     class NoSuchElementException(Exception):
         pass
 
-    QualifiedNoSuchElementException = type(
-        "java.util.NoSuchElementException", (Exception,), {}
-    )
+    QualifiedNoSuchElementException = type("java.util.NoSuchElementException", (Exception,), {})
 
     class _BareNextJava:
         def __init__(self, exception_type):
@@ -639,7 +696,7 @@ def test_iter_items_falls_back_when_iterator_returns_none(monkeypatch: pytest.Mo
     assert list(core_helpers._iter_items(_PythonIterable())) == [4, 5, 6]
 
 
-# --- list_classes -----------------------------------------------------------
+# --- list_namespaces --------------------------------------------------------
 
 
 def _safe_call(obj, name, *args):
@@ -683,7 +740,7 @@ class _FakeNamespace:
         return types.SimpleNamespace(getSymbolType=lambda: symbol_type)
 
 
-def test_list_classes_returns_only_class_namespaces():
+def test_list_namespaces_reports_classes_and_can_filter_to_them():
     namespaces = [
         _FakeNamespace("Global", symbol_type="Namespace", is_global=True),
         _FakeNamespace("std", symbol_type="Namespace"),
@@ -691,12 +748,24 @@ def test_list_classes_returns_only_class_namespaces():
         _FakeNamespace("no_symbol", symbol_type=None),
     ]
 
-    result = list_classes(
+    everything = list_namespaces(
         {},
-        context=None,
+        ensure_context=lambda: None,
+        to_int=_to_int,
+        iter_namespaces=lambda _ctx: iter(namespaces),
+        safe_call=_safe_call,
+    )
+    classes = list_namespaces(
+        {"classes_only": True},
+        ensure_context=lambda: None,
         to_int=_to_int,
         iter_namespaces=lambda _ctx: iter(namespaces),
         safe_call=_safe_call,
     )
 
-    assert result == [{"name": "MyClass", "isClass": True}]
+    assert everything == [
+        {"name": "std", "is_class": False},
+        {"name": "MyClass", "is_class": True},
+        {"name": "no_symbol", "is_class": False},
+    ]
+    assert classes == [{"name": "MyClass", "is_class": True}]

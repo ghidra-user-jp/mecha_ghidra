@@ -2,36 +2,55 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import pathlib
 import threading
+import time
 from typing import Any, Dict, Optional
 
 import pyghidra
 import pyghidra.core as pycore
 
-from .models import ProgramSession
+from ghidra_headless.errors import HeadlessError
+
 from . import java_bindings, path_utils, sync_utils
+from .models import ProgramSession
+from .transactions import run_in_transaction
 
 logger = logging.getLogger(__name__)
 
 _VERSION_HISTORY_MAX_LIMIT = 10_000
 _VERSION_DIFF_MAX_RANGE_LIMIT = 10_000
+_VERSION_DIFF_MAX_DETAILS_LIMIT = 200
 _VERSION_DIFF_TIMEOUT_SECONDS = 60
+_DEFAULT_GHIDRA_SERVER_PORT = 13100
 
 
-class _ImportedProgramCloseError(RuntimeError):
+class _ImportedProgramCloseError(HeadlessError):
     pass
 
 
 class ProjectHandle:
     """Shared handle for a Ghidra project, allowing multiple program sessions."""
 
+    # ``RepositoryAdapter.verifyConnection()`` is a server round-trip.  Every
+    # mutating command re-checks the connection, so a successful verification is
+    # trusted for this many seconds; a stale connection still surfaces through
+    # the DomainFile call that follows.  Set to 0 to verify on every call.
+    repository_verify_interval_seconds: float = 2.0
+
     def __init__(self, project_location: str, project_name: Optional[str]) -> None:
         self._lock = threading.RLock()
-        self.project_location, self.project_name = self.resolve_project_location_and_file(project_location, project_name)
+        self._repository_verified_at: float | None = None
+        self.project_location, self.project_name = self.resolve_project_location_and_file(
+            project_location, project_name
+        )
         self.key = self.make_key(project_location, project_name)
-        self._open_programs: set[tuple[str, str]] = set()
+        self._open_programs: set[tuple[str, ...]] = set()
+        # (program, consumer, key) for past versions opened read-only; they are
+        # released through DomainObject.release(consumer), not Project.close().
+        self._read_only_programs: list[tuple[Any, Any, tuple[str, ...]]] = []
 
         from ghidra.base.project import GhidraProject
 
@@ -67,7 +86,9 @@ class ProjectHandle:
                 raise ValueError("project_name must not be empty")
             project_dir = path.parent if path.suffix.lower() == ".gpr" else path
             if path.suffix.lower() == ".gpr" and path.stem != effective_name:
-                raise ValueError("project_name must match the .gpr filename when project_location points to a .gpr file")
+                raise ValueError(
+                    "project_name must match the .gpr filename when project_location points to a .gpr file"
+                )
         else:
             if path.suffix.lower() != ".gpr":
                 raise ValueError("project_name is required when project_location is not a .gpr file")
@@ -102,7 +123,7 @@ class ProjectHandle:
             return PyGhidraProjectManager().createProject(locator, None, True)
         except DuplicateFileException as exc:
             project_file = project_dir / f"{effective_name}.gpr"
-            raise RuntimeError(f"PROJECT_ALREADY_EXISTS: {project_file}") from exc
+            raise HeadlessError(f"PROJECT_ALREADY_EXISTS: {project_file}") from exc
 
     @staticmethod
     def create_project(
@@ -121,7 +142,7 @@ class ProjectHandle:
         project_rep = project_dir / f"{effective_name}.rep"
         existed = project_file.exists() or project_rep.exists()
         if existed and not overwrite:
-            raise RuntimeError(f"PROJECT_ALREADY_EXISTS: {project_file}")
+            raise HeadlessError(f"PROJECT_ALREADY_EXISTS: {project_file}")
         project_dir.mkdir(parents=True, exist_ok=True)
 
         project = ProjectHandle._create_empty_project(
@@ -132,7 +153,7 @@ class ProjectHandle:
         try:
             project.close()
         except Exception as exc:
-            raise RuntimeError(f"PROJECT_CLOSE_FAILED: failed to close created project: {exc}") from exc
+            raise HeadlessError(f"PROJECT_CLOSE_FAILED: failed to close created project: {exc}") from exc
         return {
             "status": "ok",
             "project_location": str(project_dir),
@@ -143,7 +164,102 @@ class ProjectHandle:
         }
 
     @staticmethod
-    def list_programs_from_metadata(project_location: str, project_name: Optional[str]) -> Optional[list[Dict[str, str]]]:
+    def parse_repository_url(repository_url: str) -> tuple[str, int, str]:
+        """Split ``ghidra://host[:port]/repo[/...]`` into (host, port, repository name)."""
+        import urllib.parse
+
+        try:
+            parts = urllib.parse.urlsplit(str(repository_url or "").strip())
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError(f"invalid Ghidra Server URL: {exc}") from exc
+        if parts.scheme.lower() != "ghidra" or not parts.hostname:
+            raise ValueError("repository_url must be a ghidra://host[:port]/repository URL")
+        segments = [segment for segment in parts.path.split("/") if segment]
+        if not segments:
+            raise ValueError("repository_url must name a repository")
+        return parts.hostname, int(port or _DEFAULT_GHIDRA_SERVER_PORT), segments[0]
+
+    @staticmethod
+    def create_repository_cache_project(
+        project_location: str,
+        project_name: Optional[str],
+        *,
+        repository_url: str,
+    ) -> Dict[str, Any]:
+        """Create a local project bound to a Ghidra Server repository.
+
+        The result is what Ghidra calls a shared project: a local ``.gpr``/``.rep``
+        cache whose ``project.prp`` records the server, so every later open
+        reconnects through the configured client authenticator.  An existing
+        cache at the same location is reused only when it already points at that
+        repository; anything else at the location is an error.
+        """
+        host, port, repository_name = ProjectHandle.parse_repository_url(repository_url)
+        resolved_dir, effective_name = ProjectHandle.resolve_project_creation_target(project_location, project_name)
+        project_dir = pathlib.Path(resolved_dir)
+        project_file = project_dir / f"{effective_name}.gpr"
+        project_rep = project_dir / f"{effective_name}.rep"
+        if project_file.exists() or project_rep.exists():
+            info = path_utils._read_prp_basic_info(project_rep / "project.prp") or {}
+            existing_server = str(info.get("SERVER") or "").strip()
+            existing_repo = str(info.get("REPOSITORY_NAME") or "").strip()
+            if not existing_server or existing_repo != repository_name:
+                raise HeadlessError(
+                    f"PROJECT_ALREADY_EXISTS: {project_file} exists but is not a cache of repository "
+                    f"'{repository_name}'"
+                )
+            return {
+                "status": "exists",
+                "project_location": str(project_dir),
+                "project_name": effective_name,
+                "project_file": str(project_file),
+                "repository_url": f"ghidra://{host}:{port}/{repository_name}",
+                "created": False,
+            }
+
+        from ghidra.framework.client import ClientUtil
+        from ghidra.framework.model import ProjectLocator
+        from ghidra.pyghidra import PyGhidraProjectManager
+        from ghidra.util.exception import DuplicateFileException
+
+        try:
+            server = ClientUtil.getRepositoryServer(host, port, True)
+            names = {str(name) for name in list(server.getRepositoryNames())}
+        except Exception as exc:
+            raise HeadlessError(f"REPOSITORY_CONNECT_FAILED: failed to connect to {host}:{port}: {exc}") from exc
+        if repository_name not in names:
+            raise HeadlessError(f"REPOSITORY_NOT_FOUND: repository '{repository_name}' does not exist on {host}:{port}")
+        try:
+            repository = server.getRepository(repository_name)
+            repository.connect()
+        except Exception as exc:
+            raise HeadlessError(
+                f"REPOSITORY_CONNECT_FAILED: failed to open repository '{repository_name}': {exc}"
+            ) from exc
+        project_dir.mkdir(parents=True, exist_ok=True)
+        locator = ProjectLocator(str(project_dir), effective_name)
+        try:
+            project = PyGhidraProjectManager().createProject(locator, repository, True)
+        except DuplicateFileException as exc:
+            raise HeadlessError(f"PROJECT_ALREADY_EXISTS: {project_file}") from exc
+        try:
+            project.close()
+        except Exception as exc:
+            raise HeadlessError(f"PROJECT_CLOSE_FAILED: failed to close created project: {exc}") from exc
+        return {
+            "status": "ok",
+            "project_location": str(project_dir),
+            "project_name": effective_name,
+            "project_file": str(project_file),
+            "repository_url": f"ghidra://{host}:{port}/{repository_name}",
+            "created": True,
+        }
+
+    @staticmethod
+    def list_programs_from_metadata(
+        project_location: str, project_name: Optional[str]
+    ) -> Optional[list[Dict[str, str]]]:
         rep_dir = ProjectHandle._project_rep_dir(project_location, project_name)
         idata_dir = rep_dir / "idata"
         if not idata_dir.is_dir():
@@ -152,14 +268,18 @@ class ProjectHandle:
 
     @staticmethod
     def is_repository_project_from_metadata(project_location: str, project_name: Optional[str]) -> bool:
-        info = path_utils._read_prp_basic_info(ProjectHandle._project_rep_dir(project_location, project_name) / "project.prp")
+        info = path_utils._read_prp_basic_info(
+            ProjectHandle._project_rep_dir(project_location, project_name) / "project.prp"
+        )
         if not info:
             return False
         return bool(str(info.get("SERVER") or "").strip())
 
     @staticmethod
     def _project_rep_dir(project_location: str, project_name: Optional[str]) -> pathlib.Path:
-        resolved_location, resolved_name = ProjectHandle.resolve_project_location_and_file(project_location, project_name)
+        resolved_location, resolved_name = ProjectHandle.resolve_project_location_and_file(
+            project_location, project_name
+        )
         return pathlib.Path(resolved_location) / f"{resolved_name}.rep"
 
     def get_project_location(self) -> str:
@@ -185,30 +305,21 @@ class ProjectHandle:
                 get_shared_url = getattr(project_data, "getSharedProjectURL", None)
                 if get_shared_url is None:
                     if is_repository_project:
-                        raise RuntimeError(
-                            "SYNC_STATUS_UNAVAILABLE: ProjectData.getSharedProjectURL is unavailable"
-                        )
+                        raise HeadlessError("SYNC_STATUS_UNAVAILABLE: ProjectData.getSharedProjectURL is unavailable")
                     return None
                 shared_url = get_shared_url()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 if str(exc).startswith("SYNC_STATUS_UNAVAILABLE:"):
                     raise
-                raise RuntimeError(
-                    "SYNC_STATUS_UNAVAILABLE: failed to resolve shared project URL: "
-                    f"{exc}"
-                ) from exc
+                raise HeadlessError(f"SYNC_STATUS_UNAVAILABLE: failed to resolve shared project URL: {exc}") from exc
             if shared_url is None:
                 if is_repository_project:
-                    raise RuntimeError(
-                        "SYNC_STATUS_UNAVAILABLE: shared project URL is unavailable"
-                    )
+                    raise HeadlessError("SYNC_STATUS_UNAVAILABLE: shared project URL is unavailable")
                 return None
             normalized_url = str(shared_url).strip()
             if not normalized_url:
                 if is_repository_project:
-                    raise RuntimeError(
-                        "SYNC_STATUS_UNAVAILABLE: shared project URL is empty"
-                    )
+                    raise HeadlessError("SYNC_STATUS_UNAVAILABLE: shared project URL is empty")
                 return None
             return normalized_url
 
@@ -220,51 +331,131 @@ class ProjectHandle:
             domain_file = self._get_domain_file_locked(domain_path)
             get_file_id = getattr(domain_file, "getFileID", None)
             if get_file_id is None:
-                raise RuntimeError(
-                    "SYNC_STATUS_UNAVAILABLE: DomainFile.getFileID is unavailable"
-                )
+                raise HeadlessError("SYNC_STATUS_UNAVAILABLE: DomainFile.getFileID is unavailable")
             try:
                 file_id = get_file_id()
             except Exception as exc:
-                raise RuntimeError(
-                    "SYNC_STATUS_UNAVAILABLE: failed to read DomainFile file ID: "
-                    f"{exc}"
-                ) from exc
+                raise HeadlessError(f"SYNC_STATUS_UNAVAILABLE: failed to read DomainFile file ID: {exc}") from exc
             if file_id is None:
                 return None
             normalized_id = str(file_id).strip()
             return normalized_id or None
 
-    def open_program(self, domain_path: Optional[str] = None) -> ProgramSession:
+    def open_program(self, domain_path: Optional[str] = None, *, version: Optional[int] = None) -> ProgramSession:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is already closed")
             monitor = java_bindings._console_monitor()
             domain_dir, domain_name = path_utils._parse_domain_path(self.project, domain_path)
+            if version is not None:
+                return self._open_program_version_locked(domain_dir, domain_name, int(version), monitor)
             domain_path_key = (domain_dir, domain_name)
             if domain_path_key in self._open_programs:
                 raise RuntimeError(f"Program already has an active session: {domain_path_key}")
-            program = self.project.openProgram(domain_dir, domain_name, False)
+            program = self._open_program_object_locked(domain_dir, domain_name, monitor)
             if program is None:
                 raise RuntimeError(f"Failed to open program: {domain_path}")
             try:
                 flat_api = java_bindings._flat_program_api_class()(program, monitor)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 domain_path_text = (pathlib.PurePosixPath(domain_dir) / domain_name).as_posix()
                 try:
-                    self.project.close(program)
-                except Exception as close_exc:  # noqa: BLE001
-                    raise RuntimeError(
+                    self._release_program_object_locked(program)
+                except Exception as close_exc:
+                    raise HeadlessError(
                         "PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for "
                         f"{domain_path_text}: {exc}; cleanup close failed: {close_exc}"
                     ) from exc
-                raise RuntimeError(
-                    "PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for "
-                    f"{domain_path_text}: {exc}"
+                raise HeadlessError(
+                    f"PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for {domain_path_text}: {exc}"
                 ) from exc
             self._refcount += 1
             self._open_programs.add(domain_path_key)
             return ProgramSession(flat_api, program, project_handle=self)
+
+    def _open_program_object_locked(self, domain_dir: str, domain_name: str, monitor):
+        """Open a program for update through its DomainFile, not ``GhidraProject.openProgram``.
+
+        GhidraProject keeps a "Batch Processing" transaction open for the whole life
+        of every program it opens.  Inside it ``Program.isChanged()`` stays false,
+        undo is impossible and a .gzf export fails with "Unable to lock due to
+        active transaction".  Opening the DomainObject directly (with the project as
+        consumer) gives each tool call its own top-level transaction instead.
+        """
+        domain_path_text = (pathlib.PurePosixPath(domain_dir) / domain_name).as_posix()
+        if not domain_path_text.startswith("/"):
+            domain_path_text = "/" + domain_path_text
+        domain_file = self._get_domain_file_locked(domain_path_text)
+        # Mirrors GhidraProject.openProgram: okToUpgrade=True, okToRecover=False.
+        return domain_file.getDomainObject(self.project, True, False, monitor)
+
+    def _release_program_object_locked(self, program) -> None:
+        """Drop the consumer reference taken by ``_open_program_object_locked``."""
+        program.release(self.project)
+
+    def _open_program_version_locked(self, domain_dir: str, domain_name: str, version: int, monitor) -> ProgramSession:
+        """Open one past repository version read-only (``DomainFile.getReadOnlyDomainObject``)."""
+        if version < 1:
+            raise ValueError("version must be >= 1")
+        domain_path_text = (pathlib.PurePosixPath(domain_dir) / domain_name).as_posix()
+        if not domain_path_text.startswith("/"):
+            domain_path_text = "/" + domain_path_text
+        domain_key: tuple[str, ...] = (domain_dir, domain_name, f"v{version}")
+        if domain_key in self._open_programs:
+            raise RuntimeError(f"Program version already has an active session: {domain_key}")
+        self._ensure_repository_connected_locked(required=True)
+        domain_file = self._get_domain_file_locked(domain_path_text)
+        if not bool(sync_utils._required_call(domain_file, "isVersioned")):
+            raise HeadlessError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
+        known_versions = {item["version"] for item in sync_utils._get_version_history_entries(domain_file)}
+        if version not in known_versions:
+            raise HeadlessError(f"VERSION_NOT_FOUND: version={version} not found in history")
+        consumer = java_bindings._java_object()
+        try:
+            program = domain_file.getReadOnlyDomainObject(consumer, version, monitor)
+        except Exception as exc:
+            raise HeadlessError(
+                f"VERSION_LOAD_FAILED: failed to open version {version} of {domain_path_text}: {exc}"
+            ) from exc
+        if program is None:
+            raise HeadlessError(f"VERSION_LOAD_FAILED: failed to open version {version} of {domain_path_text}")
+        try:
+            flat_api = java_bindings._flat_program_api_class()(program, monitor)
+        except Exception as exc:
+            sync_utils._release_domain_object(program, consumer)
+            raise HeadlessError(
+                f"PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for {domain_path_text}@v{version}: {exc}"
+            ) from exc
+        self._refcount += 1
+        self._open_programs.add(domain_key)
+        self._read_only_programs.append((program, consumer, domain_key))
+        return ProgramSession(flat_api, program, project_handle=self, read_only_version=version)
+
+    def _find_read_only_locked(self, program):
+        # getattr: unit tests build handles without __init__ (see _repository_verified_at).
+        for entry in getattr(self, "_read_only_programs", ()):
+            if entry[0] is program or entry[0] == program:
+                return entry
+        return None
+
+    def _release_read_only_locked(self, entry, *, remove_program: bool) -> None:
+        program, consumer, domain_key = entry
+        if remove_program:
+            raise HeadlessError("UNSAFE_PROGRAM_REMOVE: a read-only version session cannot remove the program")
+        try:
+            program.release(consumer)
+        except Exception as exc:
+            raise HeadlessError(f"PROGRAM_CLOSE_FAILED: failed to release read-only program version: {exc}") from exc
+        self._read_only_programs.remove(entry)
+        self._open_programs.discard(domain_key)
+        self._refcount = max(0, self._refcount - 1)
+        if self._refcount == 0:
+            try:
+                self._close_project_locked()
+            except Exception as exc:
+                raise HeadlessError(
+                    f"SESSION_CLOSE_FAILED: failed to close project: {self._project_close_error_text(exc)}"
+                ) from exc
 
     def import_program(
         self,
@@ -327,7 +518,7 @@ class ProjectHandle:
                     )
                 except Exception as exc:
                     if isinstance(exc, _ImportedProgramCloseError):
-                        raise RuntimeError(
+                        raise HeadlessError(
                             "IMPORT_CLOSE_FAILED: imported program "
                             f"{imported_domain_path} but failed to close after post-processing: "
                             f"{self._short_error(exc)}"
@@ -335,12 +526,12 @@ class ProjectHandle:
                     try:
                         self._delete_domain_file_locked(imported_domain_path)
                     except Exception as cleanup_exc:
-                        raise RuntimeError(
+                        raise HeadlessError(
                             "IMPORT_POST_PROCESS_FAILED: imported program "
                             f"{imported_domain_path} but post-processing failed: {exc}; "
                             f"rollback delete failed: {cleanup_exc}"
                         ) from exc
-                    raise RuntimeError(
+                    raise HeadlessError(
                         "IMPORT_POST_PROCESS_FAILED: rolled back imported program "
                         f"{imported_domain_path} after post-processing failed: {exc}"
                     ) from exc
@@ -364,12 +555,10 @@ class ProjectHandle:
             if normalized_limit < 1:
                 raise ValueError("limit must be >= 1")
             if normalized_limit > _VERSION_HISTORY_MAX_LIMIT:
-                raise ValueError(
-                    f"limit must be <= {_VERSION_HISTORY_MAX_LIMIT}"
-                )
+                raise ValueError(f"limit must be <= {_VERSION_HISTORY_MAX_LIMIT}")
             domain_file = self._get_domain_file_locked(domain_path)
             if not bool(sync_utils._required_call(domain_file, "isVersioned")):
-                raise RuntimeError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
+                raise HeadlessError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
             versions = sync_utils._get_version_history_entries(domain_file)
             versions.sort(key=lambda item: item["version"], reverse=True)
             current_version = int(sync_utils._required_call(domain_file, "getVersion"))
@@ -389,6 +578,8 @@ class ProjectHandle:
         from_version: int,
         to_version: int,
         range_limit: int = 200,
+        include_details: bool = False,
+        details_limit: int = 20,
     ) -> Dict[str, Any]:
         with self._lock:
             if self._closed:
@@ -402,24 +593,23 @@ class ProjectHandle:
             if normalized_range_limit < 0:
                 raise ValueError("range_limit must be >= 0")
             if normalized_range_limit > _VERSION_DIFF_MAX_RANGE_LIMIT:
-                raise ValueError(
-                    f"range_limit must be <= {_VERSION_DIFF_MAX_RANGE_LIMIT}"
-                )
+                raise ValueError(f"range_limit must be <= {_VERSION_DIFF_MAX_RANGE_LIMIT}")
+            normalized_details_limit = int(details_limit)
+            if normalized_details_limit < 0:
+                raise ValueError("details_limit must be >= 0")
+            if normalized_details_limit > _VERSION_DIFF_MAX_DETAILS_LIMIT:
+                raise ValueError(f"details_limit must be <= {_VERSION_DIFF_MAX_DETAILS_LIMIT}")
 
             domain_file = self._get_domain_file_locked(domain_path)
             if not bool(sync_utils._required_call(domain_file, "isVersioned")):
-                raise RuntimeError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
+                raise HeadlessError("NOT_SHARED_PROJECT: target program is not under shared-project version control")
 
             versions = sync_utils._get_version_history_entries(domain_file)
             known_versions = {item["version"] for item in versions}
             if source_version not in known_versions:
-                raise RuntimeError(
-                    f"VERSION_NOT_FOUND: from_version={source_version} not found in history"
-                )
+                raise HeadlessError(f"VERSION_NOT_FOUND: from_version={source_version} not found in history")
             if target_version not in known_versions:
-                raise RuntimeError(
-                    f"VERSION_NOT_FOUND: to_version={target_version} not found in history"
-                )
+                raise HeadlessError(f"VERSION_NOT_FOUND: to_version={target_version} not found in history")
 
             result = {
                 "program": domain_path,
@@ -430,14 +620,14 @@ class ProjectHandle:
                 "diff_types": [],
                 "ranges": [],
                 "ranges_truncated": False,
+                "details": [],
+                "details_truncated": False,
                 "warnings": None,
             }
             if source_version == target_version:
                 return result
 
-            monitor = java_bindings._timeout_task_monitor(
-                timeout_seconds=_VERSION_DIFF_TIMEOUT_SECONDS
-            )
+            monitor = java_bindings._timeout_task_monitor(timeout_seconds=_VERSION_DIFF_TIMEOUT_SECONDS)
             from_consumer = None
             to_consumer = None
             from_program = None
@@ -449,7 +639,7 @@ class ProjectHandle:
                     from_program = domain_file.getReadOnlyDomainObject(from_consumer, source_version, monitor)
                     to_program = domain_file.getReadOnlyDomainObject(to_consumer, target_version, monitor)
                     if from_program is None or to_program is None:
-                        raise RuntimeError(
+                        raise HeadlessError(
                             f"VERSION_LOAD_FAILED: failed to open version {source_version} or {target_version}"
                         )
                     program_diff = java_bindings._program_diff_class()(from_program, to_program)
@@ -457,28 +647,44 @@ class ProjectHandle:
 
                     type_counts = sync_utils._collect_diff_type_counts(program_diff, differences, monitor)
                     ranges, truncated = sync_utils._collect_diff_ranges(differences, limit=normalized_range_limit)
+                    details: list[Dict[str, Any]] = []
+                    details_truncated = False
+                    if include_details:
+                        # Details are keyed by the ranges the caller sees, so the
+                        # range limit bounds them as well as details_limit.
+                        details, details_truncated = sync_utils._collect_diff_details(
+                            from_program,
+                            to_program,
+                            ranges,
+                            limit=normalized_details_limit,
+                        )
+                        details_truncated = details_truncated or truncated
                     warnings = program_diff.getWarnings()
                     result.update(
                         {
-                            "total_diff_addresses": int(differences.getNumAddresses()) if differences is not None else 0,
-                            "total_diff_ranges": int(differences.getNumAddressRanges()) if differences is not None else 0,
+                            "total_diff_addresses": int(differences.getNumAddresses())
+                            if differences is not None
+                            else 0,
+                            "total_diff_ranges": int(differences.getNumAddressRanges())
+                            if differences is not None
+                            else 0,
                             "diff_types": type_counts,
                             "ranges": ranges,
                             "ranges_truncated": truncated,
+                            "details": details,
+                            "details_truncated": details_truncated,
                             "warnings": None if warnings is None else str(warnings),
                         }
                     )
                 except Exception as exc:
                     if bool(monitor.didTimeout()):
-                        raise RuntimeError(
-                            "VERSION_DIFF_TIMEOUT: version diff exceeded "
-                            f"{_VERSION_DIFF_TIMEOUT_SECONDS} seconds"
+                        raise HeadlessError(
+                            f"VERSION_DIFF_TIMEOUT: version diff exceeded {_VERSION_DIFF_TIMEOUT_SECONDS} seconds"
                         ) from exc
                     raise
                 if bool(monitor.didTimeout()):
-                    raise RuntimeError(
-                        "VERSION_DIFF_TIMEOUT: version diff exceeded "
-                        f"{_VERSION_DIFF_TIMEOUT_SECONDS} seconds"
+                    raise HeadlessError(
+                        f"VERSION_DIFF_TIMEOUT: version diff exceeded {_VERSION_DIFF_TIMEOUT_SECONDS} seconds"
                     )
                 return result
             finally:
@@ -486,7 +692,7 @@ class ProjectHandle:
                 sync_utils._release_domain_object(to_program, to_consumer)
                 try:
                     monitor.finished()
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("failed to finish version diff timeout monitor: %s", exc)
 
     def refresh_project_data(self, *, force: bool = True) -> None:
@@ -501,14 +707,12 @@ class ProjectHandle:
         refresh = getattr(data, "refresh", None)
         if refresh is None:
             if repository_connected:
-                raise RuntimeError(
-                    "PROJECT_DATA_REFRESH_FAILED: shared ProjectData.refresh is unavailable"
-                )
+                raise HeadlessError("PROJECT_DATA_REFRESH_FAILED: shared ProjectData.refresh is unavailable")
             return
         try:
             refresh(bool(force))
         except Exception as exc:
-            raise RuntimeError(f"PROJECT_DATA_REFRESH_FAILED: failed to refresh project data: {exc}") from exc
+            raise HeadlessError(f"PROJECT_DATA_REFRESH_FAILED: failed to refresh project data: {exc}") from exc
         if repository_connected:
             self._verify_repository_connected_after_refresh_locked()
 
@@ -538,9 +742,9 @@ class ProjectHandle:
             domain_file = self._get_domain_file_locked(domain_path)
             can_add = sync_utils._required_call(domain_file, "canAddToRepository")
             if can_add is None:
-                raise RuntimeError("SYNC_STATUS_UNAVAILABLE: DomainFile.canAddToRepository returned None")
+                raise HeadlessError("SYNC_STATUS_UNAVAILABLE: DomainFile.canAddToRepository returned None")
             if not bool(can_add):
-                raise RuntimeError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControl is not allowed")
+                raise HeadlessError("ADD_TO_VERSION_CONTROL_NOT_ALLOWED: addToVersionControl is not allowed")
             monitor = java_bindings._console_monitor()
             domain_file.addToVersionControl(text, bool(keep_checked_out), monitor)
 
@@ -561,7 +765,9 @@ class ProjectHandle:
                 raise ValueError("message is required")
             domain_file = self._get_domain_file_locked(domain_path)
             monitor = java_bindings._console_monitor()
-            handler = java_bindings._default_checkin_handler_class()(text, bool(keep_checked_out), bool(create_keep_file))
+            handler = java_bindings._default_checkin_handler_class()(
+                text, bool(keep_checked_out), bool(create_keep_file)
+            )
             domain_file.checkin(handler, monitor)
 
     def merge_program(self, domain_path: str, *, ok_to_upgrade: bool = True) -> None:
@@ -600,10 +806,13 @@ class ProjectHandle:
             if self._closed:
                 # Never a silent success: the project is gone, so nothing can be
                 # saved and the program was already force-closed with it.
-                raise RuntimeError(
-                    "SESSION_CLOSE_FAILED: project is already closed; the program was "
-                    "closed without saving"
+                raise HeadlessError(
+                    "SESSION_CLOSE_FAILED: project is already closed; the program was closed without saving"
                 )
+            read_only_entry = self._find_read_only_locked(program)
+            if read_only_entry is not None:
+                self._release_read_only_locked(read_only_entry, remove_program=remove_program)
+                return
             domain_path = path_utils._domain_path(program)
             if domain_path is None:
                 raise RuntimeError("Failed to resolve path of program to remove")
@@ -612,21 +821,21 @@ class ProjectHandle:
                 # Guard against double release: a second release for the same
                 # program would decrement the refcount again and close the
                 # project out from under the remaining sessions.
-                raise RuntimeError(
-                    f"PROGRAM_NOT_OPEN: program '{domain_path}' is not open in this project handle"
-                )
+                raise HeadlessError(f"PROGRAM_NOT_OPEN: program '{domain_path}' is not open in this project handle")
             remove_error = None
             project_close_error = None
             try:
                 if save and program is not None:
                     self.save_program(program)
             except Exception as exc:
-                raise RuntimeError(f"SAVE_FAILED: failed to save program before close: {self._save_error_text(exc)}") from exc
+                raise HeadlessError(
+                    f"SAVE_FAILED: failed to save program before close: {self._save_error_text(exc)}"
+                ) from exc
             try:
                 if program is not None:
-                    self.project.close(program)
+                    self._release_program_object_locked(program)
             except Exception as exc:
-                raise RuntimeError(f"PROGRAM_CLOSE_FAILED: failed to close program: {exc}") from exc
+                raise HeadlessError(f"PROGRAM_CLOSE_FAILED: failed to close program: {exc}") from exc
             if remove_program:
                 try:
                     self._delete_program_locked(domain_path)
@@ -635,14 +844,14 @@ class ProjectHandle:
             self._open_programs.discard(domain_key)
             self._refcount = max(0, self._refcount - 1)
             if remove_error is not None:
-                raise RuntimeError(f"REMOVE_PROGRAM_FAILED: {remove_error}")
+                raise HeadlessError(f"REMOVE_PROGRAM_FAILED: {remove_error}")
             if self._refcount == 0:
                 try:
                     self._close_project_locked()
                 except Exception as exc:
                     project_close_error = exc
             if project_close_error is not None:
-                raise RuntimeError(
+                raise HeadlessError(
                     "SESSION_CLOSE_FAILED: failed to close project: "
                     f"{self._project_close_error_text(project_close_error)}"
                 ) from project_close_error
@@ -658,7 +867,7 @@ class ProjectHandle:
             try:
                 self.project.save(program)
             except Exception as exc:
-                raise RuntimeError(f"SAVE_FAILED: failed to save program: {exc}") from exc
+                raise HeadlessError(f"SAVE_FAILED: failed to save program: {exc}") from exc
             return True
 
     def list_programs(self):
@@ -689,7 +898,7 @@ class ProjectHandle:
                 # and shutdown paths reclaiming a handle whose program release
                 # already failed pass force=True — for them, rejecting the close
                 # would leave the project wedged until the process restarts.
-                raise RuntimeError(
+                raise HeadlessError(
                     f"PROJECT_CLOSE_REJECTED: {self._refcount} program session(s) are "
                     "still open for this project; close them first"
                 )
@@ -704,7 +913,7 @@ class ProjectHandle:
             self.project.close()
         except Exception as exc:
             logger.warning("project close failed: %s", exc)
-            raise RuntimeError(f"PROJECT_CLOSE_FAILED: failed to close project: {exc}") from exc
+            raise HeadlessError(f"PROJECT_CLOSE_FAILED: failed to close project: {exc}") from exc
         self._open_programs.clear()
         self._closed = True
 
@@ -728,37 +937,37 @@ class ProjectHandle:
         try:
             self._refresh_project_data_locked(force=True)
         except Exception as exc:
-            raise RuntimeError(
+            raise HeadlessError(
                 "DELETE_POSTCONDITION_FAILED: domain file delete returned, but project data "
                 f"refresh failed for {domain_path}: {exc}"
             ) from exc
         try:
             remaining_file = self.project.getProjectData().getFile(domain_path)
         except Exception as exc:
-            raise RuntimeError(
+            raise HeadlessError(
                 "DELETE_POSTCONDITION_FAILED: domain file delete returned, but path absence "
                 f"could not be verified for {domain_path}: {exc}"
             ) from exc
         if remaining_file is None and was_hijacked:
-            raise RuntimeError(
+            raise HeadlessError(
                 "DELETE_POSTCONDITION_FAILED: hijacked shadow was deleted, but the repository "
                 f"file was not revealed: {domain_path}"
             )
         if remaining_file is not None:
             if not was_hijacked:
-                raise RuntimeError(
+                raise HeadlessError(
                     "DELETE_POSTCONDITION_FAILED: domain file delete returned, but the path still "
                     f"exists: {domain_path}"
                 )
             try:
                 revealed_status = sync_utils._sync_status_from_domain_file(remaining_file)
             except Exception as exc:
-                raise RuntimeError(
+                raise HeadlessError(
                     "DELETE_POSTCONDITION_FAILED: hijacked shadow was deleted, but the revealed "
                     f"repository state could not be verified for {domain_path}: {exc}"
                 ) from exc
             if revealed_status.get("is_hijacked") or not revealed_status.get("is_versioned"):
-                raise RuntimeError(
+                raise HeadlessError(
                     "DELETE_POSTCONDITION_FAILED: hijacked shadow was deleted, but a versioned "
                     f"repository file was not revealed: {domain_path}"
                 )
@@ -806,8 +1015,7 @@ class ProjectHandle:
         repository = self._get_repository_adapter_locked()
         if repository is None:
             message = (
-                "SHARED_PROJECT_UNAVAILABLE: shared project metadata exists, "
-                "but no repository adapter is attached"
+                "SHARED_PROJECT_UNAVAILABLE: shared project metadata exists, but no repository adapter is attached"
             )
             if required:
                 raise RuntimeError(message)
@@ -820,76 +1028,78 @@ class ProjectHandle:
         try:
             connected = bool(is_connected())
         except Exception as exc:
-            raise RuntimeError(
+            raise HeadlessError(
                 f"REPOSITORY_CONNECT_FAILED: failed to query repository connection state: {exc}"
             ) from exc
         if connected:
             verify_connection = getattr(repository, "verifyConnection", None)
             if verify_connection is None:
                 return True
+            if self._repository_recently_verified():
+                return True
             try:
                 verified = bool(verify_connection())
             except Exception as exc:
-                raise RuntimeError(
+                self._repository_verified_at = None
+                raise HeadlessError(
                     f"REPOSITORY_CONNECT_FAILED: failed to verify repository connection: {exc}"
                 ) from exc
             if verified:
+                self._repository_verified_at = time.monotonic()
                 return True
-            raise RuntimeError(
-                "REPOSITORY_CONNECT_FAILED: repository connection verification failed"
-            )
+            self._repository_verified_at = None
+            raise HeadlessError("REPOSITORY_CONNECT_FAILED: repository connection verification failed")
 
         connect = getattr(repository, "connect", None)
         if connect is None:
-            raise RuntimeError("SHARED_PROJECT_UNAVAILABLE: repository adapter does not support connect()")
+            raise HeadlessError("SHARED_PROJECT_UNAVAILABLE: repository adapter does not support connect()")
         try:
             connect()
         except Exception as exc:
-            raise RuntimeError(f"REPOSITORY_CONNECT_FAILED: failed to connect to repository: {exc}") from exc
+            raise HeadlessError(f"REPOSITORY_CONNECT_FAILED: failed to connect to repository: {exc}") from exc
         try:
             connected = bool(is_connected())
         except Exception as exc:
-            raise RuntimeError(
+            raise HeadlessError(
                 f"REPOSITORY_CONNECT_FAILED: failed to re-check repository connection state: {exc}"
             ) from exc
         if not connected:
-            raise RuntimeError("REPOSITORY_CONNECT_FAILED: repository is not connected after connect()")
+            raise HeadlessError("REPOSITORY_CONNECT_FAILED: repository is not connected after connect()")
         return True
+
+    def _repository_recently_verified(self) -> bool:
+        interval = float(self.repository_verify_interval_seconds or 0.0)
+        verified_at = getattr(self, "_repository_verified_at", None)
+        if interval <= 0.0 or verified_at is None:
+            return False
+        return (time.monotonic() - verified_at) < interval
 
     def _verify_repository_connected_after_refresh_locked(self) -> None:
         repository = self._get_repository_adapter_locked()
         if repository is None:
-            raise RuntimeError(
-                "PROJECT_DATA_REFRESH_FAILED: repository adapter became unavailable during refresh"
-            )
+            raise HeadlessError("PROJECT_DATA_REFRESH_FAILED: repository adapter became unavailable during refresh")
         is_connected = getattr(repository, "isConnected", None)
         if is_connected is None:
             return
         try:
             connected = bool(is_connected())
         except Exception as exc:
-            raise RuntimeError(
-                "PROJECT_DATA_REFRESH_FAILED: failed to verify repository connection after refresh: "
-                f"{exc}"
+            raise HeadlessError(
+                f"PROJECT_DATA_REFRESH_FAILED: failed to verify repository connection after refresh: {exc}"
             ) from exc
         if not connected:
-            raise RuntimeError(
-                "PROJECT_DATA_REFRESH_FAILED: repository disconnected during project data refresh"
-            )
+            raise HeadlessError("PROJECT_DATA_REFRESH_FAILED: repository disconnected during project data refresh")
         verify_connection = getattr(repository, "verifyConnection", None)
         if verify_connection is None:
             return
         try:
             verified = bool(verify_connection())
         except Exception as exc:
-            raise RuntimeError(
-                "PROJECT_DATA_REFRESH_FAILED: failed to verify repository connection after refresh: "
-                f"{exc}"
+            raise HeadlessError(
+                f"PROJECT_DATA_REFRESH_FAILED: failed to verify repository connection after refresh: {exc}"
             ) from exc
         if not verified:
-            raise RuntimeError(
-                "PROJECT_DATA_REFRESH_FAILED: repository connection verification failed after refresh"
-            )
+            raise HeadlessError("PROJECT_DATA_REFRESH_FAILED: repository connection verification failed after refresh")
 
     def _get_repository_adapter_locked(self):
         project = None
@@ -1025,10 +1235,8 @@ class ProjectHandle:
         loader_factory = getattr(pyghidra, "program_loader", None)
         builder_factory = loader_factory or (lambda: pycore.JClass("ghidra.app.util.importer.ProgramLoader").builder())
         loader_value = "ghidra.app.util.opinion.BinaryLoader"
-        try:
+        with contextlib.suppress(Exception):
             loader_value = pycore.JClass(loader_value)
-        except Exception:
-            pass
         builder = (
             builder_factory()
             .project(self.project.getProject())
@@ -1059,12 +1267,12 @@ class ProjectHandle:
                 continue
             option_arg = loader_option_args.get(option_name)
             if option_arg is None:
-                raise RuntimeError(f"RAW_LOADER_OPTION_UNAVAILABLE: {option_name}")
+                raise HeadlessError(f"RAW_LOADER_OPTION_UNAVAILABLE: {option_name}")
             builder = builder.addLoaderArg(option_arg, str(value))
         if overlay:
             option_arg = loader_option_args.get("Overlay")
             if option_arg is None:
-                raise RuntimeError("RAW_LOADER_OPTION_UNAVAILABLE: Overlay")
+                raise HeadlessError("RAW_LOADER_OPTION_UNAVAILABLE: Overlay")
             builder = builder.addLoaderArg(option_arg, "true")
 
         load_results = builder.load()
@@ -1182,8 +1390,12 @@ class ProjectHandle:
         script_util = java_bindings._ghidra_script_util()
         script_util.acquireBundleHostReference()
         try:
-            flat_api.analyzeAll(program)
-            utilities.markProgramAnalyzed(program)
+
+            def _analyze():
+                flat_api.analyzeAll(program)
+                utilities.markProgramAnalyzed(program)
+
+            run_in_transaction(program, "Auto analysis", _analyze)
         finally:
             script_util.releaseBundleHostReference()
 
@@ -1265,7 +1477,9 @@ class ProjectHandle:
             return resolved
         except Exception as exc:
             if required_options:
-                raise RuntimeError(f"RAW_LOADER_OPTION_UNAVAILABLE: failed to resolve BinaryLoader options: {exc}") from exc
+                raise HeadlessError(
+                    f"RAW_LOADER_OPTION_UNAVAILABLE: failed to resolve BinaryLoader options: {exc}"
+                ) from exc
             logger.debug("failed to resolve binary loader option args; using fallback names: %s", exc)
             return fallback
 

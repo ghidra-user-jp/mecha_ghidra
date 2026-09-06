@@ -1,15 +1,18 @@
-"""Transport configuration helpers for MCP presentation layer."""
+"""Transport configuration helpers for the MCP presentation layer.
+
+mcp 2.x passes host/port/path/security to ``MCPServer.run()`` instead of a
+mutable ``settings`` object, so these helpers build that keyword mapping.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+DEFAULT_HTTP_PORT = 8081
 
 
 def normalize_transport(transport: str) -> str:
@@ -51,7 +54,7 @@ def resolve_transport_security_for_host(host: str) -> TransportSecuritySettings:
     normalized = normalize_host(host)
     if normalized in {"127.0.0.1", "localhost", "::1"}:
         return _transport_security_for_hosts(_LOOPBACK_HOSTS)
-    if normalized in {"0.0.0.0", "::"}:
+    if normalized in {"0.0.0.0", "::"}:  # noqa: S104 - detecting, not binding
         # A wildcard listen address is necessary inside the Docker container,
         # but it must not imply that every Host/Origin is trusted.  Keep the
         # listener reachable through the loopback-published Compose port while
@@ -63,48 +66,69 @@ def resolve_transport_security_for_host(host: str) -> TransportSecuritySettings:
     return _transport_security_for_hosts((normalized,))
 
 
-def configure_transport_security_for_host(*, mcp: FastMCP, host: str, logger: logging.Logger) -> None:
+def transport_security_for_host(*, host: str, logger: logging.Logger) -> TransportSecuritySettings:
     settings = resolve_transport_security_for_host(host)
-    if normalize_host(host) in {"0.0.0.0", "::"}:
+    if normalize_host(host) in {"0.0.0.0", "::"}:  # noqa: S104 - detecting, not binding
         logger.warning(
             "MCP is listening on wildcard host %s, but DNS rebinding protection "
             "accepts only loopback Host/Origin values. Bind a fixed IP/hostname "
             "and use TLS plus access controls for intentional remote access.",
             host,
         )
-    mcp.settings.transport_security = settings
+    return settings
 
 
-def configure_mcp_for_sse(*, mcp: FastMCP, args: Any, logger: logging.Logger) -> None:
+def _apply_log_level(args: Any) -> None:
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
-    mcp.settings.log_level = args.log_level.upper()
-    mcp.settings.host = args.mcp_host
-    mcp.settings.port = args.mcp_port or 8081
-    configure_transport_security_for_host(mcp=mcp, host=mcp.settings.host, logger=logger)
-    logger.info("Starting MCP in SSE mode: http://%s:%s/sse", mcp.settings.host, mcp.settings.port)
 
 
-def configure_mcp_for_streamable_http(*, mcp: FastMCP, args: Any, logger: logging.Logger) -> None:
-    logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
-    mcp.settings.log_level = args.log_level.upper()
-    mcp.settings.host = args.mcp_host
-    mcp.settings.port = args.mcp_port or 8081
-    mcp.settings.streamable_http_path = normalize_streamable_http_path(args.mcp_path)
-    configure_transport_security_for_host(mcp=mcp, host=mcp.settings.host, logger=logger)
-    logger.info(
-        "Starting MCP in Streamable HTTP mode: http://%s:%s%s",
-        mcp.settings.host,
-        mcp.settings.port,
-        mcp.settings.streamable_http_path,
-    )
+def sse_run_kwargs(*, args: Any, logger: logging.Logger) -> dict[str, Any]:
+    """Keyword arguments for ``MCPServer.run("sse", **kwargs)``."""
+
+    _apply_log_level(args)
+    host = args.mcp_host
+    port = args.mcp_port or DEFAULT_HTTP_PORT
+    logger.info("Starting MCP in SSE mode: http://%s:%s/sse", host, port)
+    return {
+        "host": host,
+        "port": port,
+        "transport_security": transport_security_for_host(host=host, logger=logger),
+    }
+
+
+def streamable_http_run_kwargs(*, args: Any, logger: logging.Logger) -> dict[str, Any]:
+    """Keyword arguments for ``MCPServer.run("streamable-http", **kwargs)``."""
+
+    _apply_log_level(args)
+    host = args.mcp_host
+    port = args.mcp_port or DEFAULT_HTTP_PORT
+    path = normalize_streamable_http_path(args.mcp_path)
+    logger.info("Starting MCP in Streamable HTTP mode: http://%s:%s%s", host, port, path)
+    return {
+        "host": host,
+        "port": port,
+        "streamable_http_path": path,
+        "transport_security": transport_security_for_host(host=host, logger=logger),
+    }
+
+
+def run_kwargs_for_transport(*, transport: str, args: Any, logger: logging.Logger) -> dict[str, Any]:
+    normalized = normalize_transport(transport)
+    if normalized == "sse":
+        return sse_run_kwargs(args=args, logger=logger)
+    if normalized == "streamable-http":
+        return streamable_http_run_kwargs(args=args, logger=logger)
+    return {}
 
 
 __all__ = [
-    "configure_mcp_for_sse",
-    "configure_mcp_for_streamable_http",
-    "configure_transport_security_for_host",
+    "DEFAULT_HTTP_PORT",
     "normalize_host",
     "normalize_streamable_http_path",
     "normalize_transport",
     "resolve_transport_security_for_host",
+    "run_kwargs_for_transport",
+    "sse_run_kwargs",
+    "streamable_http_run_kwargs",
+    "transport_security_for_host",
 ]

@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 import pytest
-from mcp.server.fastmcp import Audio, Image
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Image
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ResourceLink, TextContent
 from pydantic import BaseModel
 
@@ -41,13 +41,7 @@ def _run(coro):
 class LargeResultRegistry:
     def call(self, command, params, target):  # noqa: ARG002
         if command == "decompile_function":
-            return (
-                "int main(void) {\n"
-                + ("  return 0;\n" * 20)
-                + "}\n/* "
-                + ("x" * 2000)
-                + " */\n"
-            )
+            return "int main(void) {\n" + ("  return 0;\n" * 20) + "}\n/* " + ("x" * 2000) + " */\n"
         if command == "list_functions":
             return [{"name": f"function_{idx}", "entry": f"0x{idx:x}"} for idx in range(50)]
         return {"status": "ok"}
@@ -151,10 +145,7 @@ def test_short_description_abbreviation_needs_word_boundary():
     assert _first_sentence_or_truncate(text) == "The operation is transactional."
 
     text = "See Smith et al. for details on the algorithm. Second sentence."
-    assert (
-        _first_sentence_or_truncate(text)
-        == "See Smith et al. for details on the algorithm."
-    )
+    assert _first_sentence_or_truncate(text) == "See Smith et al. for details on the algorithm."
 
 
 def test_short_description_handles_cjk_sentences_without_trailing_space():
@@ -210,9 +201,9 @@ def test_tool_description_mode_none_omits_description_but_keeps_annotations():
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
     assert tools["list_targets"].description is None
-    assert tools["list_targets"].annotations.readOnlyHint is True
-    assert tools["list_targets"].annotations.idempotentHint is True
-    assert tools["close_session_and_remove_program"].annotations.destructiveHint is True
+    assert tools["list_targets"].annotations.read_only_hint is True
+    assert tools["list_targets"].annotations.idempotent_hint is True
+    assert tools["close_session_and_remove_program"].annotations.destructive_hint is True
 
 
 @pytest.mark.parametrize("mode", ["short", "full", "none"])
@@ -226,10 +217,10 @@ def test_annotations_survive_all_description_modes(mode):
 
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
-    assert tools["list_targets"].annotations.readOnlyHint is True
-    assert tools["list_targets"].annotations.idempotentHint is True
-    assert tools["create_session"].annotations.idempotentHint is False
-    assert tools["close_session_and_remove_program"].annotations.destructiveHint is True
+    assert tools["list_targets"].annotations.read_only_hint is True
+    assert tools["list_targets"].annotations.idempotent_hint is True
+    assert tools["create_session"].annotations.idempotent_hint is False
+    assert tools["close_session_and_remove_program"].annotations.destructive_hint is True
 
 
 def test_tool_docs_resources_only_include_exposed_specs():
@@ -261,9 +252,7 @@ def test_server_instructions_advertise_docs_and_result_tools():
     assert "read_result" in resource_runtime.mcp.instructions
     assert "search_result" in resource_runtime.mcp.instructions
 
-    inline_runtime = _runtime_for_specs(
-        specs, config=ToolPresentationConfig(large_result_mode="inline")
-    )
+    inline_runtime = _runtime_for_specs(specs, config=ToolPresentationConfig(large_result_mode="inline"))
     assert "ghidra://docs/tools" in inline_runtime.mcp.instructions
     assert "read_result" not in inline_runtime.mcp.instructions
 
@@ -274,9 +263,7 @@ def test_result_tools_registered_only_in_resource_mode():
     resource_names = {tool.name for tool in _run(_runtime_for_specs(specs).mcp.list_tools())}
     assert {"read_result", "search_result"} <= resource_names
 
-    inline_runtime = _runtime_for_specs(
-        specs, config=ToolPresentationConfig(large_result_mode="inline")
-    )
+    inline_runtime = _runtime_for_specs(specs, config=ToolPresentationConfig(large_result_mode="inline"))
     inline_names = {tool.name for tool in _run(inline_runtime.mcp.list_tools())}
     assert "read_result" not in inline_names
     assert "search_result" not in inline_names
@@ -288,11 +275,11 @@ def test_search_result_schema_publishes_pattern_length_limit():
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
     for tool_name in ("read_result", "search_result"):
-        result_id_schema = tools[tool_name].inputSchema["properties"]["result_id"]
+        result_id_schema = tools[tool_name].input_schema["properties"]["result_id"]
         assert result_id_schema["minLength"] == 16
         assert result_id_schema["maxLength"] == 16
         assert result_id_schema["pattern"] == "^[0-9a-f]{16}$"
-    properties = tools["search_result"].inputSchema["properties"]
+    properties = tools["search_result"].input_schema["properties"]
     assert properties["pattern"]["maxLength"] == 512
     assert properties["context_chars"]["minimum"] == 0
     assert properties["context_chars"]["maximum"] == 2000
@@ -357,14 +344,14 @@ def test_large_string_result_returns_preview_resource_link_and_readable_resource
     assert isinstance(result, CallToolResult)
     assert isinstance(result.content[0], TextContent)
     assert isinstance(result.content[1], ResourceLink)
-    meta = result.structuredContent
+    meta = result.structured_content
     assert meta["truncated"] is True
     assert meta["tool"] == "decompile_function"
     assert meta["target"] == "fw"
     assert meta["mime_type"] == "text/x-c"
     assert "preview" not in meta
     assert meta["resource_uri"].endswith(meta["result_id"])
-    assert result.content[1].mimeType == "text/x-c"
+    assert result.content[1].mime_type == "text/x-c"
 
     resource_contents = _run(runtime.mcp.read_resource(meta["resource_uri"]))
     full_text = resource_contents[0].content
@@ -407,12 +394,12 @@ def test_unicode_payload_round_trips_with_utf8_cache_accounting():
 
     assert isinstance(first, CallToolResult)
     assert isinstance(second, CallToolResult)
-    assert first.structuredContent["result_id"] == second.structuredContent["result_id"]
-    entry = store.get(first.structuredContent["result_id"])
+    assert first.structured_content["result_id"] == second.structured_content["result_id"]
+    entry = store.get(first.structured_content["result_id"])
     assert entry.text == payload
     assert entry.size_chars == len(payload)
     assert entry.size_bytes == len(payload.encode("utf-8"))
-    assert first.structuredContent["size_chars"] == len(payload)
+    assert first.structured_content["size_chars"] == len(payload)
 
 
 def test_large_list_result_is_stored_as_json_resource():
@@ -427,10 +414,10 @@ def test_large_list_result_is_stored_as_json_resource():
     result = runtime.tools["list_functions"](target="fw")
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["result_type"] == "list"
-    assert result.structuredContent["item_count"] == 50
-    assert result.structuredContent["mime_type"] == "application/json"
-    resource_contents = _run(runtime.mcp.read_resource(result.structuredContent["resource_uri"]))
+    assert result.structured_content["result_type"] == "list"
+    assert result.structured_content["item_count"] == 50
+    assert result.structured_content["mime_type"] == "application/json"
+    resource_contents = _run(runtime.mcp.read_resource(result.structured_content["resource_uri"]))
     assert resource_contents[0].mime_type == "application/json"
     payload = json.loads(resource_contents[0].content)
     assert payload[0]["name"] == "function_0"
@@ -445,13 +432,16 @@ def test_call_tool_end_to_end_preserves_resource_link():
     assert isinstance(result, CallToolResult)
     assert isinstance(result.content[0], TextContent)
     assert isinstance(result.content[1], ResourceLink)
-    assert result.structuredContent["truncated"] is True
+    assert result.structured_content["truncated"] is True
 
 
 def _call_result_tool(runtime, name, arguments):
     # read_result/search_result are registered with structured_output=False so
     # each response is delivered once, as JSON text; parse that single copy.
-    content = _run(runtime.mcp.call_tool(name, arguments))
+    result = _run(runtime.mcp.call_tool(name, arguments))
+    assert isinstance(result, CallToolResult)
+    assert result.is_error is False
+    content = result.content
     assert len(content) == 1
     return content, json.loads(content[0].text)
 
@@ -459,12 +449,10 @@ def _call_result_tool(runtime, name, arguments):
 def test_read_result_pages_through_stored_result():
     runtime = _compacted_decompile_runtime()
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
-    meta = compacted.structuredContent
+    meta = compacted.structured_content
     full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
 
-    content, first = _call_result_tool(
-        runtime, "read_result", {"result_id": meta["result_id"], "limit_chars": 10}
-    )
+    content, first = _call_result_tool(runtime, "read_result", {"result_id": meta["result_id"], "limit_chars": 10})
     assert first["chunk"] == full_text[:10]
     assert first["chunk_chars"] == 10
     assert first["total_chars"] == len(full_text)
@@ -492,7 +480,7 @@ def test_read_result_pages_through_stored_result():
 def test_read_result_clamps_limit_to_threshold():
     runtime = _compacted_decompile_runtime()
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
-    meta = compacted.structuredContent
+    meta = compacted.structured_content
 
     content, sliced = _call_result_tool(
         runtime,
@@ -511,7 +499,7 @@ def test_read_result_clamps_limit_to_threshold():
 def test_read_result_default_page_tracks_threshold():
     runtime = _compacted_decompile_runtime()  # threshold 40 -> default page 13
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
-    meta = compacted.structuredContent
+    meta = compacted.structured_content
     full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
 
     _, page = _call_result_tool(runtime, "read_result", {"result_id": meta["result_id"]})
@@ -548,7 +536,7 @@ def test_search_result_returns_matches_with_usable_offsets():
         ),
     )
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
-    meta = compacted.structuredContent
+    meta = compacted.structured_content
     full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
 
     content, found = _call_result_tool(
@@ -573,9 +561,10 @@ def test_search_result_returns_matches_with_usable_offsets():
     assert first["match_chars"] == len("return 0;")
     assert first["match_truncated"] is False
     assert "return 0;" in first["context"]
-    assert first["context"] == full_text[
-        first["context_offset_chars"] : first["context_offset_chars"] + len(first["context"])
-    ]
+    assert (
+        first["context"]
+        == full_text[first["context_offset_chars"] : first["context_offset_chars"] + len(first["context"])]
+    )
 
 
 def test_search_result_caps_snippets_at_response_budget():
@@ -586,7 +575,7 @@ def test_search_result_caps_snippets_at_response_budget():
         runtime,
         "search_result",
         {
-            "result_id": compacted.structuredContent["result_id"],
+            "result_id": compacted.structured_content["result_id"],
             "pattern": r"return 0;",
             "context_chars": 10,
             "max_matches": 20,
@@ -606,7 +595,7 @@ def test_search_result_count_only_with_zero_max_matches():
         runtime,
         "search_result",
         {
-            "result_id": compacted.structuredContent["result_id"],
+            "result_id": compacted.structured_content["result_id"],
             "pattern": r"return 0;",
             "max_matches": 0,
         },
@@ -644,7 +633,7 @@ def test_search_result_invalid_regex_is_error():
         _run(
             runtime.mcp.call_tool(
                 "search_result",
-                {"result_id": compacted.structuredContent["result_id"], "pattern": "("},
+                {"result_id": compacted.structured_content["result_id"], "pattern": "("},
             )
         )
 
@@ -681,7 +670,7 @@ def test_large_result_inline_mode_returns_original_payload():
 def test_error_call_tool_result_is_not_resourceized():
     store = ResultResourceStore(max_entries=4)
     error_result = CallToolResult(
-        isError=True,
+        is_error=True,
         content=[TextContent(type="text", text="x" * 100)],
     )
 
@@ -716,7 +705,7 @@ def test_large_successful_call_tool_result_is_resourceized():
 
     assert isinstance(result, CallToolResult)
     assert result is not call_result
-    meta = result.structuredContent
+    meta = result.structured_content
     assert meta["result_type"] == "call_tool_result_text"
     preview = result.content[0].text.split("----- preview -----\n", 1)[1]
     assert preview == full_text[: meta["preview_chars"]]
@@ -727,7 +716,7 @@ def test_call_tool_result_with_structured_content_is_fully_serialized():
     store = ResultResourceStore(max_entries=4)
     call_result = CallToolResult(
         content=[TextContent(type="text", text="x" * 3000)],
-        structuredContent={"answer": 42},
+        structured_content={"answer": 42},
     )
 
     result = maybe_compact_tool_result(
@@ -738,7 +727,7 @@ def test_call_tool_result_with_structured_content_is_fully_serialized():
         store=store,
     )
 
-    meta = result.structuredContent
+    meta = result.structured_content
     assert meta["result_type"] == "call_tool_result"
     stored = json.loads(store.read_text(meta["result_id"]))
     assert stored["structuredContent"] == {"answer": 42}
@@ -770,8 +759,8 @@ def test_call_tool_result_metadata_and_content_annotations_are_preserved():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["result_type"] == "call_tool_result"
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert result.structured_content["result_type"] == "call_tool_result"
+    stored = json.loads(store.read_text(result.structured_content["result_id"]))
     assert stored["_meta"] == {"result": "preserve"}
     assert stored["content"][0]["_meta"] == {"block": "preserve"}
     assert stored["content"][0]["annotations"] == {
@@ -796,8 +785,8 @@ def test_single_text_content_is_stored_as_fastmcp_visible_text():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["result_type"] == "text_content"
-    assert store.read_text(result.structuredContent["result_id"]) == content.text
+    assert result.structured_content["result_type"] == "text_content"
+    assert store.read_text(result.structured_content["result_id"]) == content.text
 
 
 def test_annotated_text_content_is_stored_structurally():
@@ -820,16 +809,20 @@ def test_annotated_text_content_is_stored_structurally():
         store=store,
     )
 
-    assert result.structuredContent["result_type"] == "text_content_block"
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert result.structured_content["result_type"] == "text_content_block"
+    stored = json.loads(store.read_text(result.structured_content["result_id"]))
     assert stored["text"] == content.text
     assert stored["annotations"]["audience"] == ["assistant"]
     assert stored["_meta"] == {"source": "analysis"}
 
 
-def test_forward_compatible_text_content_fields_are_preserved():
+def test_unknown_text_content_fields_are_dropped_by_the_sdk_before_compaction():
+    # mcp_types ignores unknown fields, so a block constructed with an extension
+    # field is a plain text block by the time compaction sees it and is stored
+    # as raw text rather than as a structural JSON dump.
     store = ResultResourceStore(max_entries=4)
     content = TextContent(type="text", text="x" * 4000, future_field="preserve")
+    assert not content.model_extra
 
     result = maybe_compact_tool_result(
         tool_name="custom_tool",
@@ -842,63 +835,7 @@ def test_forward_compatible_text_content_fields_are_preserved():
         store=store,
     )
 
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
-    assert stored["text"] == content.text
-    assert stored["future_field"] == "preserve"
-
-
-def test_forward_compatible_call_result_fields_are_preserved():
-    store = ResultResourceStore(max_entries=4)
-    original = CallToolResult(
-        content=[TextContent(type="text", text="x" * 4000)],
-        future_outer="preserve",
-    )
-
-    result = maybe_compact_tool_result(
-        tool_name="custom_tool",
-        target="fw",
-        result=original,
-        config=ToolPresentationConfig(
-            large_result_threshold_chars=20,
-            large_result_preview_chars=12,
-        ),
-        store=store,
-    )
-
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
-    assert stored["future_outer"] == "preserve"
-    assert stored["content"][0]["text"] == "x" * 4000
-
-
-@pytest.mark.parametrize(
-    ("helper", "block_type", "mime_type"),
-    [
-        (Image(data=b"i" * 4096, format="png"), "image", "image/png"),
-        (Audio(data=b"a" * 4096, format="wav"), "audio", "audio/wav"),
-    ],
-)
-def test_fastmcp_binary_helpers_are_compacted_as_content_blocks(
-    helper, block_type, mime_type
-):
-    store = ResultResourceStore(max_entries=4)
-
-    result = maybe_compact_tool_result(
-        tool_name="custom_tool",
-        target="fw",
-        result=helper,
-        config=ToolPresentationConfig(
-            large_result_threshold_chars=100,
-            large_result_preview_chars=20,
-        ),
-        store=store,
-    )
-
-    assert isinstance(result, CallToolResult)
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
-    assert stored["type"] == block_type
-    assert stored["mimeType"] == mime_type
-    expected_byte = b"i" if block_type == "image" else b"a"
-    assert base64.b64decode(stored["data"]) == expected_byte * 4096
+    assert store.read_text(result.structured_content["result_id"]) == content.text
 
 
 def test_fastmcp_binary_helper_is_converted_exactly_once():
@@ -929,7 +866,7 @@ def test_fastmcp_binary_helper_is_converted_exactly_once():
 
 
 def test_compaction_fault_after_binary_conversion_returns_prepared_block(monkeypatch):
-    from ghidra_mcp.presentation import result_resources
+    from ghidra_mcp.presentation import result_compaction
 
     class OneShotImage(Image):
         calls = 0
@@ -945,7 +882,7 @@ def test_compaction_fault_after_binary_conversion_returns_prepared_block(monkeyp
     def fail_after_preparation(*_args, **_kwargs):
         raise RuntimeError("presentation fault")
 
-    monkeypatch.setattr(result_resources, "_serialize_result", fail_after_preparation)
+    monkeypatch.setattr(result_compaction, "_serialize_result", fail_after_preparation)
 
     result = maybe_compact_tool_result(
         tool_name="custom_tool",
@@ -997,10 +934,10 @@ def test_partial_binary_preparation_failure_returns_safe_completed_notice():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
-    assert result.structuredContent["operation_succeeded"] is True
-    assert result.structuredContent["result_unavailable"] is True
-    assert result.structuredContent["presentation_failed"] is True
+    assert result.is_error is False
+    assert result.structured_content["operation_succeeded"] is True
+    assert result.structured_content["result_unavailable"] is True
+    assert result.structured_content["presentation_failed"] is True
     assert prepared.calls == 1
     assert broken.calls == 1
 
@@ -1020,7 +957,7 @@ def test_compaction_normalizes_unpaired_unicode_surrogates():
 
     assert isinstance(result, CallToolResult)
     result.model_dump_json(by_alias=True, exclude_none=True)
-    stored = store.read_text(result.structuredContent["result_id"])
+    stored = store.read_text(result.structured_content["result_id"])
     assert "\ud800" not in stored
     assert "\ufffd" in stored
 
@@ -1028,7 +965,7 @@ def test_compaction_normalizes_unpaired_unicode_surrogates():
 def test_compaction_normalizes_surrogates_inside_call_tool_result():
     raw = CallToolResult(
         content=[TextContent(type="text", text="bad:\ud800 pair:\ud83d\ude00")],
-        structuredContent={"nested": ["\udfff"]},
+        structured_content={"nested": ["\udfff"]},
     )
 
     result = maybe_compact_tool_result(
@@ -1042,7 +979,7 @@ def test_compaction_normalizes_surrogates_inside_call_tool_result():
     assert isinstance(result, CallToolResult)
     assert result is not raw
     assert result.content[0].text == "bad:\ufffd pair:\U0001f600"
-    assert result.structuredContent == {"nested": ["\ufffd"]}
+    assert result.structured_content == {"nested": ["\ufffd"]}
     result.model_dump_json(by_alias=True, exclude_none=True)
 
 
@@ -1061,8 +998,8 @@ def test_mixed_content_list_is_stored_as_fastmcp_wire_blocks():
         store=store,
     )
 
-    assert result.structuredContent["result_type"] == "content_blocks"
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    assert result.structured_content["result_type"] == "content_blocks"
+    stored = json.loads(store.read_text(result.structured_content["result_id"]))
     assert [block["type"] for block in stored] == ["text", "image"]
     assert json.loads(stored[0]["text"]) == {"status": "ok"}
     assert base64.b64decode(stored[1]["data"]) == b"x" * 4096
@@ -1088,8 +1025,8 @@ def test_pydantic_model_is_stored_as_structural_json_not_repr():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["result_type"] == "pydantic_model"
-    assert json.loads(store.read_text(result.structuredContent["result_id"])) == {
+    assert result.structured_content["result_type"] == "pydantic_model"
+    assert json.loads(store.read_text(result.structured_content["result_id"])) == {
         "status": "ok",
         "payload": "x" * 4000,
     }
@@ -1116,15 +1053,15 @@ def test_dataclass_is_stored_as_structural_json_not_repr():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["result_type"] == "ResultRecord"
-    assert json.loads(store.read_text(result.structuredContent["result_id"])) == {
+    assert result.structured_content["result_type"] == "ResultRecord"
+    assert json.loads(store.read_text(result.structured_content["result_id"])) == {
         "status": "ok",
         "payload": "x" * 4000,
     }
 
 
 def test_preview_budget_scales_by_result_type():
-    from ghidra_mcp.presentation.result_resources import _preview_budget
+    from ghidra_mcp.presentation.result_compaction import _preview_budget
 
     # Text payloads front-load meaning and keep the full configured budget;
     # JSON containers only need a few example items/entries; full
@@ -1158,7 +1095,7 @@ def test_list_preview_shows_complete_items_as_valid_json():
 
     # The advertised continuation offset resumes exactly after the previewed
     # items in the stored compact JSON.
-    stored = store.read_text(result.structuredContent["result_id"])
+    stored = store.read_text(result.structured_content["result_id"])
     offset = int(notice.split("offset_chars=", 1)[1].split(")", 1)[0])
     assert stored[:offset] + "]" == preview
 
@@ -1182,9 +1119,9 @@ def test_dict_preview_shows_complete_entries_as_valid_json():
     assert all(data[key] == value for key, value in entries.items())
     assert len(preview) <= 1000
     assert f"showing the first {len(entries)} of 400 entries" in notice
-    assert result.structuredContent["item_count"] == 400
+    assert result.structured_content["item_count"] == 400
 
-    stored = store.read_text(result.structuredContent["result_id"])
+    stored = store.read_text(result.structured_content["result_id"])
     offset = int(notice.split("offset_chars=", 1)[1].split(")", 1)[0])
     assert stored[:offset] + "}" == preview
 
@@ -1194,9 +1131,7 @@ def test_dict_subclass_preview_uses_the_same_order_as_stored_payload():
         def items(self):
             return reversed(tuple(super().items()))
 
-    data = ReverseItemsDict(
-        (f"k{index:03d}", "value") for index in range(200)
-    )
+    data = ReverseItemsDict((f"k{index:03d}", "value") for index in range(200))
     store = ResultResourceStore(max_entries=4)
 
     result = maybe_compact_tool_result(
@@ -1212,7 +1147,7 @@ def test_dict_subclass_preview_uses_the_same_order_as_stored_payload():
 
     notice = result.content[0].text
     preview = notice.split("----- preview -----\n", 1)[1]
-    stored = store.read_text(result.structuredContent["result_id"])
+    stored = store.read_text(result.structured_content["result_id"])
     offset = int(notice.split("offset_chars=", 1)[1].split(")", 1)[0])
     assert list(json.loads(preview)) == ["k000"]
     assert stored[:offset] + "}" == preview
@@ -1237,7 +1172,7 @@ def test_list_subclass_is_materialized_once_for_storage_and_preview():
         store=store,
     )
 
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    stored = json.loads(store.read_text(result.structured_content["result_id"]))
     notice = result.content[0].text
     preview = json.loads(notice.split("----- preview -----\n", 1)[1])
     assert stored[0] == {"name": "item_199"}
@@ -1252,15 +1187,13 @@ def test_list_preview_falls_back_to_prefix_when_one_item_exceeds_budget():
         tool_name="list_functions",
         target="fw",
         result=data,
-        config=ToolPresentationConfig(
-            large_result_threshold_chars=1000, large_result_preview_chars=100
-        ),
+        config=ToolPresentationConfig(large_result_threshold_chars=1000, large_result_preview_chars=100),
         store=store,
     )
 
     notice = result.content[0].text
     preview = notice.split("----- preview -----\n", 1)[1]
-    stored = store.read_text(result.structuredContent["result_id"])
+    stored = store.read_text(result.structured_content["result_id"])
     assert len(preview) <= 25  # list budget: a quarter of 100
     assert preview == stored[: len(preview)]
 
@@ -1289,9 +1222,7 @@ def test_store_identity_includes_result_metadata():
     common = _store_entry_kwargs('[{"name":"main"}]')
 
     as_list = store.add(**{**common, "result_type": "list", "item_count": 1})
-    as_call_result = store.add(
-        **{**common, "result_type": "call_tool_result", "item_count": 2}
-    )
+    as_call_result = store.add(**{**common, "result_type": "call_tool_result", "item_count": 2})
 
     assert as_list.result_id != as_call_result.result_id
     assert store.get(as_list.result_id).result_type == "list"
@@ -1341,9 +1272,7 @@ def test_store_concurrent_add_and_get_keeps_lru_accounting_consistent():
 
     assert len(results) == 200
     assert len(store._entries) == 200
-    assert store._total_bytes == sum(
-        entry.cache_size_bytes for entry in store._entries.values()
-    )
+    assert store._total_bytes == sum(entry.cache_size_bytes for entry in store._entries.values())
 
 
 def test_payload_over_cache_budget_returns_successful_unavailable_result():
@@ -1359,10 +1288,10 @@ def test_payload_over_cache_budget_returns_successful_unavailable_result():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
-    assert result.structuredContent["result_unavailable"] is True
-    assert result.structuredContent["operation_succeeded"] is True
-    assert result.structuredContent["size_chars"] == len(payload)
+    assert result.is_error is False
+    assert result.structured_content["result_unavailable"] is True
+    assert result.structured_content["operation_succeeded"] is True
+    assert result.structured_content["size_chars"] == len(payload)
     assert payload not in result.content[0].text
     assert "RESULT_TOO_LARGE" in result.content[0].text
     assert "Do not re-run a non-idempotent tool" in result.content[0].text
@@ -1395,8 +1324,8 @@ def test_uncacheable_output_does_not_report_a_completed_mutation_as_failed():
 
     assert calls == 1
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
-    assert result.structuredContent["operation_succeeded"] is True
+    assert result.is_error is False
+    assert result.structured_content["operation_succeeded"] is True
     assert "Do not re-run a non-idempotent tool" in result.content[0].text
 
 
@@ -1404,7 +1333,7 @@ def test_compaction_exception_returns_completed_result_without_logging_payload(
     monkeypatch,
     caplog,
 ):
-    from ghidra_mcp.presentation import result_resources
+    from ghidra_mcp.presentation import result_compaction
 
     calls = 0
     original = "mutation completed\n" + ("x" * 5_000)
@@ -1418,7 +1347,7 @@ def test_compaction_exception_returns_completed_result_without_logging_payload(
     def fail_serialization(*_args, **_kwargs):
         raise RuntimeError(secret_in_exception)
 
-    monkeypatch.setattr(result_resources, "_serialize_result", fail_serialization)
+    monkeypatch.setattr(result_compaction, "_serialize_result", fail_serialization)
     runtime = create_mcp_server(
         specs={"set_bytes": get_tool_spec("set_bytes")},
         registry_provider=lambda: object(),
@@ -1488,9 +1417,9 @@ def test_initial_compaction_caps_the_complete_escape_heavy_response():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
+    assert result.is_error is False
     assert _call_tool_result_wire_chars(result) <= 12_000
-    assert result.structuredContent["preview_chars"] < 4_000
+    assert result.structured_content["preview_chars"] < 4_000
 
 
 def test_compaction_compares_inline_and_compact_results_in_wire_units():
@@ -1508,7 +1437,7 @@ def test_compaction_compares_inline_and_compact_results_in_wire_units():
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["truncated"] is True
+    assert result.structured_content["truncated"] is True
     assert _call_tool_result_wire_chars(result) < _call_tool_result_wire_chars(
         CallToolResult(content=[TextContent(type="text", text=payload)])
     )
@@ -1547,7 +1476,7 @@ def test_large_string_uses_wire_lower_bound_and_encodes_payload_once(monkeypatch
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["truncated"] is True
+    assert result.structured_content["truncated"] is True
     assert payload.encode_calls == 1
 
 
@@ -1575,7 +1504,7 @@ def test_delivered_inline_size_stops_after_threshold():
 def test_call_tool_result_wire_size_matches_mcp_transport_serialization():
     result = CallToolResult(
         content=[TextContent(type="text", text="payload")],
-        structuredContent={"answer": 42},
+        structured_content={"answer": 42},
     )
 
     expected = len(result.model_dump_json(by_alias=True, exclude_none=True))
@@ -1648,11 +1577,11 @@ def test_initial_large_result_response_bounds_escape_heavy_target_metadata(
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is False
-    assert result.structuredContent.get("result_unavailable", False) is result_unavailable
+    assert result.is_error is False
+    assert result.structured_content.get("result_unavailable", False) is result_unavailable
     assert _call_tool_result_wire_chars(result) <= 12_000
-    assert result.structuredContent["metadata_truncated"] is True
-    assert len(result.structuredContent["target"]) < 20_000
+    assert result.structured_content["metadata_truncated"] is True
+    assert len(result.structured_content["target"]) < 20_000
 
 
 def test_read_result_fits_escape_heavy_text_without_collapsing_to_one_char():
@@ -1826,11 +1755,11 @@ def test_result_resource_template_does_not_advertise_the_wrong_mime_type():
     runtime = _runtime_for_specs({"list_targets": get_tool_spec("list_targets")})
     templates = _run(runtime.mcp.list_resource_templates())
     result_template = next(
-        template
-        for template in templates
-        if str(template.uriTemplate) == "ghidra://results/{result_id}"
+        template for template in templates if str(template.uri_template) == "ghidra://results/{result_id}"
     )
-    assert result_template.mimeType is None
+    # mcp 2.x templates carry one static MIME type; the server override below
+    # still serves every stored entry with its own MIME type.
+    assert result_template.mime_type == "text/plain"
 
     entry = runtime.result_store.add(
         tool="list_functions",
@@ -1855,7 +1784,7 @@ def test_empty_list_normalization_is_not_resourceized():
 
     assert isinstance(result, CallToolResult)
     assert result.content[0].text == "[]"
-    assert result.structuredContent is None
+    assert result.structured_content is None
 
 
 def test_empty_list_text_with_result_metadata_is_not_treated_as_plain_sentinel():
@@ -1878,19 +1807,22 @@ def test_empty_list_text_with_result_metadata_is_not_treated_as_plain_sentinel()
 
     assert isinstance(result, CallToolResult)
     assert result is not original
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
+    stored = json.loads(store.read_text(result.structured_content["result_id"]))
     assert stored["content"][0]["text"] == "[]"
     assert stored["_meta"] == {"blob": "x" * 5000}
 
 
-def test_empty_list_text_with_extension_field_is_not_treated_as_plain_sentinel():
+def test_empty_list_text_with_extension_field_is_treated_as_plain_sentinel():
+    # mcp_types drops unknown fields at construction, so nothing distinguishes
+    # this result from the normalized "[]" sentinel and it stays inline.
+    store = ResultResourceStore(max_entries=4)
     original = CallToolResult(
         content=[TextContent(type="text", text="[]", future_field="x" * 5000)],
     )
-    store = ResultResourceStore(max_entries=4)
+    assert not original.content[0].model_extra
 
     result = maybe_compact_tool_result(
-        tool_name="custom_tool",
+        tool_name="list_functions",
         target="fw",
         result=original,
         config=ToolPresentationConfig(
@@ -1900,10 +1832,7 @@ def test_empty_list_text_with_extension_field_is_not_treated_as_plain_sentinel()
         store=store,
     )
 
-    assert isinstance(result, CallToolResult)
-    assert result is not original
-    stored = json.loads(store.read_text(result.structuredContent["result_id"]))
-    assert stored["content"][0]["future_field"] == "x" * 5000
+    assert result is original
 
 
 def test_cli_parses_presentation_config_options():
@@ -1971,19 +1900,14 @@ def test_docs_resource_respects_profile_filtering():
 
 
 def test_tool_docs_publish_public_param_names_matching_registered_tools():
-    specs = {
-        name: get_tool_spec(name)
-        for name in ("rename_function", "search_bytes", "list_functions", "set_bytes")
-    }
+    specs = {name: get_tool_spec(name) for name in ("rename_function", "search_bytes", "list_functions", "set_bytes")}
     runtime = _runtime_for_specs(specs)
     registered = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
     for name in specs:
-        detail = json.loads(
-            _run(runtime.mcp.read_resource(f"ghidra://docs/tools/{name}"))[0].content
-        )
+        detail = json.loads(_run(runtime.mcp.read_resource(f"ghidra://docs/tools/{name}"))[0].content)
         doc_props = set(detail["input_schema"]["properties"])
-        real_props = set(registered[name].inputSchema["properties"])
+        real_props = set(registered[name].input_schema["properties"])
         # The documented schema and signature must match what the tool accepts.
         assert doc_props == real_props, name
         assert set(detail["public_signature"]) == real_props, name
@@ -2029,9 +1953,7 @@ def test_tool_docs_output_schema_matches_client_visible_shape():
     assert "status" in typed_schema["properties"]
 
     runtime = _runtime_for_specs({"list_functions": get_tool_spec("list_functions")})
-    detail = json.loads(
-        _run(runtime.mcp.read_resource("ghidra://docs/tools/list_functions"))[0].content
-    )
+    detail = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/list_functions"))[0].content)
     assert detail["output_schema"] == list_schema
 
 
@@ -2053,9 +1975,7 @@ def test_public_input_schema_target_semantics_match_signature():
 
 def test_preview_larger_than_threshold_is_rejected():
     with pytest.raises(ValueError, match="large_result_preview_chars must be <="):
-        ToolPresentationConfig(
-            large_result_threshold_chars=12000, large_result_preview_chars=20000
-        )
+        ToolPresentationConfig(large_result_threshold_chars=12000, large_result_preview_chars=20000)
     # Equal is allowed; the shipped defaults are internally consistent.
     ToolPresentationConfig(large_result_threshold_chars=100, large_result_preview_chars=100)
     defaults = ToolPresentationConfig()
@@ -2065,9 +1985,7 @@ def test_preview_larger_than_threshold_is_rejected():
 def test_cli_exits_on_preview_larger_than_threshold(capsys):
     # #7: config errors surface as an argparse usage error (exit 2), not a traceback.
     with pytest.raises(SystemExit) as excinfo:
-        cli.parse_args(
-            ["--large-result-threshold-chars", "100", "--large-result-preview-chars", "200"]
-        )
+        cli.parse_args(["--large-result-threshold-chars", "100", "--large-result-preview-chars", "200"])
     assert excinfo.value.code == 2
     assert "large_result_preview_chars must be <=" in capsys.readouterr().err
 
@@ -2112,7 +2030,7 @@ def test_compaction_decision_uses_delivered_indent2_size():
         store=store,
     )
     assert isinstance(result, CallToolResult)
-    assert result.structuredContent["truncated"] is True
+    assert result.structured_content["truncated"] is True
 
     # Above the delivered size: returned inline, untouched.
     inline = maybe_compact_tool_result(
@@ -2176,7 +2094,7 @@ def test_nested_call_tool_results_use_fastmcp_list_conversion_size():
 
     assert isinstance(result, CallToolResult)
     assert result is not data
-    assert result.structuredContent["result_type"] == "list"
+    assert result.structured_content["result_type"] == "list"
 
 
 def test_tuple_result_is_stored_as_json_like_a_list():
@@ -2191,7 +2109,7 @@ def test_tuple_result_is_stored_as_json_like_a_list():
         store=store,
     )
 
-    meta = result.structuredContent
+    meta = result.structured_content
     assert meta["result_type"] == "list"
     assert meta["mime_type"] == "application/json"
     assert meta["item_count"] == 50
@@ -2227,7 +2145,7 @@ def test_non_string_dict_keys_do_not_fail_the_tool_call():
         config=ToolPresentationConfig(large_result_threshold_chars=50, large_result_preview_chars=25),
         store=store,
     )
-    stored = json.loads(store.read_text(compacted.structuredContent["result_id"]))
+    stored = json.loads(store.read_text(compacted.structured_content["result_id"]))
     assert set(stored) == {"red"}
 
 
@@ -2235,13 +2153,13 @@ def test_non_string_dict_keys_do_not_fail_the_tool_call():
 
 
 def _decompile_result_id(runtime):
-    return runtime.tools["decompile_function"](name="main", target="fw").structuredContent["result_id"]
+    return runtime.tools["decompile_function"](name="main", target="fw").structured_content["result_id"]
 
 
 def test_search_result_times_out_on_catastrophic_pattern(monkeypatch):
-    from ghidra_mcp.presentation import result_resources
+    from ghidra_mcp.presentation import result_tools
 
-    monkeypatch.setattr(result_resources, "_SEARCH_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(result_tools, "_SEARCH_TIMEOUT_SECONDS", 0.05)
 
     class LongRunRegistry:
         def call(self, command, params, target):  # noqa: ARG002
@@ -2251,9 +2169,7 @@ def test_search_result_times_out_on_catastrophic_pattern(monkeypatch):
 
     runtime = _runtime_for_specs(
         {"decompile_function": get_tool_spec("decompile_function")},
-        config=ToolPresentationConfig(
-            large_result_threshold_chars=40, large_result_preview_chars=25
-        ),
+        config=ToolPresentationConfig(large_result_threshold_chars=40, large_result_preview_chars=25),
         registry=LongRunRegistry(),
     )
     rid = _decompile_result_id(runtime)
@@ -2276,9 +2192,7 @@ def test_search_result_allows_normal_patterns_after_hardening():
     runtime = _compacted_decompile_runtime()
     rid = _decompile_result_id(runtime)
     for good in [r"return 0;", r"return \d+;", r"int \w+\(", r"\bvoid\b"]:
-        _, found = _call_result_tool(
-            runtime, "search_result", {"result_id": rid, "pattern": good}
-        )
+        _, found = _call_result_tool(runtime, "search_result", {"result_id": rid, "pattern": good})
         assert found["match_count"] >= 1, good
 
 
@@ -2289,7 +2203,5 @@ def test_search_result_allows_quantifier_patterns_on_benign_text():
     runtime = _compacted_decompile_runtime()
     rid = _decompile_result_id(runtime)
     for pattern in [r"(0x[0-9a-f]+) *=", r"(\w+) +\+=", r"(\w+\s*)+", r"(a+)+"]:
-        _, found = _call_result_tool(
-            runtime, "search_result", {"result_id": rid, "pattern": pattern}
-        )
+        _, found = _call_result_tool(runtime, "search_result", {"result_id": rid, "pattern": pattern})
         assert found["match_count"] >= 0, pattern

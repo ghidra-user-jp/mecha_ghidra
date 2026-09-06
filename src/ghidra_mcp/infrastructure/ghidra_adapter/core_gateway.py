@@ -1,21 +1,24 @@
-"""Gateway for core command execution."""
+"""Gateway that exposes the runtime backend's core-command entry point as a port."""
 
 from __future__ import annotations
 
 from typing import Any, Protocol
 
 
-class CoreExecutor(Protocol):
-    def execute(self, command: str, params: dict[str, Any], key: str) -> Any:
-        ...
+class CoreCommandBackend(Protocol):
+    def execute_core_command(
+        self, command: str, params: dict[str, Any] | None = None, *, target: str = "default"
+    ) -> Any: ...
 
 
 class CoreGateway:
-    def __init__(self, executor: CoreExecutor) -> None:
-        self._executor = executor
+    """Adapt ``RuntimeBackend.execute_core_command`` to ``CoreGatewayPort.execute``."""
+
+    def __init__(self, backend: CoreCommandBackend) -> None:
+        self._backend = backend
 
     def execute(self, command: str, params: dict[str, Any], *, target: str) -> Any:
-        return self._executor.execute(command, params, key=target)
+        return self._backend.execute_core_command(command, params, target=target)
 
 
-__all__ = ["CoreGateway", "CoreExecutor"]
+__all__ = ["CoreCommandBackend", "CoreGateway"]

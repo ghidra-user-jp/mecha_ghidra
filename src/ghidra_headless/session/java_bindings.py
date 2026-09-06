@@ -9,6 +9,7 @@ _CONSOLE_MONITOR_CLASS = None
 _DEFAULT_CHECKIN_HANDLER_CLASS = None
 _PROGRAM_DIFF_CLASS = None
 _PROGRAM_DIFF_FILTER_CLASS = None
+_PROGRAM_DIFF_DETAILS_CLASS = None
 _JAVA_OBJECT_CLASS = None
 _GHIDRA_PROGRAM_UTILITIES_CLASS = None
 _GHIDRA_SCRIPT_UTIL_CLASS = None
@@ -24,10 +25,16 @@ def _flat_program_api_class():
 
 
 def _console_monitor():
+    """Return a silent task monitor.
+
+    The name is historical: the previous ``ConsoleTaskMonitor`` printed progress
+    to Java's ``System.out``, which is the same descriptor the MCP stdio
+    transport uses for JSON-RPC framing.
+    """
     global _CONSOLE_MONITOR_CLASS
     if _CONSOLE_MONITOR_CLASS is None:
-        _CONSOLE_MONITOR_CLASS = pycore.JClass("ghidra.util.task.ConsoleTaskMonitor")
-    return _CONSOLE_MONITOR_CLASS()
+        _CONSOLE_MONITOR_CLASS = pycore.JClass("ghidra.util.task.TaskMonitor")
+    return _CONSOLE_MONITOR_CLASS.DUMMY
 
 
 def _timeout_task_monitor(*, timeout_seconds: int = 60):
@@ -59,6 +66,13 @@ def _program_diff_class():
     if _PROGRAM_DIFF_CLASS is None:
         _PROGRAM_DIFF_CLASS = pycore.JClass("ghidra.program.util.ProgramDiff")
     return _PROGRAM_DIFF_CLASS
+
+
+def _program_diff_details_class():
+    global _PROGRAM_DIFF_DETAILS_CLASS
+    if _PROGRAM_DIFF_DETAILS_CLASS is None:
+        _PROGRAM_DIFF_DETAILS_CLASS = pycore.JClass("ghidra.program.util.ProgramDiffDetails")
+    return _PROGRAM_DIFF_DETAILS_CLASS
 
 
 def _program_diff_filter_class():

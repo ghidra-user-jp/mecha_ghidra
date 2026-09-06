@@ -10,8 +10,8 @@ import pyghidra.core as pycore
 import pytest
 from mcp.types import CallToolResult
 
+from ghidra_headless.launcher import start_headless_jvm
 from ghidra_mcp import cli
-
 
 RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
@@ -42,7 +42,7 @@ def _start_pyghidra() -> None:
         if shutil.which("java") is None:
             pytest.fail("java command not found (required for runtime registry/shared-sync validation)")
         install_dir = _require_existing_path(_require_env("GHIDRA_INSTALL_DIR"), "GHIDRA_INSTALL_DIR")
-        pyghidra.start(install_dir=str(install_dir))
+        start_headless_jvm(str(install_dir))
     _configure_ghidra_server_auth_from_env()
 
 
@@ -52,9 +52,7 @@ def _configure_ghidra_server_auth_from_env() -> None:
         return
 
     username = (
-        os.environ.get("GHIDRA_RUNTIME_SHARED_SERVER_USER")
-        or os.environ.get("GHIDRA_SERVER_USER")
-        or ""
+        os.environ.get("GHIDRA_RUNTIME_SHARED_SERVER_USER") or os.environ.get("GHIDRA_SERVER_USER") or ""
     ).strip()
     password = os.environ.get("GHIDRA_SERVER_PASSWORD")
     if not username and password is None:
@@ -105,10 +103,7 @@ def _count_of(value):
 
 
 def _log_runtime_result(name: str, value) -> None:
-    print(
-        f"[runtime] {name}: type={type(value).__name__} "
-        f"count={_count_of(value)} sample={_sample_of(value)!r}"
-    )
+    print(f"[runtime] {name}: type={type(value).__name__} count={_count_of(value)} sample={_sample_of(value)!r}")
 
 
 def _copy_runtime_binary(tmp_path: Path, source_binary: Path) -> Path:
@@ -148,14 +143,10 @@ def _local_checkout_id(status: dict) -> int:
     assert checkout_status.get("checkout_time_iso")
     checkout_id = int(checkout_id)
     listed_ids = {
-        int(item["checkout_id"])
-        for item in status.get("checkouts", [])
-        if item.get("checkout_id") is not None
+        int(item["checkout_id"]) for item in status.get("checkouts", []) if item.get("checkout_id") is not None
     }
     if checkout_id not in listed_ids:
-        pytest.fail(
-            f"The local checkout_id {checkout_id} is absent from remote checkouts {listed_ids}"
-        )
+        pytest.fail(f"The local checkout_id {checkout_id} is absent from remote checkouts {listed_ids}")
     return checkout_id
 
 
@@ -235,9 +226,7 @@ def _cleanup_runtime_domain_path(
                 domain_path=domain_path,
                 confirm=domain_path,
                 expected_latest_version=(
-                    int(latest_version)
-                    if status.get("is_versioned") and latest_version is not None
-                    else None
+                    int(latest_version) if status.get("is_versioned") and latest_version is not None else None
                 ),
                 allow_private=not bool(status.get("is_versioned")),
                 allow_non_atomic_versioned_delete=bool(status.get("is_versioned")),
@@ -254,9 +243,7 @@ def test_runtime_create_project_success(tmp_path):
     _start_pyghidra()
 
     project_file = tmp_path / "created_by_tool.gpr"
-    result = _unwrap_runtime_result(
-        cli.create_project(project_location=str(project_file), project_name=None)
-    )
+    result = _unwrap_runtime_result(cli.create_project(project_location=str(project_file), project_name=None))
 
     _log_runtime_result("create_project", result)
     assert result["status"] == "ok"
@@ -380,14 +367,13 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         runtime_results["load_project_program"] = _unwrap_runtime_result(
             cli.load_project_program(target=target, domain_path=generated_domain_path)
         )
-        functions = _unwrap_runtime_result(
-            cli.list_functions(offset=0, limit=1, target=target)
-        )
+        functions = _unwrap_runtime_result(cli.list_functions(offset=0, limit=1, target=target))
         assert functions, "Imported runtime binary has no function to modify"
         function_address = functions[0]["entry"]
         first_comment = f"runtime sync commit {uuid.uuid4().hex}"
         runtime_results["set_disassembly_comment_for_commit"] = _unwrap_runtime_result(
-            cli.set_disassembly_comment(
+            cli.set_comment(
+                kind="eol",
                 address=function_address,
                 comment=first_comment,
                 target=target,
@@ -439,7 +425,8 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         second_comment = f"runtime sync pull discard {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_disassembly_comment(
+            cli.set_comment(
+                kind="eol",
                 address=function_address,
                 comment=second_comment,
                 target=target,
@@ -469,7 +456,8 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
             )
         )
         _unwrap_runtime_result(
-            cli.set_disassembly_comment(
+            cli.set_comment(
+                kind="eol",
                 address=function_address,
                 comment=f"runtime sync undo {uuid.uuid4().hex}",
                 target=target,
@@ -485,8 +473,9 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["undo_checkout_project_program"]["checked_out"] is False
 
         runtime_results["reload_project_program"] = _unwrap_runtime_result(
-            cli.reload_project_program(target=target, domain_path=generated_domain_path)
+            cli.load_project_program(target=target, domain_path=generated_domain_path)
         )
+        assert runtime_results["reload_project_program"]["reloaded"] is True
 
         runtime_results["commit_project_program_clean"] = _unwrap_runtime_result(
             cli.commit_project_program(
@@ -521,7 +510,8 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
 
         kept_comment = f"runtime sync undo keep {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_disassembly_comment(
+            cli.set_comment(
+                kind="eol",
                 address=function_address,
                 comment=kept_comment,
                 target=target,
@@ -534,17 +524,11 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
                 domain_path=generated_domain_path,
             )
         )
-        kept_domain_path = runtime_results["undo_checkout_project_program_keep"].get(
-            "kept_program"
-        )
+        kept_domain_path = runtime_results["undo_checkout_project_program_keep"].get("kept_program")
         assert kept_domain_path
         assert kept_domain_path != generated_domain_path
-        kept_disassembly = _unwrap_runtime_result(
-            cli.disassemble_function(address=function_address, target=target)
-        )
-        kept_instruction = next(
-            item for item in kept_disassembly if item["address"] == function_address
-        )
+        kept_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        kept_instruction = next(item for item in kept_disassembly if item["address"] == function_address)
         assert kept_instruction["comment"] == kept_comment
 
         _unwrap_runtime_result(cli.close_session(target))
@@ -561,15 +545,9 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
                 project_name=project_name,
             )
         )
-        _unwrap_runtime_result(
-            cli.load_project_program(target=target, domain_path=generated_domain_path)
-        )
-        original_disassembly = _unwrap_runtime_result(
-            cli.disassemble_function(address=function_address, target=target)
-        )
-        original_instruction = next(
-            item for item in original_disassembly if item["address"] == function_address
-        )
+        _unwrap_runtime_result(cli.load_project_program(target=target, domain_path=generated_domain_path))
+        original_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        original_instruction = next(item for item in original_disassembly if item["address"] == function_address)
         assert original_instruction["comment"] != kept_comment
 
         _unwrap_runtime_result(
@@ -579,9 +557,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
                 project_name=project_name,
             )
         )
-        _unwrap_runtime_result(
-            cli.load_project_program(target=stale_target, domain_path=generated_domain_path)
-        )
+        _unwrap_runtime_result(cli.load_project_program(target=stale_target, domain_path=generated_domain_path))
         _unwrap_runtime_result(
             cli.checkout_project_program(
                 target=stale_target,
@@ -591,7 +567,8 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         remote_comment = f"runtime remote advance {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_disassembly_comment(
+            cli.set_comment(
+                kind="eol",
                 address=function_address,
                 comment=remote_comment,
                 target=stale_target,
@@ -620,12 +597,8 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["pull_project_program_remote_advance"]["followed_latest"] is True
         assert runtime_results["pull_project_program_remote_advance"]["reloaded"] is True
         assert int(runtime_results["pull_project_program_remote_advance"]["version"]) == remote_version
-        primary_disassembly = _unwrap_runtime_result(
-            cli.disassemble_function(address=function_address, target=target)
-        )
-        primary_instruction = next(
-            item for item in primary_disassembly if item["address"] == function_address
-        )
+        primary_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        primary_instruction = next(item for item in primary_disassembly if item["address"] == function_address)
         assert primary_instruction["comment"] == remote_comment
 
         _unwrap_runtime_result(cli.close_session(target))
@@ -684,11 +657,10 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         assert hijacked_status["is_versioned"] is False
         assert hijacked_status["is_hijacked"] is True
-        _unwrap_runtime_result(
-            cli.load_project_program(target=stale_target, domain_path=generated_domain_path)
-        )
+        _unwrap_runtime_result(cli.load_project_program(target=stale_target, domain_path=generated_domain_path))
         with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
-            cli.set_disassembly_comment(
+            cli.set_comment(
+                kind="eol",
                 address=function_address,
                 comment=f"must be rejected {uuid.uuid4().hex}",
                 target=stale_target,
@@ -710,9 +682,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         recovered_disassembly = _unwrap_runtime_result(
             cli.disassemble_function(address=function_address, target=stale_target)
         )
-        recovered_instruction = next(
-            item for item in recovered_disassembly if item["address"] == function_address
-        )
+        recovered_instruction = next(item for item in recovered_disassembly if item["address"] == function_address)
         assert recovered_instruction["comment"] == remote_comment
         _unwrap_runtime_result(cli.close_session(stale_target))
 

@@ -21,7 +21,7 @@ class ProgramLease:
         try:
             if save and save_hook is not None:
                 save_hook()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise DomainError(
                 code=ErrorCode.SAVE_FAILED,
                 message=f"Save failed: {exc}",
@@ -37,12 +37,12 @@ class ProgramLease:
         try:
             result = self.do_operation()
             operation_completed = True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             operation_error = exc
 
         try:
             self.reopen()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             details: dict[str, Any] | None = None
             if operation_error is not None:
                 details = {"operation_error": str(operation_error)}

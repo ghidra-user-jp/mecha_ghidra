@@ -2,68 +2,37 @@
 
 from __future__ import annotations
 
+from ghidra_mcp.application.locks import LockManager
+from ghidra_mcp.application.services.path_policy import UNRESTRICTED_PATH_POLICY, PathPolicy
 from ghidra_mcp.application.services.ports import TargetRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.domain.error_utils import is_project_lock_error, safe_cause_details
-from ghidra_mcp.infrastructure.locks import LockManager
+from ghidra_mcp.domain.error_mapping import to_domain_error
 
 
 class TargetService:
-    def __init__(self, runtime_state: TargetRuntimePort, *, lock_manager: LockManager | None = None) -> None:
+    def __init__(
+        self,
+        runtime_state: TargetRuntimePort,
+        *,
+        lock_manager: LockManager | None = None,
+        path_policy: PathPolicy | None = None,
+    ) -> None:
         self._runtime = runtime_state
         self._lock_manager = lock_manager or LockManager()
+        self._path_policy = path_policy or UNRESTRICTED_PATH_POLICY
+
+    @property
+    def path_policy(self) -> PathPolicy:
+        return self._path_policy
 
     def _to_domain_error(self, exc: Exception, *, operation: str, target: str | None = None) -> DomainError:
-        if isinstance(exc, DomainError):
-            details = dict(exc.details or {})
-            details.setdefault("operation", operation)
-            if target is not None:
-                details.setdefault("target", target)
-            return DomainError(
-                code=exc.code,
-                message=exc.message,
-                hint=exc.hint,
-                retryable=exc.retryable,
-                details=details,
-            )
-
-        message = str(exc)
-        code = ErrorCode.OPERATION_FAILED
-        retryable = False
-        details = {"operation": operation, "target": target}
-
-        if is_project_lock_error(exc):
-            code = ErrorCode.PROJECT_LOCKED
-            retryable = True
-            details.update(safe_cause_details(exc))
-        elif message.startswith("SAVE_FAILED"):
-            code = ErrorCode.SAVE_FAILED
-            details.update(safe_cause_details(exc))
-        elif message.startswith("LOCAL_CHANGES_EXIST"):
-            code = ErrorCode.LOCAL_CHANGES_EXIST
-        elif message.startswith("CHECKOUT_UNAVAILABLE"):
-            code = ErrorCode.CHECKOUT_UNAVAILABLE
-        elif message.startswith("HIJACKED_PROGRAM"):
-            code = ErrorCode.HIJACKED_PROGRAM
-        elif message.startswith("UNSAFE_PROGRAM_REMOVE"):
-            code = ErrorCode.UNSAFE_PROGRAM_REMOVE
-        elif message.startswith("REOPEN_FAILED"):
-            code = ErrorCode.REOPEN_FAILED
-            retryable = False
-        elif message.startswith("LOCK_TIMEOUT"):
-            code = ErrorCode.LOCK_TIMEOUT
-            retryable = True
-        elif "Session '" in message and ("does not exist" in message or "is not initialized" in message):
-            code = ErrorCode.SESSION_NOT_FOUND
-        elif "Target '" in message and "is not initialized" in message:
-            code = ErrorCode.TARGET_NOT_REGISTERED
-
-        return DomainError(
-            code=code,
-            message=message,
+        return to_domain_error(
+            exc,
+            operation=operation,
+            target=target,
             hint="Check target/session state for this operation",
-            retryable=retryable,
-            details=details,
+            cause_detail_codes={ErrorCode.PROJECT_LOCKED, ErrorCode.SAVE_FAILED},
+            keep_none_details=("target",),
         )
 
     def _project_key(self, target: str) -> str | None:
@@ -80,6 +49,7 @@ class TargetService:
         overwrite: bool = False,
     ):
         try:
+            self._path_policy.validate_project_location(project_location)
             return self._runtime.create_project(
                 project_location,
                 project_name=project_name,
@@ -97,6 +67,7 @@ class TargetService:
         domain_path: str | None = None,
     ):
         try:
+            self._path_policy.validate_project_location(project_location)
             with self._lock_manager.acquire(target=name):
                 session = self._runtime.create_session(
                     name,
@@ -120,6 +91,7 @@ class TargetService:
 
     def register_target(self, name: str, project_location: str, *, project_name: str | None = None):
         try:
+            self._path_policy.validate_project_location(project_location)
             with self._lock_manager.acquire(target=name):
                 return self._runtime.register_target(name, project_location, project_name=project_name)
         except Exception as exc:
@@ -135,15 +107,37 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="list_programs", target=name)
 
-    def load_program(self, name: str, domain_path: str):
+    def load_program(self, name: str, domain_path: str, *, version: int | None = None):
         try:
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
-                return self._runtime.load_program(name, domain_path)
+                return self._runtime.load_program(name, domain_path, version=version)
         except Exception as exc:
             self._raise_domain_error(exc, operation="load_program", target=name)
 
+    def validate_export_path(self, output_path: str) -> None:
+        """Raise PATH_NOT_ALLOWED when ``--allowed-export-root`` excludes the path."""
+        self._path_policy.validate_export_path(output_path)
+
+    def create_repository_cache_project(
+        self,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        repository_url: str,
+    ):
+        try:
+            self._path_policy.validate_project_location(project_location)
+            return self._runtime.create_repository_cache_project(
+                project_location,
+                project_name=project_name,
+                repository_url=repository_url,
+            )
+        except Exception as exc:
+            self._raise_domain_error(exc, operation="create_repository_cache_project")
+
     def import_program(self, name: str, binary_path: str, **kwargs):
         try:
+            self._path_policy.validate_import_path(binary_path)
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
                 return self._runtime.import_program(name, binary_path, **kwargs)
         except Exception as exc:

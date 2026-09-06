@@ -9,6 +9,8 @@ from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.target_lifecycle import RuntimeTargetLifecycle
+from runtime_fakes import FakeDomainFile as _FakeDomainFile
+from runtime_fakes import FakeProgram as _FakeProgram
 
 
 class _DummyCore:
@@ -39,26 +41,6 @@ class _TrackingCore(_DummyCore):
     def remove_context(self, key: str) -> None:
         super().remove_context(key)
         self.contexts.pop(key, None)
-
-
-class _FakeDomainFile:
-    def __init__(self, path: str) -> None:
-        self._path = path
-
-    def getPathname(self) -> str:
-        return self._path
-
-
-class _FakeProgram:
-    def __init__(self, path: str, *, changed: bool = False) -> None:
-        self._path = path
-        self._changed = changed
-
-    def getDomainFile(self):
-        return _FakeDomainFile(self._path)
-
-    def isChanged(self) -> bool:
-        return self._changed
 
 
 class _FailingChangedProgram(_FakeProgram):
@@ -93,10 +75,11 @@ class _FailingSaveProject(_FakeProject):
 
 
 class _FakeSession:
-    def __init__(self, handle, path: str, flat_api) -> None:  # noqa: ANN001
+    def __init__(self, handle, path: str, flat_api, *, read_only_version: int | None = None) -> None:  # noqa: ANN001
         self._handle = handle
         self._path = path
         self.flat_api = flat_api
+        self.read_only_version = read_only_version
         self.closed_with: list[tuple[bool, bool]] = []
 
     def get_program(self):
@@ -201,7 +184,7 @@ class _FakeProjectHandle:
     def is_repository_project_from_metadata(project_location: str, project_name: str | None):  # noqa: ARG004
         return _FakeProjectHandle.repository_backed
 
-    def open_program(self, domain_path: str | None = None):
+    def open_program(self, domain_path: str | None = None, *, version: int | None = None):
         path = domain_path or "/main"
         handle = self
 
@@ -211,7 +194,7 @@ class _FakeProjectHandle:
                 if _FakeProjectHandle.fail_analyze:
                     raise RuntimeError("analyze failed")
 
-        return _FakeSession(self, path, _FakeFlatAPI())
+        return _FakeSession(self, path, _FakeFlatAPI(), read_only_version=version)
 
     def import_program(self, binary_path: str, **kwargs):
         self.import_calls.append({"binary_path": binary_path, **kwargs})
@@ -223,7 +206,10 @@ class _FakeProjectHandle:
     def get_sync_status(self, domain_path: str):  # noqa: ARG002
         return dict(self.sync_status)
 
-    def save_program(self, program, *, force: bool = False) -> bool:  # noqa: ANN001
+    def refresh_project_data(self, *, force: bool = True) -> None:
+        return None
+
+    def save_program(self, program, *, force: bool = False) -> bool:
         if _FakeProjectHandle.fail_save:
             raise RuntimeError("SAVE_FAILED: failed to save program: disk full")
         self.save_calls.append(program.getDomainFile().getPathname())
@@ -374,9 +360,9 @@ class _DomainErrorDuringRemoveVerifyProjectHandle(_FakeProjectHandle):
 
 
 class _FailingAnalysisSaveProjectHandle(_FakeProjectHandle):
-    def __init__(self, project_location: str, project_name: str | None) -> None:
-        super().__init__(project_location, project_name)
-        self.project = _FailingSaveProject()
+    def save_program(self, program, *, force: bool = False) -> bool:
+        self.save_calls.append(program.getDomainFile().getPathname())
+        raise RuntimeError("disk full")
 
 
 class _ProjectLockingFakeProjectHandle(_FakeProjectHandle):
@@ -545,10 +531,10 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     assert store.analyzed_loads == {("fw", "/main")}
 
     loaded = lifecycle.load_program("fw", "/next")
-    assert loaded == "/next"
+    assert loaded == {"program": "/next", "reloaded": False, "version": None, "read_only": False}
     handle = store.get_target_handle("fw")
     assert handle.analyze_calls == ["/main", "/next"]
-    assert handle.project.saved_programs == ["/main", "/next"]
+    assert handle.save_calls == ["/main", "/next"]
 
     imported = lifecycle.import_program(
         "fw",
@@ -998,7 +984,7 @@ def test_target_lifecycle_close_session_preserves_registered_target(monkeypatch:
         }
     ]
 
-    assert lifecycle.load_program("fw", "/main") == "/main"
+    assert lifecycle.load_program("fw", "/main")["program"] == "/main"
     assert "fw" in store.sessions
 
 
@@ -1184,7 +1170,7 @@ def test_target_lifecycle_skips_initial_analysis_for_unchecked_versioned_program
 
     assert session is store.sessions["fw"]
     assert handle.analyze_calls == []
-    assert handle.project.saved_programs == []
+    assert handle.save_calls == []
     assert store.analyzed_loads == set()
     assert core.initialized and core.initialized[-1][1] == "fw"
 
@@ -1210,12 +1196,14 @@ def test_target_lifecycle_skips_initial_analysis_for_unversioned_shared_project_
 
     assert session is store.sessions["fw"]
     assert handle.analyze_calls == []
-    assert handle.project.saved_programs == []
+    assert handle.save_calls == []
     assert store.analyzed_loads == set()
     assert core.initialized and core.initialized[-1][1] == "fw"
 
 
-def test_target_lifecycle_create_session_closes_leaked_handle_when_rollback_close_fails(monkeypatch: pytest.MonkeyPatch):
+def test_target_lifecycle_create_session_closes_leaked_handle_when_rollback_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
     core = _TrackingCore()
@@ -1322,7 +1310,9 @@ def test_target_lifecycle_create_session_failure_restores_registered_target_proj
     assert "fw" not in store.sessions
 
 
-def test_target_lifecycle_create_session_open_failure_restores_registered_target_project(monkeypatch: pytest.MonkeyPatch):
+def test_target_lifecycle_create_session_open_failure_restores_registered_target_project(
+    monkeypatch: pytest.MonkeyPatch,
+):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
     lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
@@ -1458,7 +1448,9 @@ def test_target_lifecycle_load_program_rolls_back_new_session_when_old_close_fai
     assert core.removed == ["fw"]
 
 
-def test_target_lifecycle_close_session_preserves_save_failed_and_cleans_closed_session(monkeypatch: pytest.MonkeyPatch):
+def test_target_lifecycle_close_session_preserves_save_failed_and_cleans_closed_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
     lifecycle, store, core = _build_target_lifecycle(monkeypatch)
@@ -1609,23 +1601,61 @@ def test_target_lifecycle_close_all_calls_resources_outside_registry_lock(monkey
     assert not store.project_handles
 
 
-def test_target_lifecycle_duplicate_load_same_target_raises_specific_error(monkeypatch: pytest.MonkeyPatch):
+def test_target_lifecycle_duplicate_load_same_target_reloads_in_place(monkeypatch: pytest.MonkeyPatch):
     _FakeProjectHandle.should_analyze = True
     _FakeProjectHandle.fail_analyze = False
-    lifecycle, _store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle, store, core = _build_target_lifecycle(monkeypatch)
 
     lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    first_session = store.sessions["fw"]
+    handle = store.get_target_handle("fw")
 
-    with pytest.raises(DomainError) as exc_info:
-        lifecycle.load_program("fw", "/main")
+    result = lifecycle.load_program("fw", "/main")
 
-    err = exc_info.value
-    assert err.code == ErrorCode.TARGET_ALREADY_LOADED
-    assert err.details == {
-        "operation": "load_program",
-        "target": "fw",
-        "domain_path": "/main",
-    }
+    assert result == {"program": "/main", "reloaded": True, "version": None, "read_only": False}
+    assert first_session.closed_with == [(False, False)]
+    assert store.sessions["fw"] is not first_session
+    assert [key for _program, key in core.initialized] == ["fw", "fw"]
+    # A reload never re-runs the first-load analysis.
+    assert handle.analyze_calls == ["/main"]
+
+
+def test_target_lifecycle_load_version_opens_read_only_session(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = True
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle("fw")
+
+    result = lifecycle.load_program("fw", "/main", version=2)
+
+    assert result == {"program": "/main", "reloaded": False, "version": 2, "read_only": True}
+    assert store.sessions["fw"].read_only_version == 2
+    # A past version is immutable: no analysis, no save.
+    assert handle.analyze_calls == ["/main"]
+    assert handle.save_calls == ["/main"]
+
+    # Loading the same version again reopens it instead of failing.
+    again = lifecycle.load_program("fw", "/main", version=2)
+    assert again["reloaded"] is True and again["read_only"] is True
+
+
+def test_target_lifecycle_read_only_version_does_not_block_live_load(monkeypatch: pytest.MonkeyPatch):
+    _FakeProjectHandle.should_analyze = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+
+    lifecycle.create_session("history", "/tmp/prj", project_name="sample", domain_path="/main")
+    lifecycle.load_program("history", "/main", version=1)
+    lifecycle.register_target("live", "/tmp/prj", project_name="sample")
+
+    result = lifecycle.load_program("live", "/main")
+
+    assert result["read_only"] is False
+    assert store.sessions["history"].read_only_version == 1
+
+    with pytest.raises(ValueError, match="version must be >= 1"):
+        lifecycle.load_program("live", "/main", version=0)
 
 
 def test_target_lifecycle_duplicate_load_other_target_includes_owner(monkeypatch: pytest.MonkeyPatch):
@@ -1705,7 +1735,8 @@ def test_target_lifecycle_save_project_program_saves_active_and_clears_dirty(mon
 
     handle = store.get_target_handle("fw")
     assert result == {"status": "ok", "target": "fw", "program": "/main", "saved": True}
-    assert handle.save_calls == ["/main"]
+    # One save after initial analysis, one explicit save_project_program.
+    assert handle.save_calls == ["/main", "/main"]
     assert not store.is_dirty_program("fw", "/main")
 
 
@@ -1776,7 +1807,8 @@ def test_target_lifecycle_save_project_program_rejects_non_active_domain_path(mo
     lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
     handle = store.get_target_handle("fw")
 
+    saves_before = list(handle.save_calls)
     with pytest.raises(ValueError, match="domain_path must match"):
         lifecycle.save_project_program("fw", domain_path="/other")
 
-    assert handle.save_calls == []
+    assert handle.save_calls == saves_before

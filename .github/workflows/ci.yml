@@ -37,13 +37,46 @@ jobs:
       - name: Install uv
         run: python -m pip install --disable-pip-version-check uv==0.11.2
 
-      - name: Verify lockfile and install test dependencies
+      - name: Verify lockfile and install dev dependencies
         run: |
           uv lock --check
-          uv sync --frozen --extra test
+          uv sync --frozen --extra dev
+
+      - name: Lint (ruff check)
+        run: uv run ruff check src tests
+
+      - name: Formatting (ruff format --check)
+        run: uv run ruff format --check src tests
 
       - name: Run tests
         run: uv run pytest -q
 
       - name: Compile Python sources
         run: uv run python -m compileall -q src
+
+  latest-mcp-sdk:
+    # Early warning for the next mcp release: resolve the newest compatible SDK
+    # inside the declared range and run the suite against it. Failures here do
+    # not block merges but tell us what the next dependency bump will break.
+    name: Latest mcp SDK (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.2
+
+      - name: Upgrade mcp within the declared range and test
+        run: |
+          uv lock --upgrade-package mcp --upgrade-package mcp-types
+          uv sync --extra dev
+          uv run python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
+          uv run pytest -q

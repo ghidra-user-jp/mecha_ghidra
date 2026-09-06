@@ -5,31 +5,33 @@ from __future__ import absolute_import, print_function
 import os
 
 import jpype
-
 from ghidra.app.decompiler import DecompInterface
 from ghidra.app.util.parser import FunctionSignatureParser
 from ghidra.program.model.data import (
-    CategoryPath,
-    DataUtilities,
-    VoidDataType,
-    CharDataType,
-    UnsignedCharDataType,
-    ShortDataType,
-    UnsignedShortDataType,
-    IntegerDataType,
-    UnsignedIntegerDataType,
-    LongLongDataType,
-    UnsignedLongLongDataType,
-    FloatDataType,
-    DoubleDataType,
     BooleanDataType,
+    CategoryPath,
+    CharDataType,
+    DataUtilities,
+    DoubleDataType,
+    FloatDataType,
+    IntegerDataType,
+    LongLongDataType,
+    ShortDataType,
     StringDataType,
     UnicodeDataType,
+    UnsignedCharDataType,
+    UnsignedIntegerDataType,
+    UnsignedLongLongDataType,
+    UnsignedShortDataType,
+    VoidDataType,
 )
-from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
+
+from ghidra_headless.errors import HeadlessError
+from ghidra_headless.installation import validate_linux_arm64_decompiler_install
 
 _GHIDRA_PROGRAM_UTILITIES = None
 _GHIDRA_SCRIPT_UTIL = None
+
 
 def _to_int(value, default):
     if value is None:
@@ -65,11 +67,11 @@ def _safe_call(obj, name, *args):
 def _required_domain_file_call(domain_file, name):
     method = getattr(domain_file, name, None)
     if method is None:
-        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: DomainFile.%s is unavailable" % name)
+        raise HeadlessError("SYNC_STATUS_UNAVAILABLE: DomainFile.%s is unavailable" % name)
     try:
         return method()
     except Exception as exc:
-        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.%s: %s" % (name, exc)) from exc
+        raise HeadlessError("SYNC_STATUS_UNAVAILABLE: failed to call DomainFile.%s: %s" % (name, exc)) from exc
 
 
 def _iter_items(items):
@@ -123,8 +125,7 @@ def _iter_items(items):
 
 def _is_java_no_such_element(exc):
     return any(
-        getattr(cls, "__name__", "")
-        in {"NoSuchElementException", "java.util.NoSuchElementException"}
+        getattr(cls, "__name__", "") in {"NoSuchElementException", "java.util.NoSuchElementException"}
         for cls in type(exc).__mro__
     )
 
@@ -235,14 +236,14 @@ def _ensure_checkout_for_versioned_program(ctx):
     try:
         domain_file = program.getDomainFile()
     except Exception as exc:
-        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: failed to resolve DomainFile: %s" % exc)
+        raise HeadlessError("SYNC_STATUS_UNAVAILABLE: failed to resolve DomainFile: %s" % exc)
     if domain_file is None:
         return
 
     is_versioned = _required_domain_file_call(domain_file, "isVersioned")
     is_hijacked = _required_domain_file_call(domain_file, "isHijacked")
     if bool(is_hijacked):
-        raise RuntimeError(
+        raise HeadlessError(
             "HIJACKED_PROGRAM: mutating a hijacked shared-project file is not allowed. "
             "Resolve the hijacked file before retrying"
         )
@@ -251,25 +252,56 @@ def _ensure_checkout_for_versioned_program(ctx):
     is_checked_out = _required_domain_file_call(domain_file, "isCheckedOut")
     if bool(is_checked_out):
         return
-    raise RuntimeError(
+    raise HeadlessError(
         "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects. "
         "Run checkout_project_program first"
     )
 
 
-def _find_function_by_name(ctx, name):
-    iterator = ctx.function_manager.getFunctions(True)
+def _pick_function(candidates):
+    """Prefer the first candidate with a non-empty body, else the first candidate."""
     first_match = None
-    while iterator.hasNext():
-        function = iterator.next()
-        if function.getName() != name:
+    for function in candidates:
+        if function is None:
             continue
         if first_match is None:
             first_match = function
-        body = function.getBody()
+        body = _safe_call(function, "getBody")
         if body is not None and not body.isEmpty():
             return function
     return first_match
+
+
+def _indexed_functions_named(ctx, name):
+    """Yield functions named ``name`` through the symbol table index.
+
+    ``SymbolTable.getSymbols(name)`` is an indexed lookup, unlike walking every
+    function with ``getFunctions(True)``.  Returns None when the index is not
+    available so the caller can fall back to the full scan.
+    """
+    symbol_table = getattr(ctx, "symbol_table", None)
+    symbols = _safe_call(symbol_table, "getSymbols", name) if symbol_table is not None else None
+    if symbols is None:
+        return None
+    functions = []
+    for symbol in _iter_items(symbols):
+        symbol_type = _safe_call(symbol, "getSymbolType")
+        if symbol_type is None or str(symbol_type).upper() != "FUNCTION":
+            continue
+        function = _safe_call(symbol, "getObject")
+        if function is not None:
+            functions.append(function)
+    return functions
+
+
+def _find_function_by_name(ctx, name):
+    indexed = _indexed_functions_named(ctx, name)
+    if indexed is not None:
+        picked = _pick_function(indexed)
+        if picked is not None:
+            return picked
+    iterator = ctx.function_manager.getFunctions(True)
+    return _pick_function(function for function in _iter_items(iterator) if function.getName() == name)
 
 
 def _get_address(ctx, address_text):
@@ -284,8 +316,7 @@ def _get_address(ctx, address_text):
 def _collect(iterator, offset, limit, to_value):
     if limit <= 0:
         return []
-    if offset < 0:
-        offset = 0
+    offset = max(offset, 0)
     result = []
     idx = 0
     for item in _iter_items(iterator):
@@ -311,6 +342,12 @@ def _find_data_type_by_name(dtm, type_name):
     query_lower = query.lower()
     query_compact = query_lower.replace(" ", "")
     candidate = None
+
+    # Exact path lookups are indexed; try them before scanning every data type.
+    for probe in (query, "/" + query):
+        resolved = _safe_call(dtm, "getDataType", probe)
+        if resolved is not None:
+            return resolved
 
     iterator = _safe_call(dtm, "getAllDataTypes")
     if iterator is not None:
@@ -338,15 +375,7 @@ def _find_data_type_by_name(dtm, type_name):
                 if text_lower.endswith("/" + query_lower) and candidate is None:
                     candidate = data_type
 
-    if candidate is not None:
-        return candidate
-
-    for probe in (query, "/" + query):
-        resolved = _safe_call(dtm, "getDataType", probe)
-        if resolved is not None:
-            return resolved
-
-    return None
+    return candidate
 
 
 def _parse_clear_data_mode(clear_mode_text):
@@ -461,6 +490,7 @@ def _ghidra_program_utilities():
     global _GHIDRA_PROGRAM_UTILITIES
     if _GHIDRA_PROGRAM_UTILITIES is None:
         from ghidra.program.util import GhidraProgramUtilities
+
         _GHIDRA_PROGRAM_UTILITIES = GhidraProgramUtilities
     return _GHIDRA_PROGRAM_UTILITIES
 
@@ -469,6 +499,7 @@ def _ghidra_script_util():
     global _GHIDRA_SCRIPT_UTIL
     if _GHIDRA_SCRIPT_UTIL is None:
         from ghidra.app.script import GhidraScriptUtil
+
         _GHIDRA_SCRIPT_UTIL = GhidraScriptUtil
     return _GHIDRA_SCRIPT_UTIL
 
@@ -495,78 +526,104 @@ def _analyze_program(ctx, force=False):
     script_util = _ghidra_script_util()
     script_util.acquireBundleHostReference()
     try:
-        ctx.flat_api.analyzeAll(ctx.program)
-        utilities.markProgramAnalyzed(ctx.program)
+
+        def _analyze():
+            ctx.flat_api.analyzeAll(ctx.program)
+            utilities.markProgramAnalyzed(ctx.program)
+            return True
+
+        _txn(ctx, "Auto analysis", _analyze)
     finally:
         script_util.releaseBundleHostReference()
     return True
 
 
-def _decompile_function_object(ctx, function):
-    def _run_decompile():
-        interface = DecompInterface()
-        try:
-            if not interface.openProgram(ctx.program):
-                ghidra_install_dir = os.environ.get("GHIDRA_INSTALL_DIR")
-                try:
-                    validate_linux_arm64_decompiler_install(ghidra_install_dir)
-                except RuntimeError as exc:
-                    raise RuntimeError(str(exc))
-                raise RuntimeError("Failed to initialize decompiler")
-            results = interface.decompileFunction(function, 120, ctx.monitor())
-            if results is None:
-                raise RuntimeError("Decompilation failed")
-            decompiled = results.getDecompiledFunction()
-            if decompiled is not None:
-                return decompiled.getC()
-            detail = (results.getErrorMessage() or "").strip()
-            if detail:
-                raise RuntimeError("Decompilation result is empty: %s" % detail)
-            raise RuntimeError("Decompilation result is empty")
-        finally:
-            interface.dispose()
+DECOMPILE_TIMEOUT_SECONDS = 120
 
-    return _run_decompile()
+
+def _open_decompiler(ctx):
+    """Return the context's shared decompiler or a one-shot interface."""
+    shared = getattr(ctx, "decompiler", None)
+    if callable(shared):
+        interface = shared(DecompInterface)
+        if interface is not None:
+            return interface, False
+    else:
+        interface = DecompInterface()
+        if interface.openProgram(ctx.program):
+            return interface, True
+        interface.dispose()
+    ghidra_install_dir = os.environ.get("GHIDRA_INSTALL_DIR")
+    try:
+        validate_linux_arm64_decompiler_install(ghidra_install_dir)
+    except RuntimeError as exc:
+        raise RuntimeError(str(exc))
+    raise RuntimeError("Failed to initialize decompiler")
+
+
+def _with_decompiler(ctx, action):
+    interface, one_shot = _open_decompiler(ctx)
+    try:
+        results = action(interface)
+    except Exception:
+        # A failed call may leave the native process unusable; drop the shared
+        # instance so the next call starts a fresh decompiler.
+        reset = getattr(ctx, "reset_decompiler", None)
+        if callable(reset) and not one_shot:
+            reset()
+        raise
+    finally:
+        if one_shot:
+            interface.dispose()
+    return results
+
+
+def _decompile_function_object(ctx, function):
+    def _run(interface):
+        results = interface.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, ctx.monitor())
+        if results is None:
+            raise RuntimeError("Decompilation failed")
+        decompiled = results.getDecompiledFunction()
+        if decompiled is not None:
+            return decompiled.getC()
+        detail = (results.getErrorMessage() or "").strip()
+        if detail:
+            raise RuntimeError("Decompilation result is empty: %s" % detail)
+        raise RuntimeError("Decompilation result is empty")
+
+    return _with_decompiler(ctx, _run)
 
 
 def _decompile_high_function(ctx, function):
-    def _run_decompile():
-        interface = DecompInterface()
-        try:
-            if not interface.openProgram(ctx.program):
-                ghidra_install_dir = os.environ.get("GHIDRA_INSTALL_DIR")
-                try:
-                    validate_linux_arm64_decompiler_install(ghidra_install_dir)
-                except RuntimeError as exc:
-                    raise RuntimeError(str(exc))
-                raise RuntimeError("Failed to initialize decompiler")
-            results = interface.decompileFunction(function, 120, ctx.monitor())
-            if results is None:
-                raise RuntimeError("Decompilation failed")
-            if not results.decompileCompleted():
-                detail = (results.getErrorMessage() or "").strip()
-                if detail:
-                    raise RuntimeError("Decompilation failed: %s" % detail)
-                raise RuntimeError("Decompilation failed")
-            high_function = results.getHighFunction()
-            if high_function is None:
-                raise RuntimeError("Failed to obtain high-level function info")
-            return high_function
-        finally:
-            interface.dispose()
+    def _run(interface):
+        results = interface.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, ctx.monitor())
+        if results is None:
+            raise RuntimeError("Decompilation failed")
+        if not results.decompileCompleted():
+            detail = (results.getErrorMessage() or "").strip()
+            if detail:
+                raise RuntimeError("Decompilation failed: %s" % detail)
+            raise RuntimeError("Decompilation failed")
+        high_function = results.getHighFunction()
+        if high_function is None:
+            raise RuntimeError("Failed to obtain high-level function info")
+        return high_function
 
     try:
-        return _run_decompile()
-    except RuntimeError:
-        _ensure_checkout_for_versioned_program(ctx)
-        analyzed = False
+        return _with_decompiler(ctx, _run)
+    except RuntimeError as exc:
+        # Do not start a multi-minute auto-analysis as a hidden side effect of a
+        # rename/retype call: tell the caller what to run instead.
         try:
-            analyzed = _analyze_program_if_needed(ctx)
+            needs_analysis = bool(_ghidra_program_utilities().shouldAskToAnalyze(ctx.program))
         except Exception:
-            analyzed = False
-        if not analyzed:
-            raise
-        return _run_decompile()
+            needs_analysis = False
+        if needs_analysis:
+            raise HeadlessError(
+                "PROGRAM_NOT_ANALYZED: the program has not been analyzed, so decompiler "
+                "symbols are unavailable; run analyze_program first (%s)" % exc
+            ) from exc
+        raise
 
 
 def _requires_full_param_commit(high_symbol, high_function):
@@ -629,13 +686,15 @@ def _get_enum_datatype(ctx, name, category):
 def _describe_struct(struct_dt):
     members = []
     for component in struct_dt.getComponents():
-        members.append({
-            "offset": component.getOffset(),
-            "length": component.getLength(),
-            "name": component.getFieldName() or "",
-            "type": component.getDataType().getDisplayName(),
-            "comment": component.getComment() or "",
-        })
+        members.append(
+            {
+                "offset": component.getOffset(),
+                "length": component.getLength(),
+                "name": component.getFieldName() or "",
+                "type": component.getDataType().getDisplayName(),
+                "comment": component.getComment() or "",
+            }
+        )
     category = struct_dt.getCategoryPath()
     return {
         "name": struct_dt.getName(),
@@ -648,11 +707,13 @@ def _describe_struct(struct_dt):
 def _describe_enum(enum_dt):
     values = []
     for name in enum_dt.getNames():
-        values.append({
-            "name": name,
-            "value": int(enum_dt.getValue(name)),
-            "comment": enum_dt.getComment(name) or "",
-        })
+        values.append(
+            {
+                "name": name,
+                "value": int(enum_dt.getValue(name)),
+                "comment": enum_dt.getComment(name) or "",
+            }
+        )
     category = enum_dt.getCategoryPath()
     return {
         "name": enum_dt.getName(),
@@ -684,6 +745,7 @@ def _describe_data_type(data_type):
 def _component_length(data_type):
     length = data_type.getLength()
     return length if length > 0 else 1
+
 
 __all__ = [
     "_to_int",

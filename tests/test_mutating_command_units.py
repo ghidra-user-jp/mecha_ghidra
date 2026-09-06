@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ghidra_headless.handlers.commands.mutating_data_types import clear_struct, remove_struct_members
+from ghidra_headless.handlers.commands.mutating_data_types import remove_struct_members
 from ghidra_headless.handlers.commands.mutating_symbols import rename_data
 
 
@@ -22,18 +22,7 @@ class _Symbol:
         return "00402000"
 
 
-class _EmptyStructure:
-    def __init__(self) -> None:
-        self.delete_all_calls = 0
-
-    def deleteAll(self):
-        self.delete_all_calls += 1
-
-
 class _LegacyEmptyStructure:
-    def getNumComponents(self):
-        return 0
-
     def getComponents(self):
         return []
 
@@ -82,43 +71,52 @@ def test_rename_data_renames_non_function_primary_symbol():
     assert result == {"name": "new_name", "address": "00402000"}
 
 
-def test_clear_struct_accepts_an_already_empty_structure():
-    structure = _EmptyStructure()
-    manager = SimpleNamespace(replaceDataType=lambda *_args: None)
-    context = object()
-
-    result = clear_struct(
-        {"struct_name": "Empty"},
-        ensure_context=lambda: context,
-        txn=_run_transaction,
-        get_struct_datatype=lambda _ctx, _name, _category: structure,
-        safe_call=lambda obj, method: getattr(obj, method)(),
-        iter_items=iter,
-        dt_manager=lambda _ctx: manager,
-        describe_struct=lambda _struct: {"name": "Empty", "members": []},
-    )
-
-    assert result == {"name": "Empty", "members": []}
-    assert structure.delete_all_calls == 1
-
-
-def test_clear_struct_accepts_an_already_empty_structure_without_delete_all():
+def test_remove_struct_members_without_members_clears_an_already_empty_structure():
     structure = _LegacyEmptyStructure()
     manager = SimpleNamespace(replaceDataType=lambda *_args: None)
-    context = object()
 
-    result = clear_struct(
+    result = remove_struct_members(
         {"struct_name": "Empty"},
-        ensure_context=lambda: context,
+        ensure_context=lambda: object(),
         txn=_run_transaction,
         get_struct_datatype=lambda _ctx, _name, _category: structure,
-        safe_call=lambda obj, method: getattr(obj, method)(),
-        iter_items=iter,
         dt_manager=lambda _ctx: manager,
         describe_struct=lambda _struct: {"name": "Empty", "members": []},
     )
 
     assert result == {"name": "Empty", "members": []}
+
+
+def test_remove_struct_members_without_members_removes_everything():
+    components = [
+        SimpleNamespace(getFieldName=lambda: "first", getOrdinal=lambda: 0),
+        SimpleNamespace(getFieldName=lambda: "second", getOrdinal=lambda: 1),
+    ]
+
+    class _Structure:
+        def __init__(self):
+            self.deleted = []
+
+        def getComponents(self):
+            return components
+
+        def delete(self, ordinal):
+            self.deleted.append(ordinal)
+
+    structure = _Structure()
+    descriptions = []
+
+    remove_struct_members(
+        {"struct_name": "Fields", "members": None},
+        ensure_context=lambda: object(),
+        txn=lambda _ctx, description, operation: (descriptions.append(description), operation())[1],
+        get_struct_datatype=lambda *_args: structure,
+        dt_manager=lambda _ctx: SimpleNamespace(replaceDataType=lambda *_args: None),
+        describe_struct=lambda _struct: {"name": "Fields"},
+    )
+
+    assert structure.deleted == [1, 0]
+    assert descriptions == ["Clear struct"]
 
 
 def test_remove_struct_members_deletes_matching_ordinals_in_reverse_order():

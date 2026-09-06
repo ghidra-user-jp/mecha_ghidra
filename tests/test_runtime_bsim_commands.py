@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from ghidra_headless.launcher import start_headless_jvm
 from ghidra_mcp import cli
 from ghidra_mcp.application.services.bsim_service import BsimConfig
 from ghidra_mcp.contracts.tool_spec import get_all_tool_specs
-
 
 RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_BSIM_RUNTIME_VALIDATION") == "1"
 
@@ -34,11 +34,10 @@ def _resolve_ghidra_install_dir() -> Path:
 
 
 def _configure_runtime() -> None:
-    import pyghidra
 
     install_dir = _resolve_ghidra_install_dir()
     os.environ["GHIDRA_INSTALL_DIR"] = str(install_dir)
-    pyghidra.start(install_dir=str(install_dir))
+    start_headless_jvm(str(install_dir))
     bsim_url = os.environ.get("GHIDRA_BSIM_URL")
     if not bsim_url:
         pytest.fail("GHIDRA_BSIM_URL is required for BSim runtime tests")
@@ -59,7 +58,8 @@ def test_runtime_bsim_database_status():
 
     assert result["status"] == "ok"
     assert isinstance(result["executable_count"], int)
-    assert "://" in result["bsim_url"]
+    # postgresql://, elastic://, https:// or a file: H2 database
+    assert result["bsim_url"].startswith(("postgresql://", "elastic://", "https://", "file:"))
     assert result["ghidra_install_dir"] == os.environ["GHIDRA_INSTALL_DIR"]
     assert result["ghidra_version"]
     if result.get("database_type") == "postgres":
@@ -69,11 +69,11 @@ def test_runtime_bsim_database_status():
 def test_runtime_bsim_readonly_java_bridge():
     _configure_runtime()
 
-    categories = cli.list_bsim_categories()
+    status = cli.get_bsim_database_status()
     executables = cli.list_bsim_executables(limit=1)
 
-    assert categories["count"] == len(categories["items"])
-    assert categories["function_tag_count"] == len(categories["function_tags"])
+    assert isinstance(status["categories"], list)
+    assert isinstance(status["function_tags"], list)
     assert executables["count"] == len(executables["items"])
     assert 0 <= executables["count"] <= 1
     assert isinstance(executables["truncated"], bool)
@@ -91,13 +91,13 @@ def test_runtime_bsim_category_mutation_java_bridge():
 
     created = cli.bsim_add_executable_category(category=category)
     repeated = cli.bsim_add_executable_category(category=category)
-    categories = cli.list_bsim_categories()
+    status = cli.get_bsim_database_status()
 
     assert created["status"] == "created"
     assert created["category"] == category
     assert category in created["items"]
     assert repeated["status"] == "already_exists"
-    assert category in categories["items"]
+    assert category in status["categories"]
 
 
 def test_runtime_bsim_metadata_mutation_java_bridge():

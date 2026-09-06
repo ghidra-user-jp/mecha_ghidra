@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from ghidra_headless.errors import HeadlessError
+
 from . import java_bindings
 from .path_utils import _to_iso8601_utc
 
@@ -24,11 +26,11 @@ def _safe_call(obj, name: str, *args):
 def _required_call(obj, name: str, *args, owner: str = "DomainFile"):
     method = getattr(obj, name, None)
     if method is None:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: {owner}.{name} is unavailable")
+        raise HeadlessError(f"SYNC_STATUS_UNAVAILABLE: {owner}.{name} is unavailable")
     try:
         return method(*args)
     except Exception as exc:
-        raise RuntimeError(f"SYNC_STATUS_UNAVAILABLE: failed to call {owner}.{name}: {exc}") from exc
+        raise HeadlessError(f"SYNC_STATUS_UNAVAILABLE: failed to call {owner}.{name}: {exc}") from exc
 
 
 def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
@@ -36,7 +38,7 @@ def _to_checkout_status_dict(status) -> Optional[Dict[str, Any]]:
         return None
     checkout_id = _required_call(status, "getCheckoutId", owner="CheckoutStatus")
     if checkout_id is None:
-        raise RuntimeError("SYNC_STATUS_UNAVAILABLE: CheckoutStatus.getCheckoutId returned None")
+        raise HeadlessError("SYNC_STATUS_UNAVAILABLE: CheckoutStatus.getCheckoutId returned None")
     checkout_type = _safe_call(status, "getCheckoutType")
     project_path = _safe_call(status, "getProjectPath")
     project_name = _safe_call(status, "getProjectName")
@@ -78,14 +80,12 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
         is_checked_out = bool(_required_call(domain_file, "isCheckedOut"))
         is_checked_out_exclusive = bool(_required_call(domain_file, "isCheckedOutExclusive"))
         if is_checked_out != (checkout_status is not None):
-            raise RuntimeError(
+            raise HeadlessError(
                 "SYNC_STATUS_UNAVAILABLE: DomainFile checkout state is inconsistent "
                 "(isCheckedOut does not match getCheckoutStatus)"
             )
         if is_checked_out_exclusive and not is_checked_out:
-            raise RuntimeError(
-                "SYNC_STATUS_UNAVAILABLE: exclusive checkout reported without an active checkout"
-            )
+            raise HeadlessError("SYNC_STATUS_UNAVAILABLE: exclusive checkout reported without an active checkout")
         modified_since_checkout = bool(_required_call(domain_file, "modifiedSinceCheckout"))
         can_checkout = bool(_required_call(domain_file, "canCheckout"))
         can_checkin = bool(_required_call(domain_file, "canCheckin"))
@@ -190,10 +190,43 @@ def _collect_diff_ranges(differences, *, limit: int) -> tuple[list[Dict[str, Any
     return ranges, total_ranges > len(ranges)
 
 
+def _collect_diff_details(
+    from_program,
+    to_program,
+    ranges: list[Dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[list[Dict[str, Any]], bool]:
+    """Describe what differs at the start of each range (``ProgramDiffDetails``).
+
+    Ghidra renders the details as the text its Diff tool shows: symbol, comment,
+    code-unit and function changes at that address.  ``limit`` bounds the number
+    of ranges described; the second value reports whether any were left out.
+    """
+    if limit <= 0 or not ranges:
+        return [], bool(ranges) and limit <= 0
+    details_class = java_bindings._program_diff_details_class()
+    address_factory = from_program.getAddressFactory()
+    details: list[Dict[str, Any]] = []
+    for item in ranges[:limit]:
+        start_text = str(item.get("start"))
+        address = address_factory.getAddress(start_text)
+        if address is None:
+            details.append({"address": start_text, "details": None, "error": "address could not be resolved"})
+            continue
+        try:
+            text = details_class.getDiffDetails(from_program, to_program, address)
+        except Exception as exc:  # pragma: no cover - depends on Ghidra internals
+            details.append({"address": start_text, "details": None, "error": str(exc)})
+            continue
+        details.append({"address": start_text, "details": None if text is None else str(text).rstrip()})
+    return details, len(ranges) > limit
+
+
 def _release_domain_object(domain_object, consumer) -> None:
     if domain_object is None:
         return
     try:
         domain_object.release(consumer)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("failed to release domain object: %s", exc)

@@ -28,25 +28,18 @@ def test_mask_bsim_url_preserves_ipv6_brackets():
 
 
 def test_mask_bsim_url_masks_credentials_on_invalid_port():
-    assert (
-        mask_bsim_url("postgresql://user:pw@host:99999/db")
-        == "postgresql://***:***@host:99999/db"
-    )
+    assert mask_bsim_url("postgresql://user:pw@host:99999/db") == "postgresql://***:***@host:99999/db"
 
 
 def test_mask_bsim_url_masks_query_credentials():
     assert (
-        mask_bsim_url(
-            "postgresql://host/db?user=alice&password=topsecret&token=opaque&mode=ro"
-        )
+        mask_bsim_url("postgresql://host/db?user=alice&password=topsecret&token=opaque&mode=ro")
         == "postgresql://host/db?user=***&password=***&token=***&mode=***"
     )
 
 
 def test_mask_bsim_urls_in_exception_text_masks_userinfo_and_query_credentials():
-    masked = mask_bsim_urls_in_text(
-        "failed for postgresql://alice:topsecret@host/db?password=second&mode=ro"
-    )
+    masked = mask_bsim_urls_in_text("failed for postgresql://alice:topsecret@host/db?password=second&mode=ro")
 
     assert masked == "failed for postgresql://***:***@host/db?password=***&mode=***"
 
@@ -54,23 +47,15 @@ def test_mask_bsim_urls_in_exception_text_masks_userinfo_and_query_credentials()
 @pytest.mark.parametrize("separator", [",", ";", ")("])
 def test_mask_bsim_urls_in_text_masks_adjacent_urls(separator):
     masked = mask_bsim_urls_in_text(
-        "failed for postgresql://host/one"
-        + separator
-        + "postgresql://alice:secondsecret@host/two"
+        "failed for postgresql://host/one" + separator + "postgresql://alice:secondsecret@host/two"
     )
 
-    assert masked == (
-        "failed for postgresql://host/one"
-        + separator
-        + "postgresql://***:***@host/two"
-    )
+    assert masked == ("failed for postgresql://host/one" + separator + "postgresql://***:***@host/two")
     assert "secondsecret" not in masked
 
 
 def test_mask_bsim_urls_in_text_does_not_split_scheme_like_password():
-    masked = mask_bsim_urls_in_text(
-        "failed for postgresql://secret-user:foo://bar@host/db"
-    )
+    masked = mask_bsim_urls_in_text("failed for postgresql://secret-user:foo://bar@host/db")
 
     assert masked == "failed for postgresql://***"
     assert "secret-user" not in masked
@@ -83,10 +68,7 @@ def test_mask_bsim_url_masks_all_query_values_and_fragment():
         "credential=PRIVATE&pass%77ord=ENCODED&mode=ro#section"
     )
 
-    assert masked == (
-        "postgresql://host/db?sslpassword=***&auth_token=***&credential=***&"
-        "pass%77ord=***&mode=***#***"
-    )
+    assert masked == ("postgresql://host/db?sslpassword=***&auth_token=***&credential=***&pass%77ord=***&mode=***#***")
 
 
 def test_mask_bsim_url_masks_oauth_style_fragment():
@@ -97,9 +79,7 @@ def test_mask_bsim_url_masks_oauth_style_fragment():
 
 
 def test_mask_bsim_urls_in_text_masks_quote_inside_userinfo():
-    masked = mask_bsim_urls_in_text(
-        "failed for postgresql://alice:top'secret@host/db while connecting"
-    )
+    masked = mask_bsim_urls_in_text("failed for postgresql://alice:top'secret@host/db while connecting")
 
     assert masked == "failed for postgresql://***:***@host/db while connecting"
     assert "secret" not in masked
@@ -107,13 +87,9 @@ def test_mask_bsim_urls_in_text_masks_quote_inside_userinfo():
 
 @pytest.mark.parametrize("quote", ["'", '"'])
 def test_mask_bsim_urls_in_text_preserves_wrapping_quote(quote):
-    masked = mask_bsim_urls_in_text(
-        f"failed for {quote}postgresql://user:pw@host/db{quote}, retrying"
-    )
+    masked = mask_bsim_urls_in_text(f"failed for {quote}postgresql://user:pw@host/db{quote}, retrying")
 
-    assert masked == (
-        f"failed for {quote}postgresql://***:***@host/db{quote}, retrying"
-    )
+    assert masked == (f"failed for {quote}postgresql://***:***@host/db{quote}, retrying")
 
 
 @pytest.mark.parametrize(
@@ -133,9 +109,7 @@ def test_mask_bsim_url_fails_closed_for_malformed_userinfo(url):
 
 
 def test_mask_bsim_urls_in_text_fails_closed_for_malformed_userinfo():
-    masked = mask_bsim_urls_in_text(
-        "connection failed: postgresql://alice:top?secret@host/db"
-    )
+    masked = mask_bsim_urls_in_text("connection failed: postgresql://alice:top?secret@host/db")
 
     assert masked == "connection failed: postgresql://***"
 

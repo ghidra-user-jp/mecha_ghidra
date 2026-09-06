@@ -1,24 +1,66 @@
-"""Ghidra runtime backend implementing target/sync/core operations."""
+"""Ghidra runtime backend implementing target/sync/core operations.
+
+``RuntimeBackend`` is the single entry point the application services talk to.
+Each public method forwards to one of three runtime components and converts
+any failure into a ``DomainError`` tagged with the operation name, the target,
+and the domain path.  The forwarding is declared once by the ``_delegate``
+decorator so the methods below only spell out their public signatures.
+"""
 
 from __future__ import annotations
 
+import functools
+import inspect
+from collections.abc import Callable
 from typing import Any, Dict, List, Optional
 
-from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_headless.session import ProgramSession
+from ghidra_mcp.application.services.runtime_state import RuntimeState
 
-from .runtime.errors import to_domain_error
 from .runtime import RuntimeCoreExecution, RuntimeSessionStore, RuntimeSyncOperations, RuntimeTargetLifecycle
+from .runtime.errors import to_domain_error
+
+
+def _delegate(component: str, *, operation: str | None = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Forward the decorated method to ``self.<component>.<same name>``.
+
+    ``target`` is read from the ``name``/``target`` argument and ``domain_path``
+    from the argument of that name, so error details stay consistent without
+    repeating them at every call site.
+    """
+
+    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+        signature = inspect.signature(method)
+        operation_name = operation or method.__name__
+
+        @functools.wraps(method)
+        def wrapper(self: RuntimeBackend, *args: Any, **kwargs: Any) -> Any:
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            arguments = dict(bound.arguments)
+            arguments.pop("self", None)
+            target = arguments.get("name", arguments.get("target"))
+            domain_path = arguments.get("domain_path")
+            impl = getattr(getattr(self, component), method.__name__)
+            try:
+                return impl(*args, **kwargs)
+            except Exception as exc:
+                raise to_domain_error(
+                    exc,
+                    operation=operation_name,
+                    target=target,
+                    domain_path=domain_path if isinstance(domain_path, str) else None,
+                ) from exc
+
+        return wrapper
+
+    return decorator
 
 
 class RuntimeBackend:
-    """Façade that preserves the legacy RuntimeBackend public contract."""
+    """Façade over the runtime components with uniform error mapping."""
 
-    def __init__(
-        self,
-        *,
-        state: RuntimeState,
-    ) -> None:
+    def __init__(self, *, state: RuntimeState) -> None:
         store = RuntimeSessionStore(state=state, core_accessor=state.core_accessor)
         self._store = store
         self._target_lifecycle = RuntimeTargetLifecycle(store=store)
@@ -29,169 +71,75 @@ class RuntimeBackend:
             normalize_result=state.normalize_result,
         )
 
-    def _invoke(
-        self,
-        *,
-        operation: str,
-        func,
-        target: str | None = None,
-        domain_path: str | None = None,
-    ):
-        try:
-            return func()
-        except Exception as exc:  # noqa: BLE001
-            raise to_domain_error(
-                exc,
-                operation=operation,
-                target=target,
-                domain_path=domain_path,
-            ) from exc
+    # ---- target lifecycle -------------------------------------------------
 
+    @_delegate("_target_lifecycle")
     def create_project(
-        self,
-        project_location: str,
-        *,
-        project_name: str | None = None,
-        overwrite: bool = False,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="create_project",
-            func=lambda: self._target_lifecycle.create_project(
-                project_location,
-                project_name=project_name,
-                overwrite=overwrite,
-            ),
-        )
+        self, project_location: str, *, project_name: str | None = None, overwrite: bool = False
+    ) -> Dict[str, Any]: ...
 
+    @_delegate("_target_lifecycle")
     def create_session(
-        self,
-        name: str,
-        project_location: str,
-        *,
-        project_name: str | None = None,
-        domain_path: str | None = None,
-    ) -> ProgramSession:
-        return self._invoke(
-            operation="create_session",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._target_lifecycle.create_session(
-                name,
-                project_location,
-                project_name=project_name,
-                domain_path=domain_path,
-            ),
-        )
+        self, name: str, project_location: str, *, project_name: str | None = None, domain_path: str | None = None
+    ) -> ProgramSession: ...
 
+    @_delegate("_target_lifecycle")
     def register_target(
-        self,
-        name: str,
-        project_location: str,
-        *,
-        project_name: str | None = None,
-    ) -> Dict[str, Optional[str]]:
-        return self._invoke(
-            operation="register_target",
-            target=name,
-            func=lambda: self._target_lifecycle.register_target(
-                name,
-                project_location,
-                project_name=project_name,
-            ),
-        )
+        self, name: str, project_location: str, *, project_name: str | None = None
+    ) -> Dict[str, Optional[str]]: ...
 
-    def list_targets(self) -> List[Dict[str, Optional[str]]]:
-        return self._invoke(operation="list_targets", func=self._target_lifecycle.list_targets)
+    @_delegate("_target_lifecycle")
+    def list_targets(self) -> List[Dict[str, Optional[str]]]: ...
 
-    def list_programs(self, name: str):
-        return self._invoke(operation="list_programs", target=name, func=lambda: self._target_lifecycle.list_programs(name))
+    @_delegate("_target_lifecycle")
+    def list_programs(self, name: str): ...
 
-    def load_program(
-        self,
-        name: str,
-        domain_path: str,
-    ) -> str:
-        return self._invoke(
-            operation="load_program",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._target_lifecycle.load_program(name, domain_path),
-        )
+    @_delegate("_target_lifecycle")
+    def load_program(self, name: str, domain_path: str, *, version: int | None = None) -> Dict[str, Any]: ...
 
-    def import_program(self, name: str, binary_path: str, **kwargs) -> str:
-        return self._invoke(
-            operation="import_program",
-            target=name,
-            func=lambda: self._target_lifecycle.import_program(name, binary_path, **kwargs),
-        )
+    @_delegate("_target_lifecycle")
+    def create_repository_cache_project(
+        self, project_location: str, *, project_name: str | None = None, repository_url: str
+    ) -> Dict[str, Any]: ...
 
-    def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
-        return self._invoke(
-            operation="save_project_program",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._target_lifecycle.save_project_program(name, domain_path=domain_path),
-        )
+    @_delegate("_target_lifecycle")
+    def import_program(self, name: str, binary_path: str, **kwargs) -> str: ...
+
+    @_delegate("_target_lifecycle")
+    def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]: ...
+
+    @_delegate("_target_lifecycle")
+    def close_session(self, name: str, *, remove_program: bool = False) -> None: ...
+
+    @_delegate("_target_lifecycle")
+    def close_all(self) -> None: ...
+
+    # ---- core commands ----------------------------------------------------
 
     def execute_core_command(
-        self,
-        command: str,
-        params: Dict[str, Any] | None = None,
-        *,
-        target: str = "default",
+        self, command: str, params: Dict[str, Any] | None = None, *, target: str = "default"
     ) -> Any:
-        return self._invoke(
-            operation=command,
-            target=target,
-            func=lambda: self._core_execution.call(command, params or {}, target=target),
-        )
+        try:
+            return self._core_execution.call(command, params or {}, target=target)
+        except Exception as exc:
+            raise to_domain_error(exc, operation=command, target=target) from exc
 
-    def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
-        return self._invoke(
-            operation="get_project_sync_status",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.get_project_sync_status(name, domain_path=domain_path),
-        )
+    # ---- shared-project sync ----------------------------------------------
 
+    @_delegate("_sync_operations")
+    def get_project_sync_status(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]: ...
+
+    @_delegate("_sync_operations")
     def checkout_project_program(
-        self,
-        name: str,
-        *,
-        exclusive: bool = False,
-        domain_path: str | None = None,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="checkout_project_program",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.checkout_project_program(
-                name,
-                exclusive=exclusive,
-                domain_path=domain_path,
-            ),
-        )
+        self, name: str, *, exclusive: bool | None = None, domain_path: str | None = None
+    ) -> Dict[str, Any]: ...
 
+    @_delegate("_sync_operations")
     def add_project_program_to_version_control(
-        self,
-        name: str,
-        comment: str,
-        *,
-        keep_checked_out: bool = False,
-        domain_path: str | None = None,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="add_project_program_to_version_control",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.add_project_program_to_version_control(
-                name,
-                comment,
-                keep_checked_out=keep_checked_out,
-                domain_path=domain_path,
-            ),
-        )
+        self, name: str, comment: str, *, keep_checked_out: bool = False, domain_path: str | None = None
+    ) -> Dict[str, Any]: ...
 
+    @_delegate("_sync_operations")
     def commit_project_program(
         self,
         name: str,
@@ -201,75 +149,24 @@ class RuntimeBackend:
         auto_checkout: bool = True,
         on_conflict: str = "abort",
         domain_path: str | None = None,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="commit_project_program",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.commit_project_program(
-                name,
-                message,
-                keep_checked_out=keep_checked_out,
-                auto_checkout=auto_checkout,
-                on_conflict=on_conflict,
-                domain_path=domain_path,
-            ),
-        )
+    ) -> Dict[str, Any]: ...
 
+    @_delegate("_sync_operations")
     def pull_project_program(
-        self,
-        name: str,
-        *,
-        on_local_changes: str = "abort",
-        domain_path: str | None = None,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="pull_project_program",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.pull_project_program(
-                name,
-                on_local_changes=on_local_changes,
-                domain_path=domain_path,
-            ),
-        )
+        self, name: str, *, on_local_changes: str = "abort", domain_path: str | None = None
+    ) -> Dict[str, Any]: ...
 
+    @_delegate("_sync_operations")
     def undo_checkout_project_program(
-        self,
-        name: str,
-        *,
-        discard_local_changes: bool = True,
-        domain_path: str | None = None,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="undo_checkout_project_program",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.undo_checkout_project_program(
-                name,
-                discard_local_changes=discard_local_changes,
-                domain_path=domain_path,
-            ),
-        )
+        self, name: str, *, discard_local_changes: bool = True, domain_path: str | None = None
+    ) -> Dict[str, Any]: ...
 
+    @_delegate("_sync_operations")
     def terminate_project_program_checkout(
-        self,
-        name: str,
-        checkout_id: int,
-        *,
-        domain_path: str | None = None,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="terminate_project_program_checkout",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.terminate_project_program_checkout(
-                name,
-                checkout_id,
-                domain_path=domain_path,
-            ),
-        )
+        self, name: str, checkout_id: int, *, domain_path: str | None = None
+    ) -> Dict[str, Any]: ...
 
+    @_delegate("_sync_operations")
     def delete_shared_project_file(
         self,
         name: str,
@@ -279,43 +176,12 @@ class RuntimeBackend:
         expected_latest_version: int | None = None,
         allow_private: bool = False,
         allow_non_atomic_versioned_delete: bool = False,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="delete_shared_project_file",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.delete_shared_project_file(
-                name,
-                domain_path=domain_path,
-                confirm=confirm,
-                expected_latest_version=expected_latest_version,
-                allow_private=allow_private,
-                allow_non_atomic_versioned_delete=allow_non_atomic_versioned_delete,
-            ),
-        )
+    ) -> Dict[str, Any]: ...
 
-    def reload_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]:
-        return self._invoke(
-            operation="reload_project_program",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.reload_project_program(name, domain_path=domain_path),
-        )
+    @_delegate("_sync_operations")
+    def get_version_history(self, name: str, *, domain_path: str | None = None, limit: int = 50) -> Dict[str, Any]: ...
 
-    def get_version_history(
-        self,
-        name: str,
-        *,
-        domain_path: str | None = None,
-        limit: int = 50,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="get_version_history",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.get_version_history(name, domain_path=domain_path, limit=limit),
-        )
-
+    @_delegate("_sync_operations")
     def get_version_diff(
         self,
         name: str,
@@ -324,29 +190,11 @@ class RuntimeBackend:
         to_version: int,
         domain_path: str | None = None,
         range_limit: int = 200,
-    ) -> Dict[str, Any]:
-        return self._invoke(
-            operation="get_version_diff",
-            target=name,
-            domain_path=domain_path,
-            func=lambda: self._sync_operations.get_version_diff(
-                name,
-                from_version=from_version,
-                to_version=to_version,
-                domain_path=domain_path,
-                range_limit=range_limit,
-            ),
-        )
+        include_details: bool = False,
+        details_limit: int = 20,
+    ) -> Dict[str, Any]: ...
 
-    def close_session(self, name: str, *, remove_program: bool = False) -> None:
-        self._invoke(
-            operation="close_session",
-            target=name,
-            func=lambda: self._target_lifecycle.close_session(name, remove_program=remove_program),
-        )
-
-    def close_all(self) -> None:
-        self._invoke(operation="close_all", func=self._target_lifecycle.close_all)
+    # ---- state queries (no error mapping needed) -------------------------
 
     def has_sessions(self) -> bool:
         return self._store.has_sessions()
@@ -356,18 +204,6 @@ class RuntimeBackend:
 
     def project_lock_key(self, name: str) -> str | None:
         return self._store.project_lock_key(name)
-
-    def call(
-        self,
-        command: str,
-        params: Dict[str, Any] | None = None,
-        target: str = "default",
-    ) -> Any:
-        return self._invoke(
-            operation="call",
-            target=target,
-            func=lambda: self._core_execution.call(command, params, target=target),
-        )
 
 
 __all__ = ["RuntimeBackend"]
