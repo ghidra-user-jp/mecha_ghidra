@@ -161,17 +161,31 @@ jobs:
         include:
           - platform: linux_arm_64
             runs_on: ubuntu-24.04-arm
+            build_mode: --docker
+          - platform: mac_arm_64
+            runs_on: macos-15
+            build_mode: --no-docker
+          - platform: mac_x86_64
+            runs_on: macos-15-intel
+            build_mode: --no-docker
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
+      - name: Set up Java for macOS native builds
+        if: runner.os == 'macOS'
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Make scripts executable
         run: chmod +x scripts/build_decompiler_natives.sh scripts/build_linux_arm64_decompiler.sh
 
-      - name: Build decompiler overlay against the Ubuntu 22.04 ABI
+      - name: Build decompiler overlay
         env:
           DOCKER_IMAGE: eclipse-temurin:21-jdk-jammy
-        run: ./scripts/build_decompiler_natives.sh --platform "${{ matrix.platform }}" --docker --no-patched-dist --output-dir dist
+        run: ./scripts/build_decompiler_natives.sh --platform "${{ matrix.platform }}" "${{ matrix.build_mode }}" --no-patched-dist --output-dir dist
 
       - name: Verify overlay contents
         run: |
@@ -185,6 +199,7 @@ jobs:
           tar -tzf "${overlay}" | grep '^licenses/zlib_License.txt$'
 
       - name: Verify binaries run on Ubuntu 22.04
+        if: runner.os == 'Linux'
         run: |
           set -eu
           overlay="$(find dist -type f -name "*${{ matrix.platform }}_decompiler_overlay.tar.gz" | head -n 1)"
@@ -248,7 +263,9 @@ jobs:
 
           mkdir -p release-assets/decompiler-natives
           for overlay in \
-            "$(find platform-artifacts -type f -name '*linux_arm_64_decompiler_overlay.tar.gz' | head -n 1)"
+            "$(find platform-artifacts -type f -name '*linux_arm_64_decompiler_overlay.tar.gz' | head -n 1)" \
+            "$(find platform-artifacts -type f -name '*mac_arm_64_decompiler_overlay.tar.gz' | head -n 1)" \
+            "$(find platform-artifacts -type f -name '*mac_x86_64_decompiler_overlay.tar.gz' | head -n 1)"
           do
             test -n "${overlay}"
             tar -xzf "${overlay}" -C release-assets/decompiler-natives
@@ -289,6 +306,10 @@ jobs:
           test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | wc -l)" -eq 1
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_arm_64/decompile$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_arm_64/sleigh$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_x86_64/decompile$'
+          unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_x86_64/sleigh$'
           unzip -Z1 "${zip_path}" | grep '^LICENSE$'
           unzip -Z1 "${zip_path}" | grep '^NOTICE$'
           unzip -Z1 "${zip_path}" | grep '^DISCLAIMER.md$'
@@ -321,11 +342,11 @@ jobs:
           This release provides two ZIP assets:
 
           - \`${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}\`
-            Ready-to-use Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} distribution with the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries already included.
+            Ready-to-use Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} distribution with Linux ARM64 and macOS native \`decompile\` / \`sleigh\` binaries already included.
             Extract this ZIP and run Ghidra from the extracted \`${MECHA_GHIDRA_GHIDRA_DIST_ROOT}\` directory.
 
           - \`${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}\`
-            Overlay ZIP containing the added Linux ARM64 native \`decompile\` / \`sleigh\` binaries and required upstream license notices.
+            Overlay ZIP containing Linux ARM64 and macOS native \`decompile\` / \`sleigh\` binaries and required upstream license notices.
             Extract it at the root of an existing Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} installation.
             Files are already stored under their final \`Ghidra/Features/Decompiler/os/...\` paths inside the ZIP.
 
@@ -333,13 +354,17 @@ jobs:
 
           - \`Ghidra/Features/Decompiler/os/linux_arm_64/decompile\`
           - \`Ghidra/Features/Decompiler/os/linux_arm_64/sleigh\`
+          - \`Ghidra/Features/Decompiler/os/mac_arm_64/decompile\`
+          - \`Ghidra/Features/Decompiler/os/mac_arm_64/sleigh\`
+          - \`Ghidra/Features/Decompiler/os/mac_x86_64/decompile\`
+          - \`Ghidra/Features/Decompiler/os/mac_x86_64/sleigh\`
 
           The native archives include Ghidra's upstream \`LICENSE\`, \`NOTICE\`,
           \`DISCLAIMER.md\`, and the Decompiler module's applicable third-party
           zlib license. The mecha_ghidra Python package is licensed under
           Apache License 2.0.
 
-          The upstream Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} ZIP already includes \`mac_arm_64\` and \`mac_x86_64\` decompiler binaries.
+          The upstream Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION} ZIP does not include these three native platform directories; this release adds them from the matching Ghidra source tag.
           EOF
 
       - name: Look up existing release

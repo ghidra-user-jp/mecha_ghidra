@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_decompiler_natives.sh"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-decompiler-natives.yml"
+RELEASE_ENV = ROOT / "scripts" / "ghidra_release.env"
 
 
 def _run_with_retry_source() -> str:
@@ -69,3 +70,27 @@ def test_release_workflow_checks_ubuntu_2204_and_omits_body_checksums():
     assert "ubuntu:22.04" in source
     assert "SHA-256" not in body_step
     assert "sha256sum" not in body_step
+
+
+def test_ghidra_1213_release_builds_all_missing_native_platforms():
+    release_env = RELEASE_ENV.read_text(encoding="utf-8")
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "MECHA_GHIDRA_GHIDRA_VERSION=12.1.3" in release_env
+    assert "MECHA_GHIDRA_GHIDRA_RELEASE_TAG=Ghidra_12.1.3_build" in release_env
+    assert "MECHA_GHIDRA_GHIDRA_DIST_FILENAME=ghidra_12.1.3_PUBLIC_20260817.zip" in release_env
+    assert (
+        "MECHA_GHIDRA_GHIDRA_DIST_SHA256=93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54"
+        in release_env
+    )
+
+    for platform, runner in (
+        ("linux_arm_64", "ubuntu-24.04-arm"),
+        ("mac_arm_64", "macos-15"),
+        ("mac_x86_64", "macos-15-intel"),
+    ):
+        assert f"- platform: {platform}" in workflow
+        assert f"runs_on: {runner}" in workflow
+        assert f"*{platform}_decompiler_overlay.tar.gz" in workflow
+        assert f"Ghidra/Features/Decompiler/os/{platform}/decompile" in workflow
+        assert f"Ghidra/Features/Decompiler/os/{platform}/sleigh" in workflow

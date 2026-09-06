@@ -33,14 +33,18 @@
   - `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
   - `dist/ghidra_*_mac_x86_64_decompiler.zip`
   - ローカル検証用の対応する `.sha256`
-- GitHub Actions の `.github/workflows/release-decompiler-natives.yml` では、release 用 Linux ARM64 decompiler overlay を native hosted runner `ubuntu-24.04-arm` 上でビルドします。upstream 公式 Ghidra 12.1.2 ZIP には `mac_arm_64` と `mac_x86_64` の decompiler binaries が含まれています。
+- GitHub Actions の `.github/workflows/release-decompiler-natives.yml` では、release 用 decompiler overlay を native hosted runner 上でビルドします。`linux_arm_64` は `ubuntu-24.04-arm`、`mac_arm_64` は `macos-15`、`mac_x86_64` は `macos-15-intel` を使います。upstream 公式 Ghidra 12.1.3 ZIP には、この3つの native platform directory が含まれていません。
 - version tag push では Python の test/package gate と native build の完了後に GitHub release asset を公開します。手動 workflow 実行では release 公開はせず、workflow artifact としてアップロードします。同じtagを再実行した場合は、既存release notesを置換せずassetだけを更新します。
 - GitHub release へは、利用者向け ZIP asset を 2 つ publish します。
-  - `ghidra_12.1.2_decompiler_natives_all.zip`: Linux ARM64 decompiler ファイルを追加済みの、そのまま使える Ghidra 12.1.2 配布物
-  - `ghidra_decompiler_natives_all.zip`: 既存の Ghidra 12.1.2 install へ追加する Linux ARM64 decompiler ファイルだけの overlay ZIP
+  - `ghidra_12.1.3_decompiler_natives_all.zip`: Linux ARM64 と macOS の decompiler ファイルを追加済みの、そのまま使える Ghidra 12.1.3 配布物
+  - `ghidra_decompiler_natives_all.zip`: 既存の Ghidra 12.1.3 install へ追加する Linux ARM64 と macOS の decompiler ファイルをまとめた overlay ZIP
 - release tagからtest済みの `ghidra_mcp` wheel と source distribution も同じGitHub releaseへ添付します。PyPIへの公開はrelease ownerが別途実施します。
 - release overlay が追加する native decompiler path は次のとおりです。
-  - `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
-  - `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
+- `Ghidra/Features/Decompiler/os/linux_arm_64/decompile`
+- `Ghidra/Features/Decompiler/os/linux_arm_64/sleigh`
+- `Ghidra/Features/Decompiler/os/mac_arm_64/decompile`
+- `Ghidra/Features/Decompiler/os/mac_arm_64/sleigh`
+- `Ghidra/Features/Decompiler/os/mac_x86_64/decompile`
+- `Ghidra/Features/Decompiler/os/mac_x86_64/sleigh`
 - 通常のリポジトリ snapshot は、GitHub 標準の `Source code (zip)` / `Source code (tar.gz)` を使います。
 - release page 本文には、どちらの ZIP を使うかの説明と上記の追加パスを書きます。`.sha256` や古い legacy release asset は publish 時に削除します。

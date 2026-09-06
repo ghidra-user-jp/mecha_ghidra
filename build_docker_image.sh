@@ -58,8 +58,8 @@ Environment:
                         Default decompiler natives overlay SHA256 override.
 
 Defaults:
-  linux/amd64           Uses the upstream official Ghidra 12.1.2 ZIP.
-  linux/arm64           Uses the upstream official Ghidra 12.1.2 ZIP plus
+  linux/amd64           Uses the upstream official Ghidra 12.1.3 ZIP.
+  linux/arm64           Uses the upstream official Ghidra 12.1.3 ZIP plus
                         the mecha_ghidra decompiler natives overlay.
 EOF
 }

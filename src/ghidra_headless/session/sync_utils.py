@@ -74,8 +74,8 @@ def _sync_status_from_domain_file(domain_file) -> Dict[str, Any]:
                     checkouts_list.append(converted)
         version = _required_call(domain_file, "getVersion")
         latest_version = _required_call(domain_file, "getLatestVersion")
-        # GhidraFile.isLatestVersion() always returns true in Ghidra 12.1.2,
-        # including for a stale checkout.  Compare the actual version numbers.
+        # GhidraFile.isLatestVersion() always returns true in Ghidra 12.1.2 and
+        # 12.1.3, including for a stale checkout. Compare the actual versions.
         is_latest_version: bool | None = int(version) == int(latest_version)
         is_checked_out = bool(_required_call(domain_file, "isCheckedOut"))
         is_checked_out_exclusive = bool(_required_call(domain_file, "isCheckedOutExclusive"))
