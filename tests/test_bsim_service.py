@@ -1239,3 +1239,30 @@ def test_register_target_reports_already_registered_for_duplicate_insert():
     assert "already ingested" in message
     # Other insert failures keep the generic insert code.
     assert _classify_bsim_message("BSIM_INSERT_FAILED: disk full").startswith("BSIM_OPERATION_FAILED:")
+
+
+def test_unified_bsim_query_routes_program_and_selected_functions():
+    service, core, _target = _service()
+    service.bsim_query("fw", scope="program", min_function_size=32)
+    assert core.calls[-1][0] == "bsim_query_target"
+    assert core.calls[-1][1]["min_function_size"] == 32
+    result = service.bsim_query("fw", scope="functions", addresses=["0x1000"])
+    assert core.calls[-1][0] == "bsim_query_function"
+    assert core.calls[-1][1]["addresses"] == ["0x1000"]
+    assert result["query"]["scope"] == "function"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"scope": "program", "addresses": ["0x1000"]},
+        {"scope": "functions", "addresses": ["0x1000"], "min_function_size": 1},
+        {"scope": "functions"},
+        {"scope": "unknown"},
+    ],
+)
+def test_unified_bsim_query_rejects_conflicting_or_missing_selectors(kwargs):
+    service, core, _target = _service()
+    with pytest.raises(ValueError):
+        service.bsim_query("fw", **kwargs)
+    assert core.calls == []

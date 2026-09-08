@@ -125,6 +125,30 @@ def public_parameter_names(spec: ToolSpec) -> list[str]:
     return list(_build_signature(spec).parameters.keys())
 
 
+def _without_schema_titles(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop generated display labels, retaining property names and constraints.
+
+    Recurse only into schema-valued keywords: a property named ``title`` or
+    a literal object in ``default``/``const`` must remain intact.
+    """
+    mappings = {"properties", "$defs", "patternProperties", "dependentSchemas"}
+    sequences = {"allOf", "anyOf", "oneOf", "prefixItems"}
+    children = {"items", "additionalProperties", "contains", "not", "if", "then", "else", "propertyNames"}
+    result = {}
+    for key, value in schema.items():
+        if key == "title":
+            continue
+        if key in mappings:
+            result[key] = {name: _without_schema_titles(child) for name, child in value.items()}
+        elif key in sequences:
+            result[key] = [_without_schema_titles(child) for child in value]
+        elif key in children and isinstance(value, dict):
+            result[key] = _without_schema_titles(value)
+        else:
+            result[key] = value
+    return result
+
+
 def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
     """Return a JSON schema matching the tool's public (registered) parameters.
 
@@ -160,7 +184,7 @@ def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
         schema["required"] = required
     elif "required" in schema:
         del schema["required"]
-    return schema
+    return _without_schema_titles(schema)
 
 
 def public_output_schema(spec: ToolSpec) -> dict[str, Any]:
@@ -305,13 +329,15 @@ def tool_annotations_for_spec(spec: ToolSpec) -> ToolAnnotations | None:
 
 
 def as_anticipated_tool_failure(tool_fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap a tool callable so its failures reach MCP clients as ``ToolError``.
+    """Preserve anticipated failures and domain metadata at the MCP boundary.
 
     mcp 2.x treats every exception other than ``ToolError`` as a crash and
     replaces its message with ``Error executing tool <name>``.  The dispatcher
     already maps domain errors to public-safe messages (error codes, hints, and
     sanitized causes), so those messages must travel as anticipated failures.
-    The ``domain_error`` payload attached by ``error_mapper`` is carried over.
+    The ``domain_error`` payload attached by ``error_mapper`` is returned in
+    both text and structured content with ``isError`` set. Other anticipated
+    exceptions are raised as ``ToolError``.
     """
 
     @functools.wraps(tool_fn)

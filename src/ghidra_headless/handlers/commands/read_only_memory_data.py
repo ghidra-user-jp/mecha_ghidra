@@ -289,33 +289,6 @@ def search_bytes(params, *, ensure_context, to_int, decode_hex_bytes):
     return results
 
 
-def get_struct(params, *, ensure_context, get_struct_datatype, describe_struct):
-    ctx = ensure_context()
-    name = params.get("name")
-    if not name:
-        raise ValueError("name is required")
-    category = params.get("category")
-    struct = get_struct_datatype(ctx, name, category)
-    if struct is None:
-        raise LookupError("Struct not found: %s" % name)
-    return describe_struct(struct)
-
-
-def get_enum(params, *, ensure_context, get_enum_datatype, describe_enum, safe_call):
-    ctx = ensure_context()
-    name = params.get("name")
-    if not name:
-        raise ValueError("name is required")
-    category = params.get("category")
-    enum_dt = get_enum_datatype(ctx, name, category)
-    if enum_dt is None:
-        raise LookupError("Enum not found: %s" % name)
-    class_name = safe_call(safe_call(enum_dt, "getClass"), "getName")
-    if not class_name or "Enum" not in str(class_name):
-        raise TypeError("Specified data type is not an enum")
-    return describe_enum(enum_dt)
-
-
 def list_data_types(params, *, ensure_context, to_int, dt_manager, collect, iter_items, safe_call, describe_data_type):
     ctx = ensure_context()
     offset, limit = normalize_pagination(params, to_int, 100)

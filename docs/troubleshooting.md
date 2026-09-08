@@ -2,7 +2,7 @@
 
 # Troubleshooting and upgrades
 
-Tool failures use MCP `isError: true` and a stable code at the start of the error text. Branch on the code rather than the free-form explanation. A large-result availability notice is handled [separately](configuration.md#large-results).
+Tool failures set MCP `isError: true`. Domain errors retain `code`, `message`, `retryable`, `hint`, and `details` under `structuredContent.error` and in matching JSON text. Branch on stable codes and inspect partial completion in `details` before retrying. SDK errors such as argument validation may be text-only. Batch-edit item failures use `status` and `results` in a normal response. Large-result availability is handled [separately](configuration.md#large-results).
 
 ## Startup and connection
 
@@ -25,6 +25,9 @@ Tool failures use MCP `isError: true` and a stable code at the start of the erro
 | --- | --- |
 | `PATH_NOT_ALLOWED` | Use a path inside the corresponding allowed root, after symlink resolution |
 | `LOCK_TIMEOUT` | Another call holds the target lock; wait for it before retrying |
+| `AMBIGUOUS_FUNCTION`, `AMBIGUOUS_DATA_TYPE` | Inspect `details.candidates`; use a function address/qualified name or a full type path |
+| `SESSION_CHANGED` | Read current state and restart pagination or update the revision for edits |
+| `BSIM_MATCH_STALE` | The loaded program MD5, path, or function entry differs from the match; verify the original program and query result |
 | `PROGRAM_NOT_ANALYZED` | Run `analyze_program` before local variable naming/type operations |
 | `CHECKOUT_REQUIRED` | Check out the versioned shared file before editing |
 | `CHECKOUT_UNAVAILABLE` | Inspect repository checkout status; another user may hold an exclusive checkout |
@@ -51,8 +54,8 @@ Version 0.1.5 adds Ghidra 12.1.3 support and matching native overlays. Choose th
 | `search_functions_by_name` | `list_functions(filter=...)` |
 | `list_classes` | `list_namespaces(classes_only=true)` |
 | `reanalyze_program` | `analyze_program(force=true)` |
-| `set_decompiler_comment` | `set_comment(kind="pre")` |
-| `set_disassembly_comment` | `set_comment(kind="eol")` |
+| `set_decompiler_comment` | `apply_edits`: `kind="set_comment", comment_type="pre"` |
+| `set_disassembly_comment` | `apply_edits`: `kind="set_comment", comment_type="eol"` |
 | `clear_struct` | `remove_struct_members(clear_all=true)` |
 | `delete_struct` | `delete_data_type` |
 | `reload_project_program` | `load_project_program` on the current domain path; check `reloaded=true` |
@@ -62,8 +65,8 @@ Version 0.1.5 adds Ghidra 12.1.3 support and matching native overlays. Choose th
 
 ### Response and behavior changes
 
-- `get_function` returns signatures, parameters, and locals. `list_imports`, `list_exports`, `list_namespaces`, and `get_callee` return objects, not strings. Xrefs include the function at the other end.
-- `rename_variable`, `set_function_prototype`, and `set_local_variable_type` accept function address or name. `search_bytes` accepts `??` wildcard bytes; `list_strings.filter` is case-insensitive.
+- `get_function` returns signatures, parameters, and locals. `list_imports`, `list_exports`, `list_namespaces`, and `get_call_edges` return objects, not strings. Xrefs include the function at the other end.
+- `set_function_prototype`, and `set_local_variable_type` accept function address or name. `search_bytes` accepts `??` wildcard bytes; `list_strings.filter` is case-insensitive.
 - Checkout's omitted `exclusive` follows server policy. Commit supports `on_conflict="keep"`. Version diffs accept `include_details`, and BSim queries exclude self matches by default.
 - New analysis/editing tools include `get_program_info`, undo/redo, export, comment reading, symbol search, label creation, enum editing, and C declaration parsing. BSim adds match-name application, signature/name updates, and executable deletion; see [tools](tools.md).
 - `pull_project_program` declares its returned `checked_out` field, preventing a completed pull from failing output validation. BSim duplicate registration returns `BSIM_ALREADY_REGISTERED`; a refused exclusive checkout returns `CHECKOUT_UNAVAILABLE`.

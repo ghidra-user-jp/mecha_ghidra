@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal, get_args, get_origin
 
 import pytest
+from pydantic import BaseModel
 
 from ghidra_mcp import cli
 from ghidra_mcp.application.commands import DATATYPE_COMMANDS, FUNCTION_COMMANDS, MEMORY_COMMANDS, SYMBOL_COMMANDS
@@ -11,12 +12,6 @@ from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
 _LIST_CORE_COMMANDS = {
     "list_functions",
-    "disassemble_function",
-    "disassemble_range",
-    "get_callee",
-    "get_xrefs_to",
-    "get_xrefs_from",
-    "get_function_xrefs",
     "list_segments",
     "list_imports",
     "list_exports",
@@ -38,6 +33,8 @@ class RecordingCoreService:
 
     def call(self, command: str, params: dict[str, Any], target: str):
         self.calls.append((command, dict(params), target))
+        if command in {"get_xrefs", "get_call_edges", "disassemble"}:
+            return {"program": "/main", "revision": "r:0", "items": [], "has_more": False, "next_cursor": None}
         if command in _LIST_CORE_COMMANDS:
             return []
         if command == "decompile_function":
@@ -243,6 +240,12 @@ class RecordingService:
 
 def _sample_for_field(name: str, annotation: Any) -> Any:
     origin = get_origin(annotation)
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return {
+            key: _sample_for_field(key, field.annotation)
+            for key, field in annotation.model_fields.items()
+            if field.is_required()
+        }
 
     if origin is Literal:
         return get_args(annotation)[0]
@@ -311,8 +314,6 @@ def _required_raw_args(spec_name: str) -> dict[str, Any]:
             raw[key] = _sample_for_field(key, field.annotation)
     if spec_name == "decompile_function":
         raw["name"] = "main"
-    if spec_name == "rename_function":
-        raw["oldName"] = "old_fn"
     return raw
 
 

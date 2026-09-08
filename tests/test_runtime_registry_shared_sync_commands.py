@@ -324,7 +324,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         generated_domain_path = runtime_results["import_program_for_sync"]["program"]
 
         runtime_results["create_session"] = _unwrap_runtime_result(
-            cli.create_session(
+            cli.open_program(
                 target=create_target,
                 project_location=project_location,
                 project_name=project_name,
@@ -334,7 +334,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         runtime_results["close_session"] = _unwrap_runtime_result(cli.close_session(create_target))
 
         runtime_results["create_session_for_remove"] = _unwrap_runtime_result(
-            cli.create_session(
+            cli.open_program(
                 target=remove_target,
                 project_location=project_location,
                 project_name=project_name,
@@ -372,11 +372,16 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         function_address = functions[0]["entry"]
         first_comment = f"runtime sync commit {uuid.uuid4().hex}"
         runtime_results["set_disassembly_comment_for_commit"] = _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=first_comment,
+            cli.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": first_comment,
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         dirty_status = _unwrap_runtime_result(
@@ -425,11 +430,16 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         second_comment = f"runtime sync pull discard {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=second_comment,
+            cli.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": second_comment,
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
@@ -456,11 +466,16 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
             )
         )
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=f"runtime sync undo {uuid.uuid4().hex}",
+            cli.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": f"runtime sync undo {uuid.uuid4().hex}",
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         runtime_results["undo_checkout_project_program"] = _unwrap_runtime_result(
@@ -510,11 +525,11 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
 
         kept_comment = f"runtime sync undo keep {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=kept_comment,
+            cli.apply_edits(
                 target=target,
+                edits=[
+                    {"kind": "set_comment", "address": function_address, "comment": kept_comment, "comment_type": "eol"}
+                ],
             )
         )
         runtime_results["undo_checkout_project_program_keep"] = _unwrap_runtime_result(
@@ -527,7 +542,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         kept_domain_path = runtime_results["undo_checkout_project_program_keep"].get("kept_program")
         assert kept_domain_path
         assert kept_domain_path != generated_domain_path
-        kept_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        kept_disassembly = _unwrap_runtime_result(cli.disassemble(address=function_address, target=target))["items"]
         kept_instruction = next(item for item in kept_disassembly if item["address"] == function_address)
         assert kept_instruction["comment"] == kept_comment
 
@@ -546,7 +561,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
             )
         )
         _unwrap_runtime_result(cli.load_project_program(target=target, domain_path=generated_domain_path))
-        original_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        original_disassembly = _unwrap_runtime_result(cli.disassemble(address=function_address, target=target))["items"]
         original_instruction = next(item for item in original_disassembly if item["address"] == function_address)
         assert original_instruction["comment"] != kept_comment
 
@@ -567,11 +582,16 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         remote_comment = f"runtime remote advance {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=remote_comment,
+            cli.apply_edits(
                 target=stale_target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": remote_comment,
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         remote_commit = _unwrap_runtime_result(
@@ -597,7 +617,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["pull_project_program_remote_advance"]["followed_latest"] is True
         assert runtime_results["pull_project_program_remote_advance"]["reloaded"] is True
         assert int(runtime_results["pull_project_program_remote_advance"]["version"]) == remote_version
-        primary_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        primary_disassembly = _unwrap_runtime_result(cli.disassemble(address=function_address, target=target))["items"]
         primary_instruction = next(item for item in primary_disassembly if item["address"] == function_address)
         assert primary_instruction["comment"] == remote_comment
 
@@ -659,11 +679,16 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert hijacked_status["is_hijacked"] is True
         _unwrap_runtime_result(cli.load_project_program(target=stale_target, domain_path=generated_domain_path))
         with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=f"must be rejected {uuid.uuid4().hex}",
+            cli.apply_edits(
                 target=stale_target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": f"must be rejected {uuid.uuid4().hex}",
+                        "comment_type": "eol",
+                    }
+                ],
             )
         runtime_results["pull_project_program_hijack_recovery"] = _unwrap_runtime_result(
             cli.pull_project_program(
@@ -679,9 +704,9 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert recovered_status["is_hijacked"] is False
         assert recovered_status["is_versioned"] is True
         assert int(recovered_status["version"]) == remote_version
-        recovered_disassembly = _unwrap_runtime_result(
-            cli.disassemble_function(address=function_address, target=stale_target)
-        )
+        recovered_disassembly = _unwrap_runtime_result(cli.disassemble(address=function_address, target=stale_target))[
+            "items"
+        ]
         recovered_instruction = next(item for item in recovered_disassembly if item["address"] == function_address)
         assert recovered_instruction["comment"] == remote_comment
         _unwrap_runtime_result(cli.close_session(stale_target))

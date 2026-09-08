@@ -169,20 +169,26 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
     last_error = None
     for entry in function_entries:
         address = entry["entry"]
-        info = _unwrap_runtime_result(cli.get_function(address=address, target=target))
-        function_name = info["name"]
         decompiled = _unwrap_runtime_result(cli.decompile_function(address=address, target=target))
         for var_name in _extract_variable_candidates(decompiled):
             new_name = f"it_{var_name}_renamed"
             try:
                 rename_result = _unwrap_runtime_result(
-                    cli.rename_variable(
-                        function_name=function_name,
-                        old_name=var_name,
-                        new_name=new_name,
+                    cli.apply_edits(
                         target=target,
+                        edits=[
+                            {
+                                "kind": "rename_variable",
+                                "old_name": var_name,
+                                "new_name": new_name,
+                                "function_address": address,
+                            }
+                        ],
                     )
                 )
+                if rename_result["status"] != "applied":
+                    last_error = rename_result
+                    continue
                 set_type_result = _unwrap_runtime_result(
                     cli.set_local_variable_type(
                         function_address=address,
@@ -236,12 +242,12 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
         _log_runtime_result("delete_function(raw)", delete_function_result)
         _log_runtime_result("create_function(raw)", create_function_result)
 
-        disassembly = _unwrap_runtime_result(cli.disassemble_function(address="0x401000", target=target))
+        disassembly = _unwrap_runtime_result(cli.disassemble(address="0x401000", target=target))["items"]
         assert isinstance(disassembly, list) and disassembly
 
         range_disassembly = _unwrap_runtime_result(
-            cli.disassemble_range(start_address="0x401000", length=4, limit=5, target=target)
-        )
+            cli.disassemble(start_address="0x401000", length=4, limit=5, target=target)
+        )["items"]
         analyze_result = _unwrap_runtime_result(cli.analyze_program(target=target))
         reanalyze_result = _unwrap_runtime_result(cli.analyze_program(force=True, target=target))
         _log_runtime_result("disassemble_range(raw)", range_disassembly)
@@ -342,21 +348,31 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("list_bookmarks", list_bookmarks_result)
 
         decompiler_comment_result = _unwrap_runtime_result(
-            cli.set_comment(
-                address=primary_address,
-                comment="runtime decompiler comment",
-                kind="pre",
+            cli.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": primary_address,
+                        "comment": "runtime decompiler comment",
+                        "comment_type": "pre",
+                    }
+                ],
             )
         )
         _log_runtime_result("set_comment(pre)", decompiler_comment_result)
 
         disassembly_comment_result = _unwrap_runtime_result(
-            cli.set_comment(
-                address=primary_address,
-                comment="runtime disasm comment",
-                kind="eol",
+            cli.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": primary_address,
+                        "comment": "runtime disasm comment",
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         _log_runtime_result("set_comment(eol)", disassembly_comment_result)
@@ -410,22 +426,27 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         renamed_aux_1 = f"{aux_name}_r1"
         rename_function_result = _unwrap_runtime_result(
-            cli.rename_function(old_name=aux_name, new_name=renamed_aux_1, target=target)
+            cli.apply_edits(
+                target=target, edits=[{"kind": "rename_function", "new_name": renamed_aux_1, "address": aux_address}]
+            )
         )
         _log_runtime_result("rename_function", rename_function_result)
 
         renamed_aux_2 = f"{renamed_aux_1}_r2"
         rename_function_by_address_result = _unwrap_runtime_result(
-            cli.rename_function(
-                address=aux_address,
-                new_name=renamed_aux_2,
-                target=target,
+            cli.apply_edits(
+                target=target, edits=[{"kind": "rename_function", "address": aux_address, "new_name": renamed_aux_2}]
             )
         )
         _log_runtime_result("rename_function(address)", rename_function_by_address_result)
 
-        with pytest.raises(Exception, match="VALIDATION_ERROR"):
-            cli.rename_data(address=aux_address, new_name=f"{renamed_aux_2}_data", target=target)
+        rejected = _unwrap_runtime_result(
+            cli.apply_edits(
+                target=target,
+                edits=[{"kind": "rename_data", "address": aux_address, "new_name": f"{renamed_aux_2}_data"}],
+            )
+        )
+        assert rejected["status"] == "rolled_back" and rejected["applied_count"] == 0
         function_after_rename_data = _unwrap_runtime_result(cli.get_function(address=aux_address, target=target))
         assert function_after_rename_data["name"] == renamed_aux_2
 

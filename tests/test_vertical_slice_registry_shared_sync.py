@@ -36,8 +36,8 @@ from ghidra_mcp import cli
             "fw",
         ),
         (
-            "create_session",
-            lambda: cli.create_session(
+            "open_program",
+            lambda: cli.open_program(
                 target="fw",
                 project_location="/tmp/sample.gpr",
                 domain_path="/folder/app",
@@ -196,7 +196,7 @@ def test_registry_shared_sync_slice_create_session_error_message_is_unchanged(mo
     monkeypatch.setattr(cli, "_registry", DummyRegistry())
 
     with pytest.raises(RuntimeError, match="Failed to create session 'fw'"):
-        cli.create_session(
+        cli.open_program(
             target="fw",
             project_location="/tmp/sample.gpr",
             domain_path="/folder/app",

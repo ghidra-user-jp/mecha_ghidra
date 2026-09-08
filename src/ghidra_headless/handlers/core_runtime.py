@@ -4,6 +4,7 @@ from __future__ import absolute_import, print_function
 
 import contextlib
 import threading
+import uuid
 
 from ghidra.program.flatapi import FlatProgramAPI
 from ghidra.util.task import TaskMonitor
@@ -14,6 +15,7 @@ _THREAD_STATE = threading.local()
 
 class HeadlessContext(object):
     def __init__(self, program):
+        self.generation = uuid.uuid4().hex
         self.program = program
         self.flat_api = FlatProgramAPI(program)
         self.symbol_table = program.getSymbolTable()

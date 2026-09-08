@@ -93,7 +93,7 @@ Append these options to your normal startup command:
 | --- | --- |
 | Default tools plus shared operations | `--add-category shared_sync` |
 | Read-only tools from every category | `--tool-profile full --allow-safety read_only` |
-| Readonly profile plus function renaming | `--tool-profile readonly --enable-tool rename_function` |
+| Readonly profile plus batch annotations | `--tool-profile readonly --enable-tool apply_edits` |
 | Exclude byte patching | `--disable-tool set_bytes` |
 
 The exact tool arguments and error codes are exposed in `tools/list` and MCP resources `ghidra://docs/tools` / `ghidra://docs/tools/{tool_name}`. See the [tool reference](tools.md) for an overview. The removed `--enable-shared-project-sync` flag is covered in [upgrades](troubleshooting.md#upgrading).

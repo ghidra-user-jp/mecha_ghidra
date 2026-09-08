@@ -129,7 +129,7 @@ Streamable HTTPの接続先は `http://127.0.0.1:8081/mcp` です。設定方法
 
 `--project-name` と `project_name` に `.gpr` は付けません。付いている名前は拒否されます。既存の `.gpr` ファイルを指定するときは、そのパスを `project_location` に渡し、`project_name` を省略してください。ローカルプロジェクトは `.gpr` ファイルと隣接する `.rep` ディレクトリの組です。
 
-`register_target` はプロジェクト情報だけを登録し、`create_session` はターゲットを追加してプログラムを開きます。`load_project_program` は既存ターゲットのプログラムを読み込み・切り替えます。登録名は `list_targets` で確認できます。多くのプログラム操作ツールは `target` を受け取り、省略時は `default` を使います。
+`register_target` はプロジェクト情報だけを登録し、`open_program` はターゲットを追加してプログラムを開きます。`load_project_program` は既存ターゲットのプログラムを読み込み・切り替えます。登録名は `list_targets` で確認できます。多くのプログラム操作ツールは `target` を受け取り、省略時は `default` を使います。
 
 ## 保存と自動解析
 

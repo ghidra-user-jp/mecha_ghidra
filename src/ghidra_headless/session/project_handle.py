@@ -303,6 +303,9 @@ class ProjectHandle:
     def get_key(self) -> tuple[str, str]:
         return self.key
 
+    def is_repository_project(self) -> bool:
+        return self.is_repository_project_from_metadata(self.project_location, self.project_name)
+
     def get_shared_project_url(self) -> Optional[str]:
         """Return the server-backed project URL without changing repository state."""
         with self._lock:

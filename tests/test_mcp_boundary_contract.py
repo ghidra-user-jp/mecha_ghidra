@@ -29,6 +29,19 @@ def server(registry):
         ("get_bytes", {"address": "0x1000", "size": 1048577}),
         ("remove_struct_members", {"struct_name": "S", "member_names": ["magic"]}),
         ("remove_struct_members", {"struct_name": "S", "members": '["magic"]'}),
+        ("apply_edits", {"edits": []}),
+        ("apply_edits", {"edits": [{"kind": "run_script", "script": "x"}]}),
+        ("apply_edits", {"edits": [{"kind": "rename_function", "address": "0x1000", "newName": "main"}]}),
+        (
+            "apply_edits",
+            {"edits": [{"kind": "set_comment", "address": "0x1000", "comment": "c", "comment_type": "bad"}]},
+        ),
+        (
+            "apply_edits",
+            {"edits": [{"kind": "set_global_data_type", "address": "0x1000", "data_type": "int", "length": "4"}]},
+        ),
+        ("get_xrefs", {"address": "0x1000", "direction": "incoming"}),
+        ("get_call_edges", {"address": "0x1000", "limit": 0}),
     ],
 )
 def test_invalid_sdk_arguments_never_reach_executor(name, arguments):
@@ -44,6 +57,21 @@ def test_registered_schemas_match_public_contract():
     registered = {tool.name: tool for tool in asyncio.run(server(None).list_tools())}
     for name, spec in get_all_tool_specs().items():
         assert registered[name].input_schema == public_input_schema(spec)
+
+
+def test_compact_schema_preserves_a_property_named_title_and_literal_objects():
+    from ghidra_mcp.presentation.tool_registry import _without_schema_titles
+
+    schema = {
+        "title": "Generated",
+        "properties": {"title": {"type": "string", "title": "Title"}},
+        "const": {"title": "literal"},
+        "default": {"title": "default"},
+    }
+    compact = _without_schema_titles(schema)
+    assert "title" not in compact
+    assert compact["properties"] == {"title": {"type": "string"}}
+    assert compact["const"] == schema["const"] and compact["default"] == schema["default"]
 
 
 def test_partial_success_survives_sdk_request_handler():

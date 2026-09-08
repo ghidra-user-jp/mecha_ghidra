@@ -10,55 +10,6 @@ from ghidra_mcp import cli
     ("tool_name", "call", "expected_args"),
     [
         (
-            "rename_function",
-            lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-            {"oldName": "old_fn", "newName": "new_fn"},
-        ),
-        (
-            "rename_function",
-            lambda: cli.rename_function(
-                address="0x401000",
-                new_name="new_fn",
-                target="fw",
-            ),
-            {"address": "0x401000", "newName": "new_fn"},
-        ),
-        (
-            "rename_data",
-            lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
-            {"address": "0x402000", "newName": "new_data"},
-        ),
-        (
-            "rename_variable",
-            lambda: cli.rename_variable(
-                function_name="main",
-                old_name="old_var",
-                new_name="new_var",
-                target="fw",
-            ),
-            {"functionName": "main", "oldName": "old_var", "newName": "new_var"},
-        ),
-        (
-            "set_comment",
-            lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
-            {"address": "0x401000", "comment": "memo", "kind": "pre"},
-        ),
-        (
-            "set_comment",
-            lambda: cli.set_comment(address="0x401000", comment="memo", kind="plate", target="fw"),
-            {"address": "0x401000", "comment": "memo", "kind": "plate"},
-        ),
-        (
-            "rename_variable",
-            lambda: cli.rename_variable(
-                function_address="0x401000",
-                old_name="old_var",
-                new_name="new_var",
-                target="fw",
-            ),
-            {"functionAddress": "0x401000", "oldName": "old_var", "newName": "new_var"},
-        ),
-        (
             "set_function_prototype",
             lambda: cli.set_function_prototype(function_name="main", prototype="int main(void)", target="fw"),
             {"function_name": "main", "prototype": "int main(void)"},
@@ -238,11 +189,6 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-        lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
-        lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
-        lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
-        lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
         lambda: cli.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
         lambda: cli.set_local_variable_type(
             function_address="0x401000", variable_name="param_1", new_type="int", target="fw"
@@ -301,11 +247,6 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-        lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
-        lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
-        lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
-        lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
         lambda: cli.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
         lambda: cli.set_local_variable_type(
             function_address="0x401000", variable_name="param_1", new_type="int", target="fw"

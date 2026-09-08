@@ -92,7 +92,7 @@ mkdir -p "$HOME/bsim_sigs"
 
 検証時は、1つの `bsim_hello` プログラムで `Matching executable count: 1` と一覧表示を確認しました。全件確認では名前フィルタを付けません。12.0.4の検証では `name=*` や `--name '*'` は全件指定として扱われず、0件になりました。特定名なら `--name bsim_hello` のように指定します。
 
-次はMCPの [bsim_query_function](bsim.ja.md) で検索します。大量登録時のインデックス管理、バックアップ、失敗時の確認は[運用保守](bsim-operations.md)にまとめています。
+次はMCPの [bsim_query](bsim.ja.md) で検索します。大量登録時のインデックス管理、バックアップ、失敗時の確認は[運用保守](bsim-operations.md)にまとめています。
 
 ## 公式ドキュメント
 

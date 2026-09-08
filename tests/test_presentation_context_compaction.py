@@ -100,17 +100,17 @@ def _compacted_decompile_runtime():
 
 
 def test_tool_description_mode_short_uses_explicit_short_description():
-    base_spec = get_tool_spec("create_session")
+    base_spec = get_tool_spec("open_program")
     short_spec = replace(base_spec, short_description="Open one Ghidra target session.")
     runtime = _runtime_for_specs(
-        {"create_session": short_spec},
+        {"open_program": short_spec},
         config=ToolPresentationConfig(description_mode="short"),
     )
 
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
-    assert tools["create_session"].description == "Open one Ghidra target session."
-    assert tools["create_session"].description != base_spec.description
+    assert tools["open_program"].description == "Open one Ghidra target session."
+    assert tools["open_program"].description != base_spec.description
 
 
 def test_short_description_caps_long_single_sentence():
@@ -167,28 +167,28 @@ def test_short_mode_never_exceeds_cap_for_any_spec():
 
 
 def test_tool_description_mode_full_uses_existing_description():
-    spec = get_tool_spec("create_session")
+    spec = get_tool_spec("open_program")
     runtime = _runtime_for_specs(
-        {"create_session": spec},
+        {"open_program": spec},
         config=ToolPresentationConfig(description_mode="full"),
     )
 
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
-    assert tools["create_session"].description == spec.description
+    assert tools["open_program"].description == spec.description
 
 
 def test_default_description_mode_is_full_without_filler():
     assert ToolPresentationConfig().description_mode == "full"
 
-    bare_spec = replace(get_tool_spec("create_session"), description=None, short_description=None)
+    bare_spec = replace(get_tool_spec("open_program"), description=None, short_description=None)
     assert select_tool_description(bare_spec, "short") is None
     assert select_tool_description(bare_spec, "full") is None
 
-    runtime = _runtime_for_specs({"create_session": bare_spec})
+    runtime = _runtime_for_specs({"open_program": bare_spec})
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
-    assert tools["create_session"].description is None
+    assert tools["open_program"].description is None
 
 
 def test_tool_description_mode_none_omits_description_but_keeps_annotations():
@@ -210,7 +210,7 @@ def test_tool_description_mode_none_omits_description_but_keeps_annotations():
 def test_annotations_survive_all_description_modes(mode):
     specs = {
         "list_targets": get_tool_spec("list_targets"),
-        "create_session": get_tool_spec("create_session"),
+        "open_program": get_tool_spec("open_program"),
         "close_session_and_remove_program": get_tool_spec("close_session_and_remove_program"),
     }
     runtime = _runtime_for_specs(specs, config=ToolPresentationConfig(description_mode=mode))
@@ -219,7 +219,7 @@ def test_annotations_survive_all_description_modes(mode):
 
     assert tools["list_targets"].annotations.read_only_hint is True
     assert tools["list_targets"].annotations.idempotent_hint is True
-    assert tools["create_session"].annotations.idempotent_hint is False
+    assert tools["open_program"].annotations.idempotent_hint is False
     assert tools["close_session_and_remove_program"].annotations.destructive_hint is True
 
 
@@ -234,7 +234,7 @@ def test_tool_docs_resources_only_include_exposed_specs():
 
     assert index_contents[0].mime_type == "application/json"
     assert [tool["name"] for tool in index["tools"]] == ["list_targets"]
-    assert "create_session" not in {tool["name"] for tool in index["tools"]}
+    assert "open_program" not in {tool["name"] for tool in index["tools"]}
     assert detail["name"] == "list_targets"
     assert detail["description"] == get_tool_spec("list_targets").description
     assert detail["short_description"] == select_tool_description(get_tool_spec("list_targets"), "short")
@@ -1900,7 +1900,7 @@ def test_docs_resource_respects_profile_filtering():
 
 
 def test_tool_docs_publish_public_param_names_matching_registered_tools():
-    specs = {name: get_tool_spec(name) for name in ("rename_function", "search_bytes", "list_functions", "set_bytes")}
+    specs = {name: get_tool_spec(name) for name in ("apply_edits", "search_bytes", "list_functions", "set_bytes")}
     runtime = _runtime_for_specs(specs)
     registered = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
@@ -1915,14 +1915,18 @@ def test_tool_docs_publish_public_param_names_matching_registered_tools():
 
 
 def test_tool_docs_apply_public_name_overrides_no_raw_names_leak():
-    specs = {name: get_tool_spec(name) for name in ("rename_function", "search_bytes", "set_bytes")}
+    specs = {name: get_tool_spec(name) for name in ("apply_edits", "search_bytes", "set_bytes")}
     runtime = _runtime_for_specs(specs)
 
-    rf = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/rename_function"))[0].content)
+    rf = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/apply_edits"))[0].content)
     rf_props = rf["input_schema"]["properties"]
-    assert {"new_name", "old_name"} <= set(rf_props)
-    assert "newName" not in rf_props and "oldName" not in rf_props
-    assert "new_name" in rf["input_schema"]["required"]
+    assert "edits" in rf_props
+    assert "edits" in rf["input_schema"]["required"]
+    edit_schemas = rf["input_schema"]["$defs"]
+    rename = next(
+        v for v in edit_schemas.values() if v.get("properties", {}).get("kind", {}).get("const") == "rename_function"
+    )
+    assert "new_name" in rename["properties"] and "newName" not in rename["properties"]
 
     sb = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/search_bytes"))[0].content)
     assert "pattern" in sb["input_schema"]["properties"]
@@ -1948,7 +1952,7 @@ def test_tool_docs_output_schema_matches_client_visible_shape():
     assert "anyOf" in scalar_schema or scalar_schema.get("type") == "string"
 
     # typed output models are delivered as-is and keep their object schema.
-    typed_schema = public_output_schema(get_tool_spec("create_session"))
+    typed_schema = public_output_schema(get_tool_spec("open_program"))
     assert typed_schema["type"] == "object"
     assert "status" in typed_schema["properties"]
 
@@ -1959,7 +1963,7 @@ def test_tool_docs_output_schema_matches_client_visible_shape():
 
 def test_public_input_schema_target_semantics_match_signature():
     # CORE_COMMAND: target optional with a default; REGISTRY/SHARED_SYNC: target required.
-    core_schema = public_input_schema(get_tool_spec("rename_function"))
+    core_schema = public_input_schema(get_tool_spec("apply_edits"))
     assert core_schema["properties"]["target"]["default"] == "default"
     assert "target" not in core_schema.get("required", [])
 

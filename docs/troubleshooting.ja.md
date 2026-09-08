@@ -2,7 +2,7 @@
 
 # トラブルシューティング・移行
 
-ツールの失敗はMCPの `isError: true` と、エラー文の先頭にある固定コードで返します。処理の分岐には自由記述の説明ではなく、コードを使ってください。大きな結果が取得できない場合は[結果取得の説明](configuration.ja.md#large-results)を参照します。
+ツールの失敗はMCPの `isError: true` で返します。ドメインエラーは `structuredContent.error` と同じ内容のJSONテキストに `code`、`message`、`retryable`、`hint`、`details` を保持します。処理の分岐には固定コードを使い、再試行前に部分的に完了した操作がないか `details` を確認してください。引数検証などのSDKエラーはテキストのみの場合もあります。一括編集の項目別エラーは正常な応答内の `status` と `results` で確認します。大きな結果の取得は[別項目](configuration.ja.md#large-results)を参照してください。
 
 ## 起動・接続の問題
 
@@ -25,6 +25,9 @@
 | --- | --- |
 | `PATH_NOT_ALLOWED` | シンボリックリンク解決後も許可ルート内になるパスを使う |
 | `LOCK_TIMEOUT` | 別の呼び出しがターゲットを使用中。完了を待って再試行する |
+| `AMBIGUOUS_FUNCTION`、`AMBIGUOUS_DATA_TYPE` | `details.candidates` を確認し、関数アドレス・完全修飾名、または型の完全パスを指定する |
+| `SESSION_CHANGED` | 最新状態を読み直し、ページ取得や編集の `revision` を更新する |
+| `BSIM_MATCH_STALE` | 開いたプログラムのMD5・パス・関数エントリが参照と一致しない。元のプログラムと検索結果を確認する |
 | `PROGRAM_NOT_ANALYZED` | ローカル変数名・型の操作前に `analyze_program` を実行する |
 | `CHECKOUT_REQUIRED` | バージョン管理された共有ファイルをチェックアウトする |
 | `CHECKOUT_UNAVAILABLE` | リポジトリの状態を確認。別ユーザーが排他的チェックアウトを保持している可能性がある |
@@ -51,8 +54,8 @@
 | `search_functions_by_name` | `list_functions(filter=...)` |
 | `list_classes` | `list_namespaces(classes_only=true)` |
 | `reanalyze_program` | `analyze_program(force=true)` |
-| `set_decompiler_comment` | `set_comment(kind="pre")` |
-| `set_disassembly_comment` | `set_comment(kind="eol")` |
+| `set_decompiler_comment` | `apply_edits`：`kind="set_comment", comment_type="pre"` |
+| `set_disassembly_comment` | `apply_edits`：`kind="set_comment", comment_type="eol"` |
 | `clear_struct` | `remove_struct_members(clear_all=true)` |
 | `delete_struct` | `delete_data_type` |
 | `reload_project_program` | 保持中のdomain pathを `load_project_program` で読み込む。`reloaded=true` を確認 |
@@ -62,8 +65,8 @@
 
 ### 応答と動作の変更
 
-- `get_function` はシグネチャ、引数、ローカル変数を返します。`list_imports`、`list_exports`、`list_namespaces`、`get_callee` は文字列ではなくオブジェクトを返し、相互参照には相手側の関数も含みます。
-- `rename_variable`、`set_function_prototype`、`set_local_variable_type` は関数アドレスと名前の両方に対応します。`search_bytes` は `??` ワイルドカード、`list_strings.filter` は大小文字を区別しない検索に対応します。
+- `get_function` はシグネチャ、引数、ローカル変数を返します。`list_imports`、`list_exports`、`list_namespaces`、`get_call_edges` は文字列ではなくオブジェクトを返し、相互参照には相手側の関数も含みます。
+- `set_function_prototype`、`set_local_variable_type` は関数アドレスと名前の両方に対応します。`search_bytes` は `??` ワイルドカード、`list_strings.filter` は大小文字を区別しない検索に対応します。
 - チェックアウトの `exclusive` 省略時はサーバー設定に従います。コミットに `on_conflict="keep"`、差分に `include_details` を追加し、BSim検索では既定で自己一致を除きます。
 - 解析・編集ではプログラム情報、undo/redo、エクスポート、コメント取得、シンボル検索、ラベル作成、列挙体編集、C宣言の取り込みを追加しました。BSimでは一致名の適用、シグネチャ・名前の更新、実行ファイル削除を追加しています。[ツール一覧](tools.ja.md)を参照してください。
 - `pull_project_program` の出力定義に `checked_out` を追加し、pull成功後の出力検証エラーを防ぎます。BSimの重複登録は `BSIM_ALREADY_REGISTERED`、排他的チェックアウトによる拒否は `CHECKOUT_UNAVAILABLE` を返します。

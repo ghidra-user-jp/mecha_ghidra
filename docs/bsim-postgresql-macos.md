@@ -156,7 +156,7 @@ lsof -nP -iTCP:5432 -sTCP:LISTEN
 
 実測では、Ghidra 12.0.4でBSim拡張`lshvector`と`pg_prewarm`がbuildされ、BSim DB作成、カテゴリ追加、Ghidra Projectからのsignature生成、`commitsigs`、`getexecount`、`listexes`、`dropindex`、`rebuildindex`、`prewarm`まで成功しました。`listen_addresses`を`localhost`へ絞った後も、`getexecount`で投入済み実行ファイルを確認できています。
 
-Ghidra 12.1では、12.0.4で起動した同じPostgreSQL BSim DBに対して、MCP/PyGhidra経由の`get_bsim_database_status`、`bsim_query_function`、`bsim_load_matched_executable`、`decompile_function`が成功することを確認しています。12.1自身でPostgreSQL serverを起動する場合は、12.1側の`Ghidra/Features/BSim/support/make-postgres.sh`でbackendをbuildしてください。
+Ghidra 12.1では、12.0.4で起動した同じPostgreSQL BSim DBに対して、MCP/PyGhidra経由の`get_bsim_database_status`、`bsim_query_function`（当時の名称。現在は `bsim_query(scope="functions")`）、`bsim_load_matched_executable`、`decompile_function`が成功することを確認しています。12.1自身でPostgreSQL serverを起動する場合は、12.1側の`Ghidra/Features/BSim/support/make-postgres.sh`でbackendをbuildしてください。
 
 Ghidraのバージョンにより、コマンドのオプション表記、config template、同梱PostgreSQLのバージョン、`make-postgres.sh`の場所が変わる可能性があります。迷ったら、必ず手元のコマンドのusageを確認してください。
 

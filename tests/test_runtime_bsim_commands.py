@@ -162,13 +162,14 @@ def test_runtime_bsim_query_function_and_decompile_match():
     )
     cli.load_project_program(target=target, domain_path=required["GHIDRA_BSIM_QUERY_DOMAIN_PATH"])
 
-    result = cli.bsim_query_function(
+    result = cli.bsim_query(
         target=target,
-        function_name=required["GHIDRA_BSIM_QUERY_FUNCTION"],
         similarity_threshold=float(os.environ.get("GHIDRA_BSIM_SIMILARITY_THRESHOLD", "0.5")),
         significance_threshold=float(os.environ.get("GHIDRA_BSIM_SIGNIFICANCE_THRESHOLD", "0.0")),
         matches_per_function=10,
         max_results=10,
+        scope="functions",
+        function_names=[required["GHIDRA_BSIM_QUERY_FUNCTION"]],
     )
 
     assert result["count"] > 0

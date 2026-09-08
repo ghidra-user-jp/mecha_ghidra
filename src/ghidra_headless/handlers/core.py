@@ -53,7 +53,14 @@ from ghidra_headless.handlers.core_runtime import (
     remove_context,
 )
 
+
+def _execute_edit(command, params):
+    # Called only by the bounded annotation-edit handler under the target lock.
+    return SUPPORTED_COMMANDS[command](params)
+
+
 _PROFILE_DEPENDENCIES = {
+    "execute_edit": _execute_edit,
     "ensure_context": ensure_context,
     "to_int": _to_int,
     "collect": _collect,

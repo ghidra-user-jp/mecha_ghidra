@@ -798,6 +798,19 @@ class BsimService:
             name=name,
         )
 
+    def bsim_query(
+        self, target: str, *, scope: str, addresses=None, function_names=None, min_function_size=0, **kwargs
+    ):
+        if scope == "functions":
+            if min_function_size:
+                raise ValueError("min_function_size is only available for program scope")
+            return self.query_function(target, addresses=addresses, function_names=function_names, **kwargs)
+        if scope == "program":
+            if addresses is not None or function_names is not None:
+                raise ValueError("program scope does not accept function selectors")
+            return self.query_target(target, min_function_size=min_function_size, **kwargs)
+        raise ValueError("scope must be program or functions")
+
     def query_target(
         self,
         target: str,
@@ -853,29 +866,6 @@ class BsimService:
             matches_per_function=matches_per_function,
             max_results=max_results,
             exclude_self=bool(exclude_self),
-            min_function_size=min_function_size,
-        )
-
-    def bsim_query_target(
-        self,
-        target: str,
-        *,
-        bsim_url: str | None = None,
-        similarity_threshold: float = 0.7,
-        significance_threshold: float = 0.0,
-        matches_per_function: int = 10,
-        max_results: int = 500,
-        exclude_self: bool = True,
-        min_function_size: int = 0,
-    ) -> dict[str, Any]:
-        return self.query_target(
-            target,
-            bsim_url=bsim_url,
-            similarity_threshold=similarity_threshold,
-            significance_threshold=significance_threshold,
-            matches_per_function=matches_per_function,
-            max_results=max_results,
-            exclude_self=exclude_self,
             min_function_size=min_function_size,
         )
 
@@ -946,35 +936,6 @@ class BsimService:
             matches_per_function=matches_per_function,
             max_results=max_results,
             exclude_self=bool(exclude_self),
-        )
-
-    def bsim_query_function(
-        self,
-        target: str,
-        *,
-        bsim_url: str | None = None,
-        address: str | None = None,
-        function_name: str | None = None,
-        addresses: list[str] | None = None,
-        function_names: list[str] | None = None,
-        similarity_threshold: float = 0.7,
-        significance_threshold: float = 0.0,
-        matches_per_function: int = 10,
-        max_results: int = 100,
-        exclude_self: bool = True,
-    ) -> dict[str, Any]:
-        return self.query_function(
-            target,
-            bsim_url=bsim_url,
-            address=address,
-            function_name=function_name,
-            addresses=addresses,
-            function_names=function_names,
-            similarity_threshold=similarity_threshold,
-            significance_threshold=significance_threshold,
-            matches_per_function=matches_per_function,
-            max_results=max_results,
-            exclude_self=exclude_self,
         )
 
     def apply_matches(

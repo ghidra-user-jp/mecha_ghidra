@@ -6,8 +6,8 @@ import types
 
 import pytest
 
+from ghidra_headless.handlers.commands.analysis_queries import disassemble
 from ghidra_headless.handlers.commands.mutating_symbols import set_bytes
-from ghidra_headless.handlers.commands.read_only_decompile import disassemble_range
 from ghidra_headless.handlers.commands.read_only_functions import list_functions
 from ghidra_headless.handlers.commands.read_only_memory_data import (
     get_bytes,
@@ -21,11 +21,6 @@ from ghidra_headless.handlers.commands.read_only_memory_data import (
     list_segments,
     list_strings,
     search_bytes,
-)
-from ghidra_headless.handlers.commands.read_only_xrefs import (
-    get_function_xrefs,
-    get_xrefs_from,
-    get_xrefs_to,
 )
 
 
@@ -260,28 +255,6 @@ def test_paginated_commands_reject_invalid_limit_before_runtime_access():
             to_int=noop_to_int,
             decode_hex_bytes=bytearray.fromhex,
         ),
-        lambda: get_xrefs_to(
-            {"address": "0x1000", "limit": 0},
-            ensure_context=checked_context,
-            get_address=lambda *_args: None,
-            to_int=noop_to_int,
-            iter_items=no_items,
-        ),
-        lambda: get_xrefs_from(
-            {"address": "0x1000", "limit": 0},
-            ensure_context=checked_context,
-            get_address=lambda *_args: None,
-            to_int=noop_to_int,
-            iter_items=no_items,
-        ),
-        lambda: get_function_xrefs(
-            {"name": "entry", "limit": 0},
-            ensure_context=checked_context,
-            get_address=lambda *_args: None,
-            find_function_by_name=lambda *_args: None,
-            to_int=noop_to_int,
-            iter_items=no_items,
-        ),
         lambda: list_data_types(
             {"limit": 0},
             ensure_context=checked_context,
@@ -439,12 +412,12 @@ def test_disassemble_range_maps_address_overflow_to_validation_error():
         )
     )
 
-    with pytest.raises(ValueError, match="length exceeds the address space"):
-        disassemble_range(
+    with pytest.raises(ValueError, match="range exceeds address space"):
+        disassemble(
             {"start_address": "0xffffffff", "length": 2, "limit": 1},
             ensure_context=lambda: context,
             get_address=lambda _ctx, _text: _MaxAddress(),
-            to_int=lambda value, default: default if value is None else int(value),
+            find_function_by_name=lambda *_args: None,
             iter_items=iter,
             code_unit=object(),
         )

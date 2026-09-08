@@ -9,7 +9,6 @@ from pydantic import ValidationError
 import ghidra_mcp.contracts.tool_models as tool_models
 from ghidra_mcp.contracts.tool_spec import (
     ClearDataMode,
-    CommentKind,
     CommitConflictAction,
     ConflictAction,
     ExecutorKind,
@@ -66,9 +65,9 @@ def test_tool_specs_include_expected_tags():
     assert specs["list_functions"].safety_tag == ToolSafetyTag.READ_ONLY
     assert specs["list_functions"].operation_level == ToolOperationLevel.STANDARD
 
-    assert specs["rename_function"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
-    assert specs["rename_function"].safety_tag == ToolSafetyTag.WRITE
-    assert specs["rename_function"].operation_level == ToolOperationLevel.BASIC
+    assert specs["apply_edits"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
+    assert specs["apply_edits"].safety_tag == ToolSafetyTag.WRITE
+    assert specs["apply_edits"].operation_level == ToolOperationLevel.STANDARD
 
     assert specs["import_program"].category_tag == ToolCategoryTag.CORE
     assert specs["import_program"].safety_tag == ToolSafetyTag.WRITE
@@ -84,8 +83,8 @@ def test_tool_specs_include_expected_tags():
 
     assert specs["delete_data_type"].category_tag == ToolCategoryTag.DATATYPE_OPS
     assert specs["delete_data_type"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
-    assert specs["set_comment"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
-    assert specs["set_comment"].checkout_required is True
+    assert specs["apply_edits"].category_tag == ToolCategoryTag.SYMBOL_COMMENT_EDIT
+    assert specs["apply_edits"].checkout_required is True
 
     assert specs["get_project_sync_status"].category_tag == ToolCategoryTag.SHARED_SYNC
     assert specs["get_project_sync_status"].safety_tag == ToolSafetyTag.READ_ONLY
@@ -95,9 +94,9 @@ def test_tool_specs_include_expected_tags():
     assert specs["undo_checkout_project_program"].safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE
     assert specs["undo_checkout_project_program"].operation_level == ToolOperationLevel.STANDARD
 
-    assert specs["bsim_query_target"].category_tag == ToolCategoryTag.BSIM
-    assert specs["bsim_query_target"].safety_tag == ToolSafetyTag.READ_ONLY
-    assert specs["bsim_query_target"].operation_level == ToolOperationLevel.STANDARD
+    assert specs["bsim_query"].category_tag == ToolCategoryTag.BSIM
+    assert specs["bsim_query"].safety_tag == ToolSafetyTag.READ_ONLY
+    assert specs["bsim_query"].operation_level == ToolOperationLevel.STANDARD
 
     assert specs["bsim_register_target"].category_tag == ToolCategoryTag.BSIM
     assert specs["bsim_register_target"].safety_tag == ToolSafetyTag.WRITE
@@ -127,13 +126,12 @@ def test_bsim_specs_are_tagged_as_bsim_category():
     bsim_names = {name for name, spec in specs.items() if spec.category_tag == ToolCategoryTag.BSIM}
 
     assert bsim_names == {
+        "bsim_query",
         "get_bsim_database_status",
         "bsim_add_executable_category",
         "list_bsim_executables",
         "get_bsim_executable",
         "bsim_update_executable_metadata",
-        "bsim_query_target",
-        "bsim_query_function",
         "bsim_load_matched_executable",
         "bsim_register_target",
         "bsim_apply_matches",
@@ -221,21 +219,6 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "disassemble_function",
-        {
-            "address": (str, ...),
-        },
-    )
-    _assert_fields(
-        "disassemble_range",
-        {
-            "start_address": (str, ...),
-            "end_address": (str | None, None),
-            "length": (int | None, None),
-            "limit": (int, 200),
-        },
-    )
-    _assert_fields(
         "create_function",
         {
             "address": (str, ...),
@@ -249,37 +232,6 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields("analyze_program", {"force": (bool, False)})
-    _assert_fields(
-        "get_callee",
-        {
-            "address": (str, ...),
-        },
-    )
-    _assert_fields(
-        "get_xrefs_to",
-        {
-            "address": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-    )
-    _assert_fields(
-        "get_xrefs_from",
-        {
-            "address": (str, ...),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-    )
-    _assert_fields(
-        "get_function_xrefs",
-        {
-            "address": (str | None, None),
-            "name": (str | None, None),
-            "offset": (int, 0),
-            "limit": (int, 100),
-        },
-    )
     _assert_fields(
         "list_segments",
         {
@@ -343,52 +295,6 @@ def test_typed_input_models_for_function_listing_slice():
             "bytes": (str, ...),
             "offset": (int, 0),
             "limit": (int, 100),
-        },
-    )
-    _assert_fields(
-        "get_struct",
-        {
-            "name": (str, ...),
-            "category": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "get_enum",
-        {
-            "name": (str, ...),
-            "category": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "rename_function",
-        {
-            "address": (str | None, None),
-            "oldName": (str | None, None),
-            "newName": (str, ...),
-        },
-    )
-    _assert_fields(
-        "rename_data",
-        {
-            "address": (str, ...),
-            "newName": (str, ...),
-        },
-    )
-    _assert_fields(
-        "rename_variable",
-        {
-            "oldName": (str, ...),
-            "newName": (str, ...),
-            "functionAddress": (str | None, None),
-            "functionName": (str | None, None),
-        },
-    )
-    _assert_fields(
-        "set_comment",
-        {
-            "address": (str, ...),
-            "comment": (str, ...),
-            "kind": (CommentKind, ...),
         },
     )
     _assert_fields(
@@ -551,7 +457,7 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "create_session",
+        "open_program",
         {
             "project_location": (str, ...),
             "domain_path": (str, ...),
@@ -674,21 +580,6 @@ def test_typed_input_models_for_function_listing_slice():
         },
     )
     _assert_fields(
-        "bsim_query_function",
-        {
-            "bsim_url": (str | None, None),
-            "address": (str | None, None),
-            "function_name": (str | None, None),
-            "similarity_threshold": (float, 0.7),
-            "significance_threshold": (float, 0.0),
-            "matches_per_function": (int, 10),
-            "max_results": (int, 100),
-            "addresses": (list[str] | None, None),
-            "function_names": (list[str] | None, None),
-            "exclude_self": (bool, True),
-        },
-    )
-    _assert_fields(
         "bsim_load_matched_executable",
         {
             "matched_ref": (dict[str, object], ...),
@@ -702,8 +593,8 @@ def test_registry_and_shared_sync_adapters_are_configured():
 
     assert specs["load_project_program"].result_adapter == "status_program_ok"
     assert specs["import_program"].result_adapter == "status_program_ok"
-    assert specs["create_session"].result_adapter == "status_target_ok"
-    assert specs["create_session"].error_adapter == "create_session_error"
+    assert specs["open_program"].result_adapter == "status_target_ok"
+    assert specs["open_program"].error_adapter == "create_session_error"
     assert specs["close_session"].result_adapter == "status_target_ok"
     assert specs["close_session"].error_adapter == "close_session_error"
     assert specs["close_session_and_remove_program"].result_adapter == "status_target_ok"
@@ -717,11 +608,8 @@ def test_specs_include_contract_driven_metadata():
     assert tuple(public_parameter_names(specs["list_functions"]))[-1] == "target"
     assert tuple(public_parameter_names(specs["register_target"]))[0] == "target"
     assert tuple(public_parameter_names(specs["list_targets"])) == ()
-    assert hasattr(specs["create_session"], "output_model")
-    assert specs["rename_function"].public_name_overrides == {
-        "oldName": "old_name",
-        "newName": "new_name",
-    }
+    assert hasattr(specs["open_program"], "output_model")
+
     assert specs["list_strings"].omit_falsey_keys == frozenset({"filter"})
     assert specs["list_targets"].description is not None
     assert specs["list_targets"].safety_tag == ToolSafetyTag.READ_ONLY
@@ -730,10 +618,7 @@ def test_specs_include_contract_driven_metadata():
 
 def test_checkout_required_tools_are_declared_on_specs():
     assert get_checkout_required_tool_names() == {
-        "rename_function",
-        "rename_data",
-        "rename_variable",
-        "set_comment",
+        "apply_edits",
         "set_function_prototype",
         "set_local_variable_type",
         "set_global_data_type",
@@ -763,12 +648,6 @@ def test_all_output_models_are_strict_and_typed():
 
     list_output_tools = {
         "list_functions",
-        "disassemble_function",
-        "disassemble_range",
-        "get_callee",
-        "get_xrefs_to",
-        "get_xrefs_from",
-        "get_function_xrefs",
         "list_segments",
         "list_imports",
         "list_exports",
@@ -802,7 +681,7 @@ def test_all_output_models_are_strict_and_typed():
             "target": (str, ...),
             "program": (str, ...),
         },
-        "create_session": {
+        "open_program": {
             "status": (str, ...),
             "target": (str, ...),
             "project_location": (str, ...),
@@ -963,6 +842,14 @@ def test_all_output_models_are_strict_and_typed():
         },
     }
 
+    for name in ("get_xrefs", "get_call_edges", "disassemble"):
+        direct_output_fields[name] = {
+            "program": (str | None, ...),
+            "revision": (str, ...),
+            "items": (list[dict], ...),
+            "has_more": (bool, ...),
+            "next_cursor": (str | None, ...),
+        }
     categorized = set(list_output_tools) | set(scalar_output_tools) | set(direct_output_fields)
     assert categorized <= set(specs)
 
@@ -1038,8 +925,11 @@ def _assert_input_fields(tool_name: str, expected_fields: dict[str, tuple[Any, A
 
 def test_new_bsim_tool_specs_declare_their_parameters():
     _assert_input_fields(
-        "bsim_query_target",
+        "bsim_query",
         {
+            "scope": (Literal["program", "functions"], ...),
+            "addresses": (list[str] | None, None),
+            "function_names": (list[str] | None, None),
             "bsim_url": (str | None, None),
             "similarity_threshold": (float, 0.7),
             "significance_threshold": (float, 0.0),

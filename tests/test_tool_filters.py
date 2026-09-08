@@ -79,11 +79,11 @@ def _manual_selected_names(
             _manual_selected_names(safety_tags={ToolSafetyTag.READ_ONLY}),
         ),
         (
-            ["--tool-profile", "readonly", "--enable-tool", "rename_function"],
+            ["--tool-profile", "readonly", "--enable-tool", "apply_edits"],
             _manual_selected_names(
                 categories=set(DEFAULT_CATEGORIES),
                 safety_tags={ToolSafetyTag.READ_ONLY},
-                enable_tools={"rename_function"},
+                enable_tools={"apply_edits"},
             ),
         ),
         (
@@ -130,7 +130,7 @@ def test_filter_tool_specs_combines_same_type_with_or_and_different_types_with_a
     assert set(filtered) == expected
 
 
-def test_default_profile_matches_legacy_non_shared_sync_set():
+def test_default_profile_contains_current_non_shared_sync_tools():
     default_specs = filter_tool_specs(profile=ToolProfile.DEFAULT)
     legacy_default_specs = {
         name
@@ -140,8 +140,27 @@ def test_default_profile_matches_legacy_non_shared_sync_set():
 
     assert set(default_specs) == legacy_default_specs
     assert "get_project_sync_status" not in default_specs
-    assert "bsim_query_target" not in default_specs
+    assert "bsim_query" not in default_specs
 
 
-def test_full_profile_exposes_every_tool():
-    assert set(filter_tool_specs(profile=ToolProfile.FULL)) == ALL_TOOL_NAMES
+def test_full_profile_exposes_current_tools_without_legacy_names():
+    assert set(filter_tool_specs(profile=ToolProfile.FULL)) == set(ALL_SPECS)
+    for name in ("get_callee", "rename_function", "create_session", "bsim_query_function"):
+        assert name not in ALL_SPECS
+        assert name not in filter_tool_specs(enable_tools=[name])
+
+
+def test_existing_management_and_type_edit_exposure_is_preserved():
+    default = filter_tool_specs()
+    assert {
+        "close_session_and_remove_program",
+        "remove_struct_members",
+        "delete_data_type",
+        "set_enum_values",
+        "set_local_variable_type",
+    } <= set(default)
+    for category, names in [
+        (ToolCategoryTag.BSIM, {"bsim_delete_executable", "bsim_query"}),
+        (ToolCategoryTag.SHARED_SYNC, {"delete_shared_project_file", "terminate_project_program_checkout"}),
+    ]:
+        assert names <= set(filter_tool_specs(add_categories=[category]))

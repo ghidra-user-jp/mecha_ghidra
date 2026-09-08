@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 FUNCTION_COMMANDS: tuple[str, ...] = (
+    "get_xrefs",
+    "get_call_edges",
+    "disassemble",
     "list_functions",
     "get_function",
     "decompile_function",
-    "disassemble_function",
-    "disassemble_range",
     "create_function",
     "delete_function",
     "analyze_program",
@@ -15,13 +16,10 @@ FUNCTION_COMMANDS: tuple[str, ...] = (
     "undo_program_change",
     "redo_program_change",
     "export_program",
-    "get_callee",
-    "get_xrefs_to",
-    "get_xrefs_from",
-    "get_function_xrefs",
 )
 
 MEMORY_COMMANDS: tuple[str, ...] = (
+    "get_data_type",
     "list_segments",
     "list_imports",
     "list_exports",
@@ -32,11 +30,10 @@ MEMORY_COMMANDS: tuple[str, ...] = (
     "get_bytes",
     "search_bytes",
     "list_data_types",
-    "get_struct",
-    "get_enum",
 )
 
 SYMBOL_COMMANDS: tuple[str, ...] = (
+    "apply_edits",
     "rename_function",
     "rename_data",
     "rename_variable",

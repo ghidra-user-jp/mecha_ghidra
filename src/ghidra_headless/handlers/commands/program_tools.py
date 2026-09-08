@@ -6,6 +6,7 @@ import pathlib
 
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.handlers.commands.pagination import normalize_pagination
+from ghidra_headless.handlers.commands.query_support import program_revision
 
 MAX_UNDO_STEPS = 100
 MAX_ENTRY_POINTS = 50
@@ -41,6 +42,7 @@ def get_program_info(params, *, ensure_context, safe_call, iter_items):
     blocks = list(iter_items(memory.getBlocks()))
     return {
         "name": str(program.getName()),
+        "revision": program_revision(ctx),
         "domain_path": None if domain_file is None else _text(safe_call(domain_file, "getPathname")),
         "executable_path": _text(safe_call(program, "getExecutablePath")),
         "executable_format": _text(safe_call(program, "getExecutableFormat")),

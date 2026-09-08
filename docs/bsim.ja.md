@@ -27,17 +27,18 @@ uv run ghidra-mcp \
 ## 検索して一致した関数を調べる
 
 1. `list_functions` で関数のアドレスを取得します。
-2. そのアドレスを `bsim_query_function` に渡します。複数関数は `addresses` または `function_names`、プログラム全体は `bsim_query_target` を使います。
+2. `bsim_query(scope="functions", addresses=[...])` にアドレスを渡します。名前での指定は `function_names`、プログラム全体の検索は `scope="program"` を使います。
 3. スコアと、検索条件を記録した `query` を確認します。自己一致は既定で除外され、`exclude_self=false` で含められます。
 4. 結果の `matched_ref` を、そのまま `bsim_load_matched_executable` に渡します。参照はバージョン付きで検証されるため、手作業で組み立て直さないでください。
 5. 返されたターゲットを `get_function` や `decompile_function` に指定して、コードを比較します。
 
-`bsim_query_function` の引数例です。アドレスを置き換えてください。
+`bsim_query` の引数例です。アドレスを置き換えてください。
 
 ```json
 {
   "target": "default",
-  "address": "<function-address>",
+  "scope": "functions",
+  "addresses": ["<function-address>"],
   "similarity_threshold": 0.8,
   "matches_per_function": 5
 }

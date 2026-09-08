@@ -74,7 +74,7 @@ These are MCP operations. Use the target `default` unless you registered another
 
 1. Call `list_project_programs`, then `get_project_sync_status(domain_path="/sample.bin")`.
 2. For a versioned file, call `checkout_project_program(domain_path="/sample.bin")`. For a private file in a repository-connected project, use `add_project_program_to_version_control` before the versioned workflow.
-3. Call `load_project_program(domain_path="/sample.bin")`, then edit with tools such as `rename_function` or `set_comment`.
+3. Call `load_project_program(domain_path="/sample.bin")`, then edit with `apply_edits` to add names and comments.
 4. Call `save_project_program` to save the local project, then `commit_project_program` to check changes into the repository. Inspect the returned `committed` value.
 5. From the other local cache, obtain the latest repository state and reload the GUI program to see it. Use `pull_project_program` to follow the latest version from MCP.
 

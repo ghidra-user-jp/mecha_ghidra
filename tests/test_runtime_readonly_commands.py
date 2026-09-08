@@ -172,7 +172,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         finally:
             program.endTransaction(transaction_id, committed)
 
-        enum_result = _unwrap_runtime_result(cli.get_enum(name="__it_enum", target=target))
+        enum_result = _unwrap_runtime_result(cli.get_data_type(target=target, path="__it_enum"))
         _log_runtime_result("get_enum", enum_result)
         assert enum_result["name"] == "__it_enum"
         assert enum_result["isSigned"] is True
@@ -227,7 +227,11 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert first_data_items, "Cannot validate get_data_by_label without defined data"
         data_address = first_data_items[0]["address"]
         data_label = "__it_runtime_data"
-        _unwrap_runtime_result(cli.rename_data(address=data_address, new_name=data_label, target=target))
+        _unwrap_runtime_result(
+            cli.apply_edits(
+                target=target, edits=[{"kind": "rename_data", "address": data_address, "new_name": data_label}]
+            )
+        )
 
         bytes_dump = _unwrap_runtime_result(cli.get_bytes(address=address, size=16, target=target))
         pattern = _derive_search_pattern_from_hexdump(bytes_dump)
@@ -238,18 +242,18 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "decompile_function(address)": _unwrap_runtime_result(
                 cli.decompile_function(address=address, target=target)
             ),
-            "disassemble_function": _unwrap_runtime_result(cli.disassemble_function(address=address, target=target)),
+            "disassemble_function": _unwrap_runtime_result(cli.disassemble(address=address, target=target))["items"],
             "disassemble_range": _unwrap_runtime_result(
-                cli.disassemble_range(start_address=address, length=32, limit=10, target=target)
-            ),
-            "get_callee": _unwrap_runtime_result(cli.get_callee(address=address, target=target)),
-            "get_xrefs_to": _unwrap_runtime_result(cli.get_xrefs_to(address=address, offset=0, limit=5, target=target)),
+                cli.disassemble(start_address=address, length=32, limit=10, target=target)
+            )["items"],
+            "get_callee": _unwrap_runtime_result(cli.get_call_edges(address=address, target=target))["items"],
+            "get_xrefs_to": _unwrap_runtime_result(cli.get_xrefs(address=address, limit=5, target=target))["items"],
             "get_xrefs_from": _unwrap_runtime_result(
-                cli.get_xrefs_from(address=address, offset=0, limit=5, target=target)
-            ),
+                cli.get_xrefs(address=address, limit=5, target=target, direction="from")
+            )["items"],
             "get_function_xrefs": _unwrap_runtime_result(
-                cli.get_function_xrefs(name=function_name, offset=0, limit=5, target=target)
-            ),
+                cli.get_call_edges(name=function_name, limit=5, target=target, direction="in")
+            )["items"],
             "list_segments": _unwrap_runtime_result(cli.list_segments(offset=0, limit=5, target=target)),
             "list_imports": _unwrap_runtime_result(cli.list_imports(offset=0, limit=5, target=target)),
             "list_exports": _unwrap_runtime_result(cli.list_exports(offset=0, limit=5, target=target)),
@@ -265,7 +269,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "get_data_by_label": _unwrap_runtime_result(cli.get_data_by_label(label=data_label, target=target)),
             "get_bytes": bytes_dump,
             "search_bytes": _unwrap_runtime_result(cli.search_bytes(pattern=pattern, offset=0, limit=5, target=target)),
-            "get_struct": _unwrap_runtime_result(cli.get_struct(name="__it_struct", target=target)),
+            "get_struct": _unwrap_runtime_result(cli.get_data_type(target=target, path="__it_struct")),
             "list_bookmarks": _unwrap_runtime_result(
                 cli.list_bookmarks(address=address, type="Info", category="Validation", target=target)
             ),

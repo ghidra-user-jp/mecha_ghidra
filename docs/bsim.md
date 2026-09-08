@@ -27,17 +27,18 @@ Call `get_bsim_database_status` first. It reports database metadata, executable 
 ## Search and inspect a match
 
 1. Get a function address from `list_functions`.
-2. Call `bsim_query_function` with that address. Use `addresses` or `function_names` for multiple functions; `bsim_query_target` searches the loaded program.
+2. Call `bsim_query(scope="functions", addresses=[...])` with that address. Alternatively use `function_names`; `scope="program"` searches the loaded program.
 3. Inspect scores and the returned `query` provenance. Self matches are excluded unless `exclude_self=false`.
 4. Copy the result's `matched_ref` into `bsim_load_matched_executable` without rebuilding it by hand. The reference is versioned and validated.
 5. Use the returned target with `get_function` and `decompile_function` to compare the matched code.
 
-Example arguments for `bsim_query_function` (replace the address):
+Example arguments for `bsim_query` (replace the address):
 
 ```json
 {
   "target": "default",
-  "address": "<function-address>",
+  "scope": "functions",
+  "addresses": ["<function-address>"],
   "similarity_threshold": 0.8,
   "matches_per_function": 5
 }

@@ -74,7 +74,7 @@ uv run ghidra-mcp \
 
 1. `list_project_programs` で対象を確認し、`get_project_sync_status(domain_path="/sample.bin")` で状態を読みます。
 2. バージョン管理済みなら `checkout_project_program(domain_path="/sample.bin")` でチェックアウトします。リポジトリ接続済みプロジェクトの未共有ファイルは、先に `add_project_program_to_version_control` で共有管理へ追加します。
-3. `load_project_program(domain_path="/sample.bin")` で開き、`rename_function` や `set_comment` で編集します。
+3. `load_project_program(domain_path="/sample.bin")` で開き、`apply_edits` で名前やコメントを編集します。
 4. `save_project_program` でローカルへ保存し、`commit_project_program` でリポジトリへチェックインします。応答の `committed` を確認してください。
 5. もう一方のキャッシュで最新状態を取得し、GUIのプログラムを再読み込みします。MCPから最新状態へ追従するには `pull_project_program` を使います。
 

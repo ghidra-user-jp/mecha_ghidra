@@ -93,7 +93,7 @@ HTTP/SSEでは3種類とも指定してください。起動時の警告は**3�
 | --- | --- |
 | 既定ツールに共有操作を追加 | `--add-category shared_sync` |
 | 全カテゴリの読み取りツールだけを公開 | `--tool-profile full --allow-safety read_only` |
-| readonlyに関数名変更だけを追加 | `--tool-profile readonly --enable-tool rename_function` |
+| readonlyに名前・型・コメント編集を追加 | `--tool-profile readonly --enable-tool apply_edits` |
 | バイト書き換えを除外 | `--disable-tool set_bytes` |
 
 正確な引数とエラーコードは `tools/list`、MCPリソースの `ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}` で確認できます。概要は[ツール一覧](tools.ja.md)、削除済みの `--enable-shared-project-sync` については[移行手順](troubleshooting.ja.md#upgrading)を参照してください。

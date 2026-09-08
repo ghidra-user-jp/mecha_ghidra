@@ -529,7 +529,7 @@ def test_parse_args_accepts_tool_filter_options():
             "--allow-operation-level",
             "advanced",
             "--enable-tool",
-            "rename_function",
+            "apply_edits",
             "--disable-tool",
             "set_bytes",
         ]
@@ -539,7 +539,7 @@ def test_parse_args_accepts_tool_filter_options():
     assert args.add_category == ["core"]
     assert args.allow_safety == ["read_only"]
     assert args.allow_operation_level == ["advanced"]
-    assert args.enable_tool == ["rename_function"]
+    assert args.enable_tool == ["apply_edits"]
     assert args.disable_tool == ["set_bytes"]
 
 

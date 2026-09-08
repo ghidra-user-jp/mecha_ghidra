@@ -129,7 +129,7 @@ On later starts, reuse the existing project. Skip creation and import, list its 
 
 For `--project-name` and `project_name`, omit `.gpr`; names ending in it are rejected. To open an existing `.gpr` file, pass it as `project_location` and omit `project_name`. A `.gpr` file and its sibling `.rep` directory together form the local project.
 
-`register_target` registers project metadata; `create_session` adds a target and opens a program; `load_project_program` loads or switches a program on an existing target. Use `list_targets` to inspect the available names. Most program tools accept `target`, with `default` used when it is omitted.
+`register_target` registers project metadata; `open_program` adds a target and opens a program; `load_project_program` loads or switches a program on an existing target. Use `list_targets` to inspect the available names. Most program tools accept `target`, with `default` used when it is omitted.
 
 ## Saving and analysis
 

@@ -142,6 +142,13 @@ class RuntimeCoreExecution:
             runtime_dirty = self._store.is_dirty_program(target, domain_path)
         if session is None:
             return False
+        handle = session.get_project_handle()
+        is_repository = getattr(handle, "is_repository_project", None)
+        if callable(is_repository) and not is_repository():
+            # canAddToRepository() also returns true for a private local project.
+            # There is no remote version to discover there; reopening would
+            # unnecessarily invalidate every revision observed before an edit.
+            return False
         if runtime_dirty:
             return False
         if self._active_program_is_changed_locked(target, domain_path):
