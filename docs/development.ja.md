@@ -75,8 +75,11 @@ uv run pytest \
 | 共有プロジェクト同期 | `GHIDRA_RUNTIME_SHARED_PROJECT_LOCATION`、`GHIDRA_RUNTIME_SHARED_PROJECT_NAME`、`GHIDRA_RUNTIME_SHARED_DOMAIN_PATH`、`GHIDRA_RUNTIME_SHARED_SERVER_USER`（または `GHIDRA_SERVER_USER`）、`GHIDRA_SERVER_PASSWORD` |
 | BSim | `GHIDRA_BSIM_RUNTIME_VALIDATION=1`、`GHIDRA_INSTALL_DIR`、`GHIDRA_BSIM_URL`、`GHIDRA_BSIM_PASSWORD` または `GHIDRA_BSIM_PASSWORD_ENV` |
 | BSimの検索・読み込み・デコンパイル | 上記に加え `GHIDRA_BSIM_PROJECT_LOCATION`、`GHIDRA_BSIM_PROJECT_NAME`、`GHIDRA_BSIM_QUERY_DOMAIN_PATH`、`GHIDRA_BSIM_QUERY_FUNCTION` |
+| Ghidra ServerにあるBSim一致元の読み込み | 上記に加え `GHIDRA_BSIM_REMOTE_CACHE_DIR`。パスワード認証では `GHIDRA_SERVER_USER` と `GHIDRA_SERVER_PASSWORD` の両方を設定 |
 
 [validate_bsim_runtime.sh](../scripts/validate_bsim_runtime.sh)はBSim実機フラグを有効にし、パスワード変数がなければTTYで入力できます。同じリポジトリへ接続する場合も、キャッシュのローカル `.gpr/.rep` パスは分けてください。
+
+共有側のcheckout、commit、別クライアントからの更新取得、試験ファイル削除は `tests/test_runtime_registry_shared_sync_commands.py` で検証します。BSimのカテゴリ・メタデータ変更には `GHIDRA_BSIM_MUTATION_VALIDATION=1` が必要です。カテゴリ定義は試験後も残るため、使い捨てのDBを指定してください。
 
 <a id="native-builds"></a>
 

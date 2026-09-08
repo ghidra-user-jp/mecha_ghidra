@@ -26,6 +26,15 @@ Optional query/load/decompile validation:
   GHIDRA_BSIM_QUERY_DOMAIN_PATH  Domain path for the query program.
   GHIDRA_BSIM_QUERY_FUNCTION     Function name to query.
 
+For matches stored on Ghidra Server:
+  GHIDRA_BSIM_REMOTE_CACHE_DIR   Directory for separate repository caches.
+  GHIDRA_SERVER_USER            Ghidra Server user for password authentication.
+  GHIDRA_SERVER_PASSWORD        Ghidra Server password; set together with user.
+
+Optional category/metadata writes (disposable BSim database only):
+  GHIDRA_BSIM_MUTATION_VALIDATION=1
+  Category definitions remain in the database after validation.
+
 Any arguments after the script name are passed to pytest. With no arguments, the
 script runs tests/test_runtime_bsim_commands.py -q.
 EOF

@@ -42,6 +42,14 @@ def _configure_runtime() -> None:
     install_dir = _resolve_ghidra_install_dir()
     os.environ["GHIDRA_INSTALL_DIR"] = str(install_dir)
     start_headless_jvm(str(install_dir))
+    username = os.environ.get("GHIDRA_SERVER_USER")
+    password = os.environ.get("GHIDRA_SERVER_PASSWORD")
+    if username or password:
+        if not username or not password:
+            pytest.fail("GHIDRA_SERVER_USER and GHIDRA_SERVER_PASSWORD must be set together")
+        from ghidra.framework.client import ClientUtil, PasswordClientAuthenticator
+
+        ClientUtil.setClientAuthenticator(PasswordClientAuthenticator(username, password))
     bsim_url = os.environ.get("GHIDRA_BSIM_URL")
     if not bsim_url:
         pytest.fail("GHIDRA_BSIM_URL is required for BSim runtime tests")
@@ -51,6 +59,7 @@ def _configure_runtime() -> None:
             bsim_url=bsim_url,
             bsim_password=os.environ.get("GHIDRA_BSIM_PASSWORD"),
             bsim_password_env=os.environ.get("GHIDRA_BSIM_PASSWORD_ENV"),
+            remote_cache_dir=os.environ.get("GHIDRA_BSIM_REMOTE_CACHE_DIR"),
         ),
     )
 
@@ -155,30 +164,37 @@ def test_runtime_bsim_query_function_and_decompile_match():
     _configure_runtime()
     target = f"bsim_runtime_{uuid.uuid4().hex[:8]}"
     match_target = f"{target}_match"
-    cli.register_target(
-        target=target,
-        project_location=required["GHIDRA_BSIM_PROJECT_LOCATION"],
-        project_name=required["GHIDRA_BSIM_PROJECT_NAME"],
-    )
-    cli.load_project_program(target=target, domain_path=required["GHIDRA_BSIM_QUERY_DOMAIN_PATH"])
+    opened_targets = []
+    try:
+        cli.register_target(
+            target=target,
+            project_location=required["GHIDRA_BSIM_PROJECT_LOCATION"],
+            project_name=required["GHIDRA_BSIM_PROJECT_NAME"],
+        )
+        opened_targets.append(target)
+        cli.load_project_program(target=target, domain_path=required["GHIDRA_BSIM_QUERY_DOMAIN_PATH"])
 
-    result = cli.bsim_query(
-        target=target,
-        similarity_threshold=float(os.environ.get("GHIDRA_BSIM_SIMILARITY_THRESHOLD", "0.5")),
-        significance_threshold=float(os.environ.get("GHIDRA_BSIM_SIGNIFICANCE_THRESHOLD", "0.0")),
-        matches_per_function=10,
-        max_results=10,
-        scope="functions",
-        function_names=[required["GHIDRA_BSIM_QUERY_FUNCTION"]],
-    )
+        result = cli.bsim_query(
+            target=target,
+            similarity_threshold=float(os.environ.get("GHIDRA_BSIM_SIMILARITY_THRESHOLD", "0.5")),
+            significance_threshold=float(os.environ.get("GHIDRA_BSIM_SIGNIFICANCE_THRESHOLD", "0.0")),
+            matches_per_function=10,
+            max_results=10,
+            scope="functions",
+            function_names=[required["GHIDRA_BSIM_QUERY_FUNCTION"]],
+        )
 
-    assert result["count"] > 0
-    best = result["matches"][0]
-    assert best["similarity"] >= float(os.environ.get("GHIDRA_BSIM_SIMILARITY_THRESHOLD", "0.5"))
+        assert result["count"] > 0
+        best = result["matches"][0]
+        assert best["similarity"] >= float(os.environ.get("GHIDRA_BSIM_SIMILARITY_THRESHOLD", "0.5"))
 
-    loaded = cli.bsim_load_matched_executable(matched_ref=best["matched_ref"], target=match_target)
-    query_decompile = cli.decompile_function(name=required["GHIDRA_BSIM_QUERY_FUNCTION"], target=target)
-    match_decompile = cli.decompile_function(name=best["matched_ref"]["name"], target=loaded["target"])
+        loaded = cli.bsim_load_matched_executable(matched_ref=best["matched_ref"], target=match_target)
+        opened_targets.append(loaded["target"])
+        query_decompile = cli.decompile_function(name=required["GHIDRA_BSIM_QUERY_FUNCTION"], target=target)
+        match_decompile = cli.decompile_function(name=best["matched_ref"]["name"], target=loaded["target"])
 
-    assert required["GHIDRA_BSIM_QUERY_FUNCTION"] in str(query_decompile)
-    assert best["matched_ref"]["name"] in str(match_decompile)
+        assert required["GHIDRA_BSIM_QUERY_FUNCTION"] in str(query_decompile)
+        assert best["matched_ref"]["name"] in str(match_decompile)
+    finally:
+        for opened_target in reversed(opened_targets):
+            cli.close_session(opened_target)

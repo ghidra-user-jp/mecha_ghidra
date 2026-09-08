@@ -75,8 +75,11 @@ uv run pytest \
 | Shared-project sync | `GHIDRA_RUNTIME_SHARED_PROJECT_LOCATION`, `GHIDRA_RUNTIME_SHARED_PROJECT_NAME`, `GHIDRA_RUNTIME_SHARED_DOMAIN_PATH`, `GHIDRA_RUNTIME_SHARED_SERVER_USER` (or `GHIDRA_SERVER_USER`), `GHIDRA_SERVER_PASSWORD` |
 | BSim | `GHIDRA_BSIM_RUNTIME_VALIDATION=1`, `GHIDRA_INSTALL_DIR`, `GHIDRA_BSIM_URL`, and either `GHIDRA_BSIM_PASSWORD` or `GHIDRA_BSIM_PASSWORD_ENV` |
 | BSim query/load/decompile | Also `GHIDRA_BSIM_PROJECT_LOCATION`, `GHIDRA_BSIM_PROJECT_NAME`, `GHIDRA_BSIM_QUERY_DOMAIN_PATH`, `GHIDRA_BSIM_QUERY_FUNCTION` |
+| BSim matches stored on Ghidra Server | Also `GHIDRA_BSIM_REMOTE_CACHE_DIR`; set both `GHIDRA_SERVER_USER` and `GHIDRA_SERVER_PASSWORD` for password authentication |
 
 [`validate_bsim_runtime.sh`](../scripts/validate_bsim_runtime.sh) enables the BSim runtime flag and can prompt on a TTY if neither password variable is supplied. Separate project caches may connect to the same repository, but must have different local `.gpr/.rep` paths.
+
+Run `tests/test_runtime_registry_shared_sync_commands.py` for the shared lifecycle, including checkout, commit, updates from a second client, and deletion of test files. BSim category and metadata writes require `GHIDRA_BSIM_MUTATION_VALIDATION=1`; use a disposable database because category definitions remain after the tests.
 
 <a id="native-builds"></a>
 
