@@ -1203,6 +1203,7 @@ class BsimService:
             allow_domain_only_requested_target=(explicit_target and self._is_remote_matched_ref(ref.raw)),
         )
         if existing is not None:
+            self._validate_loaded_match(existing["target"], ref)
             return {
                 "status": "already_loaded",
                 "target": existing["target"],
@@ -1241,6 +1242,7 @@ class BsimService:
             project_name=project_name,
             domain_path=domain_path,
         )
+        self._validate_loaded_match(requested_target, ref)
         self._remember_loaded_match(
             target=requested_target,
             executable_md5=executable_md5,
@@ -1258,6 +1260,15 @@ class BsimService:
             "executable_md5": executable_md5,
             "matched_ref_version": BSIM_MATCHED_REF_VERSION,
         }
+
+    def _validate_loaded_match(self, target: str, ref: _MatchedRef) -> None:
+        # The core gateway holds the target/project locks for this entire check.
+        # Do not cache a claimed MD5 before inspecting the actual loaded Program.
+        self._core_command_service.call(
+            "bsim_validate_match",
+            {"executable_md5": ref.executable_md5, "domain_path": ref.domain_path, "address": ref.address},
+            target,
+        )
 
     def _matched_load_key(
         self,

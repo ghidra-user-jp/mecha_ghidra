@@ -11,6 +11,7 @@ from ghidra_headless.handlers.commands import (
     bsim_query_target,
     bsim_register_target,
     bsim_update_target_signatures,
+    bsim_validate_match,
     create_enum,
     create_function,
     create_label,
@@ -61,6 +62,7 @@ from ghidra_headless.handlers.commands import (
 )
 
 COMMAND_NAMES = (
+    "bsim_validate_match",
     "list_functions",
     "decompile_function",
     "rename_function",
@@ -119,6 +121,7 @@ COMMAND_NAMES = (
 )
 
 INTERNAL_COMMAND_NAMES = (
+    "bsim_validate_match",
     # export_program is exposed through the registry so the path policy runs first.
     "export_program",
     "bsim_query_target",
@@ -129,6 +132,7 @@ INTERNAL_COMMAND_NAMES = (
 )
 
 COMMAND_TO_IMPL = {
+    "bsim_validate_match": bsim_validate_match,
     "list_functions": list_functions,
     "decompile_function": decompile_function,
     "rename_function": rename_function,
@@ -188,6 +192,7 @@ COMMAND_TO_IMPL = {
 
 # command -> dependency profile for keyword argument injection into command impl.
 COMMAND_PROFILE = {
+    "bsim_validate_match": ("ensure_context", "get_address"),
     "list_functions": ("ensure_context", "to_int", "collect", "iter_items", "source_type"),
     "decompile_function": ("ensure_context", "get_address", "find_function_by_name", "decompile_function_object"),
     "rename_function": ("ensure_context", "get_address", "find_function_by_name", "txn", "source_type"),

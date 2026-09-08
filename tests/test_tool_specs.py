@@ -454,6 +454,7 @@ def test_typed_input_models_for_function_listing_slice():
         {
             "struct_name": (str, ...),
             "members": (list[str | dict] | None, None),
+            "clear_all": (bool, False),
             "category": (str | None, None),
         },
     )

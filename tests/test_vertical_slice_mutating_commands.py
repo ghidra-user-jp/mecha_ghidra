@@ -134,8 +134,8 @@ from ghidra_mcp import cli
         ),
         (
             "remove_struct_members",
-            lambda: cli.remove_struct_members(struct_name="S", category="/types", target="fw"),
-            {"struct_name": "S", "category": "/types"},
+            lambda: cli.remove_struct_members(struct_name="S", clear_all=True, category="/types", target="fw"),
+            {"struct_name": "S", "clear_all": True, "category": "/types"},
         ),
         (
             "delete_data_type",
@@ -155,7 +155,7 @@ from ghidra_mcp import cli
                 category="/types",
                 target="fw",
             ),
-            {"struct_name": "S", "members": ["b"], "category": "/types"},
+            {"struct_name": "S", "members": ["b"], "clear_all": False, "category": "/types"},
         ),
         (
             "set_global_data_type",

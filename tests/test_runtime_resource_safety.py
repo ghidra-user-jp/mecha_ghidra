@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def runtime(tmp_path, monkeypatch):
+def runtime(tmp_path, monkeypatch, request):
     _start_pyghidra_if_needed()
     from ghidra_headless.handlers import core
 
@@ -34,7 +34,7 @@ def runtime(tmp_path, monkeypatch):
     )
     api = bundle.runtime.tools
     binary = tmp_path / "tiny.bin"
-    binary.write_bytes(bytes.fromhex("b8 2a 00 00 00 c3"))
+    binary.write_bytes(getattr(request, "param", bytes.fromhex("b8 2a 00 00 00 c3")))
     try:
         api["create_project"](project_location=str(tmp_path), project_name="sample")
         api["register_target"](target="resource_safety", project_location=str(tmp_path), project_name="sample")

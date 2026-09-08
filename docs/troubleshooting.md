@@ -53,7 +53,7 @@ Version 0.1.5 adds Ghidra 12.1.3 support and matching native overlays. Choose th
 | `reanalyze_program` | `analyze_program(force=true)` |
 | `set_decompiler_comment` | `set_comment(kind="pre")` |
 | `set_disassembly_comment` | `set_comment(kind="eol")` |
-| `clear_struct` | `remove_struct_members` with `members` omitted |
+| `clear_struct` | `remove_struct_members(clear_all=true)` |
 | `delete_struct` | `delete_data_type` |
 | `reload_project_program` | `load_project_program` on the current domain path; check `reloaded=true` |
 | `list_bsim_categories` | `get_bsim_database_status`: `categories` and `function_tags` |

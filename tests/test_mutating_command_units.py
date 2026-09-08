@@ -71,12 +71,12 @@ def test_rename_data_renames_non_function_primary_symbol():
     assert result == {"name": "new_name", "address": "00402000"}
 
 
-def test_remove_struct_members_without_members_clears_an_already_empty_structure():
+def test_remove_struct_members_clear_all_clears_an_already_empty_structure():
     structure = _LegacyEmptyStructure()
     manager = SimpleNamespace(replaceDataType=lambda *_args: None)
 
     result = remove_struct_members(
-        {"struct_name": "Empty"},
+        {"struct_name": "Empty", "clear_all": True},
         ensure_context=lambda: object(),
         txn=_run_transaction,
         get_struct_datatype=lambda _ctx, _name, _category: structure,
@@ -87,7 +87,7 @@ def test_remove_struct_members_without_members_clears_an_already_empty_structure
     assert result == {"name": "Empty", "members": []}
 
 
-def test_remove_struct_members_without_members_removes_everything():
+def test_remove_struct_members_clear_all_removes_everything():
     components = [
         SimpleNamespace(getFieldName=lambda: "first", getOrdinal=lambda: 0),
         SimpleNamespace(getFieldName=lambda: "second", getOrdinal=lambda: 1),
@@ -107,7 +107,7 @@ def test_remove_struct_members_without_members_removes_everything():
     descriptions = []
 
     remove_struct_members(
-        {"struct_name": "Fields", "members": None},
+        {"struct_name": "Fields", "clear_all": True},
         ensure_context=lambda: object(),
         txn=lambda _ctx, description, operation: (descriptions.append(description), operation())[1],
         get_struct_datatype=lambda *_args: structure,

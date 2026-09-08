@@ -116,7 +116,7 @@ def get_callee(params, *, ensure_context, get_address, iter_items, task_monitor)
     if function.isThunk() and not callees_list:
         thunked = function.getThunkedFunction(False)
         if thunked is not None:
-            callees_list = list(iter_items(thunked.getCalledFunctions(task_monitor.DUMMY)))
+            callees_list = [thunked]
     rows = [
         {
             "name": str(callee.getName(True)),

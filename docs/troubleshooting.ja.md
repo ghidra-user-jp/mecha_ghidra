@@ -53,7 +53,7 @@
 | `reanalyze_program` | `analyze_program(force=true)` |
 | `set_decompiler_comment` | `set_comment(kind="pre")` |
 | `set_disassembly_comment` | `set_comment(kind="eol")` |
-| `clear_struct` | `members` を省略した `remove_struct_members` |
+| `clear_struct` | `remove_struct_members(clear_all=true)` |
 | `delete_struct` | `delete_data_type` |
 | `reload_project_program` | 保持中のdomain pathを `load_project_program` で読み込む。`reloaded=true` を確認 |
 | `list_bsim_categories` | `get_bsim_database_status` の `categories` と `function_tags` |

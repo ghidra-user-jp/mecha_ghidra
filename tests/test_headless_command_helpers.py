@@ -324,7 +324,7 @@ def _fake_function(name: str, entry: str, *, default_name: bool = False, size: i
     symbol = types.SimpleNamespace(getSource=lambda: "default" if default_name else "user")
     body = types.SimpleNamespace(getNumAddresses=lambda: size)
     return types.SimpleNamespace(
-        getName=lambda: name,
+        getName=lambda *_args: name,
         getEntryPoint=lambda: entry,
         getSymbol=lambda: symbol,
         getBody=lambda: body,
@@ -361,14 +361,14 @@ def test_list_functions_filters_case_insensitively_and_reports_size():
     ]
 
     assert _list_functions({"filter": "MAIN"}, functions) == [
-        {"name": "Main", "entry": "0x1000", "size": 32, "is_thunk": False},
-        {"name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
+        {"name": "Main", "full_name": "Main", "entry": "0x1000", "size": 32, "is_thunk": False},
+        {"name": "helper_main", "full_name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
     ]
     assert _list_functions({"only_default_names": True}, functions) == [
-        {"name": "FUN_00002000", "entry": "0x2000", "size": 8, "is_thunk": True},
+        {"name": "FUN_00002000", "full_name": "FUN_00002000", "entry": "0x2000", "size": 8, "is_thunk": True},
     ]
     assert _list_functions({"filter": "main", "offset": 1, "limit": 5}, functions) == [
-        {"name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
+        {"name": "helper_main", "full_name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
     ]
 
 

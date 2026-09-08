@@ -1608,13 +1608,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         input_fields=(
             ("struct_name", str, ...),
             ("members", list[str | dict] | None, None),
+            ("clear_all", bool, False),
             ("category", str | None, None),
         ),
-        omit_falsey_keys=("category", "members"),
+        omit_falsey_keys=("category",),
         checkout_required=True,
         description=(
-            "Remove members from a structure; members accepts names or {name} objects, and omitting it removes "
-            "every member while keeping the type."
+            "Remove members from a structure; members accepts names or {name} objects. "
+            "An empty list changes nothing; clear_all=true explicitly removes every member."
         ),
     ),
     _core_tool(

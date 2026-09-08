@@ -259,17 +259,19 @@ def _ensure_checkout_for_versioned_program(ctx):
 
 
 def _pick_function(candidates):
-    """Prefer the first candidate with a non-empty body, else the first candidate."""
-    first_match = None
-    for function in candidates:
-        if function is None:
-            continue
-        if first_match is None:
-            first_match = function
-        body = _safe_call(function, "getBody")
-        if body is not None and not body.isEmpty():
-            return function
-    return first_match
+    """Resolve one function without guessing between names in different namespaces."""
+    unique = {str(fn.getEntryPoint()): fn for fn in candidates if fn is not None}
+    if len(unique) > 1:
+        raise HeadlessError(
+            "AMBIGUOUS_FUNCTION: use an address or a unique qualified name",
+            details={
+                "candidates": [
+                    {"entry": entry, "full_name": str(fn.getName(True))} for entry, fn in sorted(unique.items())[:20]
+                ],
+                "candidate_count": len(unique),
+            },
+        )
+    return next(iter(unique.values()), None)
 
 
 def _indexed_functions_named(ctx, name):
@@ -295,13 +297,19 @@ def _indexed_functions_named(ctx, name):
 
 
 def _find_function_by_name(ctx, name):
-    indexed = _indexed_functions_named(ctx, name)
+    name = str(name)
+    qualified = "::" in name
+    indexed = _indexed_functions_named(ctx, name.rsplit("::", 1)[-1])
     if indexed is not None:
+        if qualified:
+            indexed = [fn for fn in indexed if str(fn.getName(True)) == name]
         picked = _pick_function(indexed)
         if picked is not None:
             return picked
     iterator = ctx.function_manager.getFunctions(True)
-    return _pick_function(function for function in _iter_items(iterator) if function.getName() == name)
+    return _pick_function(
+        fn for fn in _iter_items(iterator) if str(fn.getName(True) if qualified else fn.getName()) == name
+    )
 
 
 def _get_address(ctx, address_text):
@@ -341,13 +349,11 @@ def _find_data_type_by_name(dtm, type_name):
         return None
     query_lower = query.lower()
     query_compact = query_lower.replace(" ", "")
-    candidate = None
+    # An explicit path never falls back to a similarly named type elsewhere.
+    if "/" in query:
+        return dtm.getDataType(query if query.startswith("/") else "/" + query)
 
-    # Exact path lookups are indexed; try them before scanning every data type.
-    for probe in (query, "/" + query):
-        resolved = _safe_call(dtm, "getDataType", probe)
-        if resolved is not None:
-            return resolved
+    candidates = {}
 
     iterator = _safe_call(dtm, "getAllDataTypes")
     if iterator is not None:
@@ -364,18 +370,14 @@ def _find_data_type_by_name(dtm, type_name):
                     continue
                 text = str(name)
                 text_lower = text.lower()
-                if text == query:
-                    return data_type
-                if text_lower == query_lower and candidate is None:
-                    candidate = data_type
-                if text_lower.replace(" ", "") == query_compact and candidate is None:
-                    candidate = data_type
-                if text.endswith("/" + query) and candidate is None:
-                    candidate = data_type
-                if text_lower.endswith("/" + query_lower) and candidate is None:
-                    candidate = data_type
-
-    return candidate
+                if text_lower.replace(" ", "") == query_compact or text_lower.endswith("/" + query_lower):
+                    candidates[str(data_type.getPathName())] = data_type
+    if len(candidates) > 1:
+        raise HeadlessError(
+            "AMBIGUOUS_DATA_TYPE: use the full data type path",
+            details={"candidates": sorted(candidates)[:20], "candidate_count": len(candidates)},
+        )
+    return next(iter(candidates.values()), None)
 
 
 def _parse_clear_data_mode(clear_mode_text):

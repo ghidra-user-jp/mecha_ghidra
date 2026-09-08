@@ -65,6 +65,7 @@ DATATYPE_COMMANDS: tuple[str, ...] = (
 )
 
 BSIM_COMMANDS: tuple[str, ...] = (
+    "bsim_validate_match",
     "bsim_query_target",
     "bsim_query_function",
     "bsim_register_target",

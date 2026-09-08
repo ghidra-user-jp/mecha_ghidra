@@ -26,6 +26,9 @@ _RETRYABLE_SYNC = ErrorClassification(ErrorCode.SYNC_OPERATION_FAILED, retryable
 _SYNC_FAILED = ErrorClassification(ErrorCode.SYNC_OPERATION_FAILED)
 
 _CODE_TABLE: dict[str, ErrorClassification] = {
+    "AMBIGUOUS_FUNCTION": ErrorClassification(ErrorCode.AMBIGUOUS_FUNCTION),
+    "AMBIGUOUS_DATA_TYPE": ErrorClassification(ErrorCode.AMBIGUOUS_DATA_TYPE),
+    "BSIM_MATCH_STALE": ErrorClassification(ErrorCode.BSIM_MATCH_STALE),
     "OPERATION_FAILED": ErrorClassification(ErrorCode.OPERATION_FAILED),
     "SYNC_OPERATION_FAILED": _SYNC_FAILED,
     "SYNC_STATUS_UNAVAILABLE": _SYNC_FAILED,

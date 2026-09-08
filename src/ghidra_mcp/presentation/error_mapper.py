@@ -7,6 +7,9 @@ from typing import Any
 from ghidra_mcp.domain import DomainError, ErrorCode
 
 _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
+    ErrorCode.AMBIGUOUS_FUNCTION: "AMBIGUOUS_FUNCTION: use a function address or a unique qualified name",
+    ErrorCode.AMBIGUOUS_DATA_TYPE: "AMBIGUOUS_DATA_TYPE: use the full data type path",
+    ErrorCode.BSIM_MATCH_STALE: "BSIM_MATCH_STALE: the loaded program does not match the BSim reference",
     ErrorCode.OPERATION_FAILED: "OPERATION_FAILED: operation failed",
     ErrorCode.CHECKOUT_REQUIRED: "CHECKOUT_REQUIRED: checkout is required for mutating operations on shared projects",
     ErrorCode.CHECKOUT_UNAVAILABLE: (

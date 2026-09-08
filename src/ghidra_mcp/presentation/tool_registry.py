@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import re
+from copy import deepcopy
 from typing import Any, Callable
 
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.tools.base import Tool
-from mcp.types import ToolAnnotations
+from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import ConfigDict, create_model
 
 from ghidra_mcp.contracts.tool_models import PayloadToolOutputModel
 from ghidra_mcp.contracts.tool_spec import (
@@ -21,6 +25,30 @@ from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentation
 
 _SHORT_DESCRIPTION_MAX_CHARS = 180
 _SENTENCE_ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no.", "al.")
+
+
+class PublicArguments(ArgModelBase):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class StrictToolMetadata(FuncMetadata):
+    def pre_parse_json(self, data: dict[str, Any]) -> dict[str, Any]:
+        # The request is already JSON. SDK coercion would turn strings into
+        # numbers/objects before our strict contract can reject them.
+        return data
+
+
+def public_arguments_model(spec: ToolSpec) -> type[PublicArguments]:
+    fields = {}
+    if spec.include_target and spec.executor_kind != ExecutorKind.CORE_COMMAND:
+        fields["target"] = (str, ...)
+    for name, field in spec.input_model.model_fields.items():
+        public_field = deepcopy(field)
+        public_field.alias = public_field.validation_alias = public_field.serialization_alias = None
+        fields[_public_name(spec, name)] = (field.annotation, public_field)
+    if spec.include_target and spec.executor_kind == ExecutorKind.CORE_COMMAND:
+        fields["target"] = (str, "default")
+    return create_model(spec.input_model.__name__, __base__=PublicArguments, **fields)
 
 
 def _public_name(spec: ToolSpec, raw_key: str) -> str:
@@ -47,7 +75,7 @@ def _build_signature(spec: ToolSpec) -> inspect.Signature:
                 public_name,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 default=default,
-                annotation=field.annotation,
+                annotation=field.rebuild_annotation(),
             )
         )
 
@@ -293,10 +321,15 @@ def as_anticipated_tool_failure(tool_fn: Callable[..., Any]) -> Callable[..., An
         except ToolError:
             raise
         except Exception as exc:
-            failure = ToolError(str(exc))
             payload = getattr(exc, "domain_error", None)
             if payload is not None:
-                failure.domain_error = payload  # type: ignore[attr-defined]
+                error = {"message": str(exc), **payload}
+                return CallToolResult(
+                    is_error=True,
+                    structured_content={"error": error},
+                    content=[TextContent(type="text", text=json.dumps({"error": error}, ensure_ascii=False))],
+                )
+            failure = ToolError(str(exc))
             raise failure from exc
 
     return _entry
@@ -323,6 +356,8 @@ def build_tool_object(
         description=description,
         annotations=tool_annotations_for_spec(spec),
     )
+    tool.fn_metadata = StrictToolMetadata(arg_model=public_arguments_model(spec))
+    tool.parameters = public_input_schema(spec)
     if description is None:
         tool.description = None
     return tool

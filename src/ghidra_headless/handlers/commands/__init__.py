@@ -42,6 +42,7 @@ from .program_tools import (
 from .read_only_bsim import (
     bsim_query_function,
     bsim_query_target,
+    bsim_validate_match,
 )
 from .read_only_decompile import (
     decompile_function,
@@ -75,6 +76,7 @@ from .read_only_xrefs import (
 )
 
 __all__ = [
+    "bsim_validate_match",
     "create_enum",
     "create_label",
     "export_program",

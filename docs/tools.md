@@ -101,7 +101,7 @@ See [first analysis](usage.md#first-analysis) for operation order and saving beh
 | --- | --- |
 | `create_struct` | Create struct |
 | `add_struct_members` | Add struct members |
-| `remove_struct_members` | Remove selected struct members, or every member when `members` is omitted |
+| `remove_struct_members` | Remove selected struct members, or every member with explicit `clear_all=true` |
 | `delete_data_type` | Delete a data type (struct, union, enum, typedef, ...) |
 | `get_struct` | Get struct definition |
 | `list_data_types` | List program data types |

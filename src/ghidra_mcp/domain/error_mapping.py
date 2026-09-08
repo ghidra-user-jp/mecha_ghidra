@@ -114,6 +114,8 @@ def to_domain_error(
                 code = heuristic
 
     details: dict[str, Any] = {"operation": operation}
+    if code in {ErrorCode.AMBIGUOUS_FUNCTION, ErrorCode.AMBIGUOUS_DATA_TYPE, ErrorCode.BSIM_MATCH_STALE}:
+        details.update(getattr(exc, "details", None) or {})
     for key, value in context.items():
         if value is not None or key in keep_none:
             details[key] = value

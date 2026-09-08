@@ -34,6 +34,7 @@ def list_functions(params, *, ensure_context, to_int, collect, iter_items, sourc
     def _to_entry(func):
         return {
             "name": func.getName(),
+            "full_name": str(func.getName(True)),
             "entry": str(func.getEntryPoint()),
             "size": _body_size(func),
             "is_thunk": bool(func.isThunk()),

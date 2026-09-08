@@ -442,7 +442,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("add_struct_members", add_struct_members_result)
 
         clear_struct_result = _unwrap_runtime_result(
-            cli.remove_struct_members(struct_name="__it_struct_mut", target=target)
+            cli.remove_struct_members(struct_name="__it_struct_mut", clear_all=True, target=target)
         )
         _log_runtime_result("remove_struct_members(all)", clear_struct_result)
 

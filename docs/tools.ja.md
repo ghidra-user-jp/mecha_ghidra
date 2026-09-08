@@ -101,7 +101,7 @@
 | --- | --- |
 | `create_struct` | 構造体を作成 |
 | `add_struct_members` | 構造体メンバーを追加 |
-| `remove_struct_members` | 構造体メンバーを選択削除。`members` 省略で全削除 |
+| `remove_struct_members` | 構造体メンバーを選択削除。`clear_all=true` で明示的に全削除 |
 | `delete_data_type` | データ型（struct、union、enum、typedef など）を削除 |
 | `get_struct` | 構造体定義を取得 |
 | `list_data_types` | プログラム内のデータ型一覧を取得 |
