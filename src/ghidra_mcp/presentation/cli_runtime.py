@@ -101,7 +101,7 @@ class ServiceRegistryAdapter:
         overwrite: bool = False,
     ):
         """Export runs in the JVM, but the output path is an operator-policed filesystem write."""
-        self._target_service.validate_export_path(output_path)
+        output_path = self._target_service.validate_export_path(output_path)
         return self._core_command_service.call(
             "export_program",
             {"output_path": output_path, "format": format, "overwrite": overwrite},

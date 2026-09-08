@@ -59,6 +59,20 @@ class ProjectHandle:
         self._closed = False
 
     @staticmethod
+    def _normalize_project_name(project_name: str) -> str:
+        name = project_name.strip()
+        if not name:
+            raise ValueError("project_name must not be empty")
+        # ProjectLocator removes a trailing .gpr. Reject that spelling before
+        # computing keys or checking files, so Ghidra cannot open/delete a
+        # different project from the one our in-use guard checked.
+        if name.lower().endswith(".gpr"):
+            raise ValueError("project_name must omit the .gpr suffix; pass .gpr files via project_location")
+        if "/" in name or "\\" in name:
+            raise ValueError("project_name must not contain path separators")
+        return name
+
+    @staticmethod
     def resolve_project_location_and_file(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
         path = pathlib.Path(project_location).expanduser().resolve()
         if project_name is None and path.suffix.lower() != ".gpr":
@@ -67,7 +81,7 @@ class ProjectHandle:
             raise ValueError(f"Specified .gpr file not found: {path}")
         if project_name is None and path.is_dir():
             raise ValueError("project_name is required")
-        effective = project_name or path.stem
+        effective = ProjectHandle._normalize_project_name(project_name if project_name is not None else path.stem)
         return (str(path.parent if path.is_file() else path), effective)
 
     @staticmethod
@@ -81,9 +95,7 @@ class ProjectHandle:
     ) -> tuple[str, str]:
         path = pathlib.Path(project_location).expanduser().resolve()
         if project_name is not None:
-            effective_name = project_name.strip()
-            if not effective_name:
-                raise ValueError("project_name must not be empty")
+            effective_name = ProjectHandle._normalize_project_name(project_name)
             project_dir = path.parent if path.suffix.lower() == ".gpr" else path
             if path.suffix.lower() == ".gpr" and path.stem != effective_name:
                 raise ValueError(
@@ -92,7 +104,7 @@ class ProjectHandle:
         else:
             if path.suffix.lower() != ".gpr":
                 raise ValueError("project_name is required when project_location is not a .gpr file")
-            effective_name = path.stem
+            effective_name = ProjectHandle._normalize_project_name(path.stem)
             project_dir = path.parent
 
         return (str(project_dir), effective_name)

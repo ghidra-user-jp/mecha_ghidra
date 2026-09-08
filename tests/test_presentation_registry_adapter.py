@@ -59,6 +59,8 @@ class RecordingService:
             self.calls.append((name, args, dict(kwargs)))
             if name in {"list_targets", "list_programs"}:
                 return []
+            if name == "validate_export_path":
+                return args[0]
             if name == "create_project":
                 project_location = args[0] if args else kwargs["project_location"]
                 return {

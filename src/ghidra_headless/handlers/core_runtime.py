@@ -55,8 +55,14 @@ class HeadlessContext(object):
 
 
 def initialize(program, key="default"):
-    _CONTEXTS[key] = HeadlessContext(program)
-    return _CONTEXTS[key]
+    # Construct first so a failed initialization leaves the existing context
+    # usable for lifecycle rollback. Target locks serialize replacements.
+    context = HeadlessContext(program)
+    previous = _CONTEXTS.get(key)
+    if previous is not None:
+        previous.dispose()
+    _CONTEXTS[key] = context
+    return context
 
 
 def remove_context(key):

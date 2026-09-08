@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -383,3 +385,30 @@ def test_export_program_refuses_existing_file_and_missing_directory(tmp_path):
             ensure_context=lambda: ctx,
             safe_call=_safe_call,
         )
+
+
+def test_export_program_writes_the_validated_filename_unchanged(tmp_path, monkeypatch):
+    from ghidra_headless.handlers.commands import program_tools
+
+    output = tmp_path / "validated filename "
+    other = tmp_path / "validated filename"
+    other.write_bytes(b"must survive")
+    java_io = ModuleType("java.io")
+    java_io.File = Path
+    monkeypatch.setitem(sys.modules, "java.io", java_io)
+
+    class Exporter:
+        def export(self, path, _program, _addresses, _monitor):
+            path.write_bytes(b"exported")
+            return True
+
+    monkeypatch.setattr(program_tools, "_exporter_for", lambda _format: Exporter())
+    result = export_program(
+        {"output_path": str(output), "overwrite": True},
+        ensure_context=lambda: SimpleNamespace(program=object(), monitor=lambda: None),
+        safe_call=_safe_call,
+    )
+
+    assert output.read_bytes() == b"exported"
+    assert other.read_bytes() == b"must survive"
+    assert result["output_path"] == str(output)

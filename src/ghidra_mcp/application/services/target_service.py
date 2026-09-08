@@ -114,9 +114,9 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="load_program", target=name)
 
-    def validate_export_path(self, output_path: str) -> None:
-        """Raise PATH_NOT_ALLOWED when ``--allowed-export-root`` excludes the path."""
-        self._path_policy.validate_export_path(output_path)
+    def validate_export_path(self, output_path: str) -> str:
+        """Validate ``--allowed-export-root`` and return the path to write."""
+        return self._path_policy.validate_export_path(output_path)
 
     def create_repository_cache_project(
         self,

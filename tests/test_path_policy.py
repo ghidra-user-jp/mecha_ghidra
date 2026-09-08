@@ -142,7 +142,7 @@ def test_export_root_restricts_output_paths(tmp_path):
     assert exc_info.value.details["kind"] == "export"
 
 
-def test_registry_adapter_checks_export_path_before_running_the_core_command(tmp_path):
+def test_registry_adapter_checks_export_path_before_running_the_core_command(tmp_path, monkeypatch):
     from ghidra_mcp.application.services.path_policy import PathPolicy
     from ghidra_mcp.application.services.target_service import TargetService
     from ghidra_mcp.domain import DomainError
@@ -158,6 +158,7 @@ def test_registry_adapter_checks_export_path_before_running_the_core_command(tmp
 
     root = tmp_path / "exports"
     root.mkdir()
+    monkeypatch.chdir(root)
     core = _Core()
     target_service = TargetService(object(), path_policy=PathPolicy.from_roots(export_roots=[root]))  # type: ignore[arg-type]
     adapter = ServiceRegistryAdapter(
@@ -167,11 +168,29 @@ def test_registry_adapter_checks_export_path_before_running_the_core_command(tmp
         bsim_service=object(),  # type: ignore[arg-type]
     )
 
-    with pytest.raises(DomainError):
-        adapter.export_program("fw", str(tmp_path / "outside.gzf"))
+    for prefix in ("", " ", "\t", "\n"):
+        with pytest.raises(DomainError):
+            adapter.export_program("fw", prefix + str(tmp_path / "outside.gzf"))
     assert core.calls == []
 
-    adapter.export_program("fw", str(root / "ok.gzf"), format="binary", overwrite=True)
+    adapter.export_program("fw", " ok.gzf ", format="binary", overwrite=True)
     assert core.calls == [
-        ("export_program", {"output_path": str(root / "ok.gzf"), "format": "binary", "overwrite": True}, "fw")
+        ("export_program", {"output_path": str(root.resolve() / "ok.gzf"), "format": "binary", "overwrite": True}, "fw")
     ]
+
+
+def test_validated_export_path_preserves_resolved_symlink_destination(tmp_path):
+    root = tmp_path / "exports"
+    root.mkdir()
+    destination = root / "actual name with trailing space "
+    link = root / "output.bin"
+    link.symlink_to(destination)
+    policy = PathPolicy.from_roots(export_roots=[root])
+
+    assert policy.validate_export_path(str(link)) == str(destination.resolve())
+
+
+@pytest.mark.parametrize("path", ["", " ", "\t\n"])
+def test_export_path_rejects_empty_input_even_without_root_restrictions(path):
+    with pytest.raises(ValueError, match="output_path is required"):
+        UNRESTRICTED_PATH_POLICY.validate_export_path(path)

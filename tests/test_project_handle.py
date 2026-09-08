@@ -191,6 +191,42 @@ def test_create_project_with_overwrite_preserves_destructive_opt_in(monkeypatch,
     ]
 
 
+@pytest.mark.parametrize("name", ["Sample.gpr", "Sample.gpr.gpr", " Sample.gpr "])
+def test_project_names_with_marker_suffix_are_rejected_before_overwrite(monkeypatch, tmp_path, name):
+    marker = tmp_path / "Sample.gpr"
+    marker.write_text("existing project")
+    monkeypatch.setattr(
+        session.ProjectHandle,
+        "_create_empty_project",
+        lambda *_args, **_kwargs: pytest.fail("destructive creation must not run"),
+    )
+
+    with pytest.raises(ValueError, match="project_name.*gpr"):
+        session.ProjectHandle.create_project(str(tmp_path), name, overwrite=True)
+    with pytest.raises(ValueError, match="project_name.*gpr"):
+        session.ProjectHandle.make_key(str(tmp_path), name)
+    assert marker.read_text() == "existing project"
+
+
+def test_project_marker_path_still_resolves_to_the_same_key(tmp_path):
+    marker = tmp_path / "Sample.gpr"
+    marker.touch()
+    expected = (str(tmp_path.resolve()), "Sample")
+
+    assert session.ProjectHandle.make_key(str(marker), None) == expected
+    assert session.ProjectHandle.make_key(str(tmp_path), " Sample ") == expected
+    assert session.ProjectHandle.resolve_project_creation_target(str(marker), None) == expected
+
+
+def test_repeated_marker_suffix_in_project_location_is_rejected(tmp_path):
+    marker = tmp_path / "Sample.gpr.gpr"
+    marker.touch()
+    with pytest.raises(ValueError, match="project_name.*gpr"):
+        session.ProjectHandle.make_key(str(marker), None)
+    with pytest.raises(ValueError, match="project_name.*gpr"):
+        session.ProjectHandle.resolve_project_creation_target(str(marker), None)
+
+
 def test_get_shared_project_url_returns_normalized_string(monkeypatch):
     handle = build_handle(monkeypatch)
 

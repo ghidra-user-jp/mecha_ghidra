@@ -229,7 +229,9 @@ def export_program(params, *, ensure_context, safe_call):
     not included; call save_project_program first when they matter.
     """
     ctx = ensure_context()
-    output_path = str(params.get("output_path") or "").strip()
+    # The application layer has already normalized and validated this path.
+    # Trimming it here could change a resolved symlink destination's filename.
+    output_path = str(params.get("output_path") or "")
     if not output_path:
         raise ValueError("output_path is required")
     export_format = str(params.get("format") or "gzf").strip().lower()
