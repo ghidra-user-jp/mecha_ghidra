@@ -1,349 +1,140 @@
-[English](usage.md) | [日本語](usage.ja.md)
+[English](usage.md) | [日本語](usage.ja.md) · [ドキュメント一覧](usage.ja.md) · [README](../README.ja.md)
 
-# 利用ガイド
+# はじめに
 
-このドキュメントは、`ghidra-mcp` の導入と運用手順をまとめたものです。提供ツールの一覧は [README](../README.ja.md) を参照してください。
+Mecha Ghidraを導入し、MCPクライアントから最初のプログラムを開くまでの手順です。シェル例はBash/zsh用です。`/absolute/path/...` はサーバーが動くマシン上の実際のパスに置き換えてください。Ghidra同梱の環境を使う場合は[Dockerガイド](docker.ja.md)へ進んでください。
 
-## 動作要件
+## ドキュメント一覧
 
-- Python 3.10 以上
-- [uv](https://github.com/astral-sh/uv)（Python パッケージと仮想環境の管理ツール）
-- Ghidra 本体（PyGhidra が参照できるよう `GHIDRA_INSTALL_DIR` を設定してください）
-- PyGhidra が要求する Java/Ghidra のバージョン（Ghidra 11.3 以降を推奨）
+| やりたいこと | 読むページ |
+| --- | --- |
+| 導入して最初のバイナリを解析する | このページを続けて読む |
+| AIアシスタントを接続する | [MCPクライアント](clients.ja.md) |
+| 公開ツール、パス、出力サイズを変える | [設定](configuration.ja.md) |
+| 必要なツールを探す | [ツール一覧](tools.ja.md) |
+| コンテナで動かす | [Docker](docker.ja.md) |
+| Ghidra Serverで解析結果を共有する | [共有プロジェクト](shared-projects.ja.md) |
+| 類似する関数を探す | [BSim](bsim.ja.md) |
+| エラーの解決や古い設定の更新をする | [トラブルシューティング・移行](troubleshooting.ja.md) |
+| ソースコードの変更やリリースを行う | [開発](development.ja.md) |
 
-## セットアップ手順
+<a id="requirements"></a>
 
-1. **uv のインストール**
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
-   または各プラットフォーム向けパッケージを利用してください。
+## 前提環境
 
-2. **リポジトリの取得**
-   ```bash
-   git clone <このリポジトリのURL>
-   cd GhidraMCP_headless
-   ```
+| 項目 | 必要なもの |
+| --- | --- |
+| Python | 3.10以上 |
+| パッケージ管理 | [uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| Ghidra | OS・CPUに対応するネイティブデコンパイラを含むインストール一式 |
+| Java | 使用するGhidraが要求するJDK。Ghidra 12.1系はJDK 21 |
+| MCPクライアント | Streamable HTTPまたはstdioに対応したもの |
 
-3. **依存関係の同期**
-   ```bash
-   uv sync
-   ```
-   `uv` が自動的に仮想環境を作成し、`pyproject.toml` に定義された依存パッケージ（`mcp`, `pyghidra`, `pydantic`, `regex` など）をインストールします。
+ビルド対象のGhidraは[ghidra_release.env](../scripts/ghidra_release.env)で12.1.3に固定されています。Ghidra ServerとBSimデータベースは必要な場合だけ用意します。
 
-4. **環境変数の設定**
-   ```bash
-   export GHIDRA_INSTALL_DIR=/path/to/ghidra
-   ```
-   or
-   ```bash
-   $env:GHIDRA_INSTALL_DIR="C:\path\to\ghidra"
-   ```
-   
-   PyGhidra が Ghidra 本体を見つけられるようにしてください。
+<a id="native-decompiler-artifacts"></a>
 
-   Ghidra Serverを利用する場合は、ユーザ作成時に変更したパスワードを環境変数に設定する。
-   ```bash
-   export GHIDRA_SERVER_PASSWORD='your-password'
-   ```
+### ネイティブデコンパイラ
 
-5. **MCP サーバーの起動**
-   ```bash
-   uv run ghidra-mcp --project-location /path/to/ghidra_project.gpr --transport http --mcp-host 127.0.0.1 --mcp-port 8081
-   ```
+Ghidra 12.1.3の公式ZIPには、Linux ARM64とmacOSの両アーキテクチャ向けネイティブデコンパイラが含まれていません。[Mecha Ghidraのリリース](https://github.com/ghidra-user-jp/mecha_ghidra/releases)から用途に合う配布物を選んでください。
 
-## Docker でのセットアップ
+| 配布物 | 用途 |
+| --- | --- |
+| `ghidra_12.1.3_decompiler_natives_all.zip` | ネイティブファイルを追加済みのGhidra一式 |
+| `ghidra_decompiler_natives_all.zip` | 既存のGhidra 12.1.3へ展開する追加ファイル |
+| GitHubの `Source code` アーカイブ | Mecha Ghidraのソースコード。Ghidra本体は含まれない |
 
-Ghidra をホストへ個別インストールせずに試したい場合は、このリポジトリ同梱の `Dockerfile` と `docker-compose.yml` を使えます。
+追加先は `Ghidra/Features/Decompiler/os/{linux_arm_64,mac_arm_64,mac_x86_64}/` で、対応する `decompile` と `sleigh` を含みます。Ghidra本体とネイティブファイルのバージョンをそろえてください。自分で生成する場合は[ネイティブビルド](development.ja.md#native-builds)を参照してください。
 
-1. **解析対象の置き場を作成**
-   ```bash
-   mkdir -p samples
-   ```
-2. **Docker イメージをビルド（推奨）**
-   ```bash
-   ./build_docker_image.sh
-   ```
-3. **MCP サーバーを起動**
-   ```bash
-   docker compose up -d
-   ```
-4. **MCP クライアントを接続**
-   `http://127.0.0.1:8081/mcp`
+<a id="local-setup"></a>
 
-この compose 構成では、`--project-location /data/projects --project-name default` を使い、project 実体は `/data/projects/default.gpr` / `/data/projects/default.rep` に置く前提です。新規 volume では MCP から `create_project(project_location="/data/projects/default.gpr")` を先に実行して空 project を作成し、そのあと binary を import して load してください。起動直後は program 未ロードなので、通常の初回導線は `create_project`（新規 volume のみ）、`import_program`、`load_project_program` です。
-
-- `docker compose build` も利用できます。同梱 compose は既定で `DOCKER_PLATFORM=linux/amd64` を使い、同梱 Linux decompiler と一致させます。
-- `DOCKER_PLATFORM` は上書きできます。`linux/arm64` を使う場合、Docker build は upstream 公式 Ghidra 配布物に同梱の mecha_ghidra decompiler natives overlay を重ねます。
-- ARM64 overlay が無い状態なら、`decompile_function` 実行時に遅れて壊れる代わりに Docker build 時点で fail-fast します。
-- 独自の Ghidra 配布物を使う場合は、`GHIDRA_DIST_URL` と `GHIDRA_DIST_SHA256` を両方指定してください。独自の ARM64 overlay を使う場合は、`GHIDRA_DECOMPILER_NATIVES_URL` と `GHIDRA_DECOMPILER_NATIVES_SHA256` も両方指定してください。
-
-### native decompiler 配布物
-
-このリポジトリには、upstream 配布物に含まれない場合がある Ghidra native decompiler を生成して配布する専用導線があります。
-
-Linux ARM64 や Apple Silicon で Docker を native 実行したい場合は、`DOCKER_PLATFORM=linux/arm64` だけで upstream 公式 Ghidra 配布物に既定の decompiler natives overlay を重ねて使えます。
+## 1. インストールして起動する
 
 ```bash
-DOCKER_PLATFORM=linux/arm64 docker compose build
-DOCKER_PLATFORM=linux/arm64 docker compose up -d
+git clone https://github.com/ghidra-user-jp/mecha_ghidra.git
+cd mecha_ghidra
+uv sync
 ```
 
-別の ARM64 decompiler natives overlay を使いたい場合:
+以下で作成する `samples` に、解析対象を `sample.bin` として置いてください。PE、ELF、Mach-Oなど、Ghidraが認識できる実行ファイル形式を使います。生のバイナリは、ツールスキーマに従って言語やインポート方式を指定する必要があります。
 
 ```bash
-DOCKER_PLATFORM=linux/arm64 \
-GHIDRA_DECOMPILER_NATIVES_URL=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/<release-tag>/ghidra_decompiler_natives_all.zip \
-GHIDRA_DECOMPILER_NATIVES_SHA256=<release-asset-sha256> \
-docker compose build
-```
+export GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra
+mkdir -p projects samples exports
 
-配布物を自前で生成したい場合は、対象 platform に合わせて次を実行します。
-
-- `./scripts/build_linux_arm64_decompiler.sh`: `linux_arm_64` 用の native `decompile` / `sleigh` をビルドします。
-- `./scripts/build_decompiler_natives.sh --platform mac_arm_64`: Apple Silicon macOS 用の native `decompile` / `sleigh` をビルドします。
-- `./scripts/build_decompiler_natives.sh --platform mac_x86_64`: Intel macOS 用の native `decompile` / `sleigh` をビルドします。
-
-生成物:
-
-- `dist/ghidra_*_linux_arm_64_decompiler_overlay.tar.gz`
-- `dist/ghidra_*_linux_arm_64_decompiler.zip`
-- `dist/ghidra_*_mac_arm_64_decompiler_overlay.tar.gz`
-- `dist/ghidra_*_mac_arm_64_decompiler.zip`
-- `dist/ghidra_*_mac_x86_64_decompiler_overlay.tar.gz`
-- `dist/ghidra_*_mac_x86_64_decompiler.zip`
-
-GitHub release では、そのまま使える Ghidra bundle の `ghidra_12.1.3_decompiler_natives_all.zip` と、対応する `linux_arm_64`、`mac_arm_64`、`mac_x86_64` の `decompile` / `sleigh` をまとめた小さい overlay `ghidra_decompiler_natives_all.zip` の両方を公開します。upstream 公式 Ghidra 12.1.3 ZIP には、この3つの native platform directory が含まれていません。
-
-### Docker での共有パス
-
-- 解析対象: `./samples` を `/samples` に bind mount（read-only）
-- Ghidra project: named volume `ghidra-projects` を `/data/projects` に mount（read-write）
-- 書き出し先: `./exports` を `/data/exports` に bind mount。`export_program` はこの配下にしか書けません（`--allowed-export-root`）
-
-推奨構成をこの形にしている理由は次のとおりです。
-
-- `import_program` は入力ファイルを Ghidra project にコピーするため、入力側は read-only で問題ありません。
-- Ghidra project の `.rep` 配下は細かい I/O が多く、Docker Desktop 環境では bind mount より named volume の方が安定しやすく、体感性能も落ちにくいです。
-
-### Docker 起動後の import 例
-
-`./samples/hello.bin` を置いた場合、MCP クライアントからは次のように扱います。
-
-- `import_program(target="default", binary_path="/samples/hello.bin")`
-- `load_project_program(target="default", domain_path="/hello.bin")`
-
-`import_program` は project ルートへ import するので、返却される `domain_path` は通常 `/<filename>` です。以後はその `domain_path` を `load_project_program` や shared project 同期系ツールに渡します。
-
-## Notes
-
-- http接続時の推奨は `--transport http` です。MCP サーバーを Streamable HTTP モードで起動し、`http://127.0.0.1:8081/mcp` で接続できます。
-- 互換性のため `--transport sse` も引き続き利用できます（`/sse`）。
-- `--mcp-host 0.0.0.0`（または `::`）で wildcard bind しても DNS rebinding protection は有効なままで、既定では loopback の Host/Origin だけを許可します。外部公開する場合は client-facing Host と一致する固定 IP/hostname を bind し、TLS、認証、ネットワークアクセス制御を併用してください。
-- ツール公開は `--tool-profile`, `--allow-category`, `--add-category`, `--allow-safety`, `--allow-operation-level`, `--enable-tool`, `--disable-tool` で制御します。
-- `shared_sync` は通常の tool category です。shared project の `commit/pull/checkout/delete` operations を行う同期ツールを公開したい場合は、`--add-category shared_sync` を追加するか、`--tool-profile full` を使ってください。
-- ツール制御引数を何も付けない場合は `--tool-profile default` と同じで、default のツール集合を使い、`shared_sync` と `bsim` は含みません。BSim ツールは `--add-category bsim` に加えて `--bsim-url`（または呼び出しごとの `bsim_url`）が必要です。
-- `--allow-category` は現在の category 集合を置き換え、`--add-category` は追加します。同じ種類の allow は OR、異なる種類は AND で評価されます。
-- shared project の認証が必要な場合は `--ghidra-server-user` と、`--ghidra-server-password` または `--ghidra-server-password-env` のどちらか片方をセットで指定してください。片方だけ指定した場合や、両方のパスワード指定を同時に行った場合は起動エラーになります。
-- `--ghidra-server-password` が空文字の場合、または `--ghidra-server-password-env` で指定した環境変数が未設定/空文字の場合も起動エラーになります。ログにはパスワード値を出力しません。プロセス引数へ秘密情報を出したくない場合は `--ghidra-server-password-env` を推奨します。
-- Linux ARM64 では `Ghidra/Features/Decompiler/os/linux_arm_64` が不足していると、起動時または decompiler 初期化時に専用メッセージ付きで失敗します。
-- `--domain-path` を省略した場合はプロジェクトのみをターゲット登録して起動します（空プロジェクトでも起動可能）。この場合は `import_program` 後に `load_project_program` で program を開いてください。
-- project がまだ存在しない場合は、`create_project` で空のローカル `.gpr/.rep` を作成してから `register_target` / `import_program` / `load_project_program` を実行できます。既存 project は `overwrite=true` を明示しない限り上書きしません。
-- 既存ターゲットへ program をロード/切り替える操作は `load_project_program` を使い、新規ターゲット作成は `create_session` を使います。program 未指定で先にターゲットだけ作る場合は `register_target` を使ってください。
-- `load_project_program`（および同等内部経路の `create_session`）では `target + domain_path` ごとに初回ロード時のみ解析を試行します。同一ターゲットライフサイクルで同じ program を再ロードした場合は再解析しません。明示的な解析パスが必要な場合は `analyze_program`（再実行は `force=true`）を使ってください。
-- `rename_function` などの更新系 tool を使った後、変更を `.gpr/.rep` に残すには `save_project_program(target="default")` を呼んでください。Ghidra GUI 側で同じ program を開いている場合、保存後の状態を見るには GUI 側で再オープンまたはリロードが必要になることがあります。
-- private プロジェクトを shared 管理へ載せる場合は `add_project_program_to_version_control` を利用できます（同オプション有効時のみ）。
-- shared project 同期ツールは `domain_path` を省略すると現在ロード中のprogramを対象にし、`domain_path` を指定するとそのprogramを直接対象にできます。
-- `delete_shared_project_file` は明示的な `domain_path` と、正規化後パスに一致する `confirm` が必須です。ロード中ファイル、active checkout があるファイル、`allow_private=true` でない private file は削除しません。Ghidra には versioned file の原子的な compare-and-delete API がないため、同時更新を排除したうえで `expected_latest_version` と `allow_non_atomic_versioned_delete=true` の両方を明示しない限り fail-closed します。
-- shared project で `rename_*` / `set_*` など更新系ツールを使う場合は、先に `checkout_project_program` が必要です（未checkout時は `CHECKOUT_REQUIRED` エラー）。
-- shared project 同期ツールの `checkout_project_program` / `add_project_program_to_version_control` / `commit_project_program` / `pull_project_program` / `undo_checkout_project_program` は、現在ロード中programを対象にした場合のみ `DomainFile` の in-use 制約回避とロード済みprogram object更新のため内部で一度閉じて再オープンします。
-- Ghidra の制約として、headless mode では競合マージはサポートされません（`checkin/merge` ともに `requires merge ... not supported in headless mode` エラーになります）。
-- `pull_project_program(on_local_changes="discard")` はローカル変更に対して `undoCheckout(keep=False)` を使用し、さらに checked-out 状態で `can_merge=true` の場合は `DomainFile.merge()` を呼ばず、古い checkout を破棄して最新サーバー状態へ追従します。
-- `can_merge=true` でも破棄できる checkout が無い場合、`pull_project_program` は Ghidra の PropertyList merge 経路を踏まずに `UNSAFE_MERGE_REQUIRED` で停止します。
-- `commit_project_program` は競合（`can_merge=true`）を検知した場合、デフォルトでは `MERGE_REQUIRED` で停止します。`on_conflict="keep"` を指定するとローカル編集を `<name>.keep` コピー（`kept_program`）に退避して最新サーバー状態へ追従し、`on_conflict="discard"` は編集を破棄します（`status=ok` / `committed=false` / `conflict_kept` または `conflict_discarded=true`）。ロード中のターゲットは退避したコピーを開き直すので、編集内容は開いたままになります。
-- `--shared-sync-exclusive-checkout` を付けると、`exclusive` を明示しない checkout が排他になります。headless の Ghidra は merge できないため、人と program を共有するエージェントはこのフラグ付きで動かすことを推奨します。エージェントが checkout している間は他者が checkout できないので、競合自体が起きません。
-- `load_project_program(version=N)` は shared project の過去バージョンを読み取り専用でターゲットに開きます（`read_only=true`）。`get_version_history` と `get_version_diff(include_details=true)` と組み合わせて、コミットで何が変わったかを確認できます。更新系ツールは `READ_ONLY_PROGRAM` で失敗します。ターゲットが既に保持している `domain_path` をロードすると、その場で再ロードします（`reloaded=true`）。
-- BSim: `bsim_query_target` と `bsim_query_function` は program 自身の DB record への一致を除外します（`exclude_self=false` で残せます）。`bsim_query_function` は `addresses` / `function_names` のリストを受け付けます。`bsim_apply_matches` は既定名のままの関数を最良一致の名前でリネームし（`dry_run=true` で事前確認）、`bsim_update_target_signatures` は付け直した関数名を DB に書き戻し、`bsim_delete_executable` は再登録前に record を削除します。`bsim_load_matched_executable` は `--bsim-remote-cache-dir` 経由で `ghidra://` の一致を開きます。
-- Docker 構成では `./samples:/samples:ro`、`./exports:/data/exports`、`ghidra-projects:/data/projects` を既定で使います。入力ファイルは `/samples/<filename>` として指定してください。
-- `--allowed-import-root DIR` と `--allowed-project-root DIR`（いずれも複数指定可）で、`import_program`、`create_project`、`create_session`、`register_target` が触れるホスト上のパスを制限できます。HTTP/SSE で公開する構成では必ず両方を設定してください。ネットワークトランスポートで未指定の場合は起動時に警告が出ます。ルート外を指定した要求は `PATH_NOT_ALLOWED` で失敗します。
-- `--allowed-export-root DIR`（複数指定可）は `export_program` の書き出し先を制限します。ネットワーク公開時は import / project のルートと合わせて設定してください。起動時の警告は 3 つのルートをまとめて扱います。
-- `undo_program_change` はロード中 program の直近トランザクション（更新系ツール 1 回が 1 トランザクション）を取り消します。履歴はセッション単位で、再ロードすると消えます。`get_program_info` の `can_undo` / `can_redo` で確認できます。
-- `--lock-timeout-seconds N`（デフォルト 30）は、別の呼び出しが使用中のターゲットを待つ上限秒数です。同一エージェントからの並列呼び出しはこの時間まで順番待ちし、超えると再試行可能な `LOCK_TIMEOUT` を受け取ります。
-- ツールの失敗は MCP のツールエラー（`isError: true`）として返り、本文は `CHECKOUT_REQUIRED:`、`PATH_NOT_ALLOWED:`、`PROGRAM_NOT_ANALYZED:` のような安定したコードで始まります。エージェント側では後続の自由文ではなく、この接頭辞で分岐してください。
-- Docker で初回起動する server は project のみを登録した状態で立ち上がるため、新規 volume では `create_project` で project を作成し、その後 `import_program` で取り込み、続けて `load_project_program` で program を開いてください。
-
-### ツール公開制御の例
-
-readonly:
-
-```bash
-uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile readonly
-```
-
-default + shared_sync:
-
-```bash
-uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --add-category shared_sync
-```
-
-full を readonly に絞る:
-
-```bash
-uv run ghidra-mcp --project-location /path/to/project.gpr --domain-path /main --tool-profile full --allow-safety read_only
-```
-
-### shared project 認証つき起動例
-
-```bash
-export GHIDRA_SERVER_PASSWORD='your-password'
 uv run ghidra-mcp \
-    --project-location /path/to/ghidra_project.gpr \
-    --transport http \
-    --mcp-host 127.0.0.1 \
-    --mcp-port 8081 \
-    --add-category shared_sync \
-    --ghidra-server-user your-user \
-    --ghidra-server-password-env GHIDRA_SERVER_PASSWORD
+  --project-location "$PWD/projects" \
+  --project-name analysis \
+  --transport http \
+  --allowed-import-root "$PWD/samples" \
+  --allowed-project-root "$PWD/projects" \
+  --allowed-export-root "$PWD/exports"
 ```
 
-パスワード文字列を直接渡すこともできますが、shell history や process inspection から見える可能性があるため、上記の環境変数方式を推奨します。
+この起動例は `projects/analysis.gpr` を指す `default` ターゲットを登録します。プロジェクトの作成やプログラムの読み込みはまだ行いません。サーバーを起動したまま、別のアプリケーションから以下のMCPツールを呼び出します。
 
-```bash
-uv run ghidra-mcp \
-    --project-location /path/to/ghidra_project.gpr \
-    --transport http \
-    --mcp-host 127.0.0.1 \
-    --mcp-port 8081 \
-    --add-category shared_sync \
-    --ghidra-server-user your-user \
-    --ghidra-server-password 'your-password'
-```
+PowerShellでは `$env:GHIDRA_INSTALL_DIR = "C:\path\to\ghidra"` で環境変数を設定してください。シェルコマンドは1行にするか、PowerShellの継続記法に置き換えます。
 
-## Ghidra Serverの設定
+## 2. クライアントを接続する
 
-### インストール・ユーザ設定
+Streamable HTTPの接続先は `http://127.0.0.1:8081/mcp` です。設定方法は[MCPクライアント](clients.ja.md)にまとめています。接続後に `list_targets` を呼び、`default` が登録されていることを確認してください。
 
-サーバーのインストール
-```bash
-sudo GHIDRA_INSTALL_DIR/server/svrInstall
-```
+<a id="first-analysis"></a>
 
-自分自身のユーザとmecha ghidra用のユーザを登録
-```bash
-sudo GHIDRA_INSTALL_DIR/server/svrAdmin -add your_username
-sudo GHIDRA_INSTALL_DIR/server/svrAdmin -add mecha-ghidra
-```
+## 3. プロジェクト作成・インポート・読み込み
 
-GHIDRA_INSTALL_DIR/server/server.confを編集して、ユーザ名を指定して接続できるようにする。
-`${ghidra.repositories.dir}` は必ず最後に指定する
-```text
-wrapper.app.parameter.1=-a0
-wrapper.app.parameter.2=-u
-wrapper.app.parameter.3=${ghidra.repositories.dir}
-```
+以下は**MCPツールの名前とJSON引数**です。シェルで実行するコマンドではありません。`/absolute/path/to/mecha_ghidra` をリポジトリの絶対パスに置き換えてください。
 
-ghidraを起動する
-```bash
-sudo server/ghidraSvr restart
-```
-
-New ProjectからShared Projectを作成
-
-<img width="508" height="388" alt="Image" src="https://github.com/user-attachments/assets/1091c615-1590-4a49-aa2c-7628d6efed70" />
-
-localhostに接続
-
-<img width="508" height="388" alt="image" src="https://github.com/user-attachments/assets/0d1a0cef-fbee-4513-af18-3193a3529c2f" />
-
-作成したユーザでログインする。初回パスワードは `changeme`
-
-<img width="350" height="179" alt="image" src="https://github.com/user-attachments/assets/e03718b4-89df-4a2b-8609-521a42dd1878" />
-
-初回ログイン時にパスワードを変更するように言われるので、作成した2つのユーザのパスワードを変更する
-
-<img width="353" height="181" alt="image" src="https://github.com/user-attachments/assets/24da9ede-db7b-4ba2-8107-2fb7fe895968" />
-
-プロジェクトを作成する。LLMのアカウントはRead/Writeに設定。
-
-<img width="652" height="383" alt="image" src="https://github.com/user-attachments/assets/3da1693c-3dd7-4ba8-a6e6-95b4767cf95c" />
-
-<img width="531" height="389" alt="image" src="https://github.com/user-attachments/assets/76ef63d5-de7a-48ca-8758-76b5157a98c3" />
-
-<img width="531" height="389" alt="image" src="https://github.com/user-attachments/assets/80a8aa7e-659b-4d8e-bf5f-65eea292dc7f" />
-
-## Codex での MCP 設定
-
-Codexアプリ/CLI では `~/.codex/config.toml` の `mcp_servers` セクションに設定します。推奨の `streamable-http` 接続例:
-
-```toml
-[mcp_servers.ghidra_headless]
-enabled = true
-url = "http://127.0.0.1:8081/mcp"
-```
-
-`stdio` で直接起動したい場合の例:
-
-```toml
-[mcp_servers.ghidra_headless]
-enabled = true
-command = "uv"
-args = [
-  "--directory",
-  "/path/to/mecha_ghidra",
-  "run",
-  "ghidra-mcp",
-  "--project-location",
-  "/path/to/ghidra_project.gpr",
-  "--transport",
-  "stdio"
-]
-```
-
-## Claude Code での MCP 設定
-
-Claude Code では CLI から MCP サーバーを登録できます。推奨の `streamable-http` 接続例:
-
-```bash
-claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
-```
-
-サーバー側で shared project 認証が必要な場合は、`ghidra-mcp` 起動時に `--ghidra-server-user` と `--ghidra-server-password` または `--ghidra-server-password-env` を指定してください。
-
-## Kilocode/Roocode での MCP 設定
-
-Kilocode／Roocode の MCP 設定は JSON 形式で記述できます。`stdio` でサーバーを起動する場合の例:
+最初の1回だけ、`create_project` で空のプロジェクトを作成します。
 
 ```json
 {
-  "mcpServers": {
-    "ghidra_headless": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/path/to/mecha_ghidra",
-        "run",
-        "ghidra-mcp",
-        "--project-location",
-        "/path/to/ghidra_project.gpr",
-        "--transport",
-        "stdio"
-      ],
-      "timeout": 300,
-      "disabled": true
-    }
-  }
+  "project_location": "/absolute/path/to/mecha_ghidra/projects",
+  "project_name": "analysis"
 }
 ```
 
-Streamable HTTP モードであれば、以下のようにエンドポイントを指定します。
+`import_program` でファイルを取り込みます。
 
 ```json
-"ghidra_headless": {
-  "disabled": false,
-  "timeout": 60,
-  "type": "streamable-http",
-  "url": "http://127.0.0.1:8081/mcp",
+{
+  "target": "default",
+  "binary_path": "/absolute/path/to/mecha_ghidra/samples/sample.bin"
 }
 ```
 
-streamable-http を使う必要があるクライアントでは `--transport http` で起動し、`http://127.0.0.1:8081/mcp` を指定してください。
+応答の **`program` フィールド**が、プロジェクト内のパスです。通常は `/sample.bin` になります。この値をそのまま `load_project_program` の `domain_path` に渡します。
+
+```json
+{
+  "target": "default",
+  "domain_path": "/sample.bin"
+}
+```
+
+続いて `list_functions` を `{"target":"default","limit":20}` で呼びます。返された関数のアドレスを選び、`decompile_function` に `{"target":"default","address":"<function-address>"}` として渡してください。C風の疑似コード、または[大きな結果を取得するための案内](configuration.ja.md#large-results)が返れば、解析を始められる状態です。
+
+次回以降は、既存プロジェクトを再利用します。作成とインポートを省き、プログラム一覧から対象を読み込んでください。`create_project` は `overwrite=true` を指定しない限り既存プロジェクトを拒否します。通常の再起動で上書きは不要です。
+
+<a id="project-concepts"></a>
+
+## プロジェクト・プログラム・ターゲット
+
+| 名前 | 意味 | 例 |
+| --- | --- | --- |
+| Project location | プロジェクトを置くホスト側ディレクトリ、または既存の `.gpr` ファイル | `/work/projects`、`/work/projects/analysis.gpr` |
+| Project name | ディレクトリと組み合わせる、拡張子なしの名前 | `analysis` |
+| Domain path | プロジェクト内部のプログラムのパス | `/samples/sample.bin` |
+| Target | サーバープロセス内でプロジェクトやプログラムを識別する名前 | `default`、`reference` |
+
+`--project-name` と `project_name` に `.gpr` は付けません。付いている名前は拒否されます。既存の `.gpr` ファイルを指定するときは、そのパスを `project_location` に渡し、`project_name` を省略してください。ローカルプロジェクトは `.gpr` ファイルと隣接する `.rep` ディレクトリの組です。
+
+`register_target` はプロジェクト情報だけを登録し、`create_session` はターゲットを追加してプログラムを開きます。`load_project_program` は既存ターゲットのプログラムを読み込み・切り替えます。登録名は `list_targets` で確認できます。多くのプログラム操作ツールは `target` を受け取り、省略時は `default` を使います。
+
+## 保存と自動解析
+
+編集後、保存のタイミングを明確にしたい場合は `save_project_program` を呼びます。プログラムの切り替えや `close_session` でも未保存の変更を保存します。プログラム編集ツールの呼び出しごとにトランザクションが作られ、`undo_program_change` と `redo_program_change` で操作できます。履歴はセッション内だけに残り、再読み込みすると失われます。解析済みか、未保存の変更があるか、取り消せるかは `get_program_info` で確認します。
+
+ターゲットとプログラムの組に対する最初の読み込みでは、Ghidraが未解析と判定し、書き込み可能な場合に自動解析します。同じプログラムの再読み込みでは再解析しません。明示的に解析するには `analyze_program`、再解析には `force=true` を使います。過去バージョンや、必要なチェックアウトを取得していない共有プログラムは自動解析しません。
+
+同じローカル `.gpr/.rep` をサーバーで開く前に、Ghidra GUIで閉じてください。GUIとMCPを併用する場合は、[共有リポジトリに対する別々のローカルキャッシュ](shared-projects.ja.md)を使います。
