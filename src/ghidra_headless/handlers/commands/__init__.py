@@ -42,12 +42,10 @@ from .program_tools import (
 from .read_only_bsim import (
     bsim_query_function,
     bsim_query_target,
+    bsim_validate_match,
 )
 from .read_only_decompile import (
     decompile_function,
-    disassemble_function,
-    disassemble_range,
-    get_callee,
 )
 from .read_only_functions import (
     get_function,
@@ -56,8 +54,6 @@ from .read_only_functions import (
 from .read_only_memory_data import (
     get_bytes,
     get_data_by_label,
-    get_enum,
-    get_struct,
     list_bookmarks,
     list_data_items,
     list_data_types,
@@ -68,13 +64,10 @@ from .read_only_memory_data import (
     list_strings,
     search_bytes,
 )
-from .read_only_xrefs import (
-    get_function_xrefs,
-    get_xrefs_from,
-    get_xrefs_to,
-)
+from .scripts import run_script
 
 __all__ = [
+    "bsim_validate_match",
     "create_enum",
     "create_label",
     "export_program",
@@ -85,13 +78,8 @@ __all__ = [
     "search_symbols",
     "set_enum_values",
     "undo_program_change",
+    "run_script",
     "decompile_function",
-    "disassemble_function",
-    "disassemble_range",
-    "get_callee",
-    "get_xrefs_to",
-    "get_xrefs_from",
-    "get_function_xrefs",
     "bsim_query_function",
     "bsim_query_target",
     "list_segments",
@@ -103,8 +91,6 @@ __all__ = [
     "get_data_by_label",
     "get_bytes",
     "search_bytes",
-    "get_struct",
-    "get_enum",
     "rename_function",
     "rename_data",
     "rename_variable",

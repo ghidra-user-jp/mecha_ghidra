@@ -23,6 +23,30 @@ DEFAULT_CAUSE_DETAIL_CODES: frozenset[ErrorCode] = frozenset(
     }
 )
 
+# Codes whose HeadlessError.details are copied into the DomainError verbatim.
+# Script execution results (diagnostics, transaction outcome, quarantine state)
+# are only meaningful with those details.
+DETAIL_PRESERVING_CODES: frozenset[ErrorCode] = frozenset(
+    {
+        ErrorCode.AMBIGUOUS_FUNCTION,
+        ErrorCode.AMBIGUOUS_DATA_TYPE,
+        ErrorCode.BSIM_MATCH_STALE,
+        ErrorCode.SCRIPTS_DISABLED,
+        ErrorCode.SCRIPT_NOT_FOUND,
+        ErrorCode.AMBIGUOUS_SCRIPT,
+        ErrorCode.SCRIPT_RUNTIME_AMBIGUOUS,
+        ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE,
+        ErrorCode.SCRIPT_COMPILE_FAILED,
+        ErrorCode.SCRIPT_LOAD_FAILED,
+        ErrorCode.SCRIPT_FAILED,
+        ErrorCode.SCRIPT_TIMEOUT,
+        ErrorCode.SCRIPT_CANCELLED,
+        ErrorCode.TARGET_EXECUTION_INVALID,
+        ErrorCode.TARGET_ORPHAN_UNRELEASED,
+        ErrorCode.RUNTIME_DEGRADED,
+    }
+)
+
 
 def _classify_by_message_shape(message: str) -> ErrorCode | None:
     """Last-resort heuristics for messages without a ``CODE:`` prefix."""
@@ -114,6 +138,8 @@ def to_domain_error(
                 code = heuristic
 
     details: dict[str, Any] = {"operation": operation}
+    if code in DETAIL_PRESERVING_CODES:
+        details.update(getattr(exc, "details", None) or {})
     for key, value in context.items():
         if value is not None or key in keep_none:
             details[key] = value
@@ -123,4 +149,4 @@ def to_domain_error(
     return DomainError(code=code, message=message, hint=hint, retryable=retryable, details=details)
 
 
-__all__ = ["DEFAULT_CAUSE_DETAIL_CODES", "to_domain_error"]
+__all__ = ["DEFAULT_CAUSE_DETAIL_CODES", "DETAIL_PRESERVING_CODES", "to_domain_error"]

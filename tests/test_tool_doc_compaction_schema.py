@@ -105,3 +105,22 @@ def test_large_result_transport_schema_matches_uncacheable_runtime_notice():
 
     schema = tool_docs_detail(spec)["large_result_output_schema"]
     Draft202012Validator(schema).validate(result.model_dump(mode="json", by_alias=True))
+
+
+def test_large_error_schema_matches_retrievable_and_unavailable_failures():
+    from ghidra_mcp.presentation.result_errors import present_tool_error
+
+    error = {"code": "SCRIPT_FAILED", "details": {"stdout": "diagnostic\n" * 3000, "execution_state": "invalid"}}
+    original = CallToolResult(is_error=True, content=[TextContent(type="text", text=error["details"]["stdout"])])
+    schema = tool_docs_detail(get_tool_spec("run_script"))["large_error_output_schema"]
+    Draft202012Validator.check_schema(schema)
+    for cache_bytes in (100, 1000000):
+        result = present_tool_error(
+            tool="run_script",
+            target="t",
+            error=error,
+            original=original,
+            config=ToolPresentationConfig(),
+            store=ResultResourceStore(max_bytes=cache_bytes),
+        )
+        Draft202012Validator(schema).validate(result.model_dump(mode="json", by_alias=True))

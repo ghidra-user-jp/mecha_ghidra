@@ -1,5 +1,5 @@
 services:
-  ghidra-mcp:
+  mecha_ghidra:
     platform: ${DOCKER_PLATFORM:-linux/amd64}
     build:
       context: .
@@ -9,7 +9,7 @@ services:
         GHIDRA_DIST_SHA256: ${GHIDRA_DIST_SHA256-}
         GHIDRA_DECOMPILER_NATIVES_URL: ${GHIDRA_DECOMPILER_NATIVES_URL-}
         GHIDRA_DECOMPILER_NATIVES_SHA256: ${GHIDRA_DECOMPILER_NATIVES_SHA256-}
-    image: ghidra-mcp:local
+    image: mecha_ghidra:local
     restart: unless-stopped
     user: "10001:10001"
     ports:
@@ -21,6 +21,8 @@ services:
       GHIDRA_SERVER_PASSWORD: ${GHIDRA_SERVER_PASSWORD:-}
     volumes:
       - ./samples:/samples:ro
+      # Operator-trusted Ghidra scripts; enable with --add-category scripts --script-root /data/scripts.
+      - ./ghidra_scripts:/data/scripts:ro
       - ./exports:/data/exports
       - ghidra-projects:/data/projects
 

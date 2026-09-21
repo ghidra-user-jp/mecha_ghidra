@@ -4,7 +4,7 @@ from __future__ import absolute_import, print_function
 
 from ghidra.app.cmd.function import ApplyFunctionSignatureCmd
 from ghidra.program.model.data import CategoryPath, DataUtilities, EnumDataType, StructureDataType
-from ghidra.program.model.listing import CodeUnit
+from ghidra.program.model.listing import CommentType
 from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 from ghidra.util.task import TaskMonitor
@@ -46,14 +46,25 @@ from ghidra_headless.handlers.core_helpers import (
 from ghidra_headless.handlers.core_runtime import (
     _THREAD_STATE,
     _ensure_context_for_key,
+    bind_project,
     clear_contexts,
     describe_state,
     ensure_context,
+    execution_state,
     initialize,
     remove_context,
 )
 
+
+def _execute_nested_command(command, params):
+    # Bounded edit/read handlers validate commands before entering this path;
+    # the outer core call already holds the target/project locks.
+    return SUPPORTED_COMMANDS[command](params)
+
+
 _PROFILE_DEPENDENCIES = {
+    "execute_read": _execute_nested_command,
+    "execute_edit": _execute_nested_command,
     "ensure_context": ensure_context,
     "to_int": _to_int,
     "collect": _collect,
@@ -70,7 +81,7 @@ _PROFILE_DEPENDENCIES = {
     "decompile_high_function": _decompile_high_function,
     "requires_full_param_commit": _requires_full_param_commit,
     "high_function_db_util": HighFunctionDBUtil,
-    "code_unit": CodeUnit,
+    "comment_types": CommentType,
     "build_signature_parser": _build_signature_parser,
     "apply_function_signature_cmd": ApplyFunctionSignatureCmd,
     "parse_data_type": _parse_data_type,
@@ -90,6 +101,7 @@ _PROFILE_DEPENDENCIES = {
     "parse_clear_data_mode": _parse_clear_data_mode,
     "data_utilities": DataUtilities,
     "task_monitor": TaskMonitor,
+    "current_key": lambda: getattr(_THREAD_STATE, "current_key", None),
 }
 
 
@@ -145,6 +157,8 @@ HANDLERS = {
     "initialize": initialize,
     "execute": execute,
     "describe_state": describe_state,
+    "execution_state": execution_state,
+    "bind_project": bind_project,
     "remove_context": remove_context,
     "clear_contexts": clear_contexts,
 }
@@ -157,5 +171,7 @@ __all__ = [
     "clear_contexts",
     "execute",
     "describe_state",
+    "execution_state",
+    "bind_project",
     "HANDLERS",
 ]

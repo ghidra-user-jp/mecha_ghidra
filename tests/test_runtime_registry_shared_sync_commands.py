@@ -5,13 +5,16 @@ import shutil
 import uuid
 from pathlib import Path
 
+import jpype
 import pyghidra
-import pyghidra.core as pycore
 import pytest
 from mcp.types import CallToolResult
 
+from cli_support import ToolHarness
 from ghidra_headless.launcher import start_headless_jvm
-from ghidra_mcp import cli
+
+# Tool callables bound to a swappable registry (see tests/cli_support.py).
+cli_tools = ToolHarness()
 
 RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
@@ -64,11 +67,11 @@ def _configure_ghidra_server_auth_from_env() -> None:
         )
 
     try:
-        authenticator = pycore.JClass("ghidra.framework.client.PasswordClientAuthenticator")(
+        authenticator = jpype.JClass("ghidra.framework.client.PasswordClientAuthenticator")(
             username,
             password,
         )
-        pycore.JClass("ghidra.framework.client.ClientUtil").setClientAuthenticator(authenticator)
+        jpype.JClass("ghidra.framework.client.ClientUtil").setClientAuthenticator(authenticator)
     except Exception as exc:  # noqa: BLE001
         pytest.fail(f"Failed to configure Ghidra server authentication: {exc}")
     _GHIDRA_SERVER_AUTH_CONFIGURED = True
@@ -152,7 +155,7 @@ def _local_checkout_id(status: dict) -> int:
 
 def _close_runtime_target(target: str) -> None:
     try:
-        cli.close_session(target)
+        cli_tools.close_session(target)
     except Exception:
         pass
 
@@ -165,7 +168,7 @@ def _cleanup_runtime_domain_path(
 ) -> None:
     """Remove only the UUID-scoped artifact created by this runtime test."""
     cleanup_target = f"runtime_cleanup_{uuid.uuid4().hex[:8]}"
-    cli.register_target(
+    cli_tools.register_target(
         target=cleanup_target,
         project_location=project_location,
         project_name=project_name,
@@ -173,7 +176,7 @@ def _cleanup_runtime_domain_path(
     try:
         try:
             status = _unwrap_runtime_result(
-                cli.get_project_sync_status(
+                cli_tools.get_project_sync_status(
                     target=cleanup_target,
                     domain_path=domain_path,
                 )
@@ -185,14 +188,14 @@ def _cleanup_runtime_domain_path(
 
         if status.get("is_checked_out"):
             _unwrap_runtime_result(
-                cli.undo_checkout_project_program(
+                cli_tools.undo_checkout_project_program(
                     target=cleanup_target,
                     discard_local_changes=True,
                     domain_path=domain_path,
                 )
             )
             status = _unwrap_runtime_result(
-                cli.get_project_sync_status(
+                cli_tools.get_project_sync_status(
                     target=cleanup_target,
                     domain_path=domain_path,
                 )
@@ -206,7 +209,7 @@ def _cleanup_runtime_domain_path(
             if checkout_id is None:
                 continue
             _unwrap_runtime_result(
-                cli.terminate_project_program_checkout(
+                cli_tools.terminate_project_program_checkout(
                     target=cleanup_target,
                     checkout_id=int(checkout_id),
                     domain_path=domain_path,
@@ -214,14 +217,14 @@ def _cleanup_runtime_domain_path(
             )
 
         status = _unwrap_runtime_result(
-            cli.get_project_sync_status(
+            cli_tools.get_project_sync_status(
                 target=cleanup_target,
                 domain_path=domain_path,
             )
         )
         latest_version = status.get("latest_version")
         deleted = _unwrap_runtime_result(
-            cli.delete_shared_project_file(
+            cli_tools.delete_shared_project_file(
                 target=cleanup_target,
                 domain_path=domain_path,
                 confirm=domain_path,
@@ -233,7 +236,7 @@ def _cleanup_runtime_domain_path(
             )
         )
         assert deleted["deleted"] is True
-        remaining = _unwrap_runtime_result(cli.list_project_programs(cleanup_target))
+        remaining = _unwrap_runtime_result(cli_tools.list_project_programs(cleanup_target))
         assert domain_path not in {item.get("domain_path") for item in remaining}
     finally:
         _close_runtime_target(cleanup_target)
@@ -243,7 +246,7 @@ def test_runtime_create_project_success(tmp_path):
     _start_pyghidra()
 
     project_file = tmp_path / "created_by_tool.gpr"
-    result = _unwrap_runtime_result(cli.create_project(project_location=str(project_file), project_name=None))
+    result = _unwrap_runtime_result(cli_tools.create_project(project_location=str(project_file), project_name=None))
 
     _log_runtime_result("create_project", result)
     assert result["status"] == "ok"
@@ -284,28 +287,28 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
     kept_domain_path: str | None = None
     try:
         runtime_results["register_target"] = _unwrap_runtime_result(
-            cli.register_target(
+            cli_tools.register_target(
                 target=target,
                 project_location=project_location,
                 project_name=project_name,
             )
         )
 
-        runtime_results["list_targets"] = _unwrap_runtime_result(cli.list_targets())
-        runtime_results["list_project_programs"] = _unwrap_runtime_result(cli.list_project_programs(target))
+        runtime_results["list_targets"] = _unwrap_runtime_result(cli_tools.list_targets())
+        runtime_results["list_project_programs"] = _unwrap_runtime_result(cli_tools.list_project_programs(target))
 
         # The caller-provided file is read-only test input. Never checkout,
         # commit, discard, undo, or delete it.
         runtime_results["get_project_sync_status"] = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=target, domain_path=shared_domain_path)
+            cli_tools.get_project_sync_status(target=target, domain_path=shared_domain_path)
         )
         assert runtime_results["get_project_sync_status"]["is_versioned"] is True
         runtime_results["get_version_history_seed"] = _unwrap_runtime_result(
-            cli.get_version_history(target=target, limit=20, domain_path=shared_domain_path)
+            cli_tools.get_version_history(target=target, limit=20, domain_path=shared_domain_path)
         )
         seed_version = int(runtime_results["get_version_history_seed"]["current_version"])
         runtime_results["get_version_diff_seed"] = _unwrap_runtime_result(
-            cli.get_version_diff(
+            cli_tools.get_version_diff(
                 target=target,
                 from_version=seed_version,
                 to_version=seed_version,
@@ -315,26 +318,26 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
 
         runtime_results["import_program"] = _unwrap_runtime_result(
-            cli.import_program(target=target, binary_path=str(lifecycle_binary))
+            cli_tools.import_program(target=target, binary_path=str(lifecycle_binary))
         )
         lifecycle_domain_path = runtime_results["import_program"]["program"]
         runtime_results["import_program_for_sync"] = _unwrap_runtime_result(
-            cli.import_program(target=target, binary_path=str(work_binary))
+            cli_tools.import_program(target=target, binary_path=str(work_binary))
         )
         generated_domain_path = runtime_results["import_program_for_sync"]["program"]
 
         runtime_results["create_session"] = _unwrap_runtime_result(
-            cli.create_session(
+            cli_tools.open_program(
                 target=create_target,
                 project_location=project_location,
                 project_name=project_name,
                 domain_path=lifecycle_domain_path,
             )
         )
-        runtime_results["close_session"] = _unwrap_runtime_result(cli.close_session(create_target))
+        runtime_results["close_session"] = _unwrap_runtime_result(cli_tools.close_session(create_target))
 
         runtime_results["create_session_for_remove"] = _unwrap_runtime_result(
-            cli.create_session(
+            cli_tools.open_program(
                 target=remove_target,
                 project_location=project_location,
                 project_name=project_name,
@@ -342,11 +345,11 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
             )
         )
         runtime_results["close_session_and_remove_program"] = _unwrap_runtime_result(
-            cli.close_session_and_remove_program(remove_target)
+            cli_tools.close_session_and_remove_program(remove_target)
         )
 
         runtime_results["add_project_program_to_version_control"] = _unwrap_runtime_result(
-            cli.add_project_program_to_version_control(
+            cli_tools.add_project_program_to_version_control(
                 target=target,
                 comment="runtime shared sync validation",
                 keep_checked_out=False,
@@ -357,7 +360,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         initial_version = int(runtime_results["add_project_program_to_version_control"]["version"])
 
         runtime_results["checkout_project_program"] = _unwrap_runtime_result(
-            cli.checkout_project_program(
+            cli_tools.checkout_project_program(
                 target=target,
                 exclusive=False,
                 domain_path=generated_domain_path,
@@ -365,28 +368,33 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         assert runtime_results["checkout_project_program"]["checked_out"] is True
         runtime_results["load_project_program"] = _unwrap_runtime_result(
-            cli.load_project_program(target=target, domain_path=generated_domain_path)
+            cli_tools.load_project_program(target=target, domain_path=generated_domain_path)
         )
-        functions = _unwrap_runtime_result(cli.list_functions(offset=0, limit=1, target=target))
+        functions = _unwrap_runtime_result(cli_tools.list_functions(offset=0, limit=1, target=target))
         assert functions, "Imported runtime binary has no function to modify"
         function_address = functions[0]["entry"]
         first_comment = f"runtime sync commit {uuid.uuid4().hex}"
         runtime_results["set_disassembly_comment_for_commit"] = _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=first_comment,
+            cli_tools.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": first_comment,
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         dirty_status = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=target, domain_path=generated_domain_path)
+            cli_tools.get_project_sync_status(target=target, domain_path=generated_domain_path)
         )
         assert dirty_status["modified_since_checkout"] is True
 
         commit_message = f"runtime shared sync check-in {uuid.uuid4().hex}"
         runtime_results["commit_project_program"] = _unwrap_runtime_result(
-            cli.commit_project_program(
+            cli_tools.commit_project_program(
                 target=target,
                 message=commit_message,
                 keep_checked_out=False,
@@ -400,13 +408,13 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["commit_project_program"]["checked_out"] is False
 
         runtime_results["get_version_history"] = _unwrap_runtime_result(
-            cli.get_version_history(target=target, limit=20, domain_path=generated_domain_path)
+            cli_tools.get_version_history(target=target, limit=20, domain_path=generated_domain_path)
         )
         versions = runtime_results["get_version_history"]["versions"]
         assert int(versions[0]["version"]) == committed_version
         assert versions[0]["comment"] == commit_message
         runtime_results["get_version_diff"] = _unwrap_runtime_result(
-            cli.get_version_diff(
+            cli_tools.get_version_diff(
                 target=target,
                 from_version=initial_version,
                 to_version=committed_version,
@@ -417,7 +425,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["get_version_diff"]["total_diff_addresses"] > 0
 
         _unwrap_runtime_result(
-            cli.checkout_project_program(
+            cli_tools.checkout_project_program(
                 target=target,
                 exclusive=False,
                 domain_path=generated_domain_path,
@@ -425,21 +433,26 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         second_comment = f"runtime sync pull discard {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=second_comment,
+            cli_tools.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": second_comment,
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
-            cli.pull_project_program(
+            cli_tools.pull_project_program(
                 target=target,
                 on_local_changes="abort",
                 domain_path=generated_domain_path,
             )
         runtime_results["pull_project_program"] = _unwrap_runtime_result(
-            cli.pull_project_program(
+            cli_tools.pull_project_program(
                 target=target,
                 on_local_changes="discard",
                 domain_path=generated_domain_path,
@@ -449,22 +462,27 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["pull_project_program"]["updated"] is True
 
         _unwrap_runtime_result(
-            cli.checkout_project_program(
+            cli_tools.checkout_project_program(
                 target=target,
                 exclusive=False,
                 domain_path=generated_domain_path,
             )
         )
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=f"runtime sync undo {uuid.uuid4().hex}",
+            cli_tools.apply_edits(
                 target=target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": f"runtime sync undo {uuid.uuid4().hex}",
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         runtime_results["undo_checkout_project_program"] = _unwrap_runtime_result(
-            cli.undo_checkout_project_program(
+            cli_tools.undo_checkout_project_program(
                 target=target,
                 discard_local_changes=True,
                 domain_path=generated_domain_path,
@@ -473,12 +491,12 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["undo_checkout_project_program"]["checked_out"] is False
 
         runtime_results["reload_project_program"] = _unwrap_runtime_result(
-            cli.load_project_program(target=target, domain_path=generated_domain_path)
+            cli_tools.load_project_program(target=target, domain_path=generated_domain_path)
         )
         assert runtime_results["reload_project_program"]["reloaded"] is True
 
         runtime_results["commit_project_program_clean"] = _unwrap_runtime_result(
-            cli.commit_project_program(
+            cli_tools.commit_project_program(
                 target=target,
                 message=f"runtime clean no-op {uuid.uuid4().hex}",
                 keep_checked_out=False,
@@ -490,12 +508,12 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["commit_project_program_clean"]["reason"] == "not_modified"
         assert runtime_results["commit_project_program_clean"]["checked_out"] is False
         clean_status = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=target, domain_path=generated_domain_path)
+            cli_tools.get_project_sync_status(target=target, domain_path=generated_domain_path)
         )
         assert clean_status["is_checked_out"] is False
 
         runtime_results["checkout_project_program_exclusive"] = _unwrap_runtime_result(
-            cli.checkout_project_program(
+            cli_tools.checkout_project_program(
                 target=target,
                 exclusive=True,
                 domain_path=generated_domain_path,
@@ -504,21 +522,21 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["checkout_project_program_exclusive"]["checked_out"] is True
         assert runtime_results["checkout_project_program_exclusive"]["exclusive"] is True
         exclusive_status = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=target, domain_path=generated_domain_path)
+            cli_tools.get_project_sync_status(target=target, domain_path=generated_domain_path)
         )
         assert exclusive_status["is_checked_out_exclusive"] is True
 
         kept_comment = f"runtime sync undo keep {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=kept_comment,
+            cli_tools.apply_edits(
                 target=target,
+                edits=[
+                    {"kind": "set_comment", "address": function_address, "comment": kept_comment, "comment_type": "eol"}
+                ],
             )
         )
         runtime_results["undo_checkout_project_program_keep"] = _unwrap_runtime_result(
-            cli.undo_checkout_project_program(
+            cli_tools.undo_checkout_project_program(
                 target=target,
                 discard_local_changes=False,
                 domain_path=generated_domain_path,
@@ -527,11 +545,13 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         kept_domain_path = runtime_results["undo_checkout_project_program_keep"].get("kept_program")
         assert kept_domain_path
         assert kept_domain_path != generated_domain_path
-        kept_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        kept_disassembly = _unwrap_runtime_result(cli_tools.disassemble(address=function_address, target=target))[
+            "items"
+        ]
         kept_instruction = next(item for item in kept_disassembly if item["address"] == function_address)
         assert kept_instruction["comment"] == kept_comment
 
-        _unwrap_runtime_result(cli.close_session(target))
+        _unwrap_runtime_result(cli_tools.close_session(target))
         _cleanup_runtime_domain_path(
             project_location=project_location,
             project_name=project_name,
@@ -539,27 +559,29 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         kept_domain_path = None
         _unwrap_runtime_result(
-            cli.register_target(
+            cli_tools.register_target(
                 target=target,
                 project_location=project_location,
                 project_name=project_name,
             )
         )
-        _unwrap_runtime_result(cli.load_project_program(target=target, domain_path=generated_domain_path))
-        original_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        _unwrap_runtime_result(cli_tools.load_project_program(target=target, domain_path=generated_domain_path))
+        original_disassembly = _unwrap_runtime_result(cli_tools.disassemble(address=function_address, target=target))[
+            "items"
+        ]
         original_instruction = next(item for item in original_disassembly if item["address"] == function_address)
         assert original_instruction["comment"] != kept_comment
 
         _unwrap_runtime_result(
-            cli.register_target(
+            cli_tools.register_target(
                 target=stale_target,
                 project_location=stale_project_location,
                 project_name=project_name,
             )
         )
-        _unwrap_runtime_result(cli.load_project_program(target=stale_target, domain_path=generated_domain_path))
+        _unwrap_runtime_result(cli_tools.load_project_program(target=stale_target, domain_path=generated_domain_path))
         _unwrap_runtime_result(
-            cli.checkout_project_program(
+            cli_tools.checkout_project_program(
                 target=stale_target,
                 exclusive=False,
                 domain_path=generated_domain_path,
@@ -567,15 +589,20 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         remote_comment = f"runtime remote advance {uuid.uuid4().hex}"
         _unwrap_runtime_result(
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=remote_comment,
+            cli_tools.apply_edits(
                 target=stale_target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": remote_comment,
+                        "comment_type": "eol",
+                    }
+                ],
             )
         )
         remote_commit = _unwrap_runtime_result(
-            cli.commit_project_program(
+            cli_tools.commit_project_program(
                 target=stale_target,
                 message=f"runtime remote advance commit {uuid.uuid4().hex}",
                 keep_checked_out=False,
@@ -587,7 +614,7 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert remote_version > committed_version
 
         runtime_results["pull_project_program_remote_advance"] = _unwrap_runtime_result(
-            cli.pull_project_program(
+            cli_tools.pull_project_program(
                 target=target,
                 on_local_changes="abort",
                 domain_path=generated_domain_path,
@@ -597,46 +624,48 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["pull_project_program_remote_advance"]["followed_latest"] is True
         assert runtime_results["pull_project_program_remote_advance"]["reloaded"] is True
         assert int(runtime_results["pull_project_program_remote_advance"]["version"]) == remote_version
-        primary_disassembly = _unwrap_runtime_result(cli.disassemble_function(address=function_address, target=target))
+        primary_disassembly = _unwrap_runtime_result(cli_tools.disassemble(address=function_address, target=target))[
+            "items"
+        ]
         primary_instruction = next(item for item in primary_disassembly if item["address"] == function_address)
         assert primary_instruction["comment"] == remote_comment
 
-        _unwrap_runtime_result(cli.close_session(target))
+        _unwrap_runtime_result(cli_tools.close_session(target))
         _unwrap_runtime_result(
-            cli.register_target(
+            cli_tools.register_target(
                 target=guard_target,
                 project_location=project_location,
                 project_name=project_name,
             )
         )
         with pytest.raises(RuntimeError, match="TARGET_ALREADY_LOADED"):
-            cli.delete_shared_project_file(
+            cli_tools.delete_shared_project_file(
                 target=guard_target,
                 domain_path=generated_domain_path,
                 confirm=generated_domain_path,
             )
 
         _unwrap_runtime_result(
-            cli.checkout_project_program(
+            cli_tools.checkout_project_program(
                 target=stale_target,
                 exclusive=False,
                 domain_path=generated_domain_path,
             )
         )
         stale_status = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=stale_target, domain_path=generated_domain_path)
+            cli_tools.get_project_sync_status(target=stale_target, domain_path=generated_domain_path)
         )
         stale_checkout_id = _local_checkout_id(stale_status)
         with pytest.raises(RuntimeError, match="UNSAFE_ACTIVE_CHECKOUT_TERMINATE"):
-            cli.terminate_project_program_checkout(
+            cli_tools.terminate_project_program_checkout(
                 target=guard_target,
                 checkout_id=stale_checkout_id,
                 domain_path=generated_domain_path,
             )
-        _unwrap_runtime_result(cli.close_session(stale_target))
+        _unwrap_runtime_result(cli_tools.close_session(stale_target))
 
         runtime_results["terminate_project_program_checkout"] = _unwrap_runtime_result(
-            cli.terminate_project_program_checkout(
+            cli_tools.terminate_project_program_checkout(
                 target=guard_target,
                 checkout_id=stale_checkout_id,
                 domain_path=generated_domain_path,
@@ -646,27 +675,32 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         assert runtime_results["terminate_project_program_checkout"]["active_checkouts"] == []
 
         _unwrap_runtime_result(
-            cli.register_target(
+            cli_tools.register_target(
                 target=stale_target,
                 project_location=stale_project_location,
                 project_name=project_name,
             )
         )
         hijacked_status = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=stale_target, domain_path=generated_domain_path)
+            cli_tools.get_project_sync_status(target=stale_target, domain_path=generated_domain_path)
         )
         assert hijacked_status["is_versioned"] is False
         assert hijacked_status["is_hijacked"] is True
-        _unwrap_runtime_result(cli.load_project_program(target=stale_target, domain_path=generated_domain_path))
+        _unwrap_runtime_result(cli_tools.load_project_program(target=stale_target, domain_path=generated_domain_path))
         with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
-            cli.set_comment(
-                kind="eol",
-                address=function_address,
-                comment=f"must be rejected {uuid.uuid4().hex}",
+            cli_tools.apply_edits(
                 target=stale_target,
+                edits=[
+                    {
+                        "kind": "set_comment",
+                        "address": function_address,
+                        "comment": f"must be rejected {uuid.uuid4().hex}",
+                        "comment_type": "eol",
+                    }
+                ],
             )
         runtime_results["pull_project_program_hijack_recovery"] = _unwrap_runtime_result(
-            cli.pull_project_program(
+            cli_tools.pull_project_program(
                 target=stale_target,
                 on_local_changes="discard",
                 domain_path=generated_domain_path,
@@ -674,30 +708,30 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
         assert runtime_results["pull_project_program_hijack_recovery"]["discarded_hijacked_file"] is True
         recovered_status = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=stale_target, domain_path=generated_domain_path)
+            cli_tools.get_project_sync_status(target=stale_target, domain_path=generated_domain_path)
         )
         assert recovered_status["is_hijacked"] is False
         assert recovered_status["is_versioned"] is True
         assert int(recovered_status["version"]) == remote_version
         recovered_disassembly = _unwrap_runtime_result(
-            cli.disassemble_function(address=function_address, target=stale_target)
-        )
+            cli_tools.disassemble(address=function_address, target=stale_target)
+        )["items"]
         recovered_instruction = next(item for item in recovered_disassembly if item["address"] == function_address)
         assert recovered_instruction["comment"] == remote_comment
-        _unwrap_runtime_result(cli.close_session(stale_target))
+        _unwrap_runtime_result(cli_tools.close_session(stale_target))
 
         _unwrap_runtime_result(
-            cli.register_target(
+            cli_tools.register_target(
                 target=delete_target,
                 project_location=project_location,
                 project_name=project_name,
             )
         )
         delete_status = _unwrap_runtime_result(
-            cli.get_project_sync_status(target=delete_target, domain_path=generated_domain_path)
+            cli_tools.get_project_sync_status(target=delete_target, domain_path=generated_domain_path)
         )
         runtime_results["delete_shared_project_file"] = _unwrap_runtime_result(
-            cli.delete_shared_project_file(
+            cli_tools.delete_shared_project_file(
                 target=delete_target,
                 domain_path=generated_domain_path,
                 confirm=generated_domain_path,

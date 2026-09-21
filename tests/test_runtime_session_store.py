@@ -256,3 +256,26 @@ def test_dirty_program_tracking_by_target_and_domain():
 
     store.clear_dirty_programs()
     assert not store.is_dirty_program("b", "/x")
+
+
+def test_saved_changes_survive_undo_until_sync_state_is_refreshed():
+    store, _core = _build_store()
+    store.mark_pending_sync_program("a", "/x")
+    store.mark_pending_sync_program("a", "/y")
+    store.mark_pending_sync_program("b", "/x")
+
+    store.update_unsaved_program("a", "/x", changed=False)
+    assert store.is_dirty_program("a", "/x")
+    store.update_unsaved_program("a", "/x", changed=True)
+    store.update_unsaved_program("a", "/x", changed=False)
+    assert store.is_dirty_program("a", "/x")
+
+    store.clear_dirty_program("a", "/x")
+    assert not store.is_dirty_program("a", "/x")
+    assert ("a", "/x") not in store.pending_sync_programs
+    store.clear_dirty_programs_for_target("a")
+    assert not store.is_dirty_program("a", "/y")
+    assert store.pending_sync_programs == {("b", "/x")}
+    store.clear_dirty_programs()
+    assert not store.dirty_programs
+    assert not store.pending_sync_programs

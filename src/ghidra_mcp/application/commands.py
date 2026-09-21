@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 FUNCTION_COMMANDS: tuple[str, ...] = (
+    "batch_read",
+    "get_xrefs",
+    "get_call_edges",
+    "disassemble",
     "list_functions",
     "get_function",
     "decompile_function",
-    "disassemble_function",
-    "disassemble_range",
     "create_function",
     "delete_function",
     "analyze_program",
@@ -15,13 +17,10 @@ FUNCTION_COMMANDS: tuple[str, ...] = (
     "undo_program_change",
     "redo_program_change",
     "export_program",
-    "get_callee",
-    "get_xrefs_to",
-    "get_xrefs_from",
-    "get_function_xrefs",
 )
 
 MEMORY_COMMANDS: tuple[str, ...] = (
+    "get_data_type",
     "list_segments",
     "list_imports",
     "list_exports",
@@ -32,11 +31,10 @@ MEMORY_COMMANDS: tuple[str, ...] = (
     "get_bytes",
     "search_bytes",
     "list_data_types",
-    "get_struct",
-    "get_enum",
 )
 
 SYMBOL_COMMANDS: tuple[str, ...] = (
+    "apply_edits",
     "rename_function",
     "rename_data",
     "rename_variable",
@@ -65,6 +63,7 @@ DATATYPE_COMMANDS: tuple[str, ...] = (
 )
 
 BSIM_COMMANDS: tuple[str, ...] = (
+    "bsim_validate_match",
     "bsim_query_target",
     "bsim_query_function",
     "bsim_register_target",
@@ -72,8 +71,10 @@ BSIM_COMMANDS: tuple[str, ...] = (
     "bsim_update_target_signatures",
 )
 
+SCRIPT_COMMANDS: tuple[str, ...] = ("run_script",)
+
 CORE_COMMANDS: frozenset[str] = frozenset(
-    (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS, *BSIM_COMMANDS)
+    (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS, *BSIM_COMMANDS, *SCRIPT_COMMANDS)
 )
 
 __all__ = [
@@ -82,5 +83,6 @@ __all__ = [
     "DATATYPE_COMMANDS",
     "FUNCTION_COMMANDS",
     "MEMORY_COMMANDS",
+    "SCRIPT_COMMANDS",
     "SYMBOL_COMMANDS",
 ]

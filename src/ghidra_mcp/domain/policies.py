@@ -13,7 +13,14 @@ LOCK_ORDER: tuple[str, ...] = ("registry", "target", "project")
 # ``--lock-timeout-seconds``.
 DEFAULT_LOCK_TIMEOUT_SECONDS: float = 30.0
 
-_lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS
+
+# How long run_script waits for in-flight operations to finish before it may
+# start (the script barrier's writer wait).  A script run is a rare, long,
+# deliberately requested operation, so waiting a few minutes behind a running
+# analysis beats failing after the general lock timeout and asking the client
+# to retry.  Operators tune this with ``--script-queue-timeout-seconds``.
+DEFAULT_SCRIPT_QUEUE_TIMEOUT_SECONDS: float = 300.0
+
 
 # Whether checkout_project_program (and the automatic checkout made by
 # commit_project_program) requests an exclusive checkout when the caller does
@@ -23,45 +30,74 @@ _lock_timeout_seconds: float = DEFAULT_LOCK_TIMEOUT_SECONDS
 # with ``--shared-sync-exclusive-checkout``.
 DEFAULT_EXCLUSIVE_CHECKOUT: bool = False
 
-_exclusive_checkout_default: bool = DEFAULT_EXCLUSIVE_CHECKOUT
 _policy_lock = threading.Lock()
+
+
+class _Policy:
+    """The process-wide values set by the CLI at startup."""
+
+    __slots__ = ("exclusive_checkout_default", "lock_timeout_seconds", "script_queue_timeout_seconds")
+
+    def __init__(self) -> None:
+        self.lock_timeout_seconds = DEFAULT_LOCK_TIMEOUT_SECONDS
+        self.script_queue_timeout_seconds = DEFAULT_SCRIPT_QUEUE_TIMEOUT_SECONDS
+        self.exclusive_checkout_default = DEFAULT_EXCLUSIVE_CHECKOUT
+
+
+_policy = _Policy()
 
 
 def get_lock_timeout_seconds() -> float:
     with _policy_lock:
-        return _lock_timeout_seconds
+        return _policy.lock_timeout_seconds
 
 
 def configure_lock_timeout_seconds(seconds: float) -> None:
     """Set the process-wide lock wait; ``seconds`` must be positive."""
 
-    global _lock_timeout_seconds
     value = float(seconds)
     if value <= 0:
         raise ValueError("lock timeout must be > 0 seconds")
     with _policy_lock:
-        _lock_timeout_seconds = value
+        _policy.lock_timeout_seconds = value
+
+
+def get_script_queue_timeout_seconds() -> float:
+    with _policy_lock:
+        return _policy.script_queue_timeout_seconds
+
+
+def configure_script_queue_timeout_seconds(seconds: float) -> None:
+    """Set how long run_script waits for other operations before starting; must be positive."""
+
+    value = float(seconds)
+    if value <= 0:
+        raise ValueError("script queue timeout must be > 0 seconds")
+    with _policy_lock:
+        _policy.script_queue_timeout_seconds = value
 
 
 def get_exclusive_checkout_default() -> bool:
     with _policy_lock:
-        return _exclusive_checkout_default
+        return _policy.exclusive_checkout_default
 
 
 def configure_exclusive_checkout_default(enabled: bool) -> None:
     """Set whether checkouts are exclusive when a caller does not choose."""
 
-    global _exclusive_checkout_default
     with _policy_lock:
-        _exclusive_checkout_default = bool(enabled)
+        _policy.exclusive_checkout_default = bool(enabled)
 
 
 __all__ = [
     "DEFAULT_EXCLUSIVE_CHECKOUT",
     "DEFAULT_LOCK_TIMEOUT_SECONDS",
+    "DEFAULT_SCRIPT_QUEUE_TIMEOUT_SECONDS",
     "LOCK_ORDER",
     "configure_exclusive_checkout_default",
     "configure_lock_timeout_seconds",
+    "configure_script_queue_timeout_seconds",
     "get_exclusive_checkout_default",
     "get_lock_timeout_seconds",
+    "get_script_queue_timeout_seconds",
 ]

@@ -2878,7 +2878,7 @@ def test_delete_blocks_late_session_creation_after_loaded_target_guard(
             raise AssertionError("timed out waiting to release delete guard")
         return original_guard(handle=handle, domain_path=domain_path)
 
-    def fake_create_session(name, project_location, *, project_name, domain_path):  # noqa: ANN001, ARG001
+    def fake_create_session(name, project_location, *, project_name, domain_path, validate=None):  # noqa: ANN001, ARG001
         create_entered.set()
         return object()
 
@@ -3100,12 +3100,14 @@ def test_sync_status_reports_runtime_marked_dirty_without_side_effects(monkeypat
         ),
     ],
 )
-def test_mutating_commands_mark_shared_program_dirty_for_sync_status(
+@pytest.mark.parametrize("changed_after", [False, True])
+def test_command_dirty_state_is_reflected_in_sync_status(
     monkeypatch: pytest.MonkeyPatch,
     command: str,
     params: dict,
+    changed_after: bool,
 ):
-    sync, store, core, handle = _build_sync_runtime(monkeypatch)
+    sync, store, core, handle = _build_sync_runtime(monkeypatch, session_cls=_DirtyAwareFakeSession)
     handle._status.update(  # noqa: SLF001
         {
             "is_checked_out": True,
@@ -3118,15 +3120,22 @@ def test_mutating_commands_mark_shared_program_dirty_for_sync_status(
         checkout_required_commands={command},
         normalize_result=lambda value: value,
     )
+    original_execute = core.execute
+
+    def execute(command, params, *, key):
+        handle.program_reports_changed = changed_after
+        return original_execute(command, params, key=key)
+
+    monkeypatch.setattr(core, "execute", execute)
 
     execute_result = execution.call(command, params, target="fw")
     status = sync.get_project_sync_status("fw", domain_path="/main")
 
     assert execute_result == {"status": "ok", "command": command}
     assert core.executed == [(command, params, "fw")]
-    assert store.is_dirty_program("fw", "/main")
-    assert status["modified_since_checkout"] is True
-    assert status["can_checkin"] is True
+    assert store.is_dirty_program("fw", "/main") is changed_after
+    assert status["modified_since_checkout"] is changed_after
+    assert status["can_checkin"] is changed_after
 
 
 def test_sync_status_reports_loaded_owner_changes_for_registered_only_target(monkeypatch: pytest.MonkeyPatch):
@@ -3202,8 +3211,10 @@ def test_commit_refreshes_runtime_marked_dirty_status_before_checkin(monkeypatch
     assert handle.project.saved == 2
 
 
+@pytest.mark.parametrize("noop_after_save", [False, True])
 def test_save_then_commit_preserves_runtime_dirty_until_versioned_status_refresh(
     monkeypatch: pytest.MonkeyPatch,
+    noop_after_save: bool,
 ):
     sync, store, _core, handle = _build_sync_runtime(
         monkeypatch,
@@ -3216,6 +3227,11 @@ def test_save_then_commit_preserves_runtime_dirty_until_versioned_status_refresh
     lifecycle = RuntimeTargetLifecycle(store=store)
 
     save_result = lifecycle.save_project_program("fw", domain_path="/main")
+    if noop_after_save:
+        execution = RuntimeCoreExecution(
+            store=store, checkout_required_commands={"create_function"}, normalize_result=lambda value: value
+        )
+        execution.call("create_function", {"address": "0x401000"}, target="fw")
     status_after_save = sync.get_project_sync_status("fw", domain_path="/main")
     commit_result = sync.commit_project_program("fw", "rename functions", auto_checkout=False, domain_path="/main")
 

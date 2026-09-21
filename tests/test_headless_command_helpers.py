@@ -6,8 +6,8 @@ import types
 
 import pytest
 
+from ghidra_headless.handlers.commands.analysis_queries import disassemble
 from ghidra_headless.handlers.commands.mutating_symbols import set_bytes
-from ghidra_headless.handlers.commands.read_only_decompile import disassemble_range
 from ghidra_headless.handlers.commands.read_only_functions import list_functions
 from ghidra_headless.handlers.commands.read_only_memory_data import (
     get_bytes,
@@ -21,11 +21,6 @@ from ghidra_headless.handlers.commands.read_only_memory_data import (
     list_segments,
     list_strings,
     search_bytes,
-)
-from ghidra_headless.handlers.commands.read_only_xrefs import (
-    get_function_xrefs,
-    get_xrefs_from,
-    get_xrefs_to,
 )
 
 
@@ -260,28 +255,6 @@ def test_paginated_commands_reject_invalid_limit_before_runtime_access():
             to_int=noop_to_int,
             decode_hex_bytes=bytearray.fromhex,
         ),
-        lambda: get_xrefs_to(
-            {"address": "0x1000", "limit": 0},
-            ensure_context=checked_context,
-            get_address=lambda *_args: None,
-            to_int=noop_to_int,
-            iter_items=no_items,
-        ),
-        lambda: get_xrefs_from(
-            {"address": "0x1000", "limit": 0},
-            ensure_context=checked_context,
-            get_address=lambda *_args: None,
-            to_int=noop_to_int,
-            iter_items=no_items,
-        ),
-        lambda: get_function_xrefs(
-            {"name": "entry", "limit": 0},
-            ensure_context=checked_context,
-            get_address=lambda *_args: None,
-            find_function_by_name=lambda *_args: None,
-            to_int=noop_to_int,
-            iter_items=no_items,
-        ),
         lambda: list_data_types(
             {"limit": 0},
             ensure_context=checked_context,
@@ -324,7 +297,7 @@ def _fake_function(name: str, entry: str, *, default_name: bool = False, size: i
     symbol = types.SimpleNamespace(getSource=lambda: "default" if default_name else "user")
     body = types.SimpleNamespace(getNumAddresses=lambda: size)
     return types.SimpleNamespace(
-        getName=lambda: name,
+        getName=lambda *_args: name,
         getEntryPoint=lambda: entry,
         getSymbol=lambda: symbol,
         getBody=lambda: body,
@@ -361,14 +334,14 @@ def test_list_functions_filters_case_insensitively_and_reports_size():
     ]
 
     assert _list_functions({"filter": "MAIN"}, functions) == [
-        {"name": "Main", "entry": "0x1000", "size": 32, "is_thunk": False},
-        {"name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
+        {"name": "Main", "full_name": "Main", "entry": "0x1000", "size": 32, "is_thunk": False},
+        {"name": "helper_main", "full_name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
     ]
     assert _list_functions({"only_default_names": True}, functions) == [
-        {"name": "FUN_00002000", "entry": "0x2000", "size": 8, "is_thunk": True},
+        {"name": "FUN_00002000", "full_name": "FUN_00002000", "entry": "0x2000", "size": 8, "is_thunk": True},
     ]
     assert _list_functions({"filter": "main", "offset": 1, "limit": 5}, functions) == [
-        {"name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
+        {"name": "helper_main", "full_name": "helper_main", "entry": "0x3000", "size": 16, "is_thunk": False},
     ]
 
 
@@ -439,14 +412,14 @@ def test_disassemble_range_maps_address_overflow_to_validation_error():
         )
     )
 
-    with pytest.raises(ValueError, match="length exceeds the address space"):
-        disassemble_range(
+    with pytest.raises(ValueError, match="range exceeds address space"):
+        disassemble(
             {"start_address": "0xffffffff", "length": 2, "limit": 1},
             ensure_context=lambda: context,
             get_address=lambda _ctx, _text: _MaxAddress(),
-            to_int=lambda value, default: default if value is None else int(value),
+            find_function_by_name=lambda *_args: None,
             iter_items=iter,
-            code_unit=object(),
+            comment_types=object(),
         )
 
 
@@ -769,3 +742,28 @@ def test_list_namespaces_reports_classes_and_can_filter_to_them():
         {"name": "no_symbol", "is_class": False},
     ]
     assert classes == [{"name": "MyClass", "is_class": True}]
+
+
+def test_instruction_comment_uses_the_enum_overload():
+    from enum import Enum
+
+    from ghidra_headless.handlers.commands.read_only_decompile import _instruction_to_dict
+
+    class CommentTypes(Enum):
+        EOL = "eol"
+
+    class Instruction:
+        def getNumOperands(self):
+            return 0
+
+        def getComment(self, kind):
+            assert kind is CommentTypes.EOL
+            return "enum comment"
+
+        def getAddress(self):
+            return "1000"
+
+        def getMnemonicString(self):
+            return "RET"
+
+    assert _instruction_to_dict(Instruction(), CommentTypes)["comment"] == "enum comment"

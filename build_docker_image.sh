@@ -5,7 +5,7 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 SCRIPT_DIR="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
-DEFAULT_IMAGE_TAG="ghidra-mcp:local"
+DEFAULT_IMAGE_TAG="mecha_ghidra:local"
 DEFAULT_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 RELEASE_ENV_FILE="${REPO_ROOT}/scripts/ghidra_release.env"
 DEFAULT_GHIDRA_DIST_URL_AMD64=""
@@ -36,7 +36,7 @@ Usage:
   ./build_docker_image.sh [options]
 
 Options:
-  --tag NAME            Docker image tag to build. Default: ghidra-mcp:local
+  --tag NAME            Docker image tag to build. Default: mecha_ghidra:local
   --platform VALUE      Docker build platform. Default: linux/amd64
   --context NAME        Docker context to use for the build.
   --ghidra-dist-url URL Override the Ghidra distribution ZIP URL.
@@ -152,7 +152,7 @@ prepare_docker_environment() {
     exit 1
   }
 
-  TEMP_DOCKER_CONFIG="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/ghidra-mcp-docker-config.XXXXXX")"
+  TEMP_DOCKER_CONFIG="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/mecha_ghidra-docker-config.XXXXXX")"
   /usr/bin/printf '{"auths":{}}\n' > "${TEMP_DOCKER_CONFIG}/config.json"
   export DOCKER_CONFIG="${TEMP_DOCKER_CONFIG}"
   export DOCKER_HOST="${docker_host}"

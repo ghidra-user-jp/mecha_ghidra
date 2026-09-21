@@ -1,0 +1,11 @@
+{
+  "claude_code_version": "2.1.278",
+  "requested_model": "fable",
+  "resolved_model": "claude-fable-5-1",
+  "effort": "medium",
+  "tools": [],
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 54072,
+  "num_turns": 1
+}

@@ -170,15 +170,15 @@ def rename_variable(
 
 
 COMMENT_KINDS = {
-    "pre": "PRE_COMMENT",  # shown above the line in the listing and in the decompiler
-    "eol": "EOL_COMMENT",  # end-of-line comment in the listing
-    "post": "POST_COMMENT",
-    "plate": "PLATE_COMMENT",  # function header block
-    "repeatable": "REPEATABLE_COMMENT",
+    "pre": "PRE",  # shown above the line in the listing and in the decompiler
+    "eol": "EOL",  # end-of-line comment in the listing
+    "post": "POST",
+    "plate": "PLATE",  # function header block
+    "repeatable": "REPEATABLE",
 }
 
 
-def set_comment(params, *, ensure_context, get_address, txn, code_unit):
+def set_comment(params, *, ensure_context, get_address, txn, comment_types):
     """Set (or clear with an empty string) one comment kind at an address."""
     ctx = ensure_context()
     address_text = params.get("address")
@@ -186,7 +186,7 @@ def set_comment(params, *, ensure_context, get_address, txn, code_unit):
     kind = str(params.get("kind") or "").strip().lower()
     if kind not in COMMENT_KINDS:
         raise ValueError("kind must be one of: %s" % ", ".join(sorted(COMMENT_KINDS)))
-    comment_type = getattr(code_unit, COMMENT_KINDS[kind])
+    comment_type = getattr(comment_types, COMMENT_KINDS[kind])
     address = get_address(ctx, address_text)
 
     def _apply():

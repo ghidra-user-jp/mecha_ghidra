@@ -71,6 +71,29 @@ def _program_md5(program):
     return text or None
 
 
+def bsim_validate_match(params, *, ensure_context, get_address):
+    """Verify a reference against one locked, loaded program before returning it."""
+    ctx = ensure_context()
+    expected_md5 = str(params["executable_md5"]).lower()
+    actual_md5 = _program_md5(ctx.program)
+    actual_path = _domain_path(ctx.program)
+    address = get_address(ctx, params["address"])
+    function = ctx.function_manager.getFunctionAt(address)
+    if actual_md5 != expected_md5 or actual_path != params["domain_path"] or function is None:
+        raise HeadlessError(
+            "BSIM_MATCH_STALE: loaded program or function differs from the BSim reference",
+            details={
+                "expected_md5": expected_md5,
+                "actual_md5": actual_md5,
+                "expected_program": params["domain_path"],
+                "actual_program": actual_path,
+                "address": str(address),
+                "function_exists": function is not None,
+            },
+        )
+    return {"address": str(function.getEntryPoint()), "name": str(function.getName(True))}
+
+
 def _category_map(record):
     result = {}
     get_all = getattr(record, "getAllCategories", None)
@@ -285,7 +308,9 @@ def _collect_matches(ctx, target, rows, *, exclude_md5=None, matches_per_functio
             str(item["matched_ref"].get("address") or ""),
         )
     )
-    if matches_per_function is not None and excluded:
+    # The query requests an extra candidate when self-filtering is enabled.
+    # Enforce the cap even when none of those candidates belongs to this program.
+    if matches_per_function is not None:
         per_function = {}
         capped = []
         cap = max(1, int(matches_per_function))
@@ -365,4 +390,10 @@ def bsim_query_function(params, *, ensure_context, get_address, find_function_by
     )
 
 
-__all__ = ["BSIM_MATCHED_REF_VERSION", "MAX_QUERY_FUNCTIONS", "bsim_query_function", "bsim_query_target"]
+__all__ = [
+    "BSIM_MATCHED_REF_VERSION",
+    "MAX_QUERY_FUNCTIONS",
+    "bsim_query_function",
+    "bsim_query_target",
+    "bsim_validate_match",
+]

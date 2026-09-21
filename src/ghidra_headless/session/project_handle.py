@@ -9,8 +9,8 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
+import jpype
 import pyghidra
-import pyghidra.core as pycore
 
 from ghidra_headless.errors import HeadlessError
 
@@ -51,12 +51,28 @@ class ProjectHandle:
         # (program, consumer, key) for past versions opened read-only; they are
         # released through DomainObject.release(consumer), not Project.close().
         self._read_only_programs: list[tuple[Any, Any, tuple[str, ...]]] = []
+        # Programs whose release failed during a failed open; still consumers of the project.
+        self._orphaned_programs: list[tuple[Any, tuple[str, ...], str]] = []
 
         from ghidra.base.project import GhidraProject
 
         self.project = GhidraProject.openProject(self.project_location, self.project_name, True)
         self._refcount = 0
         self._closed = False
+
+    @staticmethod
+    def _normalize_project_name(project_name: str) -> str:
+        name = project_name.strip()
+        if not name:
+            raise ValueError("project_name must not be empty")
+        # ProjectLocator removes a trailing .gpr. Reject that spelling before
+        # computing keys or checking files, so Ghidra cannot open/delete a
+        # different project from the one our in-use guard checked.
+        if name.lower().endswith(".gpr"):
+            raise ValueError("project_name must omit the .gpr suffix; pass .gpr files via project_location")
+        if "/" in name or "\\" in name:
+            raise ValueError("project_name must not contain path separators")
+        return name
 
     @staticmethod
     def resolve_project_location_and_file(project_location: str, project_name: Optional[str]) -> tuple[str, str]:
@@ -67,7 +83,7 @@ class ProjectHandle:
             raise ValueError(f"Specified .gpr file not found: {path}")
         if project_name is None and path.is_dir():
             raise ValueError("project_name is required")
-        effective = project_name or path.stem
+        effective = ProjectHandle._normalize_project_name(project_name if project_name is not None else path.stem)
         return (str(path.parent if path.is_file() else path), effective)
 
     @staticmethod
@@ -81,9 +97,7 @@ class ProjectHandle:
     ) -> tuple[str, str]:
         path = pathlib.Path(project_location).expanduser().resolve()
         if project_name is not None:
-            effective_name = project_name.strip()
-            if not effective_name:
-                raise ValueError("project_name must not be empty")
+            effective_name = ProjectHandle._normalize_project_name(project_name)
             project_dir = path.parent if path.suffix.lower() == ".gpr" else path
             if path.suffix.lower() == ".gpr" and path.stem != effective_name:
                 raise ValueError(
@@ -92,7 +106,7 @@ class ProjectHandle:
         else:
             if path.suffix.lower() != ".gpr":
                 raise ValueError("project_name is required when project_location is not a .gpr file")
-            effective_name = path.stem
+            effective_name = ProjectHandle._normalize_project_name(path.stem)
             project_dir = path.parent
 
         return (str(project_dir), effective_name)
@@ -204,10 +218,21 @@ class ProjectHandle:
             info = path_utils._read_prp_basic_info(project_rep / "project.prp") or {}
             existing_server = str(info.get("SERVER") or "").strip()
             existing_repo = str(info.get("REPOSITORY_NAME") or "").strip()
-            if not existing_server or existing_repo != repository_name:
+            try:
+                existing_port = int(info.get("PORT_NUMBER", -1))
+            except ValueError as exc:
+                raise HeadlessError(f"PROJECT_ALREADY_EXISTS: {project_file} has an invalid repository port") from exc
+            # ClientUtil maps an omitted or non-positive port to Ghidra's default.
+            if existing_port <= 0:
+                existing_port = _DEFAULT_GHIDRA_SERVER_PORT
+            if (
+                existing_server.lower().rstrip(".") != host.lower().rstrip(".")
+                or existing_port != port
+                or existing_repo != repository_name
+            ):
                 raise HeadlessError(
                     f"PROJECT_ALREADY_EXISTS: {project_file} exists but is not a cache of repository "
-                    f"'{repository_name}'"
+                    f"'{repository_name}' on {host}:{port}"
                 )
             return {
                 "status": "exists",
@@ -291,6 +316,62 @@ class ProjectHandle:
     def get_key(self) -> tuple[str, str]:
         return self.key
 
+    def get_java_project(self):
+        """Return the ``ghidra.framework.model.Project`` behind this handle (scripts see it as currentProject)."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Project is closed")
+            return self.project.getProject()
+
+    def orphaned_program_count(self) -> int:
+        with self._lock:
+            return len(self._orphaned_programs)
+
+    def release_orphaned_programs(self) -> int:
+        """Retry releasing programs kept from failed opens; return how many are still unreleased."""
+        with self._lock:
+            orphans = list(self._orphaned_programs)
+            remaining = []
+            for program, key, _error in orphans:
+                try:
+                    self._release_program_object_locked(program)
+                except Exception as exc:
+                    remaining.append((program, key, str(exc)))
+                    continue
+                self._refcount = max(0, self._refcount - 1)
+            self._orphaned_programs = remaining
+            if self._refcount == 0 and not self._closed and not remaining:
+                # A close failure must surface: the project (and its lock) is still held by this handle.
+                self._close_project_locked()
+            return len(remaining)
+
+    def retain(self) -> None:
+        """Pin the project open independently of program sessions (balanced with ``release``)."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Project is closed")
+            self._refcount += 1
+
+    def release(self) -> None:
+        """Drop a ``retain`` pin; closes the project when nothing else holds it."""
+        with self._lock:
+            if self._closed:
+                return
+            self._refcount = max(0, self._refcount - 1)
+            if self._refcount == 0:
+                self._close_project_locked()
+
+    @contextlib.contextmanager
+    def pinned(self):
+        self.retain()
+        try:
+            yield self
+        finally:
+            self.release()
+
+    def is_repository_project(self) -> bool:
+        return self.is_repository_project_from_metadata(self.project_location, self.project_name)
+
     def get_shared_project_url(self) -> Optional[str]:
         """Return the server-backed project URL without changing repository state."""
         with self._lock:
@@ -362,9 +443,14 @@ class ProjectHandle:
                 try:
                     self._release_program_object_locked(program)
                 except Exception as close_exc:
+                    # Keep owning the consumer we could not release: the project
+                    # must not close under it and shutdown must know about it.
+                    self._refcount += 1
+                    self._orphaned_programs.append((program, domain_path_key, str(close_exc)))
                     raise HeadlessError(
                         "PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for "
-                        f"{domain_path_text}: {exc}; cleanup close failed: {close_exc}"
+                        f"{domain_path_text}: {exc}; cleanup close failed: {close_exc}",
+                        details={"orphaned_program": domain_path_text},
                     ) from exc
                 raise HeadlessError(
                     f"PROGRAM_OPEN_FAILED: failed to initialize FlatProgramAPI for {domain_path_text}: {exc}"
@@ -1183,39 +1269,49 @@ class ProjectHandle:
         return domain_file
 
     def _import_program_auto_locked(self, path: pathlib.Path, program_dir: str, program_name: str):
-        program = None
+        monitor = java_bindings._console_monitor()
+        # Leave loader/language selection to Ghidra, using the same public
+        # ownership model as raw imports instead of GhidraProject.importProgram.
+        load_results = (
+            pyghidra.program_loader()
+            .project(self.project.getProject())
+            .projectFolderPath(program_dir)
+            .source(str(path))
+            .name(program_name)
+            .monitor(monitor)
+            .load()
+        )
         domain_file = None
         operation_error = None
         try:
-            java_file = pycore.JClass("java.io.File")(str(path))
-            program = self.project.importProgram(java_file)
-            self.project.saveAs(program, program_dir, program_name, True)
-            domain_file = program.getDomainFile()
+            loaded_program = load_results.getPrimary()
+            if loaded_program is None:
+                raise RuntimeError(f"Failed to add program: {path}")
+            domain_file = loaded_program.save(monitor)
             return domain_file
         except Exception as exc:
             operation_error = exc
             raise
         finally:
-            if program is not None:
-                try:
-                    self.project.close(program)
-                except Exception as close_exc:
-                    if operation_error is not None:
-                        raise _ImportedProgramCloseError(
-                            "PROGRAM_CLOSE_FAILED: failed to close imported program after "
-                            f"auto import failure for {path}: {close_exc}; "
-                            f"original error: {operation_error}"
-                        ) from operation_error
-                    domain_path = None
-                    if domain_file is not None:
-                        try:
-                            domain_path = domain_file.getPathname()
-                        except Exception:
-                            domain_path = None
-                    imported_name = domain_path or program_name
+            try:
+                load_results.close()
+            except Exception as close_exc:
+                if operation_error is not None:
                     raise _ImportedProgramCloseError(
-                        f"PROGRAM_CLOSE_FAILED: failed to close imported program {imported_name}: {close_exc}"
-                    ) from close_exc
+                        "PROGRAM_CLOSE_FAILED: failed to close imported program after "
+                        f"auto import failure for {path}: {close_exc}; "
+                        f"original error: {operation_error}"
+                    ) from operation_error
+                domain_path = None
+                if domain_file is not None:
+                    try:
+                        domain_path = domain_file.getPathname()
+                    except Exception:
+                        domain_path = None
+                imported_name = domain_path or program_name
+                raise _ImportedProgramCloseError(
+                    f"PROGRAM_CLOSE_FAILED: failed to close imported program {imported_name}: {close_exc}"
+                ) from close_exc
 
     def _import_program_raw_locked(
         self,
@@ -1231,19 +1327,21 @@ class ProjectHandle:
         block_name: str | None,
         overlay: bool,
     ):
+        if length is None and file_offset is not None:
+            file_size = path.stat().st_size
+            if not 0 <= file_offset < file_size:
+                raise ValueError(f"file_offset must be >= 0 and less than file size ({file_size})")
+            # BinaryLoader otherwise keeps the full file length after moving
+            # the start offset, adding zero-filled bytes beyond the file's end.
+            length = file_size - file_offset
         monitor = java_bindings._console_monitor()
-        loader_factory = getattr(pyghidra, "program_loader", None)
-        builder_factory = loader_factory or (lambda: pycore.JClass("ghidra.app.util.importer.ProgramLoader").builder())
-        loader_value = "ghidra.app.util.opinion.BinaryLoader"
-        with contextlib.suppress(Exception):
-            loader_value = pycore.JClass(loader_value)
         builder = (
-            builder_factory()
+            pyghidra.program_loader()
             .project(self.project.getProject())
             .projectFolderPath(program_dir)
             .source(str(path))
             .name(program_name)
-            .loaders(loader_value)
+            .loaders("BinaryLoader")
             .language(language_id)
         )
         if compiler_spec_id is not None:
@@ -1259,8 +1357,11 @@ class ProjectHandle:
         if overlay:
             requested_loader_options.add("Overlay")
         loader_option_args = self._resolve_binary_loader_args_locked(
-            builder,
+            path,
+            language_id=language_id,
+            compiler_spec_id=compiler_spec_id,
             required_options=requested_loader_options,
+            base_address=base_address,
         )
         for option_name, value in loader_args.items():
             if value is None:
@@ -1268,7 +1369,15 @@ class ProjectHandle:
             option_arg = loader_option_args.get(option_name)
             if option_arg is None:
                 raise HeadlessError(f"RAW_LOADER_OPTION_UNAVAILABLE: {option_name}")
-            builder = builder.addLoaderArg(option_arg, str(value))
+            # Ghidra parses numeric loader options as hex. Match the input
+            # validator's base-0 interpretation before formatting addresses.
+            if option_name == "Base Address":
+                wire_value = format(int(value, 0), "x")
+            elif option_name in {"File Offset", "Length"}:
+                wire_value = hex(value)
+            else:
+                wire_value = str(value)
+            builder = builder.addLoaderArg(option_arg, wire_value)
         if overlay:
             option_arg = loader_option_args.get("Overlay")
             if option_arg is None:
@@ -1360,7 +1469,7 @@ class ProjectHandle:
         entry_offset: int | None,
     ):
         if entry_address is not None:
-            return self._address_from_int_locked(program, int(entry_address, 0))
+            return self._address_from_int_locked(program, int(entry_address, 0), word_offset=True)
         if entry_offset is None:
             return None
         min_address = self._get_imported_min_address_locked(program)
@@ -1420,68 +1529,80 @@ class ProjectHandle:
                 return address
         raise RuntimeError("Failed to resolve imported program base address")
 
-    def _address_from_int_locked(self, program, value: int):
+    def _address_from_int_locked(self, program, value: int, *, word_offset: bool = False):
         address_space = program.getAddressFactory().getDefaultAddressSpace()
         if address_space is None:
             raise RuntimeError("Program has no default address space")
-        return address_space.getAddress(int(value))
+        value = int(value)
+        if word_offset:
+            # Explicit addresses use the language's addressable units;
+            # entry_offset and Ghidra's numeric Address API use byte offsets.
+            value *= int(address_space.getAddressableUnitSize())
+        if value >= 1 << 63:
+            max_offset = int(str(address_space.getMaxAddress().getOffsetAsBigInteger()))
+            if value > max_offset:
+                raise ValueError(f"Address {value:#x} exceeds the default address space")
+            # Ghidra represents upper-half 64-bit byte offsets as signed Java longs.
+            value -= 1 << 64
+        return address_space.getAddress(value)
 
     def _resolve_binary_loader_args_locked(
         self,
-        builder,
+        path: pathlib.Path,
         *,
+        language_id: str,
+        compiler_spec_id: str | None,
         required_options: set[str] | None = None,
+        base_address: str | None = None,
     ) -> dict[str, str]:
-        required_options = required_options or set()
-        fallback = {
-            "Base Address": "Base Address",
-            "File Offset": "File Offset",
-            "Length": "Length",
-            "Block Name": "Block Name",
-            "Overlay": "Overlay",
-        }
+        """Resolve CLI options and validate the base against the selected language."""
+        if not required_options:
+            return {}
         try:
-            builder_class = builder.getClass()
-            byte_provider_class = pycore.JClass("ghidra.app.util.bin.ByteProvider")
-            load_spec_class = pycore.JClass("ghidra.app.util.opinion.LoadSpec")
-            get_source = builder_class.getDeclaredMethod("getSourceAsProvider")
-            get_source.setAccessible(True)
-            provider = get_source.invoke(builder)
+            java_file = jpype.JClass("java.io.File")(str(path))
+            access_mode = jpype.JClass("java.nio.file.AccessMode")
+            provider = jpype.JClass("ghidra.app.util.bin.FileByteProvider")(java_file, None, access_mode.READ)
             try:
-                get_load_spec = builder_class.getDeclaredMethod("getLoadSpec", byte_provider_class.class_)
-                get_load_spec.setAccessible(True)
-                load_spec = get_load_spec.invoke(builder, provider)
-                get_loader_options = builder_class.getDeclaredMethod(
-                    "getLoaderOptions",
-                    byte_provider_class.class_,
-                    load_spec_class.class_,
+                loader = jpype.JClass("ghidra.app.util.opinion.BinaryLoader")()
+                loader_map = jpype.JClass("ghidra.app.util.opinion.LoaderMap")()
+                loader_map.put(loader, loader.findSupportedLoadSpecs(provider))
+                language = jpype.JClass("ghidra.program.model.lang.LanguageID")(language_id)
+                compiler = (
+                    jpype.JClass("ghidra.program.model.lang.CompilerSpecID")(compiler_spec_id)
+                    if compiler_spec_id is not None
+                    else None
                 )
-                get_loader_options.setAccessible(True)
-                options = get_loader_options.invoke(builder, provider, load_spec)
+                chooser = jpype.JClass("ghidra.app.util.importer.LcsHintLoadSpecChooser")(language, compiler)
+                load_spec = chooser.choose(loader_map)
+                if load_spec is None:
+                    raise ValueError(f"No BinaryLoader load specification for {language_id}")
+                options = loader.getDefaultOptions(provider, load_spec, None, False, False)
+                if options is None:
+                    raise ValueError("BinaryLoader returned no option metadata")
+                option_args = {
+                    str(option.getName()): str(option.getArg())
+                    for option in options
+                    if option.getName() is not None and option.getArg() is not None
+                }
+                if base_address is not None:
+                    address_space = load_spec.getLanguageCompilerSpec().getLanguage().getDefaultSpace()
+                    # Loader address strings use addressable units, while
+                    # Address offsets are measured in bytes.
+                    unit_size = int(address_space.getAddressableUnitSize())
+                    min_offset = int(str(address_space.getMinAddress().getOffsetAsBigInteger())) // unit_size
+                    max_offset = int(str(address_space.getMaxAddress().getOffsetAsBigInteger())) // unit_size
             finally:
-                close = getattr(provider, "close", None)
-                if close is not None:
-                    close()
-            if options is None:
-                if required_options:
-                    requested = ", ".join(sorted(required_options))
-                    raise RuntimeError(f"failed to resolve BinaryLoader option metadata for: {requested}")
-                return dict(fallback)
-            resolved = {} if required_options else dict(fallback)
-            for option in options:
-                option_name = option.getName()
-                option_arg = option.getArg()
-                if option_name is None or option_arg is None:
-                    continue
-                resolved[str(option_name)] = str(option_arg)
-            return resolved
+                provider.close()
         except Exception as exc:
-            if required_options:
-                raise HeadlessError(
-                    f"RAW_LOADER_OPTION_UNAVAILABLE: failed to resolve BinaryLoader options: {exc}"
-                ) from exc
-            logger.debug("failed to resolve binary loader option args; using fallback names: %s", exc)
-            return fallback
+            raise HeadlessError(
+                f"RAW_LOADER_OPTION_UNAVAILABLE: failed to resolve BinaryLoader options: {exc}"
+            ) from exc
+        if base_address is not None and not min_offset <= int(base_address, 0) <= max_offset:
+            raise ValueError(
+                f"base_address {base_address} is outside the default address space for "
+                f"{language_id} ({min_offset:#x}..{max_offset:#x})"
+            )
+        return option_args
 
 
 __all__ = ["ProjectHandle"]

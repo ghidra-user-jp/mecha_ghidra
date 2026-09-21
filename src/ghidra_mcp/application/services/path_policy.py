@@ -87,13 +87,15 @@ class PathPolicy:
             return
         raise self._denied("project", project_location, self.allowed_project_roots)
 
-    def validate_export_path(self, output_path: str) -> None:
-        if not self.restricts_exports:
-            return
-        candidate = _resolve(output_path)
-        if _is_within(candidate, self.allowed_export_roots):
-            return
-        raise self._denied("export", output_path, self.allowed_export_roots)
+    def validate_export_path(self, output_path: str) -> str:
+        """Return the canonical path that the exporter must use unchanged."""
+        normalized = output_path.strip()
+        if not normalized:
+            raise ValueError("output_path is required")
+        candidate = _resolve(normalized)
+        if self.restricts_exports and not _is_within(candidate, self.allowed_export_roots):
+            raise self._denied("export", output_path, self.allowed_export_roots)
+        return str(candidate)
 
     @staticmethod
     def _denied(kind: str, path: str, roots: tuple[Path, ...]) -> DomainError:

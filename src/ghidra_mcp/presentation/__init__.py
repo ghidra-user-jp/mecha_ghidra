@@ -1,9 +1,6 @@
-"""Presentation-layer exports for ghidra_mcp."""
+"""Presentation-layer exports for ghidra_mcp (resolved lazily; see ``ghidra_mcp._lazy``)."""
 
-from .error_mapper import map_exception
-from .mcp_server import MCPServerRuntime, create_mcp_server
-from .tool_dispatcher import dispatch_tool, normalize_empty_list_result
-from .tool_registry import ToolRegistry, build_tool_functions, build_tool_objects
+from ghidra_mcp._lazy import lazy_exports
 
 __all__ = [
     "MCPServerRuntime",
@@ -15,3 +12,17 @@ __all__ = [
     "normalize_empty_list_result",
     "build_tool_objects",
 ]
+
+__getattr__, __dir__ = lazy_exports(
+    __name__,
+    {
+        "map_exception": ".error_mapper",
+        "MCPServerRuntime": ".mcp_server",
+        "create_mcp_server": ".mcp_server",
+        "dispatch_tool": ".tool_dispatcher",
+        "normalize_empty_list_result": ".tool_dispatcher",
+        "ToolRegistry": ".tool_registry",
+        "build_tool_functions": ".tool_registry",
+        "build_tool_objects": ".tool_registry",
+    },
+)

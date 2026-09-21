@@ -3,8 +3,8 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ghidra-mcp"
-version = "0.1.5rc1"
+name = "mecha_ghidra"
+version = "1.0.0"
 description = "Headless Ghidra MCP server built on PyGhidra (PyGhidra ベースの Ghidra MCP サーバー)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ["ghidra", "mcp", "reverse-engineering", "pyghidra", "model-context-protocol"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Operating System :: OS Independent",
@@ -26,11 +26,18 @@ classifiers = [
     "Topic :: Software Development :: Disassemblers",
 ]
 dependencies = [
-    "mcp>=2.1.1,<3",
-    "pyghidra>=2.0.0",
+    "anyio>=4.5,<5",
+    "mcp>=2.2.0,<3",
+    # Published metadata stays installable from PyPI. The exception propagation
+    # fix the scripts tools need (ghidra#9288) is only in the unreleased 3.2
+    # snapshot pinned under [tool.uv.sources]; on an older PyGhidra the startup
+    # probe (runtime_check) marks every script runtime unavailable.
+    "pyghidra>=3.1.0",
     "fasteners>=0.19",
     "pydantic>=2.11,<3",
     "regex>=2024.4.16",
+    "jsonschema>=4.20,<5",
+    "uvicorn>=0.31,<1",
 ]
 
 [project.urls]
@@ -40,13 +47,22 @@ Documentation = "https://github.com/ghidra-user-jp/mecha_ghidra/blob/main/docs/u
 Issues = "https://github.com/ghidra-user-jp/mecha_ghidra/issues"
 
 [project.scripts]
-ghidra-mcp = "ghidra_mcp.cli:main"
+mecha_ghidra = "ghidra_mcp.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.uv]
 managed = true
+
+[tool.uv.sources]
+# Unreleased PyGhidra 3.2 snapshot (upstream commit 263160cf) with the script
+# exception propagation fix (ghidra#9288). uv.lock records its SHA-256. Not part
+# of the wheel metadata, so PyPI publishing and plain pip installs keep working.
+# Remove this entry (and raise the pyghidra lower bound above) once a PyPI
+# release contains the fix; the snapshot also reports version 3.2.0, so the
+# bound must change in the same commit.
+pyghidra = { url = "https://github.com/NationalSecurityAgency/ghidra/archive/263160cf57db21a9e25f1e0a8bc42fde5b8824eb.tar.gz", subdirectory = "Ghidra/Features/PyGhidra/src/main/py" }
 
 [project.optional-dependencies]
 test = [
@@ -75,7 +91,6 @@ ignore = [
     "E501",    # line length is handled by the formatter
     "PLR0913", "PLR0912", "PLR0915", "PLR0911", "PLR2004", "PLR0914", "PLR0917", "PLR6301", "PLR1702",
     "PLC0415", # late imports are used deliberately for optional JVM/adapter dependencies
-    "PLW0603", # module-level caches for JVM classes
     "S101",    # asserts are fine in tests and internal invariants
     "TRY003", "TRY004", "TRY300", "TRY301", "TRY400",
     "SIM102", "SIM108", "SIM113", "SIM117",

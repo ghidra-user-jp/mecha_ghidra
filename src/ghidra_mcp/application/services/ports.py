@@ -6,6 +6,7 @@ only the protocols so the dependency direction stays application -> ports.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
 
@@ -69,6 +70,7 @@ class TargetRuntimePort(Protocol):
         *,
         project_name: str | None = None,
         domain_path: str | None = None,
+        validate: Callable[[], None] | None = None,
     ) -> Any: ...
 
     def register_target(
@@ -93,7 +95,7 @@ class TargetRuntimePort(Protocol):
 
     def save_project_program(self, name: str, *, domain_path: str | None = None) -> dict[str, Any]: ...
 
-    def close_session(self, name: str, *, remove_program: bool = False) -> None: ...
+    def close_session(self, name: str, *, remove_program: bool = False, discard_changes: bool = False) -> None: ...
 
     def close_all(self) -> None: ...
 
@@ -187,4 +189,14 @@ class SyncRuntimePort(Protocol):
     def project_lock_key(self, name: str) -> str | None: ...
 
 
-__all__ = ["BsimBackendPort", "CoreGatewayPort", "SyncRuntimePort", "TargetRuntimePort"]
+class ScriptRuntimePort(Protocol):
+    """Runtime side of Ghidra script execution (JVM-bound)."""
+
+    def script_runtime_availability(self) -> dict[str, bool]: ...
+
+    def run_script(self, name: str, *, request: dict[str, Any]) -> dict[str, Any]: ...
+
+    def project_lock_key(self, name: str) -> str | None: ...
+
+
+__all__ = ["BsimBackendPort", "CoreGatewayPort", "ScriptRuntimePort", "SyncRuntimePort", "TargetRuntimePort"]

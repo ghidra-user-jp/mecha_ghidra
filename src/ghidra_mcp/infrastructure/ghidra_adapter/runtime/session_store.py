@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from typing import Any, Callable
@@ -19,6 +20,29 @@ _SURFACED_CLOSE_CODES = frozenset(
 )
 
 
+def _java_project_of(session: ProgramSession):
+    """Best-effort ``ghidra.framework.model.Project`` for a session (None if unavailable)."""
+    try:
+        return session.get_project_handle().get_java_project()
+    except Exception as exc:
+        logger.debug("java project unavailable for session: %s", exc)
+        return None
+
+
+def bind_session_project(core_accessor, key: str, session: ProgramSession) -> None:
+    """Give the context for ``key`` its Java project when the accessor supports it (scripts need it)."""
+    bind = getattr(core_accessor(), "bind_project", None)
+    if bind is None:
+        return
+    project = _java_project_of(session)
+    if project is None:
+        return
+    try:
+        bind(key, project)
+    except Exception as exc:
+        logger.debug("bind_project failed for target '%s': %s", key, exc)
+
+
 class RuntimeSessionStore:
     def __init__(
         self,
@@ -34,8 +58,148 @@ class RuntimeSessionStore:
         self.project_handles = state.project_handles
         self.analyzed_loads = state.analyzed_loads
         self.dirty_programs = state.dirty_programs
+        self.pending_sync_programs = state.pending_sync_programs
+        self.invalid_targets = state.invalid_targets
+        self.orphaned_sessions = state.orphaned_sessions
+        self.orphan_handles = state.orphan_handles
         self.operation_lock = state.operation_lock
         self.registry_lock = state.registry_lock
+
+    # ---- quarantine (execution_state=invalid) ---------------------------------
+
+    def quarantine_state(self, name: str) -> dict[str, Any] | None:
+        """Return the quarantine payload for ``name`` from either layer, or None."""
+        payload = self.invalid_targets.get(name)
+        if payload is not None:
+            return payload
+        accessor = self.core_accessor()
+        execution_state = getattr(accessor, "execution_state", None)
+        if execution_state is None:
+            return None
+        try:
+            payload = execution_state(name)
+        except Exception as exc:
+            logger.debug("execution_state lookup failed for target '%s': %s", name, exc)
+            return None
+        return None if payload is None else dict(payload)
+
+    def quarantine_target(self, name: str, payload: dict[str, Any]) -> None:
+        with self.registry_lock.write_lock():
+            self.invalid_targets[name] = dict(payload)
+
+    def clear_quarantine(self, name: str) -> None:
+        with self.registry_lock.write_lock():
+            self.invalid_targets.pop(name, None)
+
+    def ensure_not_quarantined(self, name: str, *, operation: str) -> None:
+        """Refuse an operation that would persist or reopen a quarantined target's state."""
+        payload = self.quarantine_state(name)
+        if payload is None:
+            return
+        raise HeadlessError(
+            f"TARGET_EXECUTION_INVALID: target '{name}' is quarantined ({payload.get('reason')}); "
+            f"{operation} is refused. Use close_session with discard_changes=true, then reload the program",
+            details=dict(payload),
+        )
+
+    # ---- orphaned program consumers ------------------------------------------
+
+    def record_orphan(self, name: str, session: Any, *, stage: str, error: BaseException) -> None:
+        """Keep ownership of a session whose close failed; it is retried by ``release_orphans``."""
+        with self.registry_lock.write_lock():
+            self.orphaned_sessions.setdefault(name, []).append(
+                {"session": session, "stage": stage, "error": str(error), "code": error_code_of(error)}
+            )
+        logger.error("target '%s': program consumer could not be released at %s: %s", name, stage, error)
+
+    def orphans_for(self, name: str) -> list[dict[str, Any]]:
+        with self.registry_lock.read_lock():
+            return [{k: v for k, v in item.items() if k != "session"} for item in self.orphaned_sessions.get(name, [])]
+
+    def release_orphans(self, name: str) -> list[dict[str, Any]]:
+        """Retry every orphaned close for ``name``; return the ones still unreleased."""
+        with self.registry_lock.read_lock():
+            items = list(self.orphaned_sessions.get(name, []))
+        remaining: list[dict[str, Any]] = []
+        for item in items:
+            session = item["session"]
+            try:
+                session.get_project_handle()
+            except Exception:
+                continue  # already closed
+            try:
+                session.close(save=False)
+            except Exception as exc:
+                remaining.append({**item, "error": str(exc), "code": error_code_of(exc)})
+        with self.registry_lock.write_lock():
+            if remaining:
+                self.orphaned_sessions[name] = remaining
+            else:
+                self.orphaned_sessions.pop(name, None)
+        result = [{k: v for k, v in item.items() if k != "session"} for item in remaining]
+        # Programs a ProjectHandle could not release during a failed open belong to the same recovery.
+        for handle in self._handles_for_target(name):
+            release = getattr(handle, "release_orphaned_programs", None)
+            if release is None:
+                continue
+            try:
+                leftover = int(release())
+            except Exception as exc:
+                leftover = -1
+                result.append({"stage": "handle_release", "error": str(exc), "code": error_code_of(exc)})
+            if leftover > 0:
+                result.append(
+                    {
+                        "stage": "handle_orphaned_program",
+                        "error": f"{leftover} program(s) still unreleased",
+                        "code": None,
+                    }
+                )
+        if not result:
+            with self.registry_lock.write_lock():
+                self.orphan_handles.pop(name, None)
+        return result
+
+    def _handles_for_target(self, name: str) -> list[ProjectHandle]:
+        with self.registry_lock.read_lock():
+            key = self.target_projects.get(name)
+            session = self.sessions.get(name)
+        handles: list[ProjectHandle] = []
+        if session is not None:
+            with contextlib.suppress(Exception):
+                handles.append(session.get_project_handle())
+        if key is not None:
+            with self.registry_lock.read_lock():
+                handle = self.project_handles.get(key)
+            if handle is not None and all(handle is not known for known in handles):
+                handles.append(handle)
+        with self.registry_lock.read_lock():
+            remembered = list(self.orphan_handles.get(name, []))
+        for handle in remembered:
+            if all(handle is not known for known in handles):
+                handles.append(handle)
+        return handles
+
+    def note_open_failure(self, name: str, exc: BaseException, *, handle: Any = None) -> bool:
+        """Quarantine ``name`` when an open failed while leaving a program consumer unreleased.
+
+        The owning handle is remembered explicitly so recovery can reach it even
+        after the target's project binding was rolled back.  Returns True when
+        the target was quarantined.
+        """
+        details = getattr(exc, "details", None) or {}
+        if "orphaned_program" not in details:
+            return False
+        with self.registry_lock.write_lock():
+            if handle is not None:
+                known = self.orphan_handles.setdefault(name, [])
+                if all(handle is not existing for existing in known):
+                    known.append(handle)
+        self.quarantine_target(
+            name,
+            {"reason": "orphaned_program", "domain_path": details["orphaned_program"], "error": str(exc)},
+        )
+        return True
 
     def ensure_session(self, name: str) -> ProgramSession:
         try:
@@ -222,18 +386,30 @@ class RuntimeSessionStore:
     def mark_dirty_program(self, name: str, domain_path: str) -> None:
         self.dirty_programs.add((name, domain_path))
 
+    def mark_pending_sync_program(self, name: str, domain_path: str) -> None:
+        self.mark_dirty_program(name, domain_path)
+        self.pending_sync_programs.add((name, domain_path))
+
+    def update_unsaved_program(self, name: str, domain_path: str, *, changed: bool) -> None:
+        if changed:
+            self.mark_dirty_program(name, domain_path)
+        elif (name, domain_path) not in self.pending_sync_programs:
+            self.clear_dirty_program(name, domain_path)
+
     def clear_dirty_program(self, name: str, domain_path: str) -> None:
         self.dirty_programs.discard((name, domain_path))
+        self.pending_sync_programs.discard((name, domain_path))
 
     def clear_dirty_programs_for_target(self, name: str) -> None:
         if not self.dirty_programs:
             return
         remove_keys = [key for key in self.dirty_programs if key[0] == name]
         for key in remove_keys:
-            self.dirty_programs.discard(key)
+            self.clear_dirty_program(*key)
 
     def clear_dirty_programs(self) -> None:
         self.dirty_programs.clear()
+        self.pending_sync_programs.clear()
 
     @staticmethod
     def session_domain_path(session: ProgramSession) -> str:
@@ -245,6 +421,3 @@ class RuntimeSessionStore:
         if not path:
             raise RuntimeError("failed to resolve domain path for current program")
         return path
-
-
-__all__ = ["RuntimeSessionStore"]

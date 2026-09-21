@@ -31,9 +31,10 @@ def error_code_of(exc: BaseException) -> str | None:
 class HeadlessError(RuntimeError):
     """A failure with a machine-readable ``code`` and a human-readable message."""
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(self, message: str, *, code: str | None = None, details: dict | None = None) -> None:
         super().__init__(message)
         self.code = code or error_code_prefix(message) or "OPERATION_FAILED"
+        self.details = details
 
 
 __all__ = ["HeadlessError", "error_code_of", "error_code_prefix"]

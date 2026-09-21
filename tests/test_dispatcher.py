@@ -221,20 +221,9 @@ def test_dispatch_tool_validation_error():
 @pytest.mark.parametrize(
     ("spec_name", "raw_args"),
     [
-        ("disassemble_function", {}),
-        ("get_callee", {}),
-        ("get_xrefs_to", {"offset": 0, "limit": 10}),
-        ("get_xrefs_from", {"offset": 0, "limit": 10}),
         ("get_data_by_label", {}),
         ("get_bytes", {"size": 8}),
         ("search_bytes", {"offset": 0, "limit": 10}),
-        ("get_struct", {}),
-        ("get_enum", {}),
-        ("rename_function", {"oldName": "old_only"}),
-        ("rename_function", {"address": "0x1"}),
-        ("rename_data", {"address": "0x1"}),
-        ("rename_variable", {"functionName": "main", "oldName": "old"}),
-        ("set_comment", {"address": "0x1", "comment": "memo"}),
         ("set_function_prototype", {"function_address": "0x1"}),
         ("set_local_variable_type", {"function_address": "0x1", "variable_name": "v"}),
         ("create_struct", {}),
@@ -247,7 +236,7 @@ def test_dispatch_tool_validation_error():
         ("load_project_program", {}),
         ("import_program", {}),
         ("import_program", {"binary_path": "/tmp/a.bin", "import_mode": "raw_binary"}),
-        ("create_session", {"project_location": "/tmp/sample.gpr"}),
+        ("open_program", {"project_location": "/tmp/sample.gpr"}),
         ("add_project_program_to_version_control", {"keep_checked_out": False}),
         ("commit_project_program", {"keep_checked_out": False, "auto_checkout": True, "on_conflict": "abort"}),
         ("terminate_project_program_checkout", {"domain_path": "/sample"}),
@@ -271,11 +260,6 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("get_function", {"name": 123}),
         ("decompile_function", {"name": 123}),
         ("decompile_function", {"address": 123}),
-        ("disassemble_function", {"address": 123}),
-        ("get_callee", {"address": 123}),
-        ("get_xrefs_to", {"address": "0x1", "offset": "x", "limit": 10}),
-        ("get_xrefs_from", {"address": "0x1", "offset": 0, "limit": "x"}),
-        ("get_function_xrefs", {"name": "main", "offset": "x", "limit": 10}),
         ("list_segments", {"offset": "x", "limit": 10}),
         ("list_imports", {"offset": 0, "limit": "x"}),
         ("list_exports", {"offset": "x", "limit": 10}),
@@ -285,14 +269,6 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("get_data_by_label", {"label": 123}),
         ("get_bytes", {"address": "0x1", "size": "x"}),
         ("search_bytes", {"bytes": 123, "offset": 0, "limit": 10}),
-        ("get_struct", {"name": 123, "category": None}),
-        ("get_enum", {"name": 123, "category": None}),
-        ("rename_function", {"oldName": "old", "newName": 1}),
-        ("rename_function", {"address": 1, "newName": "new"}),
-        ("rename_data", {"address": 1, "newName": "new"}),
-        ("rename_variable", {"functionName": "main", "oldName": "old", "newName": 1}),
-        ("set_comment", {"address": "0x1", "comment": 1, "kind": "pre"}),
-        ("set_comment", {"address": "0x1", "comment": "memo", "kind": "sideways"}),
         ("set_function_prototype", {"function_address": "0x1", "prototype": 1}),
         ("set_local_variable_type", {"function_address": "0x1", "variable_name": "v", "new_type": 1}),
         ("create_struct", {"name": "S", "size": "x"}),
@@ -308,7 +284,7 @@ def test_dispatch_tool_validation_error_for_missing_required_fields(spec_name, r
         ("import_program", {"binary_path": "/tmp/a.bin", "base_address": 123}),
         ("import_program", {"binary_path": "/tmp/a.bin", "base_address": "nope"}),
         ("import_program", {"binary_path": "/tmp/a.bin", "entry_address": "0x401000", "entry_offset": 0}),
-        ("create_session", {"project_location": "/tmp/sample.gpr", "domain_path": 1}),
+        ("open_program", {"project_location": "/tmp/sample.gpr", "domain_path": 1}),
         ("save_project_program", {"domain_path": 1}),
         ("get_project_sync_status", {"domain_path": 1}),
         ("checkout_project_program", {"exclusive": "yes", "domain_path": None}),
@@ -481,7 +457,7 @@ def test_dispatch_tool_applies_status_target_result_adapter():
     registry = DummyRegistry()
 
     result = dispatch_tool(
-        "create_session",
+        "open_program",
         {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
         "fw",
         registry=registry,
@@ -503,7 +479,7 @@ def test_dispatch_tool_applies_error_adapter_for_create_session():
 
     with pytest.raises(RuntimeError, match="Failed to create session 'fw'"):
         dispatch_tool(
-            "create_session",
+            "open_program",
             {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
             "fw",
             registry=FailingRegistry(),
@@ -527,7 +503,7 @@ def test_dispatch_tool_preserves_domain_error_for_create_session():
 
     with pytest.raises(RuntimeError) as exc_info:
         dispatch_tool(
-            "create_session",
+            "open_program",
             {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
             "fw",
             registry=FailingRegistry(),
@@ -704,11 +680,11 @@ def test_dispatch_tool_validates_output_after_result_adapter(monkeypatch):
             "get_bytes output validation failed",
         ),
         (
-            "create_session",
+            "open_program",
             {"project_location": "/tmp/sample.gpr", "domain_path": "/folder/app"},
             {"create_session_result": {"target": "fw"}},
             ValueError,
-            "create_session output validation failed",
+            "open_program output validation failed",
         ),
         (
             "close_session",

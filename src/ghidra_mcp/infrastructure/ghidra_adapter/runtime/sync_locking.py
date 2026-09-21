@@ -8,7 +8,7 @@ import time
 from collections.abc import Iterator
 
 from ghidra_headless.errors import HeadlessError
-from ghidra_mcp.application.locks import acquire_ordered_locks
+from ghidra_mcp.application.locks import SCRIPT_BARRIER, USE_POLICY_TIMEOUT, acquire_ordered_locks
 from ghidra_mcp.domain import LOCK_ORDER, DomainError, ErrorCode, get_lock_timeout_seconds
 
 from .session_store import RuntimeSessionStore
@@ -26,7 +26,10 @@ class SyncLockingMixin:
         operation_lock = (
             self._store.operation_lock.write_lock() if exclusive else self._store.operation_lock.read_lock()
         )
-        with operation_lock:
+        process_barrier = (
+            SCRIPT_BARRIER.write_lock(timeout=USE_POLICY_TIMEOUT) if exclusive else SCRIPT_BARRIER.read_lock()
+        )
+        with process_barrier, operation_lock:
             with self._store.registry_lock.write_lock():
                 lock = self._store.ensure_lock(name)
                 project_key = self._store.get_target_project_key_locked(name)

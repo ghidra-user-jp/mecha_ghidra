@@ -14,9 +14,12 @@ class _Core:
         self.calls: list[tuple[str, dict, str]] = []
         self.initialized: list[tuple[object, str]] = []
         self.removed: list[str] = []
+        self.on_execute = None
 
     def execute(self, command: str, params: dict, *, key: str):
         self.calls.append((command, params, key))
+        if self.on_execute is not None:
+            self.on_execute(key)
         return {"status": "ok"}
 
     def initialize(self, program, key: str):  # noqa: ANN001
@@ -196,6 +199,7 @@ def _build_core_execution(
     store = RuntimeSessionStore(state=state, core_accessor=lambda: core)
     store.sessions["fw"] = _Session(handle, changed=changed, fail_changed=fail_changed)
     store.locks["fw"] = threading.RLock()
+    core.on_execute = lambda key: setattr(store.sessions[key], "_changed", True)
     return (
         RuntimeCoreExecution(
             store=store,
@@ -228,6 +232,28 @@ def test_mutating_checkout_guard_allows_checked_out_state_after_refresh():
     assert handle.refresh_calls == 1
     assert core.calls == [("rename_function", {"oldName": "old", "newName": "new"}, "fw")]
     assert store.is_dirty_program("fw", "/main")
+
+
+@pytest.mark.parametrize("previously_dirty", [False, True])
+@pytest.mark.parametrize("changed_after", [False, True])
+def test_core_call_tracks_actual_unsaved_changes(previously_dirty, changed_after):
+    execution, store, core = _build_core_execution(_CheckedOutAfterRefreshHandle())
+    if previously_dirty:
+        store.mark_dirty_program("fw", "/main")
+    core.on_execute = lambda key: setattr(store.sessions[key], "_changed", changed_after)
+
+    execution.call("rename_function", target="fw")
+
+    assert store.is_dirty_program("fw", "/main") is changed_after
+
+
+def test_core_call_preserves_dirty_guard_when_program_state_is_unavailable(caplog):
+    execution, store, _core = _build_core_execution(_CheckedOutAfterRefreshHandle(), fail_changed=True)
+
+    assert execution.call("rename_function", target="fw") == {"status": "ok"}
+
+    assert store.is_dirty_program("fw", "/main")
+    assert "failed to read dirty state after rename_function" in caplog.text
 
 
 def test_mutating_checkout_guard_aborts_when_refresh_fails():

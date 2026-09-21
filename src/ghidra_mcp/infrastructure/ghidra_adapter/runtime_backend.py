@@ -17,7 +17,13 @@ from typing import Any, Dict, List, Optional
 from ghidra_headless.session import ProgramSession
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 
-from .runtime import RuntimeCoreExecution, RuntimeSessionStore, RuntimeSyncOperations, RuntimeTargetLifecycle
+from .runtime import (
+    RuntimeCoreExecution,
+    RuntimeScriptExecution,
+    RuntimeSessionStore,
+    RuntimeSyncOperations,
+    RuntimeTargetLifecycle,
+)
 from .runtime.errors import to_domain_error
 
 
@@ -70,6 +76,7 @@ class RuntimeBackend:
             checkout_required_commands=set(state.checkout_required_commands),
             normalize_result=state.normalize_result,
         )
+        self._script_execution = RuntimeScriptExecution(store=store, core_execution=self._core_execution)
 
     # ---- target lifecycle -------------------------------------------------
 
@@ -80,7 +87,13 @@ class RuntimeBackend:
 
     @_delegate("_target_lifecycle")
     def create_session(
-        self, name: str, project_location: str, *, project_name: str | None = None, domain_path: str | None = None
+        self,
+        name: str,
+        project_location: str,
+        *,
+        project_name: str | None = None,
+        domain_path: str | None = None,
+        validate: Callable[[], None] | None = None,
     ) -> ProgramSession: ...
 
     @_delegate("_target_lifecycle")
@@ -109,7 +122,18 @@ class RuntimeBackend:
     def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]: ...
 
     @_delegate("_target_lifecycle")
-    def close_session(self, name: str, *, remove_program: bool = False) -> None: ...
+    def close_session(self, name: str, *, remove_program: bool = False, discard_changes: bool = False) -> None: ...
+
+    # ---- scripts ----------------------------------------------------------
+
+    def script_runtime_availability(self) -> Dict[str, bool]:
+        try:
+            return self._script_execution.script_runtime_availability()
+        except Exception as exc:
+            raise to_domain_error(exc, operation="script_runtime_availability") from exc
+
+    @_delegate("_script_execution")
+    def run_script(self, name: str, *, request: Dict[str, Any]) -> Dict[str, Any]: ...
 
     @_delegate("_target_lifecycle")
     def close_all(self) -> None: ...

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import re
+from copy import deepcopy
 from typing import Any, Callable
 
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.mcpserver.tools.base import Tool
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
+from pydantic import BaseModel, ConfigDict, create_model
 
 from ghidra_mcp.contracts.tool_models import PayloadToolOutputModel
 from ghidra_mcp.contracts.tool_spec import (
@@ -18,9 +19,27 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSpec,
 )
 from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentationConfig
+from ghidra_mcp.presentation.tool_errors import ToolError
 
 _SHORT_DESCRIPTION_MAX_CHARS = 180
 _SENTENCE_ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no.", "al.")
+
+
+class PublicArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+def public_arguments_model(spec: ToolSpec) -> type[PublicArguments]:
+    fields = {}
+    if spec.include_target and spec.executor_kind != ExecutorKind.CORE_COMMAND:
+        fields["target"] = (str, ...)
+    for name, field in spec.input_model.model_fields.items():
+        public_field = deepcopy(field)
+        public_field.alias = public_field.validation_alias = public_field.serialization_alias = None
+        fields[_public_name(spec, name)] = (field.annotation, public_field)
+    if spec.include_target and spec.executor_kind == ExecutorKind.CORE_COMMAND:
+        fields["target"] = (str, "default")
+    return create_model(spec.input_model.__name__, __base__=PublicArguments, **fields)
 
 
 def _public_name(spec: ToolSpec, raw_key: str) -> str:
@@ -47,7 +66,7 @@ def _build_signature(spec: ToolSpec) -> inspect.Signature:
                 public_name,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 default=default,
-                annotation=field.annotation,
+                annotation=field.rebuild_annotation(),
             )
         )
 
@@ -97,6 +116,30 @@ def public_parameter_names(spec: ToolSpec) -> list[str]:
     return list(_build_signature(spec).parameters.keys())
 
 
+def _without_schema_titles(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop generated display labels, retaining property names and constraints.
+
+    Recurse only into schema-valued keywords: a property named ``title`` or
+    a literal object in ``default``/``const`` must remain intact.
+    """
+    mappings = {"properties", "$defs", "patternProperties", "dependentSchemas"}
+    sequences = {"allOf", "anyOf", "oneOf", "prefixItems"}
+    children = {"items", "additionalProperties", "contains", "not", "if", "then", "else", "propertyNames"}
+    result = {}
+    for key, value in schema.items():
+        if key == "title":
+            continue
+        if key in mappings:
+            result[key] = {name: _without_schema_titles(child) for name, child in value.items()}
+        elif key in sequences:
+            result[key] = [_without_schema_titles(child) for child in value]
+        elif key in children and isinstance(value, dict):
+            result[key] = _without_schema_titles(value)
+        else:
+            result[key] = value
+    return result
+
+
 def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
     """Return a JSON schema matching the tool's public (registered) parameters.
 
@@ -132,7 +175,7 @@ def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
         schema["required"] = required
     elif "required" in schema:
         del schema["required"]
-    return schema
+    return _without_schema_titles(schema)
 
 
 def public_output_schema(spec: ToolSpec) -> dict[str, Any]:
@@ -276,14 +319,18 @@ def tool_annotations_for_spec(spec: ToolSpec) -> ToolAnnotations | None:
     return None
 
 
-def as_anticipated_tool_failure(tool_fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap a tool callable so its failures reach MCP clients as ``ToolError``.
+def as_anticipated_tool_failure(
+    tool_fn: Callable[..., Any],
+    error_presenter: Callable[..., CallToolResult] | None = None,
+) -> Callable[..., Any]:
+    """Preserve anticipated failures and domain metadata at the MCP boundary.
 
-    mcp 2.x treats every exception other than ``ToolError`` as a crash and
-    replaces its message with ``Error executing tool <name>``.  The dispatcher
-    already maps domain errors to public-safe messages (error codes, hints, and
-    sanitized causes), so those messages must travel as anticipated failures.
-    The ``domain_error`` payload attached by ``error_mapper`` is carried over.
+    The dispatcher maps domain errors to public-safe messages (error codes,
+    hints and sanitized causes). Preserve those messages as anticipated
+    failures for the low-level protocol handler.
+    The ``domain_error`` payload attached by ``error_mapper`` is returned in
+    both text and structured content with ``isError`` set. Other anticipated
+    exceptions are raised as ``ToolError``.
     """
 
     @functools.wraps(tool_fn)
@@ -293,48 +340,54 @@ def as_anticipated_tool_failure(tool_fn: Callable[..., Any]) -> Callable[..., An
         except ToolError:
             raise
         except Exception as exc:
-            failure = ToolError(str(exc))
             payload = getattr(exc, "domain_error", None)
             if payload is not None:
-                failure.domain_error = payload  # type: ignore[attr-defined]
+                error = {"message": str(exc), **payload}
+                result = CallToolResult(
+                    is_error=True,
+                    structured_content={"error": error},
+                    content=[TextContent(type="text", text=json.dumps({"error": error}, ensure_ascii=False))],
+                )
+                if error_presenter is not None:
+                    bound = inspect.signature(tool_fn).bind(*args, **kwargs)
+                    return error_presenter(
+                        error=error, original=result, target=bound.arguments.get("target", "default")
+                    )
+                return result
+            failure = ToolError(str(exc))
             raise failure from exc
 
     return _entry
 
 
+def spec_wire_output_schema(spec: ToolSpec) -> dict[str, Any]:
+    """structuredContent schema for a spec: its logical output plus the envelopes its presenter emits."""
+    from ghidra_mcp.presentation.response_schemas import wire_output_schema
+
+    return wire_output_schema(public_output_schema(spec), batch=spec.presenter == "batch")
+
+
 def build_tool_object(
     spec: ToolSpec,
-    tool_fn: Callable[..., Any],
     presentation_config: ToolPresentationConfig | None = None,
 ) -> Tool:
-    """Build the SDK ``Tool`` for one spec through the public ``Tool.from_function``.
-
-    ``Tool.from_function`` substitutes an empty string for a missing description,
-    so the description is reset to ``None`` afterwards: a description-less tool
-    costs less context as an omitted field than as boilerplate, and the docs
-    resource carries the details.
-    """
-    effective_config = presentation_config or ToolPresentationConfig()
-    description = select_tool_description(spec, effective_config.description_mode)
-    tool_fn.__doc__ = description
-    tool = Tool.from_function(
-        as_anticipated_tool_failure(tool_fn),
+    """Publish the explicit protocol contract without SDK signature inference."""
+    config = presentation_config or ToolPresentationConfig()
+    return Tool(
         name=spec.name,
-        description=description,
+        description=select_tool_description(spec, config.description_mode),
         annotations=tool_annotations_for_spec(spec),
+        input_schema=public_input_schema(spec),
+        output_schema=spec_wire_output_schema(spec),
     )
-    if description is None:
-        tool.description = None
-    return tool
 
 
 def build_tool_objects(
     *,
-    tools: dict[str, Callable[..., Any]],
     specs: dict[str, ToolSpec],
     presentation_config: ToolPresentationConfig | None = None,
 ) -> list[Tool]:
-    return [build_tool_object(spec, tools[spec.name], presentation_config) for spec in specs.values()]
+    return [build_tool_object(spec, presentation_config) for spec in specs.values()]
 
 
 class ToolRegistry:
@@ -353,7 +406,7 @@ class ToolRegistry:
             registry_provider=registry_provider,
             presentation_config=presentation_config,
         )
-        tool_objects = build_tool_objects(tools=tools, specs=specs, presentation_config=presentation_config)
+        tool_objects = build_tool_objects(specs=specs, presentation_config=presentation_config)
         return tools, tool_objects
 
 

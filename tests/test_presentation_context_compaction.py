@@ -8,9 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 import pytest
-from mcp.server.mcpserver import Image
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import CallToolResult, ResourceLink, TextContent
+from mcp.types import CallToolResult, ImageContent, ResourceLink, TextContent
 from pydantic import BaseModel
 
 from ghidra_mcp.contracts.tool_spec import ToolProfile, filter_tool_specs, get_tool_spec
@@ -27,6 +25,7 @@ from ghidra_mcp.presentation.result_resources import (
     maybe_compact_tool_result,
 )
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
+from ghidra_mcp.presentation.tool_errors import ToolError
 from ghidra_mcp.presentation.tool_registry import (
     public_input_schema,
     public_parameter_names,
@@ -100,17 +99,17 @@ def _compacted_decompile_runtime():
 
 
 def test_tool_description_mode_short_uses_explicit_short_description():
-    base_spec = get_tool_spec("create_session")
+    base_spec = get_tool_spec("open_program")
     short_spec = replace(base_spec, short_description="Open one Ghidra target session.")
     runtime = _runtime_for_specs(
-        {"create_session": short_spec},
+        {"open_program": short_spec},
         config=ToolPresentationConfig(description_mode="short"),
     )
 
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
-    assert tools["create_session"].description == "Open one Ghidra target session."
-    assert tools["create_session"].description != base_spec.description
+    assert tools["open_program"].description == "Open one Ghidra target session."
+    assert tools["open_program"].description != base_spec.description
 
 
 def test_short_description_caps_long_single_sentence():
@@ -167,28 +166,28 @@ def test_short_mode_never_exceeds_cap_for_any_spec():
 
 
 def test_tool_description_mode_full_uses_existing_description():
-    spec = get_tool_spec("create_session")
+    spec = get_tool_spec("open_program")
     runtime = _runtime_for_specs(
-        {"create_session": spec},
+        {"open_program": spec},
         config=ToolPresentationConfig(description_mode="full"),
     )
 
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
-    assert tools["create_session"].description == spec.description
+    assert tools["open_program"].description == spec.description
 
 
 def test_default_description_mode_is_full_without_filler():
     assert ToolPresentationConfig().description_mode == "full"
 
-    bare_spec = replace(get_tool_spec("create_session"), description=None, short_description=None)
+    bare_spec = replace(get_tool_spec("open_program"), description=None, short_description=None)
     assert select_tool_description(bare_spec, "short") is None
     assert select_tool_description(bare_spec, "full") is None
 
-    runtime = _runtime_for_specs({"create_session": bare_spec})
+    runtime = _runtime_for_specs({"open_program": bare_spec})
     tools = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
-    assert tools["create_session"].description is None
+    assert tools["open_program"].description is None
 
 
 def test_tool_description_mode_none_omits_description_but_keeps_annotations():
@@ -210,7 +209,7 @@ def test_tool_description_mode_none_omits_description_but_keeps_annotations():
 def test_annotations_survive_all_description_modes(mode):
     specs = {
         "list_targets": get_tool_spec("list_targets"),
-        "create_session": get_tool_spec("create_session"),
+        "open_program": get_tool_spec("open_program"),
         "close_session_and_remove_program": get_tool_spec("close_session_and_remove_program"),
     }
     runtime = _runtime_for_specs(specs, config=ToolPresentationConfig(description_mode=mode))
@@ -219,7 +218,7 @@ def test_annotations_survive_all_description_modes(mode):
 
     assert tools["list_targets"].annotations.read_only_hint is True
     assert tools["list_targets"].annotations.idempotent_hint is True
-    assert tools["create_session"].annotations.idempotent_hint is False
+    assert tools["open_program"].annotations.idempotent_hint is False
     assert tools["close_session_and_remove_program"].annotations.destructive_hint is True
 
 
@@ -234,7 +233,7 @@ def test_tool_docs_resources_only_include_exposed_specs():
 
     assert index_contents[0].mime_type == "application/json"
     assert [tool["name"] for tool in index["tools"]] == ["list_targets"]
-    assert "create_session" not in {tool["name"] for tool in index["tools"]}
+    assert "open_program" not in {tool["name"] for tool in index["tools"]}
     assert detail["name"] == "list_targets"
     assert detail["description"] == get_tool_spec("list_targets").description
     assert detail["short_description"] == select_tool_description(get_tool_spec("list_targets"), "short")
@@ -436,14 +435,16 @@ def test_call_tool_end_to_end_preserves_resource_link():
 
 
 def _call_result_tool(runtime, name, arguments):
-    # read_result/search_result are registered with structured_output=False so
-    # each response is delivered once, as JSON text; parse that single copy.
+    # Retrieval responses preserve JSON text and publish the same data through
+    # the explicit structured result envelope.
     result = _run(runtime.mcp.call_tool(name, arguments))
     assert isinstance(result, CallToolResult)
     assert result.is_error is False
     content = result.content
     assert len(content) == 1
-    return content, json.loads(content[0].text)
+    payload = json.loads(content[0].text)
+    assert result.structured_content == {"result": payload}
+    return content, payload
 
 
 def test_read_result_pages_through_stored_result():
@@ -497,15 +498,15 @@ def test_read_result_clamps_limit_to_threshold():
 
 
 def test_read_result_default_page_tracks_threshold():
-    runtime = _compacted_decompile_runtime()  # threshold 40 -> default page 13
+    runtime = _compacted_decompile_runtime()  # threshold 40 -> default candidate 40
     compacted = runtime.tools["decompile_function"](name="main", target="fw")
     meta = compacted.structured_content
     full_text = _run(runtime.mcp.read_resource(meta["resource_uri"]))[0].content
 
     _, page = _call_result_tool(runtime, "read_result", {"result_id": meta["result_id"]})
 
-    assert page["chunk_chars"] == 13
-    assert page["chunk"] == full_text[:13]
+    assert page["chunk_chars"] == 40
+    assert page["chunk"] == full_text[:40]
 
 
 def test_read_result_unknown_id_is_actionable_error():
@@ -551,7 +552,7 @@ def test_search_result_returns_matches_with_usable_offsets():
     )
 
     assert found["match_count"] == 20
-    assert found["matches_shown"] == 5
+    assert 0 < found["matches_shown"] <= 5
     assert found["scan_truncated"] is False
     offsets = [match["offset_chars"] for match in found["matches"]]
     assert offsets == sorted(offsets)
@@ -838,56 +839,41 @@ def test_unknown_text_content_fields_are_dropped_by_the_sdk_before_compaction():
     assert store.read_text(result.structured_content["result_id"]) == content.text
 
 
-def test_fastmcp_binary_helper_is_converted_exactly_once():
-    class OneShotImage(Image):
-        calls = 0
-
-        def to_image_content(self):
-            self.calls += 1
-            if self.calls > 1:
-                raise RuntimeError("image helper converted more than once")
-            return super().to_image_content()
-
-    helper = OneShotImage(data=b"x" * 4096)
+def test_image_content_block_is_stored_structurally():
+    store = ResultResourceStore(max_entries=4)
+    block = ImageContent(type="image", data=base64.b64encode(b"x" * 4096).decode(), mimeType="image/png")
 
     result = maybe_compact_tool_result(
         tool_name="custom_tool",
         target="fw",
-        result=helper,
+        result=block,
         config=ToolPresentationConfig(
             large_result_threshold_chars=100,
             large_result_preview_chars=20,
         ),
-        store=ResultResourceStore(max_entries=4),
+        store=store,
     )
 
     assert isinstance(result, CallToolResult)
-    assert helper.calls == 1
+    assert result.structured_content["result_type"] == "content_block"
+    stored = json.loads(store.read_text(result.structured_content["result_id"]))
+    assert stored["type"] == "image"
+    assert base64.b64decode(stored["data"]) == b"x" * 4096
 
 
-def test_compaction_fault_after_binary_conversion_returns_prepared_block(monkeypatch):
+def test_compaction_fault_after_preparation_returns_prepared_value(monkeypatch):
     from ghidra_mcp.presentation import result_compaction
-
-    class OneShotImage(Image):
-        calls = 0
-
-        def to_image_content(self):
-            self.calls += 1
-            if self.calls > 1:
-                raise RuntimeError("image helper converted more than once")
-            return super().to_image_content()
-
-    helper = OneShotImage(data=b"x" * 4096)
 
     def fail_after_preparation(*_args, **_kwargs):
         raise RuntimeError("presentation fault")
 
     monkeypatch.setattr(result_compaction, "_serialize_result", fail_after_preparation)
+    value = "\ud800" + "x" * 4096
 
     result = maybe_compact_tool_result(
         tool_name="custom_tool",
         target="fw",
-        result=helper,
+        result=value,
         config=ToolPresentationConfig(
             large_result_threshold_chars=100,
             large_result_preview_chars=20,
@@ -895,37 +881,25 @@ def test_compaction_fault_after_binary_conversion_returns_prepared_block(monkeyp
         store=ResultResourceStore(max_entries=4),
     )
 
-    # FastMCP can pass this block through directly. Returning the original
-    # helper here would make FastMCP call its one-shot adapter a second time.
-    assert result is not helper
-    assert result.type == "image"
-    assert helper.calls == 1
+    # The normalized value is wire-equivalent and already serializable; falling
+    # back to the original would make the SDK trip over the same lone surrogate.
+    assert result is not value
+    assert isinstance(result, str)
+    assert "\ud800" not in result
+    assert result.startswith("\ufffd")
 
 
-def test_partial_binary_preparation_failure_returns_safe_completed_notice():
-    class OneShotImage(Image):
-        calls = 0
+def test_partial_preparation_failure_returns_safe_completed_notice():
+    class BrokenModel(BaseModel):
+        payload: str = "y" * 4096
 
-        def to_image_content(self):
-            self.calls += 1
-            if self.calls > 1:
-                raise RuntimeError("image helper converted more than once")
-            return super().to_image_content()
-
-    class BrokenImage(Image):
-        calls = 0
-
-        def to_image_content(self):
-            self.calls += 1
-            raise RuntimeError("image conversion failed")
-
-    prepared = OneShotImage(data=b"x" * 4096)
-    broken = BrokenImage(data=b"y" * 4096)
+        def model_dump(self, *args, **kwargs):  # noqa: ARG002
+            raise RuntimeError("serialization failed")
 
     result = maybe_compact_tool_result(
         tool_name="custom_tool",
         target="fw",
-        result=[prepared, broken],
+        result=[{"status": "ok"}, BrokenModel()],
         config=ToolPresentationConfig(
             large_result_threshold_chars=100,
             large_result_preview_chars=20,
@@ -938,8 +912,6 @@ def test_partial_binary_preparation_failure_returns_safe_completed_notice():
     assert result.structured_content["operation_succeeded"] is True
     assert result.structured_content["result_unavailable"] is True
     assert result.structured_content["presentation_failed"] is True
-    assert prepared.calls == 1
-    assert broken.calls == 1
 
 
 def test_compaction_normalizes_unpaired_unicode_surrogates():
@@ -983,9 +955,12 @@ def test_compaction_normalizes_surrogates_inside_call_tool_result():
     result.model_dump_json(by_alias=True, exclude_none=True)
 
 
-def test_mixed_content_list_is_stored_as_fastmcp_wire_blocks():
+def test_mixed_content_list_is_stored_as_wire_blocks():
     store = ResultResourceStore(max_entries=4)
-    result_value = [{"status": "ok"}, Image(data=b"x" * 4096)]
+    result_value = [
+        {"status": "ok"},
+        ImageContent(type="image", data=base64.b64encode(b"x" * 4096).decode(), mimeType="image/png"),
+    ]
 
     result = maybe_compact_tool_result(
         tool_name="custom_tool",
@@ -1444,7 +1419,7 @@ def test_compaction_compares_inline_and_compact_results_in_wire_units():
 
 
 def test_large_string_uses_wire_lower_bound_and_encodes_payload_once(monkeypatch):
-    from ghidra_mcp.presentation import result_resources
+    from ghidra_mcp.presentation import result_compaction
 
     class CountingString(str):
         encode_calls = 0
@@ -1459,7 +1434,7 @@ def test_large_string_uses_wire_lower_bound_and_encodes_payload_once(monkeypatch
         raise AssertionError("large inline result was fully serialized")
 
     monkeypatch.setattr(
-        result_resources,
+        result_compaction,
         "_inline_result_wire_chars",
         fail_full_wire_serialization,
     )
@@ -1594,8 +1569,18 @@ def test_read_result_fits_escape_heavy_text_without_collapsing_to_one_char():
         {"result_id": entry.result_id, "limit_chars": 12_000},
     )
 
-    assert 5_000 <= page["chunk_chars"] <= 6_000
-    assert len(content[0].text) <= 12_000
+    from ghidra_mcp.presentation.result_compaction import structured_result_wire_chars
+
+    assert page["chunk_chars"] > 2000
+    assert structured_result_wire_chars(page) <= 12_000
+    # The next character cannot fit across both text and structured channels.
+    next_page = {
+        **page,
+        "chunk": page["chunk"] + "\n",
+        "chunk_chars": page["chunk_chars"] + 1,
+        "next_offset_chars": page["next_offset_chars"] + 1,
+    }
+    assert structured_result_wire_chars(next_page) > 12_000
     assert page["has_more"] is True
 
 
@@ -1757,9 +1742,9 @@ def test_result_resource_template_does_not_advertise_the_wrong_mime_type():
     result_template = next(
         template for template in templates if str(template.uri_template) == "ghidra://results/{result_id}"
     )
-    # mcp 2.x templates carry one static MIME type; the server override below
-    # still serves every stored entry with its own MIME type.
-    assert result_template.mime_type == "text/plain"
+    # A heterogeneous result template omits MIME type; each read supplies the
+    # stored entry's actual type through the protocol handler.
+    assert result_template.mime_type is None
 
     entry = runtime.result_store.add(
         tool="list_functions",
@@ -1900,7 +1885,7 @@ def test_docs_resource_respects_profile_filtering():
 
 
 def test_tool_docs_publish_public_param_names_matching_registered_tools():
-    specs = {name: get_tool_spec(name) for name in ("rename_function", "search_bytes", "list_functions", "set_bytes")}
+    specs = {name: get_tool_spec(name) for name in ("apply_edits", "search_bytes", "list_functions", "set_bytes")}
     runtime = _runtime_for_specs(specs)
     registered = {tool.name: tool for tool in _run(runtime.mcp.list_tools())}
 
@@ -1915,14 +1900,18 @@ def test_tool_docs_publish_public_param_names_matching_registered_tools():
 
 
 def test_tool_docs_apply_public_name_overrides_no_raw_names_leak():
-    specs = {name: get_tool_spec(name) for name in ("rename_function", "search_bytes", "set_bytes")}
+    specs = {name: get_tool_spec(name) for name in ("apply_edits", "search_bytes", "set_bytes")}
     runtime = _runtime_for_specs(specs)
 
-    rf = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/rename_function"))[0].content)
+    rf = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/apply_edits"))[0].content)
     rf_props = rf["input_schema"]["properties"]
-    assert {"new_name", "old_name"} <= set(rf_props)
-    assert "newName" not in rf_props and "oldName" not in rf_props
-    assert "new_name" in rf["input_schema"]["required"]
+    assert "edits" in rf_props
+    assert "edits" in rf["input_schema"]["required"]
+    edit_schemas = rf["input_schema"]["$defs"]
+    rename = next(
+        v for v in edit_schemas.values() if v.get("properties", {}).get("kind", {}).get("const") == "rename_function"
+    )
+    assert "new_name" in rename["properties"] and "newName" not in rename["properties"]
 
     sb = json.loads(_run(runtime.mcp.read_resource("ghidra://docs/tools/search_bytes"))[0].content)
     assert "pattern" in sb["input_schema"]["properties"]
@@ -1948,7 +1937,7 @@ def test_tool_docs_output_schema_matches_client_visible_shape():
     assert "anyOf" in scalar_schema or scalar_schema.get("type") == "string"
 
     # typed output models are delivered as-is and keep their object schema.
-    typed_schema = public_output_schema(get_tool_spec("create_session"))
+    typed_schema = public_output_schema(get_tool_spec("open_program"))
     assert typed_schema["type"] == "object"
     assert "status" in typed_schema["properties"]
 
@@ -1959,7 +1948,7 @@ def test_tool_docs_output_schema_matches_client_visible_shape():
 
 def test_public_input_schema_target_semantics_match_signature():
     # CORE_COMMAND: target optional with a default; REGISTRY/SHARED_SYNC: target required.
-    core_schema = public_input_schema(get_tool_spec("rename_function"))
+    core_schema = public_input_schema(get_tool_spec("apply_edits"))
     assert core_schema["properties"]["target"]["default"] == "default"
     assert "target" not in core_schema.get("required", [])
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ghidra_mcp.application.locks import LockManager
 from ghidra_mcp.application.services.path_policy import UNRESTRICTED_PATH_POLICY, PathPolicy
 from ghidra_mcp.application.services.ports import TargetRuntimePort
@@ -65,15 +67,18 @@ class TargetService:
         *,
         project_name: str | None = None,
         domain_path: str | None = None,
+        validate: Callable[[], None] | None = None,
     ):
         try:
             self._path_policy.validate_project_location(project_location)
             with self._lock_manager.acquire(target=name):
+                validation_options = {"validate": validate} if validate is not None else {}
                 session = self._runtime.create_session(
                     name,
                     project_location,
                     project_name=project_name,
                     domain_path=domain_path,
+                    **validation_options,
                 )
                 info = {}
                 if hasattr(session, "to_dict"):
@@ -114,9 +119,9 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="load_program", target=name)
 
-    def validate_export_path(self, output_path: str) -> None:
-        """Raise PATH_NOT_ALLOWED when ``--allowed-export-root`` excludes the path."""
-        self._path_policy.validate_export_path(output_path)
+    def validate_export_path(self, output_path: str) -> str:
+        """Validate ``--allowed-export-root`` and return the path to write."""
+        return self._path_policy.validate_export_path(output_path)
 
     def create_repository_cache_project(
         self,
@@ -150,11 +155,19 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="save_project_program", target=name)
 
-    def close_session(self, name: str, *, remove_program: bool = False):
+    def close_session(self, name: str, *, remove_program: bool = False, discard_changes: bool = False):
         try:
             with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
-                self._runtime.close_session(name, remove_program=remove_program)
-                return {"closed": True, "target": name, "remove_program": bool(remove_program)}
+                if discard_changes:
+                    self._runtime.close_session(name, remove_program=remove_program, discard_changes=True)
+                else:
+                    self._runtime.close_session(name, remove_program=remove_program)
+                return {
+                    "closed": True,
+                    "target": name,
+                    "remove_program": bool(remove_program),
+                    "discard_changes": bool(discard_changes),
+                }
         except Exception as exc:
             self._raise_domain_error(exc, operation="close_session", target=name)
 

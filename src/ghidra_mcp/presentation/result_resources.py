@@ -56,8 +56,7 @@ from ghidra_mcp.presentation.result_tools import (
     _read_result_payload,
     _search_stored_result,
     _validate_search_pattern,
-    register_result_resources,
-    register_result_tools,
+    build_result_tools,
 )
 
 __all__ = [
@@ -96,6 +95,5 @@ __all__ = [
     "_validate_search_pattern",
     "maybe_compact_tool_result",
     "regex",
-    "register_result_resources",
-    "register_result_tools",
+    "build_result_tools",
 ]

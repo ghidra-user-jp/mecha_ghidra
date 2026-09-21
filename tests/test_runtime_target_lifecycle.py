@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -1308,6 +1309,126 @@ def test_target_lifecycle_create_session_failure_restores_registered_target_proj
     assert store.target_projects["fw"] == ("/tmp/orig", "orig")
     assert "fw" in store.locks
     assert "fw" not in store.sessions
+
+
+@pytest.mark.parametrize("registered_before", [False, True])
+def test_create_session_validation_failure_releases_only_new_session(monkeypatch, registered_before):
+    monkeypatch.setattr(_FakeProjectHandle, "should_analyze", False)
+    core = _TrackingCore()
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch, core=core)
+    if registered_before:
+        lifecycle.register_target("fw", "/tmp/orig", project_name="orig")
+    before = lifecycle.list_targets()
+    opened = []
+
+    def reject():
+        opened.append(store.sessions["fw"])
+        assert core.contexts["fw"] == "/main"
+        raise RuntimeError("reference validation failed")
+
+    with pytest.raises(RuntimeError, match="reference validation failed"):
+        lifecycle.create_session("fw", "/tmp/new", project_name="new", domain_path="/main", validate=reject)
+    assert lifecycle.list_targets() == before
+    assert opened[0].closed_with == [(False, False)]
+    assert not store.sessions
+    assert not store.project_handles
+    assert "fw" not in core.contexts
+    assert ("fw" in store.locks) is registered_before
+
+
+@pytest.mark.parametrize("reject", [False, True])
+def test_create_session_holds_target_lock_through_validation(monkeypatch, reject):
+    monkeypatch.setattr(_FakeProjectHandle, "should_analyze", False)
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/orig", project_name="orig")
+    before = lifecycle.list_targets()
+    validating = threading.Event()
+    release = threading.Event()
+    reading = threading.Event()
+    observed = threading.Event()
+
+    def validate():
+        # The validator can use the newly loaded context on this same thread.
+        assert lifecycle.list_targets()[0]["domain_path"] == "/main"
+        validating.set()
+        assert release.wait(5)
+        if reject:
+            raise RuntimeError("reference validation failed")
+
+    def read():
+        reading.set()
+        result = lifecycle.list_targets()
+        observed.set()
+        return result
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            creating = pool.submit(
+                lifecycle.create_session, "fw", "/tmp/new", project_name="new", domain_path="/main", validate=validate
+            )
+            try:
+                assert validating.wait(3)
+                reader = pool.submit(read)
+                assert reading.wait(3)
+                assert not observed.wait(0.1)
+            finally:
+                release.set()
+            if reject:
+                with pytest.raises(RuntimeError, match="reference validation failed"):
+                    creating.result(timeout=3)
+                assert reader.result(timeout=3) == before
+            else:
+                assert store.sessions["fw"] is creating.result(timeout=3)
+                assert reader.result(timeout=3)[0]["domain_path"] == "/main"
+    finally:
+        lifecycle.close_all()
+
+
+@pytest.mark.parametrize("registered_before", [False, True])
+@pytest.mark.parametrize("blocked_lock", ["target", "project"])
+def test_create_session_lock_timeout_preserves_binding_and_allows_retry(monkeypatch, registered_before, blocked_lock):
+    _FakeProjectHandle.fail_analyze = False
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    if registered_before:
+        lifecycle.register_target("fw", "/tmp/orig", project_name="orig")
+    before = dict(store.target_projects)
+    lock = (
+        store.locks.setdefault("fw", threading.RLock())
+        if blocked_lock == "target"
+        else store.ensure_project_lock(("/tmp/new", "new"))
+    )
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with lock:
+            acquired.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    try:
+        assert acquired.wait(3)
+        with monkeypatch.context() as patch:
+            patch.setattr("ghidra_mcp.application.locks.get_lock_timeout_seconds", lambda: 0.05)
+            with pytest.raises(DomainError) as failed:
+                lifecycle.create_session("fw", "/tmp/new", project_name="new", domain_path="/main")
+        assert failed.value.code == ErrorCode.LOCK_TIMEOUT
+        assert failed.value.details["lock"] == blocked_lock
+        assert store.target_projects == before
+        assert "fw" not in store.sessions
+        assert not store.project_handles
+    finally:
+        release.set()
+        holder.join(5)
+    assert not holder.is_alive()
+
+    try:
+        created = lifecycle.create_session("fw", "/tmp/new", project_name="new", domain_path="/main")
+        assert store.target_projects["fw"] == ("/tmp/new", "new")
+        assert store.sessions["fw"] is created
+    finally:
+        lifecycle.close_all()
 
 
 def test_target_lifecycle_create_session_open_failure_restores_registered_target_project(

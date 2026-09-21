@@ -3,69 +3,24 @@ from __future__ import annotations
 import pytest
 from mcp.types import CallToolResult
 
+from cli_support import ToolHarness
 from ghidra_mcp import cli
+
+# Tool callables bound to a swappable registry (see tests/cli_support.py).
+cli_tools = ToolHarness()
 
 
 @pytest.mark.parametrize(
     ("tool_name", "call", "expected_args"),
     [
         (
-            "rename_function",
-            lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-            {"oldName": "old_fn", "newName": "new_fn"},
-        ),
-        (
-            "rename_function",
-            lambda: cli.rename_function(
-                address="0x401000",
-                new_name="new_fn",
-                target="fw",
-            ),
-            {"address": "0x401000", "newName": "new_fn"},
-        ),
-        (
-            "rename_data",
-            lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
-            {"address": "0x402000", "newName": "new_data"},
-        ),
-        (
-            "rename_variable",
-            lambda: cli.rename_variable(
-                function_name="main",
-                old_name="old_var",
-                new_name="new_var",
-                target="fw",
-            ),
-            {"functionName": "main", "oldName": "old_var", "newName": "new_var"},
-        ),
-        (
-            "set_comment",
-            lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
-            {"address": "0x401000", "comment": "memo", "kind": "pre"},
-        ),
-        (
-            "set_comment",
-            lambda: cli.set_comment(address="0x401000", comment="memo", kind="plate", target="fw"),
-            {"address": "0x401000", "comment": "memo", "kind": "plate"},
-        ),
-        (
-            "rename_variable",
-            lambda: cli.rename_variable(
-                function_address="0x401000",
-                old_name="old_var",
-                new_name="new_var",
-                target="fw",
-            ),
-            {"functionAddress": "0x401000", "oldName": "old_var", "newName": "new_var"},
-        ),
-        (
             "set_function_prototype",
-            lambda: cli.set_function_prototype(function_name="main", prototype="int main(void)", target="fw"),
+            lambda: cli_tools.set_function_prototype(function_name="main", prototype="int main(void)", target="fw"),
             {"function_name": "main", "prototype": "int main(void)"},
         ),
         (
             "set_function_prototype",
-            lambda: cli.set_function_prototype(
+            lambda: cli_tools.set_function_prototype(
                 function_address="0x401000",
                 prototype="int main(void)",
                 target="fw",
@@ -74,7 +29,7 @@ from ghidra_mcp import cli
         ),
         (
             "set_local_variable_type",
-            lambda: cli.set_local_variable_type(
+            lambda: cli_tools.set_local_variable_type(
                 function_address="0x401000",
                 variable_name="param_1",
                 new_type="int",
@@ -84,27 +39,27 @@ from ghidra_mcp import cli
         ),
         (
             "create_function",
-            lambda: cli.create_function(address="0x401100", name="manual_fn", target="fw"),
+            lambda: cli_tools.create_function(address="0x401100", name="manual_fn", target="fw"),
             {"address": "0x401100", "name": "manual_fn"},
         ),
         (
             "delete_function",
-            lambda: cli.delete_function(address="0x401100", target="fw"),
+            lambda: cli_tools.delete_function(address="0x401100", target="fw"),
             {"address": "0x401100"},
         ),
         (
             "analyze_program",
-            lambda: cli.analyze_program(target="fw"),
+            lambda: cli_tools.analyze_program(target="fw"),
             {},
         ),
         (
             "analyze_program",
-            lambda: cli.analyze_program(force=True, target="fw"),
+            lambda: cli_tools.analyze_program(force=True, target="fw"),
             {"force": True},
         ),
         (
             "create_struct",
-            lambda: cli.create_struct(
+            lambda: cli_tools.create_struct(
                 name="S",
                 category="/types",
                 size=4,
@@ -120,7 +75,7 @@ from ghidra_mcp import cli
         ),
         (
             "add_struct_members",
-            lambda: cli.add_struct_members(
+            lambda: cli_tools.add_struct_members(
                 struct_name="S",
                 members=[{"name": "b", "type": "char"}],
                 category="/types",
@@ -134,32 +89,32 @@ from ghidra_mcp import cli
         ),
         (
             "remove_struct_members",
-            lambda: cli.remove_struct_members(struct_name="S", category="/types", target="fw"),
-            {"struct_name": "S", "category": "/types"},
+            lambda: cli_tools.remove_struct_members(struct_name="S", clear_all=True, category="/types", target="fw"),
+            {"struct_name": "S", "clear_all": True, "category": "/types"},
         ),
         (
             "delete_data_type",
-            lambda: cli.delete_data_type(name="S", category="/types", target="fw"),
+            lambda: cli_tools.delete_data_type(name="S", category="/types", target="fw"),
             {"name": "S", "category": "/types"},
         ),
         (
             "rename_data_type",
-            lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
+            lambda: cli_tools.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
             {"name": "OldType", "new_name": "NewType", "category": "/types"},
         ),
         (
             "remove_struct_members",
-            lambda: cli.remove_struct_members(
+            lambda: cli_tools.remove_struct_members(
                 struct_name="S",
                 members=["b"],
                 category="/types",
                 target="fw",
             ),
-            {"struct_name": "S", "members": ["b"], "category": "/types"},
+            {"struct_name": "S", "members": ["b"], "clear_all": False, "category": "/types"},
         ),
         (
             "set_global_data_type",
-            lambda: cli.set_global_data_type(
+            lambda: cli_tools.set_global_data_type(
                 address="0x403000",
                 data_type="int",
                 length=4,
@@ -175,12 +130,12 @@ from ghidra_mcp import cli
         ),
         (
             "set_bytes",
-            lambda: cli.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
+            lambda: cli_tools.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
             {"address": "0x401000", "bytes": "90"},
         ),
         (
             "add_bookmark",
-            lambda: cli.add_bookmark(
+            lambda: cli_tools.add_bookmark(
                 address="0x401000",
                 category="Analysis",
                 comment="note",
@@ -196,7 +151,7 @@ from ghidra_mcp import cli
         ),
         (
             "delete_bookmark",
-            lambda: cli.delete_bookmark(
+            lambda: cli_tools.delete_bookmark(
                 address="0x401000",
                 category="Analysis",
                 comment="note",
@@ -231,52 +186,47 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
     assert called["spec_name"] == tool_name
     assert called["raw_args"] == expected_args
     assert called["target"] == "fw"
-    assert called["registry"] is cli._registry
+    assert called["registry"] is cli_tools.registry
     assert called["core_executor"] is None
 
 
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-        lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
-        lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
-        lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
-        lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
-        lambda: cli.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
-        lambda: cli.set_local_variable_type(
+        lambda: cli_tools.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
+        lambda: cli_tools.set_local_variable_type(
             function_address="0x401000", variable_name="param_1", new_type="int", target="fw"
         ),
-        lambda: cli.create_function(address="0x401100", name="manual_fn", target="fw"),
-        lambda: cli.delete_function(address="0x401100", target="fw"),
-        lambda: cli.analyze_program(target="fw"),
-        lambda: cli.analyze_program(force=True, target="fw"),
-        lambda: cli.create_struct(
+        lambda: cli_tools.create_function(address="0x401100", name="manual_fn", target="fw"),
+        lambda: cli_tools.delete_function(address="0x401100", target="fw"),
+        lambda: cli_tools.analyze_program(target="fw"),
+        lambda: cli_tools.analyze_program(force=True, target="fw"),
+        lambda: cli_tools.create_struct(
             name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"
         ),
-        lambda: cli.add_struct_members(
+        lambda: cli_tools.add_struct_members(
             struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"
         ),
-        lambda: cli.remove_struct_members(struct_name="S", category="/types", target="fw"),
-        lambda: cli.delete_data_type(name="S", category="/types", target="fw"),
-        lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
-        lambda: cli.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
-        lambda: cli.set_global_data_type(
+        lambda: cli_tools.remove_struct_members(struct_name="S", category="/types", target="fw"),
+        lambda: cli_tools.delete_data_type(name="S", category="/types", target="fw"),
+        lambda: cli_tools.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
+        lambda: cli_tools.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
+        lambda: cli_tools.set_global_data_type(
             address="0x403000",
             data_type="int",
             length=4,
             clear_mode="CLEAR_ALL_DEFAULT_CONFLICT_DATA",
             target="fw",
         ),
-        lambda: cli.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
-        lambda: cli.add_bookmark(
+        lambda: cli_tools.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
+        lambda: cli_tools.add_bookmark(
             address="0x401000",
             category="Analysis",
             comment="note",
             type="Info",
             target="fw",
         ),
-        lambda: cli.delete_bookmark(
+        lambda: cli_tools.delete_bookmark(
             address="0x401000",
             category="Analysis",
             comment="note",
@@ -290,7 +240,7 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
         def call(self, command, params, target):
             return []
 
-    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+    monkeypatch.setattr(cli_tools, "registry", DummyRegistry())
 
     result = call()
 
@@ -301,45 +251,40 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: cli.rename_function(old_name="old_fn", new_name="new_fn", target="fw"),
-        lambda: cli.rename_function(address="0x401000", new_name="new_fn", target="fw"),
-        lambda: cli.rename_data(address="0x402000", new_name="new_data", target="fw"),
-        lambda: cli.rename_variable(function_name="main", old_name="old_var", new_name="new_var", target="fw"),
-        lambda: cli.set_comment(address="0x401000", comment="memo", kind="pre", target="fw"),
-        lambda: cli.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
-        lambda: cli.set_local_variable_type(
+        lambda: cli_tools.set_function_prototype(function_address="0x401000", prototype="int main(void)", target="fw"),
+        lambda: cli_tools.set_local_variable_type(
             function_address="0x401000", variable_name="param_1", new_type="int", target="fw"
         ),
-        lambda: cli.create_function(address="0x401100", name="manual_fn", target="fw"),
-        lambda: cli.delete_function(address="0x401100", target="fw"),
-        lambda: cli.analyze_program(target="fw"),
-        lambda: cli.analyze_program(force=True, target="fw"),
-        lambda: cli.create_struct(
+        lambda: cli_tools.create_function(address="0x401100", name="manual_fn", target="fw"),
+        lambda: cli_tools.delete_function(address="0x401100", target="fw"),
+        lambda: cli_tools.analyze_program(target="fw"),
+        lambda: cli_tools.analyze_program(force=True, target="fw"),
+        lambda: cli_tools.create_struct(
             name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"
         ),
-        lambda: cli.add_struct_members(
+        lambda: cli_tools.add_struct_members(
             struct_name="S", members=[{"name": "b", "type": "char"}], category="/types", target="fw"
         ),
-        lambda: cli.remove_struct_members(struct_name="S", category="/types", target="fw"),
-        lambda: cli.delete_data_type(name="S", category="/types", target="fw"),
-        lambda: cli.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
-        lambda: cli.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
-        lambda: cli.set_global_data_type(
+        lambda: cli_tools.remove_struct_members(struct_name="S", category="/types", target="fw"),
+        lambda: cli_tools.delete_data_type(name="S", category="/types", target="fw"),
+        lambda: cli_tools.rename_data_type(name="OldType", new_name="NewType", category="/types", target="fw"),
+        lambda: cli_tools.remove_struct_members(struct_name="S", members=["b"], category="/types", target="fw"),
+        lambda: cli_tools.set_global_data_type(
             address="0x403000",
             data_type="int",
             length=4,
             clear_mode="CLEAR_ALL_DEFAULT_CONFLICT_DATA",
             target="fw",
         ),
-        lambda: cli.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
-        lambda: cli.add_bookmark(
+        lambda: cli_tools.set_bytes(address="0x401000", bytes_hex="90", target="fw"),
+        lambda: cli_tools.add_bookmark(
             address="0x401000",
             category="Analysis",
             comment="note",
             type="Info",
             target="fw",
         ),
-        lambda: cli.delete_bookmark(
+        lambda: cli_tools.delete_bookmark(
             address="0x401000",
             category="Analysis",
             comment="note",
@@ -353,7 +298,7 @@ def test_mutating_slice_error_message_is_unchanged(monkeypatch, call):
         def call(self, command, params, target):
             raise RuntimeError(f"Session '{target}' is not initialized")
 
-    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+    monkeypatch.setattr(cli_tools, "registry", DummyRegistry())
 
     with pytest.raises(RuntimeError, match="Session 'fw' is not initialized"):
         call()

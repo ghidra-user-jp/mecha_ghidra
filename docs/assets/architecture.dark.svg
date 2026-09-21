@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="458" viewBox="0 0 1040 458" role="img" aria-labelledby="title desc">
+  <title id="title">Mecha Ghidra architecture and analysis flow</title>
+  <desc id="desc">In the basic setup, an MCP client requests analysis and Mecha Ghidra runs Ghidra without a GUI and returns results. Analysis data and edits are stored in a local Ghidra project. Optional connections, shown as dashed lines, let Mecha Ghidra query BSim for similar functions and shared projects exchange analysis data with Ghidra Server.</desc>
+  <g font-family="'Inter', 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif" fill="#e4eaf2">
+    <text x="24" y="32" font-size="15" font-weight="500" text-anchor="start" fill="#9daebe">Basic setup</text>
+    <rect x="24" y="68" width="240" height="132" fill="#171e27" stroke="#34404f" stroke-width="1.25" rx="10" />
+    <path d="M46 153H242" fill="none" stroke="#2a3543" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="46" y="105" font-size="20" font-weight="500" text-anchor="start" fill="#e4eaf2">MCP client</text>
+    <text x="46" y="136" font-size="14" font-weight="400" text-anchor="start" fill="#c0cad6">Ask AI and read the results</text>
+    <text x="46" y="178" font-size="12" font-weight="400" text-anchor="start" fill="#9daebe">Codex / Claude Code</text>
+    <rect x="392" y="68" width="240" height="132" fill="#1b2c40" stroke="#45698d" stroke-width="1.25" rx="10" />
+    <path d="M414 153H610" fill="none" stroke="#30465e" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="414" y="105" font-size="20" font-weight="500" text-anchor="start" fill="#accef0">Mecha Ghidra</text>
+    <text x="414" y="136" font-size="14" font-weight="400" text-anchor="start" fill="#c0cad6">Analyze and edit with Ghidra</text>
+    <text x="414" y="178" font-size="12" font-weight="400" text-anchor="start" fill="#9daebe">No GUI · Uses PyGhidra</text>
+    <rect x="760" y="68" width="256" height="132" fill="#171e27" stroke="#34404f" stroke-width="1.25" rx="10" />
+    <path d="M782 153H994" fill="none" stroke="#2a3543" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="782" y="105" font-size="20" font-weight="500" text-anchor="start" fill="#e4eaf2">Ghidra project</text>
+    <text x="782" y="136" font-size="14" font-weight="400" text-anchor="start" fill="#c0cad6">Store analysis data and edits</text>
+    <text x="782" y="178" font-size="12" font-weight="400" text-anchor="start" fill="#9daebe">Local · .gpr / .rep</text>
+    <path d="M276 119H380M374 114l6 5-6 5" fill="none" stroke="#6f9fce" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="328" y="106" font-size="13" font-weight="400" text-anchor="middle" fill="#9daebe">Request analysis</text>
+    <path d="M276 157H380M282 152l-6 5 6 5" fill="none" stroke="#6f8298" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="328" y="180" font-size="13" font-weight="400" text-anchor="middle" fill="#9daebe">Return results</text>
+    <path d="M644 119H748M650 114l-6 5 6 5" fill="none" stroke="#6f8298" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="696" y="106" font-size="13" font-weight="400" text-anchor="middle" fill="#9daebe">Read data</text>
+    <path d="M644 157H748M742 152l6 5-6 5" fill="none" stroke="#6f9fce" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="696" y="180" font-size="13" font-weight="400" text-anchor="middle" fill="#9daebe">Save changes</text>
+    <text x="24" y="288" font-size="15" font-weight="500" text-anchor="start" fill="#9daebe">Optional features</text>
+    <text x="24" y="316" font-size="13" font-weight="400" text-anchor="start" fill="#9daebe">Connect only the features you need</text>
+    <path d="M24 344H58" fill="none" stroke="#6f8298" stroke-width="1.3" stroke-dasharray="5 5" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="69" y="349" font-size="13" font-weight="400" text-anchor="start" fill="#9daebe">Optional connection</text>
+    <path d="M512 212V332" fill="none" stroke="#6f8298" stroke-width="1.3" stroke-dasharray="5 5" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M507 218l5-6 5 6M507 326l5 6 5-6" fill="none" stroke="#6f8298" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="530" y="278" font-size="13" font-weight="400" text-anchor="start" fill="#9daebe">Query functions</text>
+    <path d="M888 212V332" fill="none" stroke="#6f8298" stroke-width="1.3" stroke-dasharray="5 5" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M883 218l5-6 5 6M883 326l5 6 5-6" fill="none" stroke="#6f8298" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="906" y="268" font-size="13" font-weight="400" text-anchor="start" fill="#9daebe">Get / share</text>
+    <text x="906" y="291" font-size="13" font-weight="400" text-anchor="start" fill="#9daebe">analysis data</text>
+    <rect x="392" y="344" width="240" height="90" fill="#171e27" stroke="#34404f" stroke-width="1.25" rx="10" />
+    <text x="414" y="381" font-size="20" font-weight="500" text-anchor="start" fill="#e4eaf2">BSim</text>
+    <text x="414" y="412" font-size="14" font-weight="400" text-anchor="start" fill="#c0cad6">Find similar functions</text>
+    <rect x="760" y="344" width="256" height="90" fill="#171e27" stroke="#34404f" stroke-width="1.25" rx="10" />
+    <text x="782" y="381" font-size="20" font-weight="500" text-anchor="start" fill="#e4eaf2">Ghidra Server</text>
+    <text x="782" y="412" font-size="14" font-weight="400" text-anchor="start" fill="#c0cad6">Share analysis with your team</text>
+  </g>
+</svg>

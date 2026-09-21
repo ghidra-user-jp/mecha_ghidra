@@ -9,6 +9,7 @@ from ghidra_mcp.application.services.bsim_service import BsimConfig, BsimService
 from ghidra_mcp.application.services.core_command_service import CoreCommandService
 from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.application.services.runtime_state import RuntimeState
+from ghidra_mcp.application.services.script_service import ScriptConfig, ScriptService
 from ghidra_mcp.application.services.sync_service import SyncService
 from ghidra_mcp.application.services.target_service import TargetService
 from ghidra_mcp.contracts.tool_spec import ToolSpec
@@ -57,13 +58,16 @@ class ServiceRegistryAdapter:
         "list_bsim_executables": "_bsim_service",
         "get_bsim_executable": "_bsim_service",
         "bsim_update_executable_metadata": "_bsim_service",
-        "bsim_query_target": "_bsim_service",
-        "bsim_query_function": "_bsim_service",
+        "bsim_query": "_bsim_service",
         "bsim_load_matched_executable": "_bsim_service",
         "bsim_register_target": "_bsim_service",
         "bsim_apply_matches": "_bsim_service",
         "bsim_update_target_signatures": "_bsim_service",
         "bsim_delete_executable": "_bsim_service",
+        # scripts
+        "list_scripts": "_script_service",
+        "get_script_info": "_script_service",
+        "run_script": "_script_service",
     }
 
     def __init__(
@@ -73,17 +77,23 @@ class ServiceRegistryAdapter:
         target_service: TargetService,
         sync_service: SyncService,
         bsim_service: BsimService,
+        script_service: ScriptService | None = None,
     ) -> None:
         self._core_command_service = core_command_service
         self._target_service = target_service
         self._sync_service = sync_service
         self._bsim_service = bsim_service
+        # A disabled ScriptService keeps every forwarded name resolvable and answers SCRIPTS_DISABLED.
+        self._script_service = script_service or ScriptService(None, config=ScriptConfig())
 
     def __getattr__(self, name: str) -> Any:
         service_attr = self._FORWARDED.get(name)
         if service_attr is None:
             raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
-        return getattr(getattr(self, service_attr), name)
+        service = getattr(self, service_attr)
+        if service is None:
+            raise AttributeError(f"{name!r} is not available: its service is not configured")
+        return getattr(service, name)
 
     def __dir__(self) -> list[str]:
         return sorted(set(super().__dir__()) | set(self._FORWARDED))
@@ -101,7 +111,7 @@ class ServiceRegistryAdapter:
         overwrite: bool = False,
     ):
         """Export runs in the JVM, but the output path is an operator-policed filesystem write."""
-        self._target_service.validate_export_path(output_path)
+        output_path = self._target_service.validate_export_path(output_path)
         return self._core_command_service.call(
             "export_program",
             {"output_path": output_path, "format": format, "overwrite": overwrite},
@@ -136,6 +146,7 @@ class CLIRuntimeBundle:
     sync_service: SyncService
     bsim_service: BsimService
     core_command_service: CoreCommandService
+    script_service: ScriptService
 
 
 def create_cli_runtime(
@@ -147,8 +158,8 @@ def create_cli_runtime(
     presentation_config: ToolPresentationConfig | None = None,
     dispatcher_provider: Callable[[], Callable[..., Any]] | None = None,
     registry_provider: Callable[[], Any] | None = None,
-    server_log_level: str | None = None,
     path_policy: PathPolicy | None = None,
+    script_config: ScriptConfig | None = None,
 ) -> CLIRuntimeBundle:
     runtime_state = RuntimeState(
         core_accessor=core_accessor,
@@ -167,11 +178,13 @@ def create_cli_runtime(
         config=bsim_config,
         java_backend=BsimJavaBackend(),
     )
+    script_service = ScriptService(runtime_backend, config=script_config, lock_manager=lock_manager)
     registry = ServiceRegistryAdapter(
         core_command_service=core_command_service,
         target_service=target_service,
         sync_service=sync_service,
         bsim_service=bsim_service,
+        script_service=script_service,
     )
     effective_dispatcher_provider = dispatcher_provider or (lambda: dispatch_tool)
     effective_registry_provider = registry_provider or (lambda: registry)
@@ -180,7 +193,6 @@ def create_cli_runtime(
         registry_provider=effective_registry_provider,
         dispatcher_provider=effective_dispatcher_provider,
         presentation_config=presentation_config,
-        server_log_level=server_log_level,
     )
     return CLIRuntimeBundle(
         registry=registry,
@@ -191,6 +203,7 @@ def create_cli_runtime(
         sync_service=sync_service,
         bsim_service=bsim_service,
         core_command_service=core_command_service,
+        script_service=script_service,
     )
 
 
