@@ -66,8 +66,6 @@ Startup verifies exception propagation through the standard provider. If that ch
 
 Comment reads and writes use `ghidra.program.model.listing.CommentType` and the public overloads accepting that enum. Do not use the integer constants or integer overloads scheduled for removal. `ScriptBarrier` waits and records ownership under one `Condition`, without a second, unbounded lock acquisition after the timed wait.
 
-The [2026-09-20 validation record](release-fixes-validation-20260920.ja.md) covers raw import byte ranges, all nine parent/child language combinations, rollback, process-state restoration, and stdio/HTTP transports.
-
 ## Real-runtime validation
 
 Set a compatible JDK and a real Ghidra install. For local commands and resource ownership:
@@ -87,8 +85,6 @@ uv run pytest \
 With the same runtime flag, `tests/test_runtime_mcp_transport.py` launches the real CLI in separate processes over stdio and localhost Streamable HTTP. It creates disposable projects and a tiny raw binary, so it does not require `GHIDRA_RUNTIME_BINARY_PATH`. It verifies schemas, mutations, rollback, and large-result retrieval, plus direct HTTP calls without initialization, responses without session IDs, and resource retrieval from a fresh connection.
 
 To include Jython, install the Jython extension matching your Ghidra version and set both `GHIDRA_RUNTIME_VALIDATION=1` and `GHIDRA_JYTHON_RUNTIME_VALIDATION=1` when running `tests/test_runtime_script_commands.py` and `tests/test_runtime_mcp_transport.py`. The additional flag fails validation if Jython is unavailable and enables Jython cases over both stdio and HTTP. For isolation, use Java's `-Dapplication.settingsdir=...` setting and install the extension under that settings area's Ghidra extension directory.
-
-See the [2026-09-16 runtime validation record (Japanese)](recommended-api-runtime-validation-20260916.ja.md) for measurements after the recommended-API migration.
 
 | Validation | Additional environment |
 | --- | --- |

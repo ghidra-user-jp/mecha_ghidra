@@ -66,8 +66,6 @@ PyPI公開はリリース対象外です。リポジトリとリリース添付�
 
 コメントの読み書きには `ghidra.program.model.listing.CommentType` と、それを受け取る公開APIを使用します。削除予定の整数定数・整数引数のオーバーロードは使用しません。`ScriptBarrier` は一つの `Condition` 内で待機と所有状態の更新を行い、待機後に期限のない別のロック取得を挟みません。
 
-[2026-09-20の検証記録](release-fixes-validation-20260920.ja.md)には、raw importのバイト範囲、親子全9通りの言語の組み合わせ、ロールバック、プロセス状態の復元、stdio／HTTPの結果を記録しています。
-
 ## 実機検証
 
 対応するJDKと実際のGhidraインストール先を設定します。ローカルコマンドとリソース管理を検証する例です。
@@ -87,8 +85,6 @@ uv run pytest \
 `tests/test_runtime_mcp_transport.py` は同じ実機フラグで、実際のCLIを別プロセスとして起動し、stdioとlocalhostのStreamable HTTPを検証します。専用プロジェクトと小さなraw binaryを自動生成するため、`GHIDRA_RUNTIME_BINARY_PATH` は不要です。入出力スキーマ、変更とロールバック、大きな結果の取得に加え、HTTPの初期化なしの呼び出し・セッションIDなしの応答・別接続からのリソース取得を確認します。
 
 Jythonまで検証する場合は、使用するGhidraと同じバージョンのJython拡張を導入し、`GHIDRA_RUNTIME_VALIDATION=1`に加えて`GHIDRA_JYTHON_RUNTIME_VALIDATION=1`を指定して、`tests/test_runtime_script_commands.py`と`tests/test_runtime_mcp_transport.py`を実行します。この追加フラグではJythonが未導入なら失敗にし、MCPのstdio／HTTPにもJythonのケースを追加します。通常のGhidra設定から分離する場合は、Javaの`-Dapplication.settingsdir=...`で専用の設定領域を使い、その領域のGhidra拡張ディレクトリへインストールします。
-
-推奨APIへの移行後の実測結果は[2026-09-16の実機検証記録](recommended-api-runtime-validation-20260916.ja.md)にまとめています。
 
 | 検証対象 | 追加で設定する環境変数 |
 | --- | --- |
