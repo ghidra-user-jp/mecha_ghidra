@@ -5,13 +5,16 @@ import shutil
 import uuid
 from pathlib import Path
 
+import jpype
 import pyghidra
-import pyghidra.core as pycore
 import pytest
 from mcp.types import CallToolResult
 
+from cli_support import ToolHarness
 from ghidra_headless.launcher import start_headless_jvm
-from ghidra_mcp import cli
+
+# Tool callables bound to a swappable registry (see tests/cli_support.py).
+cli_tools = ToolHarness()
 
 RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
@@ -82,7 +85,7 @@ def _ensure_project_created(project_dir: Path, project_name: str) -> None:
     if marker.exists():
         return
     project_dir.mkdir(parents=True, exist_ok=True)
-    ghidra_project = pycore.JClass("ghidra.base.project.GhidraProject")
+    ghidra_project = jpype.JClass("ghidra.base.project.GhidraProject")
     project = ghidra_project.createProject(str(project_dir), project_name, False)
     project.close()
 
@@ -141,26 +144,26 @@ def test_runtime_readonly_commands_all_success(tmp_path):
     _ensure_project_created(project_dir, project_name)
 
     try:
-        cli.register_target(
+        cli_tools.register_target(
             target=target,
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli.import_program(
+        imported = cli_tools.import_program(
             target=target,
             binary_path=binary_path,
             analyze_imported=True,
         )
         domain_path = imported["program"]
-        cli.load_project_program(target=target, domain_path=domain_path)
+        cli_tools.load_project_program(target=target, domain_path=domain_path)
 
-        struct_result = _unwrap_runtime_result(cli.create_struct(name="__it_struct", target=target))
+        struct_result = _unwrap_runtime_result(cli_tools.create_struct(name="__it_struct", target=target))
         _log_runtime_result("create_struct", struct_result)
 
         from ghidra_headless.handlers.core_runtime import _ensure_context_for_key
 
         program = _ensure_context_for_key(target).program
-        enum_data_type = pycore.JClass("ghidra.program.model.data.EnumDataType")
+        enum_data_type = jpype.JClass("ghidra.program.model.data.EnumDataType")
         transaction_id = program.startTransaction("Create runtime validation enum")
         committed = False
         try:
@@ -172,7 +175,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         finally:
             program.endTransaction(transaction_id, committed)
 
-        enum_result = _unwrap_runtime_result(cli.get_data_type(target=target, path="__it_enum"))
+        enum_result = _unwrap_runtime_result(cli_tools.get_data_type(target=target, path="__it_enum"))
         _log_runtime_result("get_enum", enum_result)
         assert enum_result["name"] == "__it_enum"
         assert enum_result["isSigned"] is True
@@ -181,7 +184,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             "ZERO": 0,
         }
 
-        first_functions = _unwrap_runtime_result(cli.list_functions(offset=0, limit=1, target=target))
+        first_functions = _unwrap_runtime_result(cli_tools.list_functions(offset=0, limit=1, target=target))
         assert isinstance(first_functions, list)
         assert first_functions, "Cannot continue runtime validation because list_functions returned empty"
         first = first_functions[0]
@@ -190,7 +193,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         _log_runtime_result("list_functions(seed)", first_functions)
 
         bookmark_result = _unwrap_runtime_result(
-            cli.add_bookmark(
+            cli_tools.add_bookmark(
                 address=address,
                 category="Validation",
                 comment="runtime readonly seed",
@@ -201,7 +204,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         _log_runtime_result("add_bookmark(seed)", bookmark_result)
 
         search_result = _unwrap_runtime_result(
-            cli.list_functions(
+            cli_tools.list_functions(
                 filter="main",
                 offset=0,
                 limit=5,
@@ -211,7 +214,7 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         if not search_result:
             fallback_query = (function_name or "main")[:4] or function_name or "main"
             search_result = _unwrap_runtime_result(
-                cli.list_functions(
+                cli_tools.list_functions(
                     filter=fallback_query,
                     offset=0,
                     limit=5,
@@ -220,58 +223,66 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             )
         _log_runtime_result("list_functions(filter, seed)", search_result)
 
-        function_info = _unwrap_runtime_result(cli.get_function(address=address, target=target))
+        function_info = _unwrap_runtime_result(cli_tools.get_function(address=address, target=target))
         _log_runtime_result("get_function(seed)", function_info)
 
-        first_data_items = _unwrap_runtime_result(cli.list_data_items(offset=0, limit=20, target=target))
+        first_data_items = _unwrap_runtime_result(cli_tools.list_data_items(offset=0, limit=20, target=target))
         assert first_data_items, "Cannot validate get_data_by_label without defined data"
         data_address = first_data_items[0]["address"]
         data_label = "__it_runtime_data"
         _unwrap_runtime_result(
-            cli.apply_edits(
+            cli_tools.apply_edits(
                 target=target, edits=[{"kind": "rename_data", "address": data_address, "new_name": data_label}]
             )
         )
 
-        bytes_dump = _unwrap_runtime_result(cli.get_bytes(address=address, size=16, target=target))
+        bytes_dump = _unwrap_runtime_result(cli_tools.get_bytes(address=address, size=16, target=target))
         pattern = _derive_search_pattern_from_hexdump(bytes_dump)
         _log_runtime_result("get_bytes(seed)", bytes_dump)
 
         runtime_results = {
-            "decompile_function": _unwrap_runtime_result(cli.decompile_function(name=function_name, target=target)),
-            "decompile_function(address)": _unwrap_runtime_result(
-                cli.decompile_function(address=address, target=target)
+            "decompile_function": _unwrap_runtime_result(
+                cli_tools.decompile_function(name=function_name, target=target)
             ),
-            "disassemble_function": _unwrap_runtime_result(cli.disassemble(address=address, target=target))["items"],
+            "decompile_function(address)": _unwrap_runtime_result(
+                cli_tools.decompile_function(address=address, target=target)
+            ),
+            "disassemble_function": _unwrap_runtime_result(cli_tools.disassemble(address=address, target=target))[
+                "items"
+            ],
             "disassemble_range": _unwrap_runtime_result(
-                cli.disassemble(start_address=address, length=32, limit=10, target=target)
+                cli_tools.disassemble(start_address=address, length=32, limit=10, target=target)
             )["items"],
-            "get_callee": _unwrap_runtime_result(cli.get_call_edges(address=address, target=target))["items"],
-            "get_xrefs_to": _unwrap_runtime_result(cli.get_xrefs(address=address, limit=5, target=target))["items"],
+            "get_callee": _unwrap_runtime_result(cli_tools.get_call_edges(address=address, target=target))["items"],
+            "get_xrefs_to": _unwrap_runtime_result(cli_tools.get_xrefs(address=address, limit=5, target=target))[
+                "items"
+            ],
             "get_xrefs_from": _unwrap_runtime_result(
-                cli.get_xrefs(address=address, limit=5, target=target, direction="from")
+                cli_tools.get_xrefs(address=address, limit=5, target=target, direction="from")
             )["items"],
             "get_function_xrefs": _unwrap_runtime_result(
-                cli.get_call_edges(name=function_name, limit=5, target=target, direction="in")
+                cli_tools.get_call_edges(name=function_name, limit=5, target=target, direction="in")
             )["items"],
-            "list_segments": _unwrap_runtime_result(cli.list_segments(offset=0, limit=5, target=target)),
-            "list_imports": _unwrap_runtime_result(cli.list_imports(offset=0, limit=5, target=target)),
-            "list_exports": _unwrap_runtime_result(cli.list_exports(offset=0, limit=5, target=target)),
+            "list_segments": _unwrap_runtime_result(cli_tools.list_segments(offset=0, limit=5, target=target)),
+            "list_imports": _unwrap_runtime_result(cli_tools.list_imports(offset=0, limit=5, target=target)),
+            "list_exports": _unwrap_runtime_result(cli_tools.list_exports(offset=0, limit=5, target=target)),
             "list_classes": _unwrap_runtime_result(
-                cli.list_namespaces(classes_only=True, offset=0, limit=5, target=target)
+                cli_tools.list_namespaces(classes_only=True, offset=0, limit=5, target=target)
             ),
-            "list_namespaces": _unwrap_runtime_result(cli.list_namespaces(offset=0, limit=5, target=target)),
-            "list_data_items": _unwrap_runtime_result(cli.list_data_items(offset=0, limit=5, target=target)),
+            "list_namespaces": _unwrap_runtime_result(cli_tools.list_namespaces(offset=0, limit=5, target=target)),
+            "list_data_items": _unwrap_runtime_result(cli_tools.list_data_items(offset=0, limit=5, target=target)),
             "list_data_types": _unwrap_runtime_result(
-                cli.list_data_types(offset=0, limit=20, filter="__it_", target=target)
+                cli_tools.list_data_types(offset=0, limit=20, filter="__it_", target=target)
             ),
-            "list_strings": _unwrap_runtime_result(cli.list_strings(offset=0, limit=5, target=target)),
-            "get_data_by_label": _unwrap_runtime_result(cli.get_data_by_label(label=data_label, target=target)),
+            "list_strings": _unwrap_runtime_result(cli_tools.list_strings(offset=0, limit=5, target=target)),
+            "get_data_by_label": _unwrap_runtime_result(cli_tools.get_data_by_label(label=data_label, target=target)),
             "get_bytes": bytes_dump,
-            "search_bytes": _unwrap_runtime_result(cli.search_bytes(pattern=pattern, offset=0, limit=5, target=target)),
-            "get_struct": _unwrap_runtime_result(cli.get_data_type(target=target, path="__it_struct")),
+            "search_bytes": _unwrap_runtime_result(
+                cli_tools.search_bytes(pattern=pattern, offset=0, limit=5, target=target)
+            ),
+            "get_struct": _unwrap_runtime_result(cli_tools.get_data_type(target=target, path="__it_struct")),
             "list_bookmarks": _unwrap_runtime_result(
-                cli.list_bookmarks(address=address, type="Info", category="Validation", target=target)
+                cli_tools.list_bookmarks(address=address, type="Info", category="Validation", target=target)
             ),
         }
 
@@ -309,6 +320,6 @@ def test_runtime_readonly_commands_all_success(tmp_path):
         assert any(item.get("comment") == "runtime readonly seed" for item in runtime_results["list_bookmarks"])
     finally:
         try:
-            cli.close_session(target)
+            cli_tools.close_session(target)
         except Exception:
             pass

@@ -62,7 +62,7 @@ Put a binary named `sample.bin` in the `samples` directory created below. It can
 export GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra
 mkdir -p projects samples exports
 
-uv run ghidra-mcp \
+uv run mecha_ghidra \
   --project-location "$PWD/projects" \
   --project-name analysis \
   --transport http \

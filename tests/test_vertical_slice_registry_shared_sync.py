@@ -3,41 +3,45 @@ from __future__ import annotations
 import pytest
 from mcp.types import CallToolResult
 
+from cli_support import ToolHarness
 from ghidra_mcp import cli
+
+# Tool callables bound to a swappable registry (see tests/cli_support.py).
+cli_tools = ToolHarness()
 
 
 @pytest.mark.parametrize(
     ("tool_name", "call", "expected_args", "expected_target"),
     [
-        ("list_targets", lambda: cli.list_targets(), {}, "default"),
+        ("list_targets", lambda: cli_tools.list_targets(), {}, "default"),
         (
             "create_project",
-            lambda: cli.create_project(project_location="/tmp/sample.gpr", project_name=None, overwrite=False),
+            lambda: cli_tools.create_project(project_location="/tmp/sample.gpr", project_name=None, overwrite=False),
             {"project_location": "/tmp/sample.gpr", "overwrite": False},
             "default",
         ),
-        ("list_project_programs", lambda: cli.list_project_programs("fw"), {}, "fw"),
+        ("list_project_programs", lambda: cli_tools.list_project_programs("fw"), {}, "fw"),
         (
             "register_target",
-            lambda: cli.register_target(target="fw", project_location="/tmp/sample.gpr", project_name=None),
+            lambda: cli_tools.register_target(target="fw", project_location="/tmp/sample.gpr", project_name=None),
             {"project_location": "/tmp/sample.gpr"},
             "fw",
         ),
         (
             "load_project_program",
-            lambda: cli.load_project_program(target="fw", domain_path="/folder/app"),
+            lambda: cli_tools.load_project_program(target="fw", domain_path="/folder/app"),
             {"domain_path": "/folder/app"},
             "fw",
         ),
         (
             "import_program",
-            lambda: cli.import_program(target="fw", binary_path="/tmp/app.bin"),
+            lambda: cli_tools.import_program(target="fw", binary_path="/tmp/app.bin"),
             {"binary_path": "/tmp/app.bin", "import_mode": "auto", "overlay": False},
             "fw",
         ),
         (
             "open_program",
-            lambda: cli.open_program(
+            lambda: cli_tools.open_program(
                 target="fw",
                 project_location="/tmp/sample.gpr",
                 domain_path="/folder/app",
@@ -49,23 +53,23 @@ from ghidra_mcp import cli
             },
             "fw",
         ),
-        ("close_session", lambda: cli.close_session("fw"), {}, "fw"),
-        ("close_session_and_remove_program", lambda: cli.close_session_and_remove_program("fw"), {}, "fw"),
+        ("close_session", lambda: cli_tools.close_session("fw"), {"discard_changes": False}, "fw"),
+        ("close_session_and_remove_program", lambda: cli_tools.close_session_and_remove_program("fw"), {}, "fw"),
         (
             "get_project_sync_status",
-            lambda: cli.get_project_sync_status("fw", domain_path="/folder/app"),
+            lambda: cli_tools.get_project_sync_status("fw", domain_path="/folder/app"),
             {"domain_path": "/folder/app"},
             "fw",
         ),
         (
             "checkout_project_program",
-            lambda: cli.checkout_project_program("fw", exclusive=True, domain_path="/folder/app"),
+            lambda: cli_tools.checkout_project_program("fw", exclusive=True, domain_path="/folder/app"),
             {"exclusive": True, "domain_path": "/folder/app"},
             "fw",
         ),
         (
             "add_project_program_to_version_control",
-            lambda: cli.add_project_program_to_version_control(
+            lambda: cli_tools.add_project_program_to_version_control(
                 "fw",
                 comment="enable shared",
                 keep_checked_out=False,
@@ -76,7 +80,7 @@ from ghidra_mcp import cli
         ),
         (
             "commit_project_program",
-            lambda: cli.commit_project_program(
+            lambda: cli_tools.commit_project_program(
                 "fw",
                 "checkin",
                 keep_checked_out=True,
@@ -94,25 +98,27 @@ from ghidra_mcp import cli
         ),
         (
             "pull_project_program",
-            lambda: cli.pull_project_program("fw", on_local_changes="discard", domain_path="/folder/app"),
+            lambda: cli_tools.pull_project_program("fw", on_local_changes="discard", domain_path="/folder/app"),
             {"on_local_changes": "discard", "domain_path": "/folder/app"},
             "fw",
         ),
         (
             "undo_checkout_project_program",
-            lambda: cli.undo_checkout_project_program("fw", discard_local_changes=False, domain_path="/folder/app"),
+            lambda: cli_tools.undo_checkout_project_program(
+                "fw", discard_local_changes=False, domain_path="/folder/app"
+            ),
             {"discard_local_changes": False, "domain_path": "/folder/app"},
             "fw",
         ),
         (
             "terminate_project_program_checkout",
-            lambda: cli.terminate_project_program_checkout("fw", checkout_id=7, domain_path="/folder/app"),
+            lambda: cli_tools.terminate_project_program_checkout("fw", checkout_id=7, domain_path="/folder/app"),
             {"checkout_id": 7, "domain_path": "/folder/app"},
             "fw",
         ),
         (
             "delete_shared_project_file",
-            lambda: cli.delete_shared_project_file("fw", domain_path="/folder/app", confirm="/folder/app"),
+            lambda: cli_tools.delete_shared_project_file("fw", domain_path="/folder/app", confirm="/folder/app"),
             {
                 "domain_path": "/folder/app",
                 "confirm": "/folder/app",
@@ -123,13 +129,15 @@ from ghidra_mcp import cli
         ),
         (
             "get_version_history",
-            lambda: cli.get_version_history("fw", limit=5, domain_path="/folder/app"),
+            lambda: cli_tools.get_version_history("fw", limit=5, domain_path="/folder/app"),
             {"limit": 5, "domain_path": "/folder/app"},
             "fw",
         ),
         (
             "get_version_diff",
-            lambda: cli.get_version_diff("fw", from_version=1, to_version=2, range_limit=50, domain_path="/folder/app"),
+            lambda: cli_tools.get_version_diff(
+                "fw", from_version=1, to_version=2, range_limit=50, domain_path="/folder/app"
+            ),
             {
                 "from_version": 1,
                 "to_version": 2,
@@ -161,15 +169,15 @@ def test_registry_shared_sync_slice_uses_dispatcher(monkeypatch, tool_name, call
     assert called["spec_name"] == tool_name
     assert called["raw_args"] == expected_args
     assert called["target"] == expected_target
-    assert called["registry"] is cli._registry
+    assert called["registry"] is cli_tools.registry
     assert called["core_executor"] is None
 
 
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: cli.list_targets(),
-        lambda: cli.list_project_programs("fw"),
+        lambda: cli_tools.list_targets(),
+        lambda: cli_tools.list_project_programs("fw"),
     ],
 )
 def test_registry_shared_sync_slice_empty_result_keeps_compatibility(monkeypatch, call):
@@ -180,7 +188,7 @@ def test_registry_shared_sync_slice_empty_result_keeps_compatibility(monkeypatch
         def list_programs(self, _target):
             return []
 
-    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+    monkeypatch.setattr(cli_tools, "registry", DummyRegistry())
 
     result = call()
 
@@ -193,10 +201,10 @@ def test_registry_shared_sync_slice_create_session_error_message_is_unchanged(mo
         def create_session(self, target, **kwargs):  # noqa: ARG002
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+    monkeypatch.setattr(cli_tools, "registry", DummyRegistry())
 
     with pytest.raises(RuntimeError, match="Failed to create session 'fw'"):
-        cli.open_program(
+        cli_tools.open_program(
             target="fw",
             project_location="/tmp/sample.gpr",
             domain_path="/folder/app",
@@ -208,10 +216,10 @@ def test_registry_shared_sync_slice_close_session_error_message_is_unchanged(mon
         def close_session(self, target, **kwargs):  # noqa: ARG002
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+    monkeypatch.setattr(cli_tools, "registry", DummyRegistry())
 
     with pytest.raises(RuntimeError, match="Failed to close session 'fw'"):
-        cli.close_session("fw")
+        cli_tools.close_session("fw")
 
 
 def test_registry_shared_sync_slice_close_remove_error_message_is_unchanged(monkeypatch):
@@ -220,7 +228,7 @@ def test_registry_shared_sync_slice_close_remove_error_message_is_unchanged(monk
             assert kwargs == {"remove_program": True}
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+    monkeypatch.setattr(cli_tools, "registry", DummyRegistry())
 
     with pytest.raises(RuntimeError, match="Failed to close/remove session 'fw'"):
-        cli.close_session_and_remove_program("fw")
+        cli_tools.close_session_and_remove_program("fw")

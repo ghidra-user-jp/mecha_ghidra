@@ -9,11 +9,8 @@ import re
 from copy import deepcopy
 from typing import Any, Callable
 
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.mcpserver.tools.base import Tool
-from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import ConfigDict, create_model
+from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
+from pydantic import BaseModel, ConfigDict, create_model
 
 from ghidra_mcp.contracts.tool_models import PayloadToolOutputModel
 from ghidra_mcp.contracts.tool_spec import (
@@ -22,20 +19,14 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSpec,
 )
 from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentationConfig
+from ghidra_mcp.presentation.tool_errors import ToolError
 
 _SHORT_DESCRIPTION_MAX_CHARS = 180
 _SENTENCE_ABBREVIATIONS = ("e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "no.", "al.")
 
 
-class PublicArguments(ArgModelBase):
+class PublicArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-
-
-class StrictToolMetadata(FuncMetadata):
-    def pre_parse_json(self, data: dict[str, Any]) -> dict[str, Any]:
-        # The request is already JSON. SDK coercion would turn strings into
-        # numbers/objects before our strict contract can reject them.
-        return data
 
 
 def public_arguments_model(spec: ToolSpec) -> type[PublicArguments]:
@@ -328,13 +319,15 @@ def tool_annotations_for_spec(spec: ToolSpec) -> ToolAnnotations | None:
     return None
 
 
-def as_anticipated_tool_failure(tool_fn: Callable[..., Any]) -> Callable[..., Any]:
+def as_anticipated_tool_failure(
+    tool_fn: Callable[..., Any],
+    error_presenter: Callable[..., CallToolResult] | None = None,
+) -> Callable[..., Any]:
     """Preserve anticipated failures and domain metadata at the MCP boundary.
 
-    mcp 2.x treats every exception other than ``ToolError`` as a crash and
-    replaces its message with ``Error executing tool <name>``.  The dispatcher
-    already maps domain errors to public-safe messages (error codes, hints, and
-    sanitized causes), so those messages must travel as anticipated failures.
+    The dispatcher maps domain errors to public-safe messages (error codes,
+    hints and sanitized causes). Preserve those messages as anticipated
+    failures for the low-level protocol handler.
     The ``domain_error`` payload attached by ``error_mapper`` is returned in
     both text and structured content with ``isError`` set. Other anticipated
     exceptions are raised as ``ToolError``.
@@ -350,52 +343,51 @@ def as_anticipated_tool_failure(tool_fn: Callable[..., Any]) -> Callable[..., An
             payload = getattr(exc, "domain_error", None)
             if payload is not None:
                 error = {"message": str(exc), **payload}
-                return CallToolResult(
+                result = CallToolResult(
                     is_error=True,
                     structured_content={"error": error},
                     content=[TextContent(type="text", text=json.dumps({"error": error}, ensure_ascii=False))],
                 )
+                if error_presenter is not None:
+                    bound = inspect.signature(tool_fn).bind(*args, **kwargs)
+                    return error_presenter(
+                        error=error, original=result, target=bound.arguments.get("target", "default")
+                    )
+                return result
             failure = ToolError(str(exc))
             raise failure from exc
 
     return _entry
 
 
+def spec_wire_output_schema(spec: ToolSpec) -> dict[str, Any]:
+    """structuredContent schema for a spec: its logical output plus the envelopes its presenter emits."""
+    from ghidra_mcp.presentation.response_schemas import wire_output_schema
+
+    return wire_output_schema(public_output_schema(spec), batch=spec.presenter == "batch")
+
+
 def build_tool_object(
     spec: ToolSpec,
-    tool_fn: Callable[..., Any],
     presentation_config: ToolPresentationConfig | None = None,
 ) -> Tool:
-    """Build the SDK ``Tool`` for one spec through the public ``Tool.from_function``.
-
-    ``Tool.from_function`` substitutes an empty string for a missing description,
-    so the description is reset to ``None`` afterwards: a description-less tool
-    costs less context as an omitted field than as boilerplate, and the docs
-    resource carries the details.
-    """
-    effective_config = presentation_config or ToolPresentationConfig()
-    description = select_tool_description(spec, effective_config.description_mode)
-    tool_fn.__doc__ = description
-    tool = Tool.from_function(
-        as_anticipated_tool_failure(tool_fn),
+    """Publish the explicit protocol contract without SDK signature inference."""
+    config = presentation_config or ToolPresentationConfig()
+    return Tool(
         name=spec.name,
-        description=description,
+        description=select_tool_description(spec, config.description_mode),
         annotations=tool_annotations_for_spec(spec),
+        input_schema=public_input_schema(spec),
+        output_schema=spec_wire_output_schema(spec),
     )
-    tool.fn_metadata = StrictToolMetadata(arg_model=public_arguments_model(spec))
-    tool.parameters = public_input_schema(spec)
-    if description is None:
-        tool.description = None
-    return tool
 
 
 def build_tool_objects(
     *,
-    tools: dict[str, Callable[..., Any]],
     specs: dict[str, ToolSpec],
     presentation_config: ToolPresentationConfig | None = None,
 ) -> list[Tool]:
-    return [build_tool_object(spec, tools[spec.name], presentation_config) for spec in specs.values()]
+    return [build_tool_object(spec, presentation_config) for spec in specs.values()]
 
 
 class ToolRegistry:
@@ -414,7 +406,7 @@ class ToolRegistry:
             registry_provider=registry_provider,
             presentation_config=presentation_config,
         )
-        tool_objects = build_tool_objects(tools=tools, specs=specs, presentation_config=presentation_config)
+        tool_objects = build_tool_objects(specs=specs, presentation_config=presentation_config)
         return tools, tool_objects
 
 

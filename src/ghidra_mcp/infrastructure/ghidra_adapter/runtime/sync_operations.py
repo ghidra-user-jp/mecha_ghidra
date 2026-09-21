@@ -60,6 +60,7 @@ class RuntimeSyncOperations(
         # --shared-sync-exclusive-checkout); an explicit value always wins.
         exclusive = get_exclusive_checkout_default() if exclusive is None else bool(exclusive)
         with self._target_operation(name):
+            self._store.ensure_not_quarantined(name, operation="checkout_project_program")
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
             active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
             status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
@@ -135,6 +136,7 @@ class RuntimeSyncOperations(
         if not text:
             raise ValueError("comment is required")
         with self._target_operation(name):
+            self._store.ensure_not_quarantined(name, operation="add_project_program_to_version_control")
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
             status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)
             if status.get("is_versioned"):
@@ -196,6 +198,7 @@ class RuntimeSyncOperations(
         if conflict_action not in {"abort", "discard", "keep"}:
             raise ValueError("on_conflict must be 'abort', 'discard', or 'keep'")
         with self._target_operation(name):
+            self._store.ensure_not_quarantined(name, operation="commit_project_program")
             auto_checkout_created = False
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
             active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
@@ -381,6 +384,7 @@ class RuntimeSyncOperations(
         if normalized not in {"abort", "discard"}:
             raise ValueError("on_local_changes must be either 'abort' or 'discard'")
         with self._target_operation(name):
+            self._store.ensure_not_quarantined(name, operation="pull_project_program")
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
             active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
             loaded_version = self._active_program_version_locked(active_target, resolved_domain_path)
@@ -542,6 +546,7 @@ class RuntimeSyncOperations(
         domain_path: str | None = None,
     ) -> Dict[str, Any]:
         with self._target_operation(name):
+            self._store.ensure_not_quarantined(name, operation="undo_checkout_project_program")
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
             active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
             status = self._get_refreshed_sync_status_locked(handle, resolved_domain_path, require_refresh=True)

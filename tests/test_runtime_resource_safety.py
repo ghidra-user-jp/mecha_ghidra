@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -82,6 +83,41 @@ def test_runtime_export_uses_only_the_validated_path(runtime, tmp_path):
     assert destination.read_bytes() == bytes.fromhex("b8 2a 00 00 00 c3")
 
 
+@pytest.mark.parametrize("offset,length", [(16, 24), (10, 16), (0, 32)])
+def test_runtime_raw_import_preserves_decimal_byte_ranges_after_reload(runtime, tmp_path, offset, length):
+    import jpype
+
+    from ghidra_headless.handlers import core_runtime
+
+    binary = tmp_path / "range.bin"
+    contents = bytes(range(128))
+    binary.write_bytes(contents)
+    imported = runtime["import_program"](
+        target="resource_safety",
+        binary_path=str(binary),
+        import_mode="raw_binary",
+        language_id="x86:LE:64:default",
+        compiler_spec_id="windows",
+        base_address="0x2000",
+        file_offset=offset,
+        length=length,
+        block_name="range_block",
+        analyze_imported=False,
+    )
+    for _ in range(2):
+        runtime["load_project_program"](target="resource_safety", domain_path=imported["program"])
+        program = core_runtime._CONTEXTS["resource_safety"].program
+        block = program.getMemory().getBlocks()[0]
+        assert int(block.getStart().getOffset()) == 0x2000
+        assert int(block.getSize()) == length
+        assert str(block.getName()) == "range_block"
+        assert str(program.getCompilerSpec().getCompilerSpecID()) == "windows"
+        actual = jpype.JArray(jpype.JByte)(length)
+        assert program.getMemory().getBytes(block.getStart(), actual) == length
+        assert bytes(actual) == contents[offset : offset + length]
+        runtime["close_session"](target="resource_safety")
+
+
 def _native_decompiler_process():
     from ghidra_headless.handlers import core_runtime
 
@@ -117,3 +153,71 @@ def test_runtime_reloading_and_closing_reclaims_native_decompilers(runtime):
         for process in processes:
             if process.isAlive():
                 process.destroy()
+
+
+@pytest.mark.parametrize("analyze_imported", [False, True])
+def test_runtime_auto_import_uses_public_loader_and_releases_results(runtime, monkeypatch, analyze_imported):
+    import jpype
+    import pyghidra
+
+    from ghidra_headless.handlers import core_runtime
+
+    original_loader = pyghidra.program_loader
+    loaded_programs = []
+    detected_formats = []
+    closed_results = []
+
+    class Results:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def getPrimary(self):
+            primary = self.delegate.getPrimary()
+            consumer = jpype.JClass("java.lang.Object")()
+            program = primary.getDomainObject(consumer)
+            try:
+                loaded_programs.append(program)
+                detected_formats.append(str(program.getExecutableFormat()))
+            finally:
+                program.release(consumer)
+            return primary
+
+        def close(self):
+            self.delegate.close()
+            closed_results.append(self.delegate)
+
+    class Builder:
+        def __init__(self):
+            self.delegate = original_loader()
+
+        def __getattr__(self, name):
+            def option(*args):
+                self.delegate = getattr(self.delegate, name)(*args)
+                return self
+
+            return option
+
+        def load(self):
+            return Results(self.delegate.load())
+
+    monkeypatch.setattr(pyghidra, "program_loader", Builder)
+    sample = Path(__file__).resolve().parents[1] / "samples" / "hello.bin"
+    imported = runtime["import_program"](
+        target="resource_safety", binary_path=str(sample), analyze_imported=analyze_imported
+    )
+    assert imported["program"] == "/hello.bin"
+    assert len(loaded_programs) == len(closed_results) == 1
+    assert detected_formats[0] and detected_formats[0] != "Raw Binary"
+    assert loaded_programs[0].isClosed(), "the loader must release its program before a subsequent open"
+
+    for _ in range(2):
+        runtime["load_project_program"](target="resource_safety", domain_path=imported["program"])
+        program = core_runtime._CONTEXTS["resource_safety"].program
+        assert str(program.getName()) == "hello.bin"
+        assert str(program.getExecutableFormat()) == detected_formats[0]
+        assert int(program.getMemory().getSize()) > 0
+        assert program.getCurrentTransactionInfo() is None
+        if analyze_imported:
+            assert program.getFunctionManager().getFunctionCount() > 0
+        runtime["close_session"](target="resource_safety")
+        assert program.isClosed()

@@ -144,7 +144,7 @@ jobs:
       - name: Upload Python package artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ghidra-mcp-python-package
+          name: mecha_ghidra-python-package
           if-no-files-found: error
           path: package-dist/*
 
@@ -252,7 +252,7 @@ jobs:
       - name: Download Python package artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ghidra-mcp-python-package
+          name: mecha_ghidra-python-package
           path: python-package-artifacts
 
       - name: Resolve pinned native asset run
@@ -277,7 +277,7 @@ jobs:
           set -eu
           . ./scripts/ghidra_release.env
           mkdir -p release-assets
-          cp python-package-artifacts/ghidra_mcp-*.tar.gz release-assets/
+          cp python-package-artifacts/mecha_ghidra-*.tar.gz release-assets/
 
           # Native ZIPs for a tag are copied from the verified pre-release run
           # in the next step. Avoid downloading and repacking Ghidra a second time.
@@ -340,8 +340,8 @@ jobs:
           full_zip_path="release-assets/${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}"
           test -f "${zip_path}"
           test -f "${full_zip_path}"
-          test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.whl' | wc -l)" -eq 0
-          test "$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | wc -l)" -eq 1
+          test "$(find release-assets -maxdepth 1 -type f -name 'mecha_ghidra-*.whl' | wc -l)" -eq 0
+          test "$(find release-assets -maxdepth 1 -type f -name 'mecha_ghidra-*.tar.gz' | wc -l)" -eq 1
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/decompile$'
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/linux_arm_64/sleigh$'
           unzip -Z1 "${zip_path}" | grep '^Ghidra/Features/Decompiler/os/mac_arm_64/decompile$'
@@ -365,13 +365,13 @@ jobs:
           . ./scripts/ghidra_release.env
           zip_path="release-assets/${MECHA_GHIDRA_RELEASE_DECOMPILER_NATIVES_ZIP_BASENAME}"
           full_zip_path="release-assets/${MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_ZIP_BASENAME}"
-          sdist_path="$(find release-assets -maxdepth 1 -type f -name 'ghidra_mcp-*.tar.gz' | head -n 1)"
+          sdist_path="$(find release-assets -maxdepth 1 -type f -name 'mecha_ghidra-*.tar.gz' | head -n 1)"
           test -n "${sdist_path}"
           sdist_name="$(basename "${sdist_path}")"
           cat > release-body.md <<EOF
           ## Python package
 
-          This release includes the tested \`ghidra_mcp\` source distribution built from this tag.
+          This release includes the tested \`mecha_ghidra\` source distribution built from this tag.
 
           - \`${sdist_name}\`
 
@@ -499,6 +499,7 @@ jobs:
               "ghidra_*_mac_x86_64_decompiler.zip",
               "ghidra_*_mac_x86_64_decompiler_overlay.tar.gz",
               "ghidra_mcp-*.whl",
+              "mecha_ghidra-*.whl",
           ]
           new_asset_names = {
               path.name for path in Path("release-assets").iterdir() if path.is_file()

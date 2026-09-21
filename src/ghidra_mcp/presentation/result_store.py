@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sys
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ def _utf8_size_and_sha256(text: str) -> tuple[int, str]:
 
 
 def _normalize_surrogate_text(value: str) -> str:
-    if _SURROGATE_RE.search(value) is None:
+    if str.isascii(value) or _SURROGATE_RE.search(value) is None:
         return value
     normalized: list[str] = []
     index = 0
@@ -68,31 +69,31 @@ def _normalize_json_surrogates(value: Any) -> tuple[Any, bool]:
     if isinstance(value, str):
         normalized = _normalize_surrogate_text(value)
         return normalized, normalized is not value
-    if isinstance(value, list):
-        changed = False
-        items = []
-        for item in value:
+    if isinstance(value, (list, tuple)):
+        items = None if type(value) in (list, tuple) else []
+        for index, item in enumerate(value):
             normalized, item_changed = _normalize_json_surrogates(item)
-            items.append(normalized)
-            changed = changed or item_changed
-        return (items, True) if changed else (value, False)
-    if isinstance(value, tuple):
-        changed = False
-        items = []
-        for item in value:
-            normalized, item_changed = _normalize_json_surrogates(item)
-            items.append(normalized)
-            changed = changed or item_changed
-        return (tuple(items), True) if changed else (value, False)
+            if item_changed and items is None:
+                items = list(value[:index])
+            if items is not None:
+                items.append(normalized)
+        if items is None:
+            return value, False
+        return (tuple(items) if isinstance(value, tuple) else items), True
     if isinstance(value, dict):
-        changed = type(value) is not dict
-        normalized_items: list[tuple[Any, Any]] = []
+        normalized_items = {} if type(value) is not dict else None
         for key in dict.keys(value):
             normalized_key, key_changed = _normalize_json_surrogates(key)
             normalized_value, value_changed = _normalize_json_surrogates(dict.__getitem__(value, key))
-            normalized_items.append((normalized_key, normalized_value))
-            changed = changed or key_changed or value_changed
-        return (dict(normalized_items), True) if changed else (value, False)
+            if normalized_items is None and (key_changed or value_changed):
+                normalized_items = {}
+                for prior in dict.keys(value):
+                    if prior is key:
+                        break
+                    normalized_items[prior] = dict.__getitem__(value, prior)
+            if normalized_items is not None:
+                normalized_items[normalized_key] = normalized_value
+        return (normalized_items, True) if normalized_items is not None else (value, False)
     return value, False
 
 
@@ -109,14 +110,23 @@ class StoredToolResult:
     target: str
     result_type: str
     item_count: int | None
+    memory_size_bytes: int = 0
 
 
 class ResultResourceStore:
-    def __init__(self, *, max_entries: int = 512, max_bytes: int = 134_217_728) -> None:
+    def __init__(
+        self, *, max_entries: int = 512, max_bytes: int = 134_217_728, max_memory_bytes: int = 134_217_728
+    ) -> None:
         if max_entries < 1:
             raise ValueError("max_entries must be >= 1")
         if max_bytes < 1:
             raise ValueError("max_bytes must be >= 1")
+        if max_memory_bytes < 1:
+            raise ValueError("max_memory_bytes must be >= 1")
+        self._max_memory_bytes = max_memory_bytes
+        self._memory_bytes = 0
+        self._indexes = {}
+        self._index_bytes = {}
         self._max_entries = max_entries
         self._max_bytes = max_bytes
         self._total_bytes = 0
@@ -129,6 +139,10 @@ class ResultResourceStore:
     @property
     def max_bytes(self) -> int:
         return self._max_bytes
+
+    @property
+    def max_memory_bytes(self) -> int:
+        return self._max_memory_bytes
 
     def add(
         self,
@@ -196,12 +210,16 @@ class ResultResourceStore:
             "item_count": item_count,
         }
         cache_size_bytes = size_bytes + len(to_json(metadata, fallback=str))
+        # Retained objects, not process RSS. Count shared values conservatively.
+        memory_size = sys.getsizeof(text) + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in metadata.items()) + 512
+        if hasattr(text, "__dict__"):
+            memory_size += sys.getsizeof(text.__dict__) + sum(sys.getsizeof(v) for v in text.__dict__.values())
         with self._lock:
             existing = self._entries.get(result_id)
             if existing is not None:
                 self._entries.move_to_end(result_id)
                 return existing
-            if cache_size_bytes > self._max_bytes:
+            if cache_size_bytes > self._max_bytes or memory_size > self._max_memory_bytes:
                 # A single entry larger than the whole cache budget can never be
                 # retained without exceeding the operator-configured memory cap.
                 return None
@@ -213,6 +231,7 @@ class ResultResourceStore:
                 size_chars=len(text),
                 size_bytes=size_bytes,
                 cache_size_bytes=cache_size_bytes,
+                memory_size_bytes=memory_size,
                 tool=tool,
                 target=target,
                 result_type=result_type,
@@ -220,13 +239,61 @@ class ResultResourceStore:
             )
             self._entries[result_id] = entry
             self._total_bytes += entry.cache_size_bytes
-            # Evict oldest entries past either budget, but never the entry just added.
-            while len(self._entries) > 1 and (
-                len(self._entries) > self._max_entries or self._total_bytes > self._max_bytes
-            ):
-                _, evicted = self._entries.popitem(last=False)
-                self._total_bytes -= evicted.cache_size_bytes
+            self._memory_bytes += entry.memory_size_bytes
+            self._evict_except(entry.result_id)
             return entry
+
+    def _drop_entry(self, result_id: str) -> None:
+        entry = self._entries.pop(result_id)
+        self._total_bytes -= entry.cache_size_bytes
+        self._memory_bytes -= entry.memory_size_bytes
+        for key in [key for key in self._indexes if key[0] == result_id]:
+            size = self._index_bytes.pop(key)
+            self._total_bytes -= size
+            self._memory_bytes -= size
+            del self._indexes[key]
+
+    def _evict_except(self, result_id: str) -> None:
+        while len(self._entries) > 1 and (
+            len(self._entries) > self._max_entries
+            or self._total_bytes > self._max_bytes
+            or self._memory_bytes > self._max_memory_bytes
+        ):
+            victim = next(key for key in self._entries if key != result_id)
+            self._drop_entry(victim)
+
+    def json_index(self, entry: StoredToolResult, path: str):
+        from .result_json import build_array_index
+
+        key = (entry.result_id, path)
+        with self._lock:
+            if key in self._indexes:
+                return self._indexes[key]
+        available = min(self._max_bytes - entry.cache_size_bytes, self._max_memory_bytes - entry.memory_size_bytes)
+        index = build_array_index(entry.text, path, max_bytes=max(0, available - 256))
+        size = sys.getsizeof(index) + sys.getsizeof(key) + sys.getsizeof(path) + 128
+        with self._lock:
+            if self._entries.get(entry.result_id) is not entry:
+                raise ValueError("Result was evicted while its JSON index was being built")
+            if key in self._indexes:
+                return self._indexes[key]
+            existing_size = sum(v for k, v in self._index_bytes.items() if k[0] == entry.result_id)
+            if (
+                entry.cache_size_bytes + existing_size + size > self._max_bytes
+                or entry.memory_size_bytes + existing_size + size > self._max_memory_bytes
+            ):
+                raise ValueError("JSON index exceeds the result cache budget; use mode=text")
+            self._indexes[key] = index
+            self._index_bytes[key] = size
+            self._total_bytes += size
+            self._memory_bytes += size
+            self._evict_except(entry.result_id)
+            return index
+
+    @property
+    def accounted_memory_bytes(self) -> int:
+        with self._lock:
+            return self._memory_bytes
 
     def get(self, result_id: str) -> StoredToolResult:
         if (

@@ -6,12 +6,14 @@ GhidraとJavaを同梱したイメージでMecha Ghidraを起動します。Comp
 
 ## ビルドと起動
 
+旧サービス名 `ghidra-mcp` を使う既存環境では、設定を更新する前に[移行手順](troubleshooting.ja.md#古い設定からの移行)を確認してください。
+
 ```bash
 mkdir -p samples exports
 ./build_docker_image.sh
 docker compose up -d
 docker compose ps
-docker compose logs --tail=100 ghidra-mcp
+docker compose logs --tail=100 mecha_ghidra
 ```
 
 [MCPクライアント](clients.ja.md)の接続先は `http://127.0.0.1:8081/mcp` です。起動時は `default` ターゲットのプロジェクト情報だけを登録します。新しいボリュームでは、解析ツールを使う前に次の手順を実行してください。

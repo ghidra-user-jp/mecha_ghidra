@@ -108,6 +108,28 @@ def test_bsim_rows_are_versioned_and_stably_sorted_before_limit():
     assert result["matches"][0]["matched_ref"]["matched_ref_version"] == 1
 
 
+@pytest.mark.parametrize("include_self", [False, True])
+def test_bsim_per_function_limit_applies_even_without_a_self_match(include_self):
+    own_md5 = "dddddddddddddddddddddddddddddddd"
+    rows = [
+        FakeMatchRow(md5="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", similarity=0.8, significance=9.0, address=0x30),
+        FakeMatchRow(md5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", similarity=0.9, significance=5.0, address=0x10),
+    ]
+    if include_self:
+        rows.append(FakeMatchRow(md5=own_md5, similarity=1.0, significance=10.0, address=0x401000))
+    # Another query function must retain its own result; the limit is not global.
+    other = FakeMatchRow(md5="cccccccccccccccccccccccccccccccc", similarity=0.7, significance=1.0, address=0x20)
+    other.getOriginalFunctionDescription = lambda: FakeFunctionDescription(address=0x402000, name="other_func")
+    rows.append(other)
+
+    result = _rows_to_result(FakeContext(), {"matches_per_function": 1, "max_results": 10}, rows, exclude_md5=own_md5)
+
+    assert result["count"] == 2
+    assert result["excluded_self_matches"] == int(include_self)
+    assert [item["matched_ref"]["executable_md5"] for item in result["matches"]] == ["a" * 32, "c" * 32]
+    assert [item["query_ref"]["address"] for item in result["matches"]] == ["0x401000", "0x402000"]
+
+
 class _PathRecord:
     def __init__(self, *, path, name):
         self._path = path

@@ -7,17 +7,17 @@ import logging
 import pathlib
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Dict, List, Optional
 
 from ghidra_headless.errors import HeadlessError, error_code_of
 from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings, path_utils
 from ghidra_headless.session.transactions import run_in_transaction
-from ghidra_mcp.application.locks import acquire_ordered_locks
+from ghidra_mcp.application.locks import SCRIPT_BARRIER, USE_POLICY_TIMEOUT, acquire_ordered_locks
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_utils import is_project_lock_error
 
-from .session_store import RuntimeSessionStore
+from .session_store import RuntimeSessionStore, bind_session_project
 from .sync_reopen import SyncReopenMixin
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         project_name: str | None = None,
         repository_url: str,
     ) -> Dict[str, object]:
-        with self._store.operation_lock.read_lock():
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
             return ProjectHandle.create_repository_cache_project(
                 project_location,
                 project_name,
@@ -53,7 +53,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
 
     @contextlib.contextmanager
     def _target_operation(self, name: str, *, create: bool = False) -> Iterator[None]:
-        with self._store.operation_lock.read_lock():
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
             with self._store.registry_lock.write_lock():
                 lock = (
                     self._store.locks.setdefault(name, threading.RLock()) if create else self._store.ensure_lock(name)
@@ -76,13 +76,16 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         *,
         project_name: str | None = None,
         domain_path: str | None = None,
+        validate: Callable[[], None] | None = None,
     ) -> ProgramSession:
-        with self._store.operation_lock.read_lock():
+        self._store.ensure_not_quarantined(name, operation="create_session")
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
             return self._create_session_locked(
                 name,
                 project_location,
                 project_name=project_name,
                 domain_path=domain_path,
+                validate=validate,
             )
 
     def create_project(
@@ -92,7 +95,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         project_name: str | None = None,
         overwrite: bool = False,
     ) -> Dict[str, object]:
-        with self._store.operation_lock.write_lock():
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.write_lock():
             project_key = ProjectHandle.resolve_project_creation_target(
                 project_location,
                 project_name,
@@ -127,6 +130,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         *,
         project_name: str | None,
         domain_path: str | None,
+        validate: Callable[[], None] | None = None,
     ) -> ProgramSession:
         project_key = ProjectHandle.make_key(project_location, project_name)
         handle: ProjectHandle | None = None
@@ -134,12 +138,9 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         with self._store.registry_lock.write_lock():
             if name in self._store.sessions:
                 raise ValueError(f"Session '{name}' already exists")
-            had_target = name in self._store.target_projects
-            previous_target_key = self._store.target_projects.get(name)
             had_lock = name in self._store.locks
             lock = self._store.locks.setdefault(name, threading.RLock())
             project_lock = self._store.ensure_project_lock(project_key)
-            self._store.target_projects[name] = project_key
 
         with acquire_ordered_locks(
             [("target", lock), ("project", project_lock)],
@@ -147,13 +148,25 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         ):
             with self._store.registry_lock.write_lock():
                 if name in self._store.sessions:
-                    if had_target and previous_target_key is not None:
-                        self._store.target_projects[name] = previous_target_key
-                    else:
-                        self._store.target_projects.pop(name, None)
-                    if not had_lock:
-                        self._store.locks.pop(name, None)
                     raise ValueError(f"Session '{name}' already exists")
+                had_target = name in self._store.target_projects
+                previous_target_key = self._store.target_projects.get(name)
+                self._store.target_projects[name] = project_key
+
+            def _unpublish_binding() -> None:
+                if had_target and previous_target_key is not None:
+                    self._store.target_projects[name] = previous_target_key
+                else:
+                    self._store.target_projects.pop(name, None)
+                if not had_lock:
+                    self._store.locks.pop(name, None)
+
+            try:
+                self._store.ensure_not_quarantined(name, operation="create_session")
+            except HeadlessError:
+                with self._store.registry_lock.write_lock():
+                    _unpublish_binding()
+                raise
             try:
                 handle = self._store.get_or_create_project_handle(project_key)
                 session = handle.open_program(domain_path)
@@ -163,8 +176,14 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 )
                 with self._store.registry_lock.write_lock():
                     self._store.sessions[name] = session
+                # Keep validation inside the target/project locks and the open
+                # rollback boundary. Other callers cannot use this session
+                # until it passes, and failure restores the previous binding.
+                if validate is not None:
+                    validate()
                 return session
             except Exception as operation_error:
+                self._store.note_open_failure(name, operation_error, handle=handle)
                 with self._store.registry_lock.write_lock():
                     if session is not None and self._store.sessions.get(name) is session:
                         self._store.sessions.pop(name, None)
@@ -182,12 +201,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                         rollback_error,
                     )
                 with self._store.registry_lock.write_lock():
-                    if had_target and previous_target_key is not None:
-                        self._store.target_projects[name] = previous_target_key
-                    else:
-                        self._store.target_projects.pop(name, None)
-                    if not had_lock:
-                        self._store.locks.pop(name, None)
+                    _unpublish_binding()
                 if rollback_error is not None:
                     raise rollback_error from operation_error
                 raise
@@ -200,7 +214,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         project_name: str | None = None,
     ) -> Dict[str, Optional[str]]:
         key = ProjectHandle.make_key(project_location, project_name)
-        with self._store.operation_lock.read_lock():
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
             with self._store.registry_lock.write_lock():
                 lock = self._store.locks.setdefault(name, threading.RLock())
                 project_lock = self._store.ensure_project_lock(key)
@@ -225,7 +239,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 }
 
     def list_targets(self) -> List[Dict[str, Optional[str]]]:
-        with self._store.operation_lock.read_lock():
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
             with self._store.registry_lock.read_lock():
                 names = sorted(set(self._store.target_projects.keys()) | set(self._store.sessions.keys()))
             results: List[Dict[str, Optional[str]]] = []
@@ -278,7 +292,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             return results
 
     def list_programs(self, name: str):
-        with self._store.operation_lock.read_lock():
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
             with self._store.registry_lock.write_lock():
                 lock = self._store.ensure_lock(name)
                 key = self._store.get_target_project_key_locked(name)
@@ -334,10 +348,15 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         """
         if not domain_path:
             raise ValueError("domain_path is required")
+        # A quarantined target must not have its context replaced (the old session would be saved).
+        self._store.ensure_not_quarantined(name, operation="load_project_program")
         requested_version = None if version is None else int(version)
         if requested_version is not None and requested_version < 1:
             raise ValueError("version must be >= 1")
         with self._target_operation(name):
+            # Re-check under the barrier and target lock: a queued load must not
+            # pass a guard evaluated before another operation quarantined the target.
+            self._store.ensure_not_quarantined(name, operation="load_project_program")
             handle = self._store.get_target_handle(name)
             normalized_domain_path = self._normalize_domain_path_locked(handle, domain_path)
             with self._store.registry_lock.read_lock():
@@ -380,10 +399,15 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                     old_domain_path = self._store.session_domain_path(old_session)
                 except Exception:
                     old_domain_path = None
-            if requested_version is None:
-                new_session = handle.open_program(normalized_domain_path)
-            else:
-                new_session = handle.open_program(normalized_domain_path, version=requested_version)
+            try:
+                if requested_version is None:
+                    new_session = handle.open_program(normalized_domain_path)
+                else:
+                    new_session = handle.open_program(normalized_domain_path, version=requested_version)
+            except Exception as open_error:
+                # An open that failed while keeping a program consumer quarantines the target.
+                self._store.note_open_failure(name, open_error, handle=handle)
+                raise
             try:
                 loaded_domain_path = self._initialize_opened_session_locked(
                     name=name,
@@ -495,6 +519,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
 
     def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, object]:
         with self._target_operation(name):
+            self._store.ensure_not_quarantined(name, operation="save_project_program")
             with self._store.registry_lock.read_lock():
                 session = self._store.ensure_session(name)
             handle = session.get_project_handle()
@@ -518,6 +543,8 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                     saved=bool(saved),
                 ):
                     self._store.clear_dirty_program(name, resolved_domain_path)
+                elif saved:
+                    self._store.mark_pending_sync_program(name, resolved_domain_path)
             return {
                 "status": "ok",
                 "target": name,
@@ -540,13 +567,92 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             return True
         return bool(status.get("modified_since_checkout"))
 
-    def close_session(self, name: str, *, remove_program: bool = False) -> None:
+    def close_session(self, name: str, *, remove_program: bool = False, discard_changes: bool = False) -> None:
+        if discard_changes and self._is_orphan_only_target(name):
+            # A create_session that failed while a program consumer stayed held has no session,
+            # lock or project binding any more; recovery must still reach the remembered handle.
+            # There is no target lock to serialize on, so the whole recovery runs under the
+            # runtime-wide exclusive lock and re-checks the state it is about to clear.
+            with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.write_lock():
+                if not self._is_orphan_only_target(name):
+                    raise HeadlessError(
+                        f"SESSION_CHANGED: target '{name}' changed while recovery was queued; retry",
+                    )
+                self._ensure_script_threads_gone(name)
+                unreleased = self._store.release_orphans(name)
+                if unreleased:
+                    raise HeadlessError(
+                        f"TARGET_ORPHAN_UNRELEASED: {len(unreleased)} program consumer(s) for target '{name}' "
+                        "could not be released; the target stays quarantined (restart the server to recover)",
+                        details={"orphans": unreleased},
+                    )
+                self._store.clear_quarantine(name)
+            return
         with self._target_operation(name):
-            self._close_session_locked(name, remove_program=remove_program)
+            if discard_changes:
+                # Checked BEFORE the close: the quarantine payload (with the recorded stray threads) lives in
+                # the target's context, which the close removes, and releasing the program while script
+                # threads still run against it would be unsafe anyway.
+                self._ensure_script_threads_gone(name)
+            self._close_session_locked(name, remove_program=remove_program, discard_changes=discard_changes)
+            if discard_changes:
+                # Recovery is complete only when every consumer the runtime still owns is released:
+                # sessions whose close failed (session store) and programs whose release failed
+                # inside ProjectHandle.open_program (handle-owned).
+                unreleased = self._store.release_orphans(name)
+                if unreleased:
+                    raise HeadlessError(
+                        f"TARGET_ORPHAN_UNRELEASED: {len(unreleased)} program consumer(s) for target '{name}' "
+                        "could not be released; the target stays quarantined (restart the server to recover)",
+                        details={"orphans": unreleased},
+                    )
+                self._store.clear_quarantine(name)
+
+    def _ensure_script_threads_gone(self, name: str) -> None:
+        """Recovery is complete only when the threads a script left running have ended."""
+
+        payload = self._store.quarantine_state(name) or {}
+        recorded = payload.get("stray_threads") or []
+        if not recorded:
+            return
+        try:
+            from ghidra_headless.scripts.execution import alive_threads
+
+            alive = alive_threads(recorded)
+        except Exception as exc:
+            logger.debug("stray thread check skipped for target '%s': %s", name, exc)
+            return
+        if alive:
+            raise HeadlessError(
+                f"RUNTIME_DEGRADED: {len(alive)} thread(s) started by a script are still running in the server; "
+                f"the target '{name}' stays quarantined. Restart the server process to recover",
+                details={"alive_threads": alive},
+            )
+
+    def _is_orphan_only_target(self, name: str) -> bool:
+        with self._store.registry_lock.read_lock():
+            has_state = name in self._store.sessions or name in self._store.target_projects or name in self._store.locks
+            has_orphans = bool(self._store.orphaned_sessions.get(name)) or bool(self._store.orphan_handles.get(name))
+            quarantined = name in self._store.invalid_targets
+        return not has_state and (has_orphans or quarantined)
 
     def close_all(self) -> None:
-        with self._store.operation_lock.write_lock():
-            self._close_all_locked()
+        # Shutdown must not hang behind a script that ignores its monitor: wait
+        # for a running script only as long as the lock policy allows, then
+        # leave the sessions to process exit (Ghidra recovers the project lock).
+        try:
+            barrier = SCRIPT_BARRIER.write_lock(timeout=USE_POLICY_TIMEOUT)
+            barrier.__enter__()
+        except DomainError as exc:
+            if exc.code is not ErrorCode.LOCK_TIMEOUT:
+                raise
+            logger.error("close_all skipped: %s; sessions are left to process exit", exc)
+            return
+        try:
+            with self._store.operation_lock.write_lock():
+                self._close_all_locked()
+        finally:
+            barrier.__exit__(None, None, None)
 
     def _close_all_locked(self) -> None:
         with self._store.registry_lock.read_lock():
@@ -599,7 +705,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             self._store.project_handles.clear()
         self._store.core_accessor().clear_contexts()
 
-    def _close_session_locked(self, name: str, *, remove_program: bool) -> None:
+    def _close_session_locked(self, name: str, *, remove_program: bool, discard_changes: bool = False) -> None:
         with self._store.registry_lock.read_lock():
             session = self._store.sessions.get(name)
             target_exists = name in self._store.target_projects
@@ -607,6 +713,12 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             if not remove_program and target_exists:
                 return
             raise RuntimeError(f"Session '{name}' does not exist")
+        if not discard_changes and self._store.quarantine_state(name) is not None:
+            raise HeadlessError(
+                f"TARGET_EXECUTION_INVALID: target '{name}' is quarantined; a normal close would save an "
+                "unverifiable program state. Use close_session(discard_changes=true)",
+                details=dict(self._store.quarantine_state(name) or {}),
+            )
         handle = session.get_project_handle()
         domain_path = self._store.session_domain_path(session)
         if remove_program:
@@ -627,6 +739,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 remove_registry_entry=False,
                 remove_context=False,
                 remove_program=remove_program,
+                save=not discard_changes,
             )
         except Exception as exc:
             close_error = exc
@@ -929,6 +1042,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
     ) -> str:
         program = session.get_program()
         self._store.core_accessor().initialize(program, key=name)
+        bind_session_project(self._store.core_accessor, name, session)
         loaded_domain_path = session.to_dict().get("domain_path") or self._store.session_domain_path(session)
         if getattr(session, "read_only_version", None) is None:
             # A past version is immutable, so it can neither be analyzed nor saved.
@@ -1161,6 +1275,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
 
     def _restore_session_context_locked(self, name: str, session: ProgramSession) -> None:
         self._store.core_accessor().initialize(session.get_program(), key=name)
+        bind_session_project(self._store.core_accessor, name, session)
 
     @staticmethod
     def _normalize_domain_path_locked(handle: ProjectHandle, domain_path: str | None) -> str:

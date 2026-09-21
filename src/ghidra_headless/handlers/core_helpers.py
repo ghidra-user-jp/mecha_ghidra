@@ -2,6 +2,7 @@
 
 from __future__ import absolute_import, print_function
 
+import functools
 import os
 
 import jpype
@@ -28,9 +29,6 @@ from ghidra.program.model.data import (
 
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.installation import validate_linux_arm64_decompiler_install
-
-_GHIDRA_PROGRAM_UTILITIES = None
-_GHIDRA_SCRIPT_UTIL = None
 
 
 def _to_int(value, default):
@@ -488,22 +486,18 @@ def _hexdump(memory, start_address, size):
     return "\n".join(lines)
 
 
+@functools.cache
 def _ghidra_program_utilities():
-    global _GHIDRA_PROGRAM_UTILITIES
-    if _GHIDRA_PROGRAM_UTILITIES is None:
-        from ghidra.program.util import GhidraProgramUtilities
+    from ghidra.program.util import GhidraProgramUtilities
 
-        _GHIDRA_PROGRAM_UTILITIES = GhidraProgramUtilities
-    return _GHIDRA_PROGRAM_UTILITIES
+    return GhidraProgramUtilities
 
 
+@functools.cache
 def _ghidra_script_util():
-    global _GHIDRA_SCRIPT_UTIL
-    if _GHIDRA_SCRIPT_UTIL is None:
-        from ghidra.app.script import GhidraScriptUtil
+    from ghidra.app.script import GhidraScriptUtil
 
-        _GHIDRA_SCRIPT_UTIL = GhidraScriptUtil
-    return _GHIDRA_SCRIPT_UTIL
+    return GhidraScriptUtil
 
 
 def _analyze_program_if_needed(ctx):

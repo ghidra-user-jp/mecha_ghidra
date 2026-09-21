@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Annotated, Any, Iterable, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .batch_models import batch_input_model
 from .edit_models import Edits
+from .tool_descriptions import SHORT_TOOL_DESCRIPTIONS
 from .tool_models import (
     ToolInputModel,
     create_list_output_model,
@@ -27,6 +29,7 @@ class ToolCategoryTag(str, Enum):
     SYMBOL_COMMENT_EDIT = "symbol_comment_edit"
     DATATYPE_OPS = "datatype_ops"
     SHARED_SYNC = "shared_sync"
+    SCRIPTS = "scripts"
 
 
 class ToolSafetyTag(str, Enum):
@@ -77,6 +80,10 @@ class ToolSpec:
     short_description: str | None = None
     idempotent_hint: bool | None = None
     checkout_required: bool = False
+    # Presentation pipeline variant. ``None`` is the generic value/compaction
+    # path; ``"batch"`` selects the batch manifest envelope, the per-item output
+    # validation and the child-tool enablement check in the presentation layer.
+    presenter: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,13 +104,14 @@ _POSITIVE_INT = Annotated[int, Field(ge=1)]
 _NON_NEGATIVE_INT = Annotated[int, Field(ge=0)]
 _VERSION_NUMBER = Annotated[int, Field(ge=1)]
 _UNIT_INTERVAL = Annotated[float, Field(ge=0.0, le=1.0)]
+_BSIM_SIGNIFICANCE = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 _BSIM_MATCHES_PER_FUNCTION = Annotated[int, Field(ge=1, le=1_000)]
 _BSIM_MAX_RESULTS = Annotated[int, Field(ge=1, le=10_000)]
 _BSIM_MAX_APPLY_FUNCTIONS = Annotated[int, Field(ge=1, le=10_000)]
 _BSIM_MIN_FUNCTION_SIZE = Annotated[int, Field(ge=0, le=1_000_000)]
 _DETAILS_LIMIT = Annotated[int, Field(ge=0, le=200)]
 ConflictAction = Literal["abort", "discard"]
-# Ghidra listing/decompiler comment slots (CodeUnit.*_COMMENT).
+# Ghidra listing/decompiler comment slots (CommentType).
 CommentKind = Literal["pre", "eol", "post", "plate", "repeatable"]
 ExportFormat = Literal["gzf", "binary"]
 _UNDO_STEPS = Annotated[int, Field(ge=1, le=100)]
@@ -155,7 +163,11 @@ _CLOSE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("closed", bool, ...),
     ("target", str, ...),
     ("remove_program", bool, ...),
+    ("discard_changes", bool, False),
 )
+_SCRIPT_TIMEOUT_SECONDS = Annotated[int, Field(ge=1, le=3_600)]
+ScriptRuntimeName = Literal["Java", "Jython", "PyGhidra"]
+ScriptOrigin = Literal["operator", "bundled"]
 _IMPORT_PROGRAM_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("binary_path", str, ...),
     ("import_mode", Literal["auto", "raw_binary"], "auto"),
@@ -313,7 +325,7 @@ _BSIM_URL_FIELD: ToolFieldSpec = ("bsim_url", str | None, None)
 _BSIM_QUERY_FIELDS: tuple[ToolFieldSpec, ...] = (
     _BSIM_URL_FIELD,
     ("similarity_threshold", _UNIT_INTERVAL, 0.7),
-    ("significance_threshold", _UNIT_INTERVAL, 0.0),
+    ("significance_threshold", _BSIM_SIGNIFICANCE, 0.0),
     ("matches_per_function", _BSIM_MATCHES_PER_FUNCTION, 10),
     ("max_results", _BSIM_MAX_RESULTS, 500),
     # The query program is usually in the database too; its own records match
@@ -476,7 +488,7 @@ def _tool(
         public_name_overrides=dict(public_name_overrides or {}),
         omit_falsey_keys=frozenset(omit_falsey_keys),
         description=description,
-        short_description=short_description,
+        short_description=short_description or SHORT_TOOL_DESCRIPTIONS.get(name),
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -513,7 +525,7 @@ def _core_tool(
         public_name_overrides=public_name_overrides,
         omit_falsey_keys=omit_falsey_keys,
         description=description,
-        short_description=short_description,
+        short_description=short_description or SHORT_TOOL_DESCRIPTIONS.get(name),
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -559,7 +571,7 @@ def _registry_tool(
         public_name_overrides=public_name_overrides,
         omit_falsey_keys=omit_falsey_keys,
         description=description,
-        short_description=short_description,
+        short_description=short_description or SHORT_TOOL_DESCRIPTIONS.get(name),
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
     )
@@ -587,7 +599,7 @@ def _shared_sync_tool(
         input_fields=input_fields,
         output_fields=output_fields,
         description=description,
-        short_description=short_description,
+        short_description=short_description or SHORT_TOOL_DESCRIPTIONS.get(name),
         idempotent_hint=idempotent_hint,
     )
 
@@ -668,11 +680,14 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         category_tag=ToolCategoryTag.CORE,
         safety_tag=ToolSafetyTag.WRITE,
         operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(("discard_changes", bool, False),),
         output_fields=_CLOSE_SESSION_OUTPUT_FIELDS,
         result_adapter="status_target_ok",
         error_adapter="close_session_error",
         description=(
-            "Close a target's program session. Unsaved changes are saved to the project first unless the program is unchanged."
+            "Close a target's program session. Unsaved changes are saved to the project first unless the program is "
+            "unchanged. discard_changes=true closes WITHOUT saving; it is also the recovery path after a script run "
+            "left the program unverifiable (TARGET_EXECUTION_INVALID): close with discard_changes, then reload."
         ),
     ),
     _registry_tool(
@@ -804,6 +819,72 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "including analysis) or as the raw bytes of its initialized memory (format='binary'). Refuses to "
             "replace an existing file unless overwrite=true; --allowed-export-root can restrict where files go. "
             "Save with save_project_program first so a .gzf includes recent edits."
+        ),
+        idempotent_hint=False,
+    ),
+    # scripts (inline execution needs no root; --script-root adds catalog entries)
+    _registry_tool(
+        "list_scripts",
+        method_name="list_scripts",
+        category_tag=ToolCategoryTag.SCRIPTS,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        include_target=False,
+        input_fields=(
+            ("filter", str | None, None),
+            ("runtime", ScriptRuntimeName | None, None),
+            ("category", str | None, None),
+            ("origin", ScriptOrigin | None, None),
+            ("include_bundled", bool, False),
+            *_OFFSET_LIMIT_FIELDS,
+        ),
+        description=(
+            "List the Ghidra scripts the operator made executable (script_id = '<root>:<relative path>'). Each item "
+            "reports runtime (Java/Jython/PyGhidra), category, description and whether it can run now. "
+            "include_bundled=true also lists Ghidra's bundled scripts when the operator allowed them. Nothing is "
+            "compiled or executed by listing."
+        ),
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "get_script_info",
+        method_name="get_script_info",
+        category_tag=ToolCategoryTag.SCRIPTS,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        include_target=False,
+        input_fields=(("script_id", str, ...), ("include_source", bool, False)),
+        description=(
+            "Describe one catalog script: runtime, header metadata and (include_source=true) its source text, "
+            "so the arguments it expects can be read before run_script."
+        ),
+        idempotent_hint=True,
+    ),
+    _registry_tool(
+        "run_script",
+        method_name="run_script",
+        category_tag=ToolCategoryTag.SCRIPTS,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        input_fields=(
+            ("script_id", str | None, None),
+            ("source", str | None, None),
+            ("runtime", ScriptRuntimeName | None, None),
+            ("script_name", str | None, None),
+            ("args", list[str] | None, None),
+            ("timeout_seconds", _SCRIPT_TIMEOUT_SECONDS | None, None),
+            ("expected_revision", str | None, None),
+        ),
+        checkout_required=True,
+        description=(
+            "Run a Ghidra script against the loaded program, like the Script Manager does. Pass `source` with the "
+            "script text (Java: 'public class X extends GhidraScript'; Python: start with '# @runtime PyGhidra' or "
+            "'# @runtime Jython', or pass `runtime`), or `script_id` for a script from the server's catalog "
+            "(list_scripts). `args` are the script's positional string arguments. The run is wrapped in a transaction: "
+            "on success the changes are committed (transaction_outcome=committed), on an exception or timeout they "
+            "are rolled back. timeout_seconds (default 300, max 3600) cancels through the script monitor, so a loop "
+            "that never checks monitor.checkCancelled() cannot be interrupted. The result carries stdout, stderr "
+            "and, for Java, compiler diagnostics, so a failing script can be corrected and re-run."
         ),
         idempotent_hint=False,
     ),
@@ -943,7 +1024,7 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         input_fields=(
             _BSIM_URL_FIELD,
             ("similarity_threshold", _UNIT_INTERVAL, 0.9),
-            ("significance_threshold", _UNIT_INTERVAL, 0.0),
+            ("significance_threshold", _BSIM_SIGNIFICANCE, 0.0),
             ("matches_per_function", _BSIM_MATCHES_PER_FUNCTION, 5),
             ("max_functions", _BSIM_MAX_APPLY_FUNCTIONS, 500),
             ("only_default_names", bool, True),
@@ -1752,13 +1833,45 @@ _TOOL_SPECS["bsim_query"] = _registry_tool(
         ("addresses", list[str] | None, None),
         ("function_names", list[str] | None, None),
         ("similarity_threshold", _UNIT_INTERVAL, 0.7),
-        ("significance_threshold", float, 0.0),
+        ("significance_threshold", _BSIM_SIGNIFICANCE, 0.0),
         ("matches_per_function", _BSIM_MATCHES_PER_FUNCTION, 10),
         ("max_results", _BSIM_MAX_RESULTS, 500),
         ("exclude_self", bool, True),
         ("min_function_size", _BSIM_MIN_FUNCTION_SIZE, 0),
     ),
     description="Search BSim for the loaded program or selected functions. scope=functions requires addresses/function_names (up to 1,000 combined); scope=program excludes selectors. min_function_size applies only to program scope. Results retain query provenance and matched_ref for bsim_load_matched_executable.",
+)
+
+_TOOL_SPECS["batch_read"] = replace(
+    _core_tool(
+        "batch_read",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(),
+        output_fields=(
+            ("program", str | None, ...),
+            ("revision", str, ...),
+            ("status", Literal["ok", "partial", "error"], ...),
+            ("succeeded_count", int, ...),
+            ("failed_count", int, ...),
+            ("not_run_count", int, ...),
+            ("items", list[dict], ...),
+        ),
+        description=(
+            "Read 1-20 independent requests on one target under one lock. Supported tools: get_function, "
+            "get_comments, get_data_type, get_xrefs, get_call_edges; each must also be enabled individually. "
+            "Use unique short ids and each tool's usual arguments without target. Optional fields select top-level "
+            "data keys, or row keys for paged tools (page metadata is preserved). All inputs are validated first; "
+            "item query failures continue, revision changes fail the entire batch. Inspect status and all item statuses. "
+            "Page limits total at most 2000 rows. timeout_seconds is a soft deadline checked between reads, "
+            "not a hard interrupt; unstarted items are not_run. max_output_chars bounds response JSON text "
+            "(not the MCP envelope). Large batches use one result_id: read_result(mode='json', path='/items', "
+            "offset_items=N) retrieves item N. Inline mode rejects oversized responses."
+        ),
+    ),
+    input_model=batch_input_model(_TOOL_SPECS),
+    presenter="batch",
 )
 
 _DEFAULT_PROFILE_CATEGORIES = frozenset(
@@ -1907,6 +2020,8 @@ def filter_tool_specs(
 
 __all__ = [
     "CommentKind",
+    "ScriptOrigin",
+    "ScriptRuntimeName",
     "ExportFormat",
     "CommitConflictAction",
     "ConflictAction",

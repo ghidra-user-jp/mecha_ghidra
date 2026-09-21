@@ -17,6 +17,7 @@ class ToolPresentationConfig:
     large_result_preview_chars: int = 4000
     result_cache_max_entries: int = 512
     result_cache_max_bytes: int = 134_217_728
+    result_cache_max_memory_bytes: int = 134_217_728
 
     def __post_init__(self) -> None:
         if self.description_mode not in {"short", "full", "none"}:
@@ -33,6 +34,8 @@ class ToolPresentationConfig:
             raise ValueError("large_result_preview_chars must be <= large_result_threshold_chars")
         if self.result_cache_max_entries < 1:
             raise ValueError("result_cache_max_entries must be >= 1")
+        if self.result_cache_max_memory_bytes < 1:
+            raise ValueError("result_cache_max_memory_bytes must be >= 1")
         if self.result_cache_max_bytes < 1:
             raise ValueError("result_cache_max_bytes must be >= 1")
 

@@ -7,12 +7,14 @@
 多くのツールは `target`（既定値 `default`）で対象を選びます。`shared_sync` と `bsim` は既定では公開されません。[設定](configuration.ja.md#tool-exposure)で追加してください。
 
 - [プロジェクトとセッション](#core)
+- [読み取りのバッチ実行](#batch-read)
 - [関数解析](#function-analysis)
 - [メモリとデータ](#memory-data)
 - [シンボルとコメント](#symbol-comment-edit)
 - [データ型](#datatype-ops)
 - [共有プロジェクト](#shared-sync)
 - [BSim](#bsim)
+- [Ghidra スクリプト](#scripts)
 - [大きな結果の取得](#result-retrieval)
 
 <a id="core"></a>
@@ -27,7 +29,7 @@
 | `create_project` | 空のローカルGhidraプロジェクトを作成 |
 | `open_program` | 既存プロジェクトのプログラムを開いてターゲットを追加 |
 | `register_target` | プログラムを開かずにターゲットへプロジェクト情報のみ登録 |
-| `close_session` | ターゲットのセッションを閉じる |
+| `close_session` | ターゲットのセッションを閉じる。`discard_changes=true` で保存せずに閉じる（`TARGET_EXECUTION_INVALID` 後の復旧経路でもある） |
 | `close_session_and_remove_program` | セッションを閉じたうえでプログラムをプロジェクトから削除 |
 | `list_project_programs` | ターゲットが開いているプロジェクト内プログラム一覧を取得 |
 | `import_program` | バイナリまたは `.gzf` をプロジェクトへインポート |
@@ -36,6 +38,40 @@
 | `get_program_info` | 言語、コンパイラ、イメージベース、md5/sha256、エントリポイント、解析済みフラグ、未保存変更、取り消し可否、変更を検出する `revision` |
 | `undo_program_change` / `redo_program_change` | 読み込み中のプログラムの直近トランザクションを取り消し・やり直し |
 | `export_program` | プログラムを `.gzf` または生バイト列で書き出し（`--allowed-export-root` で制限可） |
+
+<a id="batch-read"></a>
+
+## 読み取りのバッチ実行
+
+`batch_read` は同じ `target` への独立した読み取り1〜20件を、1回のツール呼び出し・1回のターゲット／プロジェクトロック取得で順番に実行します。既定・readonly・fullプロファイルで公開されます。対応ツールは `get_function`、`get_comments`、`get_data_type`、`get_xrefs`、`get_call_edges` です。それぞれが単独でも公開されている必要があり、無効化したツールをバッチ経由で呼ぶことはできません。
+
+```json
+{
+  "target": "default",
+  "requests": [
+    {"id": "function", "tool": "get_function", "arguments": {"address": "0x401000"}, "fields": ["entry", "name"]},
+    {"id": "references", "tool": "get_xrefs", "arguments": {"address": "0x401000", "direction": "to", "limit": 20}}
+  ],
+  "timeout_seconds": 10,
+  "max_output_chars": 12000
+}
+```
+
+`id` は英数字・`_`・`-`からなる1〜32文字の一意な値です。`arguments` は各ツールと同じ引数で、`target` は含めません。構造・型・セレクター・公開設定を全件検証してから実行します。`get_xrefs` / `get_call_edges` の `limit` の合計は最大2,000です。前の項目の結果を後の引数に使う依存関係や、再帰バッチ、書き込み、スクリプトは扱いません。
+
+任意の `fields`（1〜32個）は返すキーを選びます。通常は結果オブジェクトの直下、ページ付きツールでは各行のキーを選び、`program`・`revision`・`has_more`・`next_cursor` は保持します。存在しないキーは省略し、ネストしたパスは解釈しません。項目ごとのページ継続は従来と同じクエリとcursorを使います。
+
+応答は1つのJSONテキストです。全体の `status` は全件成功なら `ok`、一部成功なら `partial`、成功がなければ `error`。`succeeded_count`・`failed_count`・`not_run_count` と、要求順の `items`（`id`・`tool`・`status`・`data` または `error`）を確認してください。項目の未検出・曖昧な名前などでは残りを続行します。成功が0件の場合はMCPの `isError=true`、部分成功は `isError=false` でも失敗項目を含みます。
+
+`expected_revision` は任意です。開始前の不一致、または読取中の編集・再読み込みを検出した場合は、混在した結果を返さず全体を `SESSION_CHANGED` で失敗させます。`timeout_seconds`（既定10、1〜60）はロック取得後、各読み取りの開始前に確認する時間予算です。実行中の処理やロック待機を打ち切る期限ではありません。予算超過後の項目は `not_run` / `time_budget_exhausted` になります。
+
+`max_output_chars`（既定12,000、2,048〜12,000）はバッチ全体のJSONテキスト上限です。MCPの外側の包み・トークン数は含まず、このツール固有の上限を使います。大きい結果は選択済みの全項目を1つの結果キャッシュに保存し、応答には件数・項目の状態・収まる小さい結果・共通の `result_id` を返します。省略項目の `offset_items` を使い、例えば次の呼び出しで2番目の結果を取得します。
+
+```json
+{"result_id": "返されたID", "mode": "json", "path": "/items", "offset_items": 1, "limit_items": 1}
+```
+
+取得ツールは `read_result` です。`limit_items` を増やせば複数項目をまとめて取得できます。1項目が取得上限を超える場合、`read_result` はその項目を飛ばし（`item_too_large=true`、`next_offset_items` は次の項目を指す）、生テキスト位置を返すので、`mode="text"` で読むか `search_result` で必要な箇所を探します。状態一覧だけでも予算を超える場合は `item_summaries_omitted=true` と件数を返し、一覧もキャッシュから取得します。キャッシュ上限で保存できなければ `result_unavailable=true` と明示します。通常のLRU追い出しにより、後からIDが利用できなくなる場合もあります。`large_result_mode=inline` では上限超過をエラーにするため、`fields`・`limit`・要求件数を絞ってください。
 
 <a id="function-analysis"></a>
 
@@ -175,6 +211,20 @@
 | `bsim_apply_matches` | 既定名のままの関数を最良一致の名前で一括リネーム（`dry_run` 可） |
 | `bsim_load_matched_executable` | 一致した実行ファイルを新しいターゲットとして開く。`ghidra://` の一致には `--bsim-remote-cache-dir` が必要 |
 
+<a id="scripts"></a>
+
+## Ghidra スクリプト
+
+公開は他のカテゴリと同じくツールプロファイル／カテゴリフラグで決まります（`--tool-profile full` または `--add-category scripts`）。`run_script` はスクリプト本文を直接受け取り、`--script-root` は事前に用意したスクリプト集を足すだけです。スクリプトはサーバープロセスの OS 権限で動きます。実行がどうトランザクションで包まれ、失敗時に何が起きるかは[スクリプト実行](configuration.ja.md#scripts)を参照してください。
+
+| ツール | 用途 |
+| --- | --- |
+| `list_scripts` | 実行可能なスクリプトの一覧（`script_id` = `<ルート>:<ファイル名>`。Script Manager と同じくルート直下のファイルだけを列挙し、サブディレクトリは対象外）。ランタイム（`Java` / `Jython` / `PyGhidra`）、カテゴリ、説明、実行可否を返す。`include_bundled=true` で運用者が許可した Ghidra 同梱スクリプトも含める |
+| `get_script_info` | 1 本のヘッダ情報。`include_source=true` でソース本文を返し、実行前に期待する `args` を確認できる |
+| `run_script` | 読み込み中のプログラムに対して、Script Manager と同じようにスクリプトを実行する。`source`（スクリプト本文。Java は `public class X extends GhidraScript`、Python は `# @runtime PyGhidra` / `# @runtime Jython` ヘッダで判定、無ければ `runtime` を指定）か `script_id`（カタログのスクリプト）を渡す。`args` は位置引数の文字列。実行はトランザクションで包まれ、成功時はコミット、例外やタイムアウト時はロールバック。結果には `transaction_outcome`、stdout／stderr、Java のコンパイル診断が付くので、失敗したスクリプトを直して再実行できる |
+
+失敗はロールバックされます。`SCRIPT_FAILED` / `SCRIPT_TIMEOUT` は `details.transaction_outcome`（`rolled_back` / `unchanged` / `unknown`）、上限付きで捕捉した `stdout` / `stderr`（`dropped_bytes` 付き）、Java の `SCRIPT_COMPILE_FAILED` ではコンパイラ診断を含みます。
+
 <a id="result-retrieval"></a>
 
 ## 大きな結果の取得
@@ -187,3 +237,5 @@
 | `search_result` | 保存済み大型結果を正規表現で検索。最大100件のスニペット、片側最大2,000文字の前後コンテキスト、`read_result` の offset にそのまま使えるマッチ位置を返す。`max_matches=0` では最大10,000件までスニペットなしで数えるため、`match_count` を全件数として扱う前に `scan_truncated` を確認 |
 
 編集後は `save_project_program` で保存します。共有ファイルの編集にはチェックアウトが必要です。`remove_struct_members.members` はメンバー名の文字列と `{"name": ...}` オブジェクトのどちらも受け付けます。
+
+`add_struct_members` でメンバーの `offset` を明示すると、`parse_c_declarations` で作成した型など、自動配置が有効な構造体は手動配置へ切り替わります。置換対象外のメンバーの位置を維持し、指定位置に収まるよう必要に応じて構造体を拡張します。`offset` を省略したメンバーは、その時点の配置方式で末尾へ追加します。メンバーは入力順に処理されます。

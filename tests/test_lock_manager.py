@@ -113,3 +113,23 @@ def test_lock_timeout_policy_is_configurable_at_runtime():
             configure_lock_timeout_seconds(0)
     finally:
         configure_lock_timeout_seconds(previous)
+
+
+def test_script_queue_timeout_policy_is_configurable_at_runtime():
+    from ghidra_mcp.domain import (
+        DEFAULT_SCRIPT_QUEUE_TIMEOUT_SECONDS,
+        configure_script_queue_timeout_seconds,
+        get_lock_timeout_seconds,
+        get_script_queue_timeout_seconds,
+    )
+
+    assert DEFAULT_SCRIPT_QUEUE_TIMEOUT_SECONDS > get_lock_timeout_seconds()
+    previous = get_script_queue_timeout_seconds()
+    try:
+        configure_script_queue_timeout_seconds(12.5)
+        assert get_script_queue_timeout_seconds() == 12.5
+        assert get_lock_timeout_seconds() != 12.5  # independent budgets
+        with pytest.raises(ValueError):
+            configure_script_queue_timeout_seconds(0)
+    finally:
+        configure_script_queue_timeout_seconds(previous)

@@ -3,7 +3,7 @@
 from __future__ import absolute_import, print_function
 
 
-def _instruction_to_dict(inst, code_unit):
+def _instruction_to_dict(inst, comment_types):
     operand_parts = []
     try:
         operand_count = inst.getNumOperands()
@@ -19,7 +19,7 @@ def _instruction_to_dict(inst, code_unit):
             operand_parts.append(str(operand_repr))
 
     operands = ", ".join(operand_parts)
-    comment = inst.getComment(code_unit.EOL_COMMENT)
+    comment = inst.getComment(comment_types.EOL)
     return {
         "address": str(inst.getAddress()),
         "mnemonic": str(inst.getMnemonicString()),

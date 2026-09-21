@@ -6,9 +6,9 @@ import logging
 from typing import Any, Dict
 
 from ghidra_headless.errors import HeadlessError
-from ghidra_mcp.application.locks import acquire_ordered_locks
+from ghidra_mcp.application.locks import SCRIPT_BARRIER, USE_SCRIPT_QUEUE_TIMEOUT, acquire_ordered_locks
 
-from .session_store import RuntimeSessionStore
+from .session_store import RuntimeSessionStore, bind_session_project
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,21 @@ class RuntimeCoreExecution:
         command: str,
         params: Dict[str, Any] | None = None,
         target: str = "default",
+        *,
+        exclusive: bool = False,
     ) -> Any:
-        with self._store.operation_lock.read_lock():
+        # ``exclusive`` takes the runtime-wide barrier as a writer: script
+        # execution mutates process-global state (sys.modules, OSGi bundles,
+        # the Jython runtime) that per-target locks do not cover.  The writer
+        # waits on the script queue budget, not the general lock timeout: a
+        # requested script run should outwait a running analysis, not fail.
+        process_barrier = (
+            SCRIPT_BARRIER.write_lock(timeout=USE_SCRIPT_QUEUE_TIMEOUT) if exclusive else SCRIPT_BARRIER.read_lock()
+        )
+        runtime_barrier = (
+            self._store.operation_lock.write_lock() if exclusive else self._store.operation_lock.read_lock()
+        )
+        with process_barrier, runtime_barrier:
             with self._store.registry_lock.write_lock():
                 session = self._store.ensure_session(target)
                 lock = self._store.ensure_lock(target)
@@ -62,6 +75,7 @@ class RuntimeCoreExecution:
                         raise HeadlessError(
                             f"SESSION_CHANGED: target '{target}' project changed before core command execution"
                         )
+                self._ensure_target_not_quarantined_locked(command, target)
                 self._ensure_checkout_for_mutating_command_locked(command, target)
                 result = self._store.core_accessor().execute(command, params or {}, key=target)
                 if command in self._checkout_required_commands:
@@ -69,10 +83,32 @@ class RuntimeCoreExecution:
                         session = self._store.sessions.get(target)
                     if session is not None:
                         domain_path = self._store.session_domain_path(session)
+                        try:
+                            changed = bool(session.get_program().isChanged())
+                        except Exception as exc:
+                            logger.warning(
+                                "failed to read dirty state after %s on target '%s': %s", command, target, exc
+                            )
+                            changed = True
                         with self._store.registry_lock.write_lock():
                             if self._store.sessions.get(target) is session:
-                                self._store.mark_dirty_program(target, domain_path)
+                                # Previews, no-ops and undo can leave a saved program
+                                # unchanged; do not force saves or block sync for them.
+                                self._store.update_unsaved_program(target, domain_path, changed=changed)
                 return self._normalize_result(result)
+
+    def _ensure_target_not_quarantined_locked(self, command: str, target: str) -> None:
+        """Refuse mutating commands on a target a script run left unverifiable."""
+        if command not in self._checkout_required_commands:
+            return
+        payload = self._store.quarantine_state(target)
+        if payload is None:
+            return
+        raise HeadlessError(
+            f"TARGET_EXECUTION_INVALID: target '{target}' is quarantined ({payload.get('reason')}); "
+            "close_session(discard_changes=true) then reload the program",
+            details=dict(payload),
+        )
 
     def _ensure_checkout_for_mutating_command_locked(self, command: str, target: str) -> None:
         if command not in self._checkout_required_commands:
@@ -171,6 +207,7 @@ class RuntimeCoreExecution:
             reopened = active_handle.open_program(domain_path)
             try:
                 self._store.core_accessor().initialize(reopened.get_program(), key=target)
+                bind_session_project(self._store.core_accessor, target, reopened)
                 with self._store.registry_lock.write_lock():
                     self._store.sessions[target] = reopened
                 reopened_session_bound = True

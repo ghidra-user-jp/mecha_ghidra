@@ -4,29 +4,37 @@
 
 Choose one connection method per client. **HTTP** connects to a server you start separately; **stdio** lets the client start and stop its own server process. For HTTP, complete [local setup](usage.md#local-setup) or [Docker setup](docker.md) first.
 
+HTTP uses stateless JSON responses, with no MCP session ID or stateful compatibility option. See [transport configuration](configuration.md#transports) for application state and timeout behavior.
+
+## Tool discovery
+
+Mecha Ghidra exposes tool definitions through standard `tools/list`. Clients supporting tool search can load the relevant definitions on demand. The server's `instructions` describe binary-analysis tasks and search capabilities using the tools actually enabled by the profile and individual filters: a readonly profile does not advertise editing operations. Optional BSim, repository and script capabilities appear only when their tools are exposed. Detailed usage stays in tool descriptions and `ghidra://docs/tools/{tool_name}`.
+
+The guidance is deterministic and limited to 1,900 UTF-8 bytes in the tested configurations. This follows the [server-author guidance](https://code.claude.com/docs/en/mcp#for-mcp-server-authors) to explain the tasks, when to search and key capabilities concisely. Search and deferral still depend on the client; `--tool-description-mode full` does not force that client to load every definition into the model context.
+
 ## Codex
 
 For the running HTTP server, add this to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.ghidra_headless]
+[mcp_servers.mecha_ghidra]
 url = "http://127.0.0.1:8081/mcp"
 ```
 
 Or register the same URL from the CLI:
 
 ```bash
-codex mcp add ghidra_headless --url http://127.0.0.1:8081/mcp
+codex mcp add mecha_ghidra --url http://127.0.0.1:8081/mcp
 ```
 
 For stdio, use this entry **instead**. Replace all absolute paths; `analysis.gpr` must already exist.
 
 ```toml
-[mcp_servers.ghidra_headless]
+[mcp_servers.mecha_ghidra]
 command = "uv"
 args = [
   "--directory", "/absolute/path/to/mecha_ghidra",
-  "run", "ghidra-mcp",
+  "run", "mecha_ghidra",
   "--project-location", "/absolute/path/to/analysis.gpr",
   "--transport", "stdio"
 ]
@@ -40,7 +48,7 @@ See [Codex MCP configuration](https://developers.openai.com/codex/mcp) for clien
 Connect to the running HTTP server:
 
 ```bash
-claude mcp add --transport http ghidra_headless http://127.0.0.1:8081/mcp
+claude mcp add --transport http mecha_ghidra http://127.0.0.1:8081/mcp
 ```
 
 Use `/mcp` in Claude Code to inspect the connection. Configuration scopes and stdio options are described in the [Claude Code MCP guide](https://code.claude.com/docs/en/mcp).
@@ -52,7 +60,7 @@ For Kilo Code's VS Code extension, add an enabled server entry to its MCP settin
 ```json
 {
   "mcpServers": {
-    "ghidra_headless": {
+    "mecha_ghidra": {
       "url": "http://127.0.0.1:8081/mcp",
       "disabled": false
     }
@@ -67,11 +75,11 @@ For a client using the `mcpServers` stdio format, including Roo Code, the launch
 ```json
 {
   "mcpServers": {
-    "ghidra_headless": {
+    "mecha_ghidra": {
       "command": "uv",
       "args": [
         "--directory", "/absolute/path/to/mecha_ghidra",
-        "run", "ghidra-mcp",
+        "run", "mecha_ghidra",
         "--project-location", "/absolute/path/to/analysis.gpr",
         "--transport", "stdio"
       ],
@@ -89,4 +97,4 @@ For a client using the `mcpServers` stdio format, including Roo Code, the launch
 
 If a GUI client cannot find `uv`, use its absolute executable path. Give the stdio process `GHIDRA_INSTALL_DIR` explicitly, as above; a GUI app may not inherit shell variables. Configure a client timeout long enough for import and analysis; `--lock-timeout-seconds` only controls queue waiting and does not extend client timeouts.
 
-For legacy SSE clients, start the server with `--transport sse` and use `/sse`. Shared-repository credentials belong to the server's [Ghidra Server configuration](shared-projects.md), not the HTTP client entry.
+Shared-repository credentials belong to the server's [Ghidra Server configuration](shared-projects.md), not the HTTP client entry.

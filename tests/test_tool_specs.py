@@ -20,7 +20,7 @@ from ghidra_mcp.contracts.tool_spec import (
     get_checkout_required_tool_names,
 )
 from ghidra_mcp.presentation import cli as presentation_cli
-from ghidra_mcp.presentation.tool_registry import build_tool_functions, build_tool_objects, public_parameter_names
+from ghidra_mcp.presentation.tool_registry import build_tool_objects, public_parameter_names
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_SPEC_PATH = ROOT / "src" / "ghidra_mcp" / "contracts" / "tool_spec.py"
@@ -142,13 +142,7 @@ def test_bsim_specs_are_tagged_as_bsim_category():
 
 def test_shared_sync_specs_register_via_generic_tool_registration():
     specs = filter_tool_specs(allow_categories=[ToolCategoryTag.SHARED_SYNC])
-    tools = build_tool_functions(
-        specs=specs,
-        dispatcher_provider=lambda: presentation_cli.dispatch_tool,
-        registry_provider=lambda: presentation_cli._registry,
-    )
-
-    tool_objects = build_tool_objects(tools=tools, specs=specs)
+    tool_objects = build_tool_objects(specs=specs)
     annotations_by_name: dict[str, Any] = {tool.name: tool.annotations for tool in tool_objects}
 
     shared_sync_names = list(specs)
@@ -464,7 +458,7 @@ def test_typed_input_models_for_function_listing_slice():
             "project_name": (str | None, None),
         },
     )
-    _assert_fields("close_session", {})
+    _assert_fields("close_session", {"discard_changes": (bool, False)})
     _assert_fields("close_session_and_remove_program", {})
     _assert_fields(
         "get_project_sync_status",
@@ -618,6 +612,7 @@ def test_specs_include_contract_driven_metadata():
 
 def test_checkout_required_tools_are_declared_on_specs():
     assert get_checkout_required_tool_names() == {
+        "run_script",
         "apply_edits",
         "set_function_prototype",
         "set_local_variable_type",
@@ -693,12 +688,14 @@ def test_all_output_models_are_strict_and_typed():
             "closed": (bool, ...),
             "target": (str, ...),
             "remove_program": (bool, ...),
+            "discard_changes": (bool, False),
         },
         "close_session_and_remove_program": {
             "status": (str, ...),
             "closed": (bool, ...),
             "target": (str, ...),
             "remove_program": (bool, ...),
+            "discard_changes": (bool, False),
         },
         "save_project_program": {
             "status": (str, ...),
@@ -842,6 +839,15 @@ def test_all_output_models_are_strict_and_typed():
         },
     }
 
+    direct_output_fields["batch_read"] = {
+        "program": (str | None, ...),
+        "revision": (str, ...),
+        "status": (Literal["ok", "partial", "error"], ...),
+        "succeeded_count": (int, ...),
+        "failed_count": (int, ...),
+        "not_run_count": (int, ...),
+        "items": (list[dict], ...),
+    }
     for name in ("get_xrefs", "get_call_edges", "disassemble"):
         direct_output_fields[name] = {
             "program": (str | None, ...),

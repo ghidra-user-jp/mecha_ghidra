@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 FUNCTION_COMMANDS: tuple[str, ...] = (
+    "batch_read",
     "get_xrefs",
     "get_call_edges",
     "disassemble",
@@ -70,8 +71,10 @@ BSIM_COMMANDS: tuple[str, ...] = (
     "bsim_update_target_signatures",
 )
 
+SCRIPT_COMMANDS: tuple[str, ...] = ("run_script",)
+
 CORE_COMMANDS: frozenset[str] = frozenset(
-    (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS, *BSIM_COMMANDS)
+    (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS, *BSIM_COMMANDS, *SCRIPT_COMMANDS)
 )
 
 __all__ = [
@@ -80,5 +83,6 @@ __all__ = [
     "DATATYPE_COMMANDS",
     "FUNCTION_COMMANDS",
     "MEMORY_COMMANDS",
+    "SCRIPT_COMMANDS",
     "SYMBOL_COMMANDS",
 ]

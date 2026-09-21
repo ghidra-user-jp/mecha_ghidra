@@ -49,7 +49,7 @@ cd mecha_ghidra
 uv sync
 export GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra
 
-uv run ghidra-mcp \
+uv run mecha_ghidra \
   --project-location /absolute/path/to/analysis.gpr \
   --transport stdio
 ```

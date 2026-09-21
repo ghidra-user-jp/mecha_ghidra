@@ -11,7 +11,7 @@ This guide assumes a working database and a loaded program. To create a PostgreS
 Set `GHIDRA_INSTALL_DIR` and put the database password in `BSIM_PASSWORD`. Point to an existing project and program:
 
 ```bash
-uv run ghidra-mcp \
+uv run mecha_ghidra \
   --project-location /work/analysis.gpr \
   --domain-path /sample.bin \
   --transport stdio \

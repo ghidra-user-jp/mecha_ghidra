@@ -12,11 +12,11 @@ MAX_UNDO_STEPS = 100
 MAX_ENTRY_POINTS = 50
 EXPORT_FORMATS = ("gzf", "binary")
 _COMMENT_KINDS = (
-    ("pre", "PRE_COMMENT"),
-    ("eol", "EOL_COMMENT"),
-    ("post", "POST_COMMENT"),
-    ("plate", "PLATE_COMMENT"),
-    ("repeatable", "REPEATABLE_COMMENT"),
+    ("pre", "PRE"),
+    ("eol", "EOL"),
+    ("post", "POST"),
+    ("plate", "PLATE"),
+    ("repeatable", "REPEATABLE"),
 )
 
 
@@ -76,14 +76,14 @@ def get_program_info(params, *, ensure_context, safe_call, iter_items):
     }
 
 
-def get_comments(params, *, ensure_context, get_address, code_unit):
+def get_comments(params, *, ensure_context, get_address, comment_types):
     """Return every comment slot at an address (None when a slot is empty)."""
     ctx = ensure_context()
     address_text = params.get("address")
     address = get_address(ctx, address_text)
     result = {"address": address_text}
     for kind, attribute in _COMMENT_KINDS:
-        comment = ctx.listing.getComment(getattr(code_unit, attribute), address)
+        comment = ctx.listing.getComment(getattr(comment_types, attribute), address)
         result[kind] = None if comment is None else str(comment)
     return result
 

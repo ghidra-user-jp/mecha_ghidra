@@ -1,6 +1,6 @@
 """Alias module: ``ghidra_mcp.cli`` *is* :mod:`ghidra_mcp.presentation.cli`.
 
-The console script (``ghidra-mcp = ghidra_mcp.cli:main``), the test suite and
+The console script (``mecha_ghidra``), the test suite and
 downstream users import this path and expect the full module surface, not just
 ``main``.  Registering the presentation module under this name keeps every
 attribute lookup consistent between the two import paths.

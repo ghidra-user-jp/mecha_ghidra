@@ -11,7 +11,7 @@ BSimは、関数のシグネチャを解析済みプログラムのデータベ�
 `GHIDRA_INSTALL_DIR` を設定し、データベースのパスワードを環境変数 `BSIM_PASSWORD` に渡します。既存プロジェクトとプログラムを指定してください。
 
 ```bash
-uv run ghidra-mcp \
+uv run mecha_ghidra \
   --project-location /work/analysis.gpr \
   --domain-path /sample.bin \
   --transport stdio \

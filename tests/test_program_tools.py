@@ -131,15 +131,13 @@ def test_undo_reports_noop_when_history_is_empty_and_bounds_count():
 def test_get_comments_returns_every_slot():
     stored = {("PRE", "0x1000"): "above", ("PLATE", "0x1000"): "header"}
     listing = SimpleNamespace(getComment=lambda kind, address: stored.get((kind, address)))
-    code_unit = SimpleNamespace(
-        PRE_COMMENT="PRE", EOL_COMMENT="EOL", POST_COMMENT="POST", PLATE_COMMENT="PLATE", REPEATABLE_COMMENT="REP"
-    )
+    comment_types = SimpleNamespace(PRE="PRE", EOL="EOL", POST="POST", PLATE="PLATE", REPEATABLE="REP")
 
     result = get_comments(
         {"address": "0x1000"},
         ensure_context=lambda: SimpleNamespace(listing=listing),
         get_address=lambda _ctx, text: text,
-        code_unit=code_unit,
+        comment_types=comment_types,
     )
 
     assert result == {
@@ -360,6 +358,45 @@ def test_set_enum_values_replaces_and_removes_names():
             describe_enum=lambda item: dict(item.values),
             iter_items=iter,
         )
+
+
+@pytest.mark.parametrize("order", [("A", "B"), ("B", "A")])
+def test_set_enum_values_can_change_signedness_in_either_key_order(order):
+    class RangeCheckedEnum(_FakeEnum):
+        def add(self, name, value, comment=""):
+            current = [entry[0] for entry in self.values.values()]
+            if (value > 127 and any(v < 0 for v in current)) or (value < 0 and any(v > 127 for v in current)):
+                raise ValueError("value conflicts with the enum's current signedness")
+            super().add(name, value, comment)
+
+    enum_dt = RangeCheckedEnum("/", "Codes", 1)
+    enum_dt.add("A", -1)
+    enum_dt.add("B", -2)
+    enum_dt.add("KEEP", 5, "preserved")
+    values = {"A": 255, "B": 1}
+    result = set_enum_values(
+        {"name": "Codes", "values": {key: values[key] for key in order}},
+        ensure_context=lambda: object(),
+        txn=_txn,
+        get_enum_datatype=lambda *_args: enum_dt,
+        describe_enum=lambda item: dict(item.values),
+        iter_items=iter,
+    )
+    assert result == {"A": (255, ""), "B": (1, ""), "KEEP": (5, "preserved")}
+
+
+def test_set_enum_values_keeps_normalized_name_replacement_and_remove_overlap():
+    enum_dt = _FakeEnum("/", "Codes", 1)
+    enum_dt.add("A", 1)
+    result = set_enum_values(
+        {"name": "Codes", "remove": ["A"], "values": {"A": 2, " A ": {"value": 3, "comment": "last"}}},
+        ensure_context=lambda: object(),
+        txn=_txn,
+        get_enum_datatype=lambda *_args: enum_dt,
+        describe_enum=lambda item: dict(item.values),
+        iter_items=iter,
+    )
+    assert result == {"A": (3, "last")}
 
 
 def test_export_program_refuses_existing_file_and_missing_directory(tmp_path):

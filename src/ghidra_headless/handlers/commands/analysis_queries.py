@@ -15,19 +15,18 @@ def get_xrefs(params, *, ensure_context, get_address, iter_items):
     manager = ctx.reference_manager
     refs = manager.getReferencesTo(address) if direction == "to" else manager.getReferencesFrom(address)
 
-    def rows():
-        for ref in iter_items(refs):
-            source, destination = ref.getFromAddress(), ref.getToAddress()
-            yield {
-                "from": str(source),
-                "to": str(destination),
-                "type": str(ref.getReferenceType()),
-                "operand_index": int(ref.getOperandIndex()),
-                "from_function": function_ref(ctx.function_manager.getFunctionContaining(source)),
-                "to_function": function_ref(ctx.function_manager.getFunctionContaining(destination)),
-            }
+    def describe(ref):
+        source, destination = ref.getFromAddress(), ref.getToAddress()
+        return {
+            "from": str(source),
+            "to": str(destination),
+            "type": str(ref.getReferenceType()),
+            "operand_index": int(ref.getOperandIndex()),
+            "from_function": function_ref(ctx.function_manager.getFunctionContaining(source)),
+            "to_function": function_ref(ctx.function_manager.getFunctionContaining(destination)),
+        }
 
-    return page(ctx, "get_xrefs", params, rows())
+    return page(ctx, "get_xrefs", params, iter_items(refs), convert=describe)
 
 
 def _call_edge(ctx, ref, include_tail_calls):
@@ -41,8 +40,8 @@ def _call_edge(ctx, ref, include_tail_calls):
     else:
         return None
     return {
-        "caller": function_ref(caller),
-        "callee": function_ref(callee),
+        "caller": caller,
+        "callee": callee,
         "call_site": str(ref.getFromAddress()),
         "destination": str(ref.getToAddress()),
         "kind": edge_kind,
@@ -55,8 +54,8 @@ def _thunk_edge(caller, callee):
     # This is a semantic transfer from Ghidra's thunk relation. No instruction
     # address is invented when the listing contains no corresponding flow ref.
     return {
-        "caller": function_ref(caller),
-        "callee": function_ref(callee),
+        "caller": caller,
+        "callee": callee,
         "call_site": None,
         "destination": str(callee.getEntryPoint()),
         "kind": "thunk",
@@ -92,7 +91,7 @@ def get_call_edges(params, *, ensure_context, get_address, find_function_by_name
                     yield edge
             if unresolved and not emitted and inst.getFlowType().isCall():
                 yield {
-                    "caller": function_ref(function),
+                    "caller": function,
                     "callee": None,
                     "call_site": str(inst.getAddress()),
                     "destination": None,
@@ -129,10 +128,13 @@ def get_call_edges(params, *, ensure_context, get_address, find_function_by_name
                 if caller is not None:
                     yield _thunk_edge(caller, function)
 
-    return page(ctx, "get_call_edges", params, incoming() if direction == "in" else outgoing())
+    def describe(edge):
+        return {**edge, "caller": function_ref(edge["caller"]), "callee": function_ref(edge["callee"])}
+
+    return page(ctx, "get_call_edges", params, incoming() if direction == "in" else outgoing(), convert=describe)
 
 
-def disassemble(params, *, ensure_context, get_address, find_function_by_name, iter_items, code_unit):
+def disassemble(params, *, ensure_context, get_address, find_function_by_name, iter_items, comment_types):
     ctx = ensure_context()
     function_selector = bool(params.get("address") or params.get("name"))
     range_selector = any(params.get(k) is not None for k in ("start_address", "end_address", "length"))
@@ -140,7 +142,8 @@ def disassemble(params, *, ensure_context, get_address, find_function_by_name, i
         raise ValueError("select a function (address/name) or a range (start_address with end_address/length)")
     if function_selector:
         function = resolve_function(ctx, params, get_address, find_function_by_name)
-        instructions = iter_items(ctx.listing.getInstructions(function.getBody(), True))
+        body = function.getBody()
+        start, end = body.getMinAddress(), body.getMaxAddress()
     else:
         if not params.get("start_address") or (params.get("end_address") is None) == (params.get("length") is None):
             raise ValueError("start_address and exactly one of end_address or length are required")
@@ -157,17 +160,40 @@ def disassemble(params, *, ensure_context, get_address, find_function_by_name, i
         if start.getAddressSpace() != end.getAddressSpace() or start.compareTo(end) > 0:
             raise ValueError("range must be ordered and within one address space")
 
-        def range_instructions():
-            for inst in iter_items(ctx.listing.getInstructions(start, True)):
-                if (
-                    inst.getAddress().getAddressSpace() != start.getAddressSpace()
-                    or inst.getAddress().compareTo(end) > 0
-                ):
-                    break
-                yield inst
+    def instructions(resume):
+        begin = get_address(ctx, resume) if resume is not None else start
+        if begin is None or end is None:
+            return
+        if function_selector:
+            if not body.contains(begin):
+                raise ValueError("cursor address is outside the selected function body")
+            remaining = body
+            if resume is not None:
+                from ghidra.program.model.address import AddressSet
 
-        instructions = range_instructions()
-    return page(ctx, "disassemble", params, (_instruction_to_dict(inst, code_unit) for inst in instructions))
+                # Trim ranges, not individual instructions. Preserve holes and
+                # address spaces in a non-contiguous function body.
+                remaining = AddressSet(body)
+                remaining.deleteFromMin(begin)
+                remaining.add(begin)
+            yield from iter_items(ctx.listing.getInstructions(remaining, True))
+            return
+        if begin.getAddressSpace() != start.getAddressSpace() or begin.compareTo(start) < 0 or begin.compareTo(end) > 0:
+            raise ValueError("cursor address is outside the selected instruction range")
+        for inst in iter_items(ctx.listing.getInstructions(begin, True)):
+            address = inst.getAddress()
+            if address.getAddressSpace() != end.getAddressSpace() or address.compareTo(end) > 0:
+                break
+            yield inst
+
+    return page(
+        ctx,
+        "disassemble",
+        params,
+        instructions,
+        convert=lambda inst: _instruction_to_dict(inst, comment_types),
+        seek_key=lambda inst: str(inst.getAddress()),
+    )
 
 
 def get_data_type(

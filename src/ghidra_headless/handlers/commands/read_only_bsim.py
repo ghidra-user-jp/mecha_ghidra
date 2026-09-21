@@ -308,7 +308,9 @@ def _collect_matches(ctx, target, rows, *, exclude_md5=None, matches_per_functio
             str(item["matched_ref"].get("address") or ""),
         )
     )
-    if matches_per_function is not None and excluded:
+    # The query requests an extra candidate when self-filtering is enabled.
+    # Enforce the cap even when none of those candidates belongs to this program.
+    if matches_per_function is not None:
         per_function = {}
         capped = []
         cap = max(1, int(matches_per_function))

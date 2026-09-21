@@ -3,6 +3,29 @@
 from __future__ import absolute_import, print_function
 
 
+def _place_struct_member(struct, data_type, length, field_name, comment, offset):
+    if offset is None:
+        struct.add(data_type, length, field_name, comment)
+        return
+    if isinstance(offset, bool) or not isinstance(offset, (int, str)):
+        raise ValueError("member offset must be an integer")
+    offset = int(offset)
+    if offset < 0:
+        raise ValueError("member offset must be >= 0")
+    # Packed structures repack replacements and ignore growStructure. Freeze
+    # their existing offsets before applying an explicitly positioned member.
+    if struct.isPackingEnabled():
+        struct.setPackingEnabled(False)
+    # replaceAtOffset only accepts positions within the existing structure.
+    # Grow at the end so explicit placement preserves all earlier offsets.
+    # Ghidra reports length 1 for an empty structure, although it has no bytes.
+    current_length = 0 if struct.isZeroLength() else struct.getLength()
+    growth = offset + length - current_length
+    if growth > 0:
+        struct.growStructure(growth)
+    struct.replaceAtOffset(offset, data_type, length, field_name, comment)
+
+
 def create_struct(
     params,
     *,
@@ -36,10 +59,7 @@ def create_struct(
             comment = member.get("comment", "")
             offset = member.get("offset")
             length = component_length(data_type)
-            if offset is not None:
-                struct.replaceAtOffset(int(offset), data_type, length, field_name, comment)
-            else:
-                struct.add(data_type, length, field_name, comment)
+            _place_struct_member(struct, data_type, length, field_name, comment, offset)
         manager.replaceDataType(struct, struct, True)
         return struct
 
@@ -77,10 +97,7 @@ def add_struct_members(
             comment = member.get("comment", "")
             offset = member.get("offset")
             length = component_length(data_type)
-            if offset is not None:
-                struct.replaceAtOffset(int(offset), data_type, length, field_name, comment)
-            else:
-                struct.add(data_type, length, field_name, comment)
+            _place_struct_member(struct, data_type, length, field_name, comment, offset)
         dt_manager(ctx).replaceDataType(struct, struct, True)
         return struct
 
@@ -296,12 +313,13 @@ def set_enum_values(params, *, ensure_context, txn, get_enum_datatype, describe_
     if not name:
         raise ValueError("name is required")
     category = params.get("category")
-    entries = _normalize_enum_values(params.get("values"))
+    # Preserve last-value-wins for names that normalize to the same spelling.
+    replacements = {name: (value, comment) for name, value, comment in _normalize_enum_values(params.get("values"))}
     remove = params.get("remove") or []
     if isinstance(remove, (str, bytes)) or not isinstance(remove, (list, tuple)):
         raise ValueError("remove must be a list of value names")
     remove_names = [str(item).strip() for item in remove if str(item).strip()]
-    if not entries and not remove_names:
+    if not replacements and not remove_names:
         raise ValueError("values or remove is required")
 
     def _update():
@@ -312,14 +330,12 @@ def set_enum_values(params, *, ensure_context, txn, get_enum_datatype, describe_
         missing = [item for item in remove_names if item not in existing]
         if missing:
             raise LookupError("Enum values not found: %s" % ", ".join(missing))
-        for value_name in remove_names:
+        # Ghidra infers signedness from the values still present. Remove all
+        # replaced values first so old signs cannot make key order significant.
+        for value_name in set(remove_names) | (existing & replacements.keys()):
             enum_dt.remove(value_name)
-            existing.discard(value_name)
-        for value_name, value, comment in entries:
-            if value_name in existing:
-                enum_dt.remove(value_name)
+        for value_name, (value, comment) in replacements.items():
             enum_dt.add(value_name, value, comment)
-            existing.add(value_name)
         return enum_dt
 
     updated = txn(ctx, "Set enum values", _update)

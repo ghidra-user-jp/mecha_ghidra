@@ -21,7 +21,7 @@ def program_metadata(ctx):
     }
 
 
-def page(ctx, tool, params, rows):
+def page(ctx, tool, params, rows, *, convert=None, seek_key=None):
     limit = int(params.get("limit", 100))
     if not 1 <= limit <= 10000:
         raise ValueError("limit must be between 1 and 10000")
@@ -35,7 +35,15 @@ def page(ctx, tool, params, rows):
             if len(cursor) > 1024:
                 raise ValueError("cursor is too long")
             prior_revision, prior_query, offset = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
-            if type(offset) is not int or not 0 <= offset <= sys.maxsize - limit - 1:
+            if isinstance(offset, dict):
+                if (
+                    seek_key is None
+                    or set(offset) != {"seek"}
+                    or not isinstance(offset["seek"], str)
+                    or len(offset["seek"]) > 256
+                ):
+                    raise ValueError("invalid seek cursor")
+            elif type(offset) is not int or not 0 <= offset <= sys.maxsize - limit - 1:
                 raise ValueError("invalid cursor offset")
         except (ValueError, TypeError) as exc:
             raise ValueError("invalid pagination cursor") from exc
@@ -43,16 +51,27 @@ def page(ctx, tool, params, rows):
             raise ValueError("cursor belongs to a different query")
         if prior_revision != metadata["revision"]:
             raise HeadlessError("SESSION_CHANGED: program changed; restart pagination")
+    if callable(rows):
+        rows = rows(offset["seek"] if isinstance(offset, dict) else None)
+    if isinstance(offset, dict):
+        offset = 0
     selected = list(islice(rows, offset, offset + limit + 1))
+    items = selected[:limit] if convert is None else [convert(row) for row in selected[:limit]]
     if program_revision(ctx) != metadata["revision"]:
         raise HeadlessError("SESSION_CHANGED: program changed while reading; restart pagination")
     has_more = len(selected) > limit
     next_cursor = None
     if has_more:
         next_cursor = base64.urlsafe_b64encode(
-            json.dumps([metadata["revision"], fingerprint, offset + limit]).encode()
+            json.dumps(
+                [
+                    metadata["revision"],
+                    fingerprint,
+                    {"seek": seek_key(selected[limit])} if seek_key is not None else offset + limit,
+                ]
+            ).encode()
         ).decode()
-    return {**metadata, "items": selected[:limit], "has_more": has_more, "next_cursor": next_cursor}
+    return {**metadata, "items": items, "has_more": has_more, "next_cursor": next_cursor}
 
 
 def resolve_function(ctx, params, get_address, find_function_by_name):

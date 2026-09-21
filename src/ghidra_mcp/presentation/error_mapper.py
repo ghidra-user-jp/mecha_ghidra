@@ -77,6 +77,36 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
         "READ_ONLY_PROGRAM: the target holds a past version opened read-only; "
         "load the current version with load_project_program before mutating"
     ),
+    ErrorCode.SCRIPTS_DISABLED: (
+        "SCRIPTS_DISABLED: no script root is configured on this server (start it with --script-root DIR)"
+    ),
+    ErrorCode.SCRIPT_NOT_FOUND: "SCRIPT_NOT_FOUND: no script with that script_id is in the catalog; use list_scripts",
+    ErrorCode.AMBIGUOUS_SCRIPT: "AMBIGUOUS_SCRIPT: several catalog entries match; pass the full root-qualified script_id",
+    ErrorCode.SCRIPT_RUNTIME_AMBIGUOUS: (
+        "SCRIPT_RUNTIME_AMBIGUOUS: the .py script has no '@runtime Jython' or '@runtime PyGhidra' header "
+    ),
+    ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE: (
+        "SCRIPT_RUNTIME_UNAVAILABLE: the script runtime is not available in this Ghidra installation"
+    ),
+    ErrorCode.SCRIPT_COMPILE_FAILED: "SCRIPT_COMPILE_FAILED: the script did not compile; see details.diagnostics",
+    ErrorCode.SCRIPT_LOAD_FAILED: "SCRIPT_LOAD_FAILED: the script class could not be loaded or instantiated",
+    ErrorCode.SCRIPT_FAILED: (
+        "SCRIPT_FAILED: the script did not complete successfully; details.transaction_outcome says what was kept"
+    ),
+    ErrorCode.SCRIPT_TIMEOUT: (
+        "SCRIPT_TIMEOUT: the script exceeded timeout_seconds; program changes were rolled back where possible"
+    ),
+    ErrorCode.SCRIPT_CANCELLED: "SCRIPT_CANCELLED: the script was cancelled before completion",
+    ErrorCode.TARGET_EXECUTION_INVALID: (
+        "TARGET_EXECUTION_INVALID: the target is quarantined after a failed script run; "
+        "close_session(discard_changes=true) then reload the program"
+    ),
+    ErrorCode.TARGET_ORPHAN_UNRELEASED: (
+        "TARGET_ORPHAN_UNRELEASED: a program consumer could not be released; the target stays quarantined"
+    ),
+    ErrorCode.RUNTIME_DEGRADED: (
+        "RUNTIME_DEGRADED: the runtime is degraded after a script run left work running; restart the server process"
+    ),
 }
 
 

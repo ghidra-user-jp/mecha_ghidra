@@ -20,11 +20,11 @@ _FIELDS = {
 }
 
 
-def _snapshot(ctx, edit, *, after, get_address, decompile_high_function, iter_items, code_unit):
+def _snapshot(ctx, edit, *, after, get_address, decompile_high_function, iter_items, comment_types):
     kind = edit["kind"]
     address = get_address(ctx, edit.get("function_address") or edit.get("address"))
     if kind == "set_comment":
-        comment_type = getattr(code_unit, COMMENT_KINDS[edit["comment_type"]])
+        comment_type = getattr(comment_types, COMMENT_KINDS[edit["comment_type"]])
         return {"address": str(address), "comment": ctx.listing.getComment(comment_type, address) or ""}
     if kind == "rename_data":
         symbol = ctx.symbol_table.getPrimarySymbol(address)
@@ -52,7 +52,9 @@ def _snapshot(ctx, edit, *, after, get_address, decompile_high_function, iter_it
     return state
 
 
-def apply_edits(params, *, ensure_context, execute_edit, get_address, decompile_high_function, iter_items, code_unit):
+def apply_edits(
+    params, *, ensure_context, execute_edit, get_address, decompile_high_function, iter_items, comment_types
+):
     ctx = ensure_context()
     edits = params.get("edits")
     if not isinstance(edits, list) or not 1 <= len(edits) <= 100:
@@ -83,7 +85,7 @@ def apply_edits(params, *, ensure_context, execute_edit, get_address, decompile_
                     get_address=get_address,
                     decompile_high_function=decompile_high_function,
                     iter_items=iter_items,
-                    code_unit=code_unit,
+                    comment_types=comment_types,
                 )
                 result["before"] = _snapshot(ctx, edit, after=False, **snapshot_args)
                 args = {

@@ -40,6 +40,7 @@ class FakeTargetService:
         *,
         project_name: str | None = None,
         domain_path: str | None = None,
+        validate=None,
     ):
         self.created.append(
             (
@@ -51,6 +52,8 @@ class FakeTargetService:
                 },
             )
         )
+        if validate is not None:
+            validate()
         self.targets.append(
             {
                 "target": name,
@@ -567,6 +570,7 @@ def test_bsim_load_matched_executable_does_not_reuse_same_domain_from_different_
             *,
             project_name: str | None = None,
             domain_path: str | None = None,
+            validate=None,
         ):
             if any(item.get("target") == name for item in self.targets):
                 raise ValueError(f"Session '{name}' already exists")
@@ -575,6 +579,7 @@ def test_bsim_load_matched_executable_does_not_reuse_same_domain_from_different_
                 project_location,
                 project_name=project_name,
                 domain_path=domain_path,
+                validate=validate,
             )
 
     target = StrictTargetService()

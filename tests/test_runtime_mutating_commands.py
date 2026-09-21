@@ -6,13 +6,16 @@ import shutil
 import uuid
 from pathlib import Path
 
+import jpype
 import pyghidra
-import pyghidra.core as pycore
 import pytest
 from mcp.types import CallToolResult
 
+from cli_support import ToolHarness
 from ghidra_headless.launcher import start_headless_jvm
-from ghidra_mcp import cli
+
+# Tool callables bound to a swappable registry (see tests/cli_support.py).
+cli_tools = ToolHarness()
 
 RUNTIME_VALIDATION_ENABLED = os.environ.get("GHIDRA_RUNTIME_VALIDATION") == "1"
 
@@ -83,7 +86,7 @@ def _ensure_project_created(project_dir: Path, project_name: str) -> None:
     if marker.exists():
         return
     project_dir.mkdir(parents=True, exist_ok=True)
-    ghidra_project = pycore.JClass("ghidra.base.project.GhidraProject")
+    ghidra_project = jpype.JClass("ghidra.base.project.GhidraProject")
     project = ghidra_project.createProject(str(project_dir), project_name, False)
     project.close()
 
@@ -156,12 +159,14 @@ def _derive_patch_bytes_from_hexdump(hexdump: str) -> str:
 
 
 def _pick_primary_function(target: str) -> tuple[str, str, str]:
-    search_result = _unwrap_runtime_result(cli.list_functions(filter="main", offset=0, limit=10, target=target))
-    candidates = list(search_result) or _unwrap_runtime_result(cli.list_functions(offset=0, limit=20, target=target))
+    search_result = _unwrap_runtime_result(cli_tools.list_functions(filter="main", offset=0, limit=10, target=target))
+    candidates = list(search_result) or _unwrap_runtime_result(
+        cli_tools.list_functions(offset=0, limit=20, target=target)
+    )
     first = candidates[0]
     address = first["entry"]
     name = first["name"]
-    decompiled = _unwrap_runtime_result(cli.decompile_function(address=address, target=target))
+    decompiled = _unwrap_runtime_result(cli_tools.decompile_function(address=address, target=target))
     return address, name, decompiled
 
 
@@ -169,12 +174,12 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
     last_error = None
     for entry in function_entries:
         address = entry["entry"]
-        decompiled = _unwrap_runtime_result(cli.decompile_function(address=address, target=target))
+        decompiled = _unwrap_runtime_result(cli_tools.decompile_function(address=address, target=target))
         for var_name in _extract_variable_candidates(decompiled):
             new_name = f"it_{var_name}_renamed"
             try:
                 rename_result = _unwrap_runtime_result(
-                    cli.apply_edits(
+                    cli_tools.apply_edits(
                         target=target,
                         edits=[
                             {
@@ -190,7 +195,7 @@ def _run_variable_mutations(target: str, function_entries: list[dict]) -> tuple[
                     last_error = rename_result
                     continue
                 set_type_result = _unwrap_runtime_result(
-                    cli.set_local_variable_type(
+                    cli_tools.set_local_variable_type(
                         function_address=address,
                         variable_name=new_name,
                         new_type="int",
@@ -215,12 +220,12 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
     _ensure_project_created(project_dir, project_name)
 
     try:
-        cli.register_target(
+        cli_tools.register_target(
             target=target,
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli.import_program(
+        imported = cli_tools.import_program(
             target=target,
             binary_path=str(raw_blob),
             import_mode="raw_binary",
@@ -229,27 +234,27 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
             entry_offset=0,
         )
         domain_path = imported["program"]
-        cli.load_project_program(target=target, domain_path=domain_path)
+        cli_tools.load_project_program(target=target, domain_path=domain_path)
 
-        function_info = _unwrap_runtime_result(cli.get_function(address="0x401000", target=target))
+        function_info = _unwrap_runtime_result(cli_tools.get_function(address="0x401000", target=target))
         assert isinstance(function_info, dict)
         assert function_info["entry"].lower().endswith("401000")
 
-        delete_function_result = _unwrap_runtime_result(cli.delete_function(address="0x401000", target=target))
+        delete_function_result = _unwrap_runtime_result(cli_tools.delete_function(address="0x401000", target=target))
         create_function_result = _unwrap_runtime_result(
-            cli.create_function(address="0x401000", name="runtime_manual_entry", target=target)
+            cli_tools.create_function(address="0x401000", name="runtime_manual_entry", target=target)
         )
         _log_runtime_result("delete_function(raw)", delete_function_result)
         _log_runtime_result("create_function(raw)", create_function_result)
 
-        disassembly = _unwrap_runtime_result(cli.disassemble(address="0x401000", target=target))["items"]
+        disassembly = _unwrap_runtime_result(cli_tools.disassemble(address="0x401000", target=target))["items"]
         assert isinstance(disassembly, list) and disassembly
 
         range_disassembly = _unwrap_runtime_result(
-            cli.disassemble(start_address="0x401000", length=4, limit=5, target=target)
+            cli_tools.disassemble(start_address="0x401000", length=4, limit=5, target=target)
         )["items"]
-        analyze_result = _unwrap_runtime_result(cli.analyze_program(target=target))
-        reanalyze_result = _unwrap_runtime_result(cli.analyze_program(force=True, target=target))
+        analyze_result = _unwrap_runtime_result(cli_tools.analyze_program(target=target))
+        reanalyze_result = _unwrap_runtime_result(cli_tools.analyze_program(force=True, target=target))
         _log_runtime_result("disassemble_range(raw)", range_disassembly)
         _log_runtime_result("analyze_program(raw)", analyze_result)
         _log_runtime_result("analyze_program(force, raw)", reanalyze_result)
@@ -260,7 +265,7 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
         assert reanalyze_result["forced"] is True
     finally:
         try:
-            cli.close_session(target=target)
+            cli_tools.close_session(target=target)
         except Exception:  # noqa: BLE001
             pass
 
@@ -276,12 +281,12 @@ def test_runtime_single_byte_search_stops_at_memory_end(tmp_path):
     _ensure_project_created(project_dir, project_name)
 
     try:
-        cli.register_target(
+        cli_tools.register_target(
             target=target,
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli.import_program(
+        imported = cli_tools.import_program(
             target=target,
             binary_path=str(raw_blob),
             import_mode="raw_binary",
@@ -289,16 +294,18 @@ def test_runtime_single_byte_search_stops_at_memory_end(tmp_path):
             base_address="0xffffffff",
             analyze_imported=False,
         )
-        cli.load_project_program(target=target, domain_path=imported["program"])
+        cli_tools.load_project_program(target=target, domain_path=imported["program"])
 
-        assert _unwrap_runtime_result(cli.search_bytes(pattern="ff", offset=0, limit=2, target=target)) == ["ffffffff"]
+        assert _unwrap_runtime_result(cli_tools.search_bytes(pattern="ff", offset=0, limit=2, target=target)) == [
+            "ffffffff"
+        ]
         with pytest.raises(Exception, match="VALIDATION_ERROR"):
-            cli.search_bytes(pattern="   ", offset=0, limit=2, target=target)
+            cli_tools.search_bytes(pattern="   ", offset=0, limit=2, target=target)
         with pytest.raises(Exception, match="VALIDATION_ERROR"):
-            cli.set_bytes(address="0xffffffff", bytes_hex="   ", target=target)
+            cli_tools.set_bytes(address="0xffffffff", bytes_hex="   ", target=target)
     finally:
         try:
-            cli.close_session(target=target)
+            cli_tools.close_session(target=target)
         except Exception:  # noqa: BLE001
             pass
 
@@ -313,27 +320,27 @@ def test_runtime_mutating_commands_all_success(tmp_path):
     _ensure_project_created(project_dir, project_name)
 
     try:
-        cli.register_target(
+        cli_tools.register_target(
             target=target,
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli.import_program(target=target, binary_path=binary_path)
+        imported = cli_tools.import_program(target=target, binary_path=binary_path)
         domain_path = imported["program"]
-        cli.load_project_program(target=target, domain_path=domain_path)
+        cli_tools.load_project_program(target=target, domain_path=domain_path)
 
-        functions = _unwrap_runtime_result(cli.list_functions(offset=0, limit=10, target=target))
+        functions = _unwrap_runtime_result(cli_tools.list_functions(offset=0, limit=10, target=target))
         assert isinstance(functions, list) and functions, "list_functions is empty"
         primary_address, primary_name, primary_decompiled = _pick_primary_function(target)
         aux = next((f for f in functions if f["entry"] != primary_address), functions[0])
         aux_address = aux["entry"]
         aux_name = aux["name"]
 
-        data_items = _unwrap_runtime_result(cli.list_data_items(offset=0, limit=1, target=target))
+        data_items = _unwrap_runtime_result(cli_tools.list_data_items(offset=0, limit=1, target=target))
         data_address = data_items[0]["address"] if data_items else primary_address
 
         bookmark_result = _unwrap_runtime_result(
-            cli.add_bookmark(
+            cli_tools.add_bookmark(
                 address=primary_address,
                 category="Validation",
                 comment="runtime mutating test",
@@ -343,12 +350,12 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         )
         _log_runtime_result("add_bookmark", bookmark_result)
         list_bookmarks_result = _unwrap_runtime_result(
-            cli.list_bookmarks(address=primary_address, type="Info", category="Validation", target=target)
+            cli_tools.list_bookmarks(address=primary_address, type="Info", category="Validation", target=target)
         )
         _log_runtime_result("list_bookmarks", list_bookmarks_result)
 
         decompiler_comment_result = _unwrap_runtime_result(
-            cli.apply_edits(
+            cli_tools.apply_edits(
                 target=target,
                 edits=[
                     {
@@ -363,7 +370,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("set_comment(pre)", decompiler_comment_result)
 
         disassembly_comment_result = _unwrap_runtime_result(
-            cli.apply_edits(
+            cli_tools.apply_edits(
                 target=target,
                 edits=[
                     {
@@ -377,7 +384,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         )
         _log_runtime_result("set_comment(eol)", disassembly_comment_result)
 
-        current_primary_info = _unwrap_runtime_result(cli.get_function(address=primary_address, target=target))
+        current_primary_info = _unwrap_runtime_result(cli_tools.get_function(address=primary_address, target=target))
         current_primary_name = current_primary_info["name"]
         prototype_candidates = [
             _extract_prototype(primary_decompiled),
@@ -391,7 +398,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
                 continue
             try:
                 function_prototype_result = _unwrap_runtime_result(
-                    cli.set_function_prototype(
+                    cli_tools.set_function_prototype(
                         function_address=primary_address,
                         prototype=prototype,
                         target=target,
@@ -412,10 +419,12 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         set_bytes_error = None
         for candidate_address in [data_address, primary_address, aux_address]:
             try:
-                bytes_dump = _unwrap_runtime_result(cli.get_bytes(address=candidate_address, size=2, target=target))
+                bytes_dump = _unwrap_runtime_result(
+                    cli_tools.get_bytes(address=candidate_address, size=2, target=target)
+                )
                 patch_bytes = _derive_patch_bytes_from_hexdump(bytes_dump)
                 set_bytes_result = _unwrap_runtime_result(
-                    cli.set_bytes(address=candidate_address, bytes_hex=patch_bytes, target=target)
+                    cli_tools.set_bytes(address=candidate_address, bytes_hex=patch_bytes, target=target)
                 )
                 break
             except Exception as exc:  # noqa: BLE001
@@ -426,7 +435,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         renamed_aux_1 = f"{aux_name}_r1"
         rename_function_result = _unwrap_runtime_result(
-            cli.apply_edits(
+            cli_tools.apply_edits(
                 target=target, edits=[{"kind": "rename_function", "new_name": renamed_aux_1, "address": aux_address}]
             )
         )
@@ -434,27 +443,27 @@ def test_runtime_mutating_commands_all_success(tmp_path):
 
         renamed_aux_2 = f"{renamed_aux_1}_r2"
         rename_function_by_address_result = _unwrap_runtime_result(
-            cli.apply_edits(
+            cli_tools.apply_edits(
                 target=target, edits=[{"kind": "rename_function", "address": aux_address, "new_name": renamed_aux_2}]
             )
         )
         _log_runtime_result("rename_function(address)", rename_function_by_address_result)
 
         rejected = _unwrap_runtime_result(
-            cli.apply_edits(
+            cli_tools.apply_edits(
                 target=target,
                 edits=[{"kind": "rename_data", "address": aux_address, "new_name": f"{renamed_aux_2}_data"}],
             )
         )
         assert rejected["status"] == "rolled_back" and rejected["applied_count"] == 0
-        function_after_rename_data = _unwrap_runtime_result(cli.get_function(address=aux_address, target=target))
+        function_after_rename_data = _unwrap_runtime_result(cli_tools.get_function(address=aux_address, target=target))
         assert function_after_rename_data["name"] == renamed_aux_2
 
-        create_struct_result = _unwrap_runtime_result(cli.create_struct(name="__it_struct_mut", target=target))
+        create_struct_result = _unwrap_runtime_result(cli_tools.create_struct(name="__it_struct_mut", target=target))
         _log_runtime_result("create_struct", create_struct_result)
 
         add_struct_members_result = _unwrap_runtime_result(
-            cli.add_struct_members(
+            cli_tools.add_struct_members(
                 struct_name="__it_struct_mut",
                 members=[{"name": "field_a", "type": "int"}],
                 target=target,
@@ -463,12 +472,12 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("add_struct_members", add_struct_members_result)
 
         clear_struct_result = _unwrap_runtime_result(
-            cli.remove_struct_members(struct_name="__it_struct_mut", clear_all=True, target=target)
+            cli_tools.remove_struct_members(struct_name="__it_struct_mut", clear_all=True, target=target)
         )
         _log_runtime_result("remove_struct_members(all)", clear_struct_result)
 
         _unwrap_runtime_result(
-            cli.add_struct_members(
+            cli_tools.add_struct_members(
                 struct_name="__it_struct_mut",
                 members=[
                     {"name": "field_a", "type": "char"},
@@ -480,7 +489,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             )
         )
         remove_struct_members_result = _unwrap_runtime_result(
-            cli.remove_struct_members(
+            cli_tools.remove_struct_members(
                 struct_name="__it_struct_mut",
                 members=["field_a", "field_b", "field_d"],
                 target=target,
@@ -489,11 +498,11 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("remove_struct_members", remove_struct_members_result)
         assert [member["name"] for member in remove_struct_members_result["members"]] == ["field_keep"]
         list_data_types_result = _unwrap_runtime_result(
-            cli.list_data_types(offset=0, limit=20, filter="__it_struct_mut", target=target)
+            cli_tools.list_data_types(offset=0, limit=20, filter="__it_struct_mut", target=target)
         )
         _log_runtime_result("list_data_types", list_data_types_result)
         rename_data_type_result = _unwrap_runtime_result(
-            cli.rename_data_type(
+            cli_tools.rename_data_type(
                 name="__it_struct_mut",
                 new_name="__it_struct_mut_renamed",
                 target=target,
@@ -501,7 +510,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         )
         _log_runtime_result("rename_data_type", rename_data_type_result)
         delete_struct_result = _unwrap_runtime_result(
-            cli.delete_data_type(name="__it_struct_mut_renamed", target=target)
+            cli_tools.delete_data_type(name="__it_struct_mut_renamed", target=target)
         )
         _log_runtime_result("delete_data_type", delete_struct_result)
 
@@ -515,7 +524,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             ]:
                 try:
                     set_global_data_type_result = _unwrap_runtime_result(
-                        cli.set_global_data_type(
+                        cli_tools.set_global_data_type(
                             address=candidate_address,
                             data_type="char",
                             length=1,
@@ -533,7 +542,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
         _log_runtime_result("set_global_data_type", set_global_data_type_result)
 
         delete_bookmark_result = _unwrap_runtime_result(
-            cli.delete_bookmark(
+            cli_tools.delete_bookmark(
                 address=primary_address,
                 type="Info",
                 category="Validation",
@@ -572,6 +581,6 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             assert isinstance(value, dict), f"{command_name} returned non-dict value: {type(value)}"
     finally:
         try:
-            cli.close_session(target)
+            cli_tools.close_session(target)
         except Exception:
             pass

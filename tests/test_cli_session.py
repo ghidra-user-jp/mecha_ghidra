@@ -1,12 +1,87 @@
 from __future__ import annotations
 
+import signal
 import types
 
 import pytest
 from mcp.server.transport_security import TransportSecurityMiddleware
 
+from cli_support import ToolHarness
 from ghidra_mcp import cli
 from ghidra_mcp.contracts.tool_spec import ToolProfile, filter_tool_specs, get_all_tool_specs
+
+# Tool callables bound to a swappable registry (see tests/cli_support.py).
+cli_tools = ToolHarness()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["installation", "jvm", "runtime", "auth", "project", "no_targets", "transport", "termination", "close", None],
+)
+def test_main_cleans_script_snapshot_on_every_exit(monkeypatch, tmp_path, failure):
+    from ghidra_headless.scripts import providers
+    from ghidra_mcp.application.services.script_service import ScriptConfig, ScriptService
+
+    source = tmp_path / "scripts"
+    source.mkdir()
+    (source / "Example.py").write_text("# @runtime PyGhidra\nprint('test')\n")
+    snapshot = tmp_path / "snapshot"
+    service = ScriptService(None, config=ScriptConfig(roots=[("test", source)], snapshot_base=snapshot))
+    events = []
+
+    def step(name):
+        def call(*args, **kwargs):
+            events.append(name)
+            if name == "transport" and failure == "termination":
+                handler = signal.getsignal(signal.SIGTERM)
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+            if name == failure:
+                raise RuntimeError(name)
+
+        return call
+
+    registry = types.SimpleNamespace(
+        register_target=step("project"), has_targets=lambda: failure != "no_targets", close_all=step("close")
+    )
+    application = types.SimpleNamespace(registry=registry, script_service=service, mcp=None)
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
+    monkeypatch.setattr(cli, "_ensure_supported_ghidra_installation", step("installation"))
+    monkeypatch.setattr(cli, "_start_pyghidra_headless", step("jvm"))
+    monkeypatch.setattr(cli, "redirect_java_stdout_to_stderr", lambda: None)
+    monkeypatch.setattr(cli, "_prepare_script_runtime", step("runtime"))
+    monkeypatch.setattr(cli, "configure_ghidra_server_auth", step("auth"))
+    monkeypatch.setattr(cli, "_core", lambda: object())
+    monkeypatch.setattr(cli, "run_mcp_server", step("transport"))
+    monkeypatch.setattr(providers, "shutdown", step("providers"))
+    # main updates this environment variable when --ghidra-path is provided.
+    monkeypatch.setenv("GHIDRA_INSTALL_DIR", str(tmp_path / "installation"))
+    argv = [
+        "--ghidra-path",
+        str(tmp_path / "installation"),
+        "--project-location",
+        str(tmp_path),
+        "--project-name",
+        "test",
+        "--add-category",
+        "scripts",
+    ]
+    original_handler = signal.getsignal(signal.SIGTERM)
+    if failure == "termination":
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main(argv)
+        assert exc_info.value.code == 128 + signal.SIGTERM
+    elif failure in {"transport", "close"}:
+        with pytest.raises(RuntimeError, match=failure):
+            cli.main(argv)
+    else:
+        # Startup failures (including a JVM that will not start) end with one logged line and exit code 1.
+        assert cli.main(argv) == (0 if failure is None else 1)
+    # Nothing to close before the JVM exists; closing would import the core without one.
+    assert events.count("close") == (0 if failure in {"installation", "jvm"} else 1)
+    assert events[-1] == "providers"
+    assert not snapshot.exists()
+    assert signal.getsignal(signal.SIGTERM) == original_handler
 
 
 class FakeCoreCommandService:
@@ -426,7 +501,7 @@ def test_service_registry_adapter_has_targets_and_close_all(adapter):
     ("call", "expected_spec", "expected_args"),
     [
         (
-            lambda: cli.list_namespaces(classes_only=True, offset=3, limit=4, target="fw"),
+            lambda: cli_tools.list_namespaces(classes_only=True, offset=3, limit=4, target="fw"),
             "list_namespaces",
             {"classes_only": True, "offset": 3, "limit": 4},
         ),
@@ -449,7 +524,7 @@ def test_list_namespaces_use_dispatcher(monkeypatch, call, expected_spec, expect
     assert called["spec_name"] == expected_spec
     assert called["raw_args"] == expected_args
     assert called["target"] == "fw"
-    assert called["registry"] is cli._registry
+    assert called["registry"] is cli_tools.registry
     assert called["core_executor"] is None
 
 
@@ -457,7 +532,7 @@ def test_list_namespaces_use_dispatcher(monkeypatch, call, expected_spec, expect
     ("call", "message"),
     [
         (
-            lambda: cli.list_namespaces(classes_only=True, offset=0, limit=10, target="fw"),
+            lambda: cli_tools.list_namespaces(classes_only=True, offset=0, limit=10, target="fw"),
             "Session 'fw' is not initialized",
         ),
     ],
@@ -467,7 +542,7 @@ def test_list_namespaces_error_message_compat(monkeypatch, call, message):
         def call(self, command, params, target):  # noqa: ARG002
             raise RuntimeError(f"Session '{target}' is not initialized")
 
-    monkeypatch.setattr(cli, "_registry", DummyRegistry())
+    monkeypatch.setattr(cli_tools, "registry", DummyRegistry())
 
     with pytest.raises(RuntimeError, match=message):
         call()
@@ -579,7 +654,7 @@ def test_parse_args_ghidra_server_auth_direct_password_option():
 
 def test_normalize_transport_alias():
     assert cli._normalize_transport("http") == "streamable-http"
-    assert cli._normalize_transport("sse") == "sse"
+    assert cli._normalize_transport("stdio") == "stdio"
 
 
 @pytest.mark.parametrize(
@@ -608,6 +683,8 @@ def test_configure_mcp_for_streamable_http():
     assert run_kwargs["host"] == "0.0.0.0"
     assert run_kwargs["port"] == 9090
     assert run_kwargs["streamable_http_path"] == "/custom"
+    assert run_kwargs["stateless_http"] is True
+    assert run_kwargs["json_response"] is True
     security = run_kwargs["transport_security"]
     assert security.enable_dns_rebinding_protection is True
     assert "127.0.0.1:*" in security.allowed_hosts
@@ -640,19 +717,13 @@ def test_configure_mcp_for_streamable_http_with_specific_host_enables_rebinding_
     ]
 
 
-def test_configure_mcp_for_sse_with_loopback_host_keeps_local_security():
-    args = types.SimpleNamespace(
-        log_level="INFO",
-        mcp_host="127.0.0.1",
-        mcp_port=8081,
-    )
-    run_kwargs = cli.configure_mcp_for_sse(args)
+def test_legacy_sse_transport_is_rejected():
+    from ghidra_mcp.presentation.transport import run_kwargs_for_transport
 
-    assert run_kwargs["host"] == "127.0.0.1"
-    assert run_kwargs["port"] == 8081
-    security = run_kwargs["transport_security"]
-    assert security.enable_dns_rebinding_protection is True
-    assert "127.0.0.1:*" in security.allowed_hosts
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--transport", "sse"])
+    with pytest.raises(ValueError, match="Unsupported transport"):
+        run_kwargs_for_transport(transport="sse", args=None, logger=cli.logger)
 
 
 def test_run_kwargs_for_stdio_transport_are_empty():
@@ -672,7 +743,7 @@ def test_redirect_java_stdout_to_stderr_swaps_system_out(monkeypatch):
         def setOut(stream):
             calls.append(stream)
 
-    monkeypatch.setattr(cli.pycore, "JClass", lambda name: FakeSystem if name == "java.lang.System" else None)
+    monkeypatch.setattr(cli.jpype, "JClass", lambda name: FakeSystem if name == "java.lang.System" else None)
     cli.redirect_java_stdout_to_stderr()
     assert calls == [FakeSystem.err]
 
@@ -804,14 +875,42 @@ def test_ensure_supported_ghidra_installation_allows_non_arm_linux(monkeypatch, 
     cli._ensure_supported_ghidra_installation(str(install_dir))
 
 
-def test_ensure_supported_ghidra_installation_raises_for_missing_linux_arm64(monkeypatch):
+def test_ensure_supported_ghidra_installation_raises_for_missing_linux_arm64(monkeypatch, tmp_path):
     def fake_validate(_path: str) -> None:
         raise RuntimeError("Linux ARM64 requires Ghidra native decompiler binaries")
 
     monkeypatch.setattr(cli, "validate_linux_arm64_decompiler_install", fake_validate)
+    install_dir = tmp_path / "ghidra"
+    install_dir.mkdir()
 
     with pytest.raises(RuntimeError, match="Linux ARM64 requires Ghidra native decompiler binaries"):
-        cli._ensure_supported_ghidra_installation("/tmp/ghidra")
+        cli._ensure_supported_ghidra_installation(str(install_dir))
+
+
+def test_ensure_supported_ghidra_installation_names_a_missing_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "validate_linux_arm64_decompiler_install", lambda _path: pytest.fail("not reached"))
+
+    with pytest.raises(RuntimeError, match="does not exist.*--ghidra-path"):
+        cli._ensure_supported_ghidra_installation(str(tmp_path / "missing"))
+
+
+def test_jvm_start_failure_is_reported_without_a_traceback(monkeypatch, tmp_path, caplog):
+    install_dir = tmp_path / "ghidra"
+    install_dir.mkdir()
+    application = types.SimpleNamespace(
+        registry=types.SimpleNamespace(close_all=lambda: None), script_service=None, mcp=None
+    )
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
+    monkeypatch.setattr(cli, "_ensure_supported_ghidra_installation", lambda _path: None)
+
+    def boom(_install_dir):
+        raise ValueError("bad Ghidra installation")
+
+    monkeypatch.setattr(cli, "_start_pyghidra_headless", boom)
+    with caplog.at_level("ERROR"):
+        code = cli.main(["--ghidra-path", str(install_dir), "--project-location", str(tmp_path), "--project-name", "t"])
+    assert code == 1
+    assert "Failed to start the Ghidra JVM: bad Ghidra installation" in caplog.text
 
 
 def test_start_pyghidra_headless_delegates_to_shared_launcher(monkeypatch):
@@ -825,7 +924,7 @@ def test_public_tool_functions_match_declared_specs():
     assert set(cli.PUBLIC_TOOL_FUNCTIONS) == set(get_all_tool_specs())
 
 
-def test_get_registry_keeps_empty_selected_specs(monkeypatch):
+def test_build_application_keeps_empty_selected_specs(monkeypatch):
     captured: dict[str, object] = {}
     sentinel_registry = object()
     sentinel_mcp = object()
@@ -847,13 +946,33 @@ def test_get_registry_keeps_empty_selected_specs(monkeypatch):
             runtime=types.SimpleNamespace(mcp=sentinel_mcp),
         )
 
-    monkeypatch.setattr(cli, "_registry", None)
     monkeypatch.setattr(cli, "create_cli_runtime", fake_create_cli_runtime)
 
-    assert cli._get_registry({}) is sentinel_registry
+    app = cli.build_application({})
+    assert app.registry is sentinel_registry
     assert captured["registered_specs"] == {}
     assert captured["checkout_required_commands"] == set()
-    assert cli.mcp is sentinel_mcp
+    assert app.mcp is sentinel_mcp
+
+
+def test_cli_module_holds_no_server_state_at_import():
+    """The CLI keeps no registry, server or tool functions in module state; main() builds a CLIApplication."""
+    from mcp.server import Server
+
+    from ghidra_mcp.presentation.cli_runtime import ServiceRegistryAdapter
+
+    module_values = vars(cli).values()
+    assert not any(isinstance(value, (Server, ServiceRegistryAdapter, cli.CLIApplication)) for value in module_values)
+    assert not any(name in vars(cli) for name in cli.PUBLIC_TOOL_FUNCTIONS)
+    assert not hasattr(cli, "_registry") and not hasattr(cli, "mcp")
+
+
+def test_two_applications_do_not_share_state():
+    first = cli.build_application({})
+    second = cli.build_application({})
+    assert first.registry is not second.registry
+    assert first.mcp is not second.mcp
+    assert first.script_service is not second.script_service
 
 
 def test_resolve_tool_specs_from_args_defaults_to_default_profile():
@@ -926,3 +1045,21 @@ def test_resolve_tool_specs_from_args_explicit_default_matches_no_args():
     )
 
     assert set(cli.resolve_tool_specs_from_args(implicit_args)) == set(cli.resolve_tool_specs_from_args(explicit_args))
+
+
+def test_script_queue_timeout_flag_is_validated_and_applied(monkeypatch):
+    from ghidra_mcp.domain import get_script_queue_timeout_seconds
+
+    base = ["--project-location", "/tmp/p", "--project-name", "t"]
+    assert cli.parse_args(base).script_queue_timeout_seconds == 300.0
+    assert cli.parse_args([*base, "--script-queue-timeout-seconds", "42"]).script_queue_timeout_seconds == 42.0
+    with pytest.raises(SystemExit):
+        cli.parse_args([*base, "--script-queue-timeout-seconds", "0"])
+    applied = []
+    monkeypatch.setattr(cli, "configure_script_queue_timeout_seconds", applied.append)
+    monkeypatch.setattr(cli, "configure_lock_timeout_seconds", lambda _seconds: None)
+    monkeypatch.setattr(cli, "configure_exclusive_checkout_default", lambda _flag: None)
+    monkeypatch.setattr(cli, "script_config_from_args", lambda *_args: (_ for _ in ()).throw(ValueError("stop")))
+    assert cli._run_cli([*base, "--script-queue-timeout-seconds", "42"]) == 2
+    assert applied == [42.0]
+    assert get_script_queue_timeout_seconds() == 300.0

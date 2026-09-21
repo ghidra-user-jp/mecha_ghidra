@@ -419,7 +419,7 @@ def test_disassemble_range_maps_address_overflow_to_validation_error():
             get_address=lambda _ctx, _text: _MaxAddress(),
             find_function_by_name=lambda *_args: None,
             iter_items=iter,
-            code_unit=object(),
+            comment_types=object(),
         )
 
 
@@ -742,3 +742,28 @@ def test_list_namespaces_reports_classes_and_can_filter_to_them():
         {"name": "no_symbol", "is_class": False},
     ]
     assert classes == [{"name": "MyClass", "is_class": True}]
+
+
+def test_instruction_comment_uses_the_enum_overload():
+    from enum import Enum
+
+    from ghidra_headless.handlers.commands.read_only_decompile import _instruction_to_dict
+
+    class CommentTypes(Enum):
+        EOL = "eol"
+
+    class Instruction:
+        def getNumOperands(self):
+            return 0
+
+        def getComment(self, kind):
+            assert kind is CommentTypes.EOL
+            return "enum comment"
+
+        def getAddress(self):
+            return "1000"
+
+        def getMnemonicString(self):
+            return "RET"
+
+    assert _instruction_to_dict(Instruction(), CommentTypes)["comment"] == "enum comment"

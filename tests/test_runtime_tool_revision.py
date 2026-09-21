@@ -19,6 +19,26 @@ pytestmark = [
 TARGET = "resource_safety"
 
 
+def test_all_comment_types_round_trip_clear_and_disassemble(runtime):
+    kinds = ("pre", "eol", "post", "plate", "repeatable")
+    edits = [
+        {"kind": "set_comment", "address": "0x1000", "comment_type": kind, "comment": f"comment-{kind}"}
+        for kind in kinds
+    ]
+    result = runtime["apply_edits"](target=TARGET, edits=edits)
+    assert result["status"] == "applied"
+    comments = runtime["get_comments"](target=TARGET, address="0x1000")
+    assert {kind: comments[kind] for kind in kinds} == {kind: f"comment-{kind}" for kind in kinds}
+    listing = runtime["disassemble"](target=TARGET, address="0x1000", limit=1)
+    assert listing["items"][0]["comment"] == "comment-eol"
+    result = runtime["apply_edits"](target=TARGET, edits=[{**edit, "comment": ""} for edit in edits])
+    assert result["status"] == "applied"
+    assert all(item["after"]["comment"] == "" for item in result["results"])
+    comments = runtime["get_comments"](target=TARGET, address="0x1000")
+    # Ghidra can retain an empty string after a clear; an unset slot returns None.
+    assert all(comments[kind] in (None, "") for kind in kinds), comments
+
+
 def test_explicit_type_category_and_empty_removal(runtime):
     runtime["create_struct"](target=TARGET, name="Header", category="/keep", members=[{"name": "magic", "type": "int"}])
     for name, extra in [("delete_data_type", {}), ("rename_data_type", {"new_name": "changed"})]:
@@ -226,3 +246,34 @@ def test_call_edges_exclude_data_refs_and_keep_unresolved_calls(runtime):
     assert len(outgoing) == 1 and outgoing[0]["resolved"] is False
     assert outgoing[0]["callee"] is None and outgoing[0]["call_site"] == "00001000"
     assert runtime["get_call_edges"](target=TARGET, address="0x1000", include_unresolved=False)["items"] == []
+
+
+def test_disassembly_seek_preserves_holes_and_converts_only_returned_instructions(runtime, monkeypatch):
+    from ghidra.program.model.address import AddressSet
+
+    from ghidra_headless.handlers.commands import analysis_queries
+    from ghidra_headless.handlers.core_runtime import _CONTEXTS
+
+    program = _CONTEXTS[TARGET].program
+    address = program.getAddressFactory().getAddress
+    function = program.getFunctionManager().getFunctionAt(address("1000"))
+    body = AddressSet(address("1000"), address("1004"))
+    body.add(address("1008"))
+    tx = program.startTransaction("non-contiguous test function")
+    try:
+        function.setBody(body)
+    finally:
+        program.endTransaction(tx, True)
+    converted = []
+    original = analysis_queries._instruction_to_dict
+
+    def recording(inst, comment_types):
+        converted.append(str(inst.getAddress()))
+        return original(inst, comment_types)
+
+    monkeypatch.setattr(analysis_queries, "_instruction_to_dict", recording)
+    first = runtime["disassemble"](target=TARGET, address="0x1000", limit=1)
+    second = runtime["disassemble"](target=TARGET, address="0x1000", limit=1, cursor=first["next_cursor"])
+    assert [first["items"][0]["address"], second["items"][0]["address"]] == ["00001000", "00001008"]
+    assert converted == ["00001000", "00001008"]
+    assert second["next_cursor"] is None and not second["has_more"]

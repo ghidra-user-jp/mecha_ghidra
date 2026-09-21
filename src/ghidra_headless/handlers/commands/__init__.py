@@ -64,6 +64,7 @@ from .read_only_memory_data import (
     list_strings,
     search_bytes,
 )
+from .scripts import run_script
 
 __all__ = [
     "bsim_validate_match",
@@ -77,6 +78,7 @@ __all__ = [
     "search_symbols",
     "set_enum_values",
     "undo_program_change",
+    "run_script",
     "decompile_function",
     "bsim_query_function",
     "bsim_query_target",

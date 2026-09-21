@@ -141,6 +141,7 @@ def test_target_service_lifecycle_and_lock_routing():
         "closed": True,
         "target": "fw",
         "remove_program": True,
+        "discard_changes": False,
     }
 
     lock_targets = [target for target, _project in lock_manager.calls]

@@ -1,17 +1,25 @@
 # Mecha Ghidra
 
-AIによる完全自動解析と、人への知見の引き継ぎを支えるGhidra MCPサーバー。Ghidraプラグインに依存せず、低レベルのツールをLLMが組み合わせて解析を進める設計です。
+AIによる完全自動解析と、人への解析結果・知見の引き継ぎを支えるGhidra MCPサーバーです。Ghidraプラグインに依存せず、低レベルのツールをLLMが組み合わせながら解析を進める設計を採用しています。
 
 [English](README.md) | [日本語](README.ja.md) · [はじめに](docs/usage.ja.md) · [ツール一覧](docs/tools.ja.md) · [リリース](https://github.com/ghidra-user-jp/mecha_ghidra/releases)
 
-<img src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" alt="Mecha Ghidra" width="480" />
+<img src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" alt="Mecha Ghidra" width="９６０" />
 
 ## 設計思想
 
-- **Ghidraプラグインから独立して動く。** PyGhidraを通じてGhidra APIを利用する、独立したMCPサーバーです。プラグインの導入やGUIの操作を必要とせず、プロジェクトの作成から解析・編集・保存までをAIが自動化できます。
-- **AIの知見を人が受け取れる。** Ghidra Serverに対応し、AIが付けた名前・型・コメントなどを共有リポジトリへチェックインできます。人はその変更をGhidra GUIで取得・確認し、解析を引き継げます。
-- **コンテキストを解析のために使う。** 公開するツールを用途に応じて必要最小限に絞れます。ツール説明の短縮や、大きな結果の分割取得・検索にも対応し、ツール定義と出力によるLLMのコンテキスト圧迫を抑えます。詳しくは[ツールの公開範囲](docs/configuration.ja.md#tool-exposure)と[大きな結果の取得](docs/configuration.ja.md#large-results)を参照してください。
-- **高度な解析フローはLLMに委ねる。** 逆コンパイル、参照の取得、名前や型の編集といった低レベルの操作を提供し、仮説の立案やツールの選択・組み合わせはモデル側に任せます。解析手順をサーバーに固定せず、LLMの能力向上を解析に取り込める設計を目指しています。
+- **Ghidraプラグインに依存せず動作する。**
+  PyGhidraを通じてGhidra APIを利用する、独立したMCPサーバーです。プラグインの導入やGUI操作を必要とせず、プロジェクトの作成から解析、編集、保存までをAIが自動化できます。
+
+- **AIの解析結果を人に引き継げる。**
+  Ghidra Serverに対応しており、AIが付与した名前・型・コメントなどの変更を共有リポジトリへチェックインできます。人はその変更をGhidra GUIから取得・確認し、そのまま解析を引き継げます。
+
+- **コンテキストを解析そのものに使う。**
+  公開するツールを用途に応じて必要最小限に絞ることができます。ツール説明の短縮に加え、大きな結果の分割取得や検索にも対応しており、ツール定義や出力によるLLMのコンテキスト消費を抑えます。詳しくは[ツールの公開範囲](docs/configuration.ja.md#tool-exposure)と[大きな結果の取得](docs/configuration.ja.md#large-results)を参照してください。
+
+- **高度な解析フローはLLMに委ねる。**
+  逆コンパイル、参照の取得、名前や型の編集といった低レベルの操作を提供し、仮説の立案やツールの選択・組み合わせはモデル側に委ねます。解析手順をサーバー側に固定しないことで、LLMの能力向上をそのまま解析能力の向上につなげられる設計を目指しています。
+
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture.dark.svg">
@@ -49,7 +57,7 @@ cd mecha_ghidra
 uv sync
 export GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra
 
-uv run ghidra-mcp \
+uv run mecha_ghidra \
   --project-location /absolute/path/to/analysis.gpr \
   --transport stdio
 ```

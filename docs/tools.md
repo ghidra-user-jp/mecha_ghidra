@@ -7,12 +7,14 @@ Use this index to find a tool by task. Consult the client-visible tool schema be
 Most program tools select a `target` (default `default`). The `shared_sync` and `bsim` categories are not exposed by default; enable them through [configuration](configuration.md#tool-exposure).
 
 - [Projects and sessions](#core)
+- [Batch reads](#batch-read)
 - [Function analysis](#function-analysis)
 - [Memory and data](#memory-data)
 - [Symbols and comments](#symbol-comment-edit)
 - [Data types](#datatype-ops)
 - [Shared-project tools](#shared-sync)
 - [BSim tools](#bsim)
+- [Ghidra scripts](#scripts)
 - [Large-result retrieval](#result-retrieval)
 
 <a id="core"></a>
@@ -27,7 +29,7 @@ See [first analysis](usage.md#first-analysis) for operation order and saving beh
 | `create_project` | Create an empty local Ghidra project |
 | `open_program` | Open an existing project program in a new target |
 | `register_target` | Register project metadata to a target without opening a program |
-| `close_session` | Close a target session |
+| `close_session` | Close a target session; `discard_changes=true` closes without saving (also the recovery path after `TARGET_EXECUTION_INVALID`) |
 | `close_session_and_remove_program` | Close a session and remove the program from the project |
 | `list_project_programs` | List programs in the target's opened project |
 | `import_program` | Import a binary or `.gzf` into the project |
@@ -36,6 +38,40 @@ See [first analysis](usage.md#first-analysis) for operation order and saving beh
 | `get_program_info` | Language, compiler, image base, md5/sha256, entry points, analysis flag, unsaved changes, undo availability, and a `revision` for change detection |
 | `undo_program_change` / `redo_program_change` | Undo or redo the most recent transactions on the loaded program |
 | `export_program` | Write the program as a `.gzf` archive or raw bytes (restrict with `--allowed-export-root`) |
+
+<a id="batch-read"></a>
+
+## Batch reads
+
+`batch_read` executes 1–20 independent reads on one `target` sequentially, with one tool call and one target/project lock acquisition. It is exposed in the default, readonly and full profiles. Supported children are `get_function`, `get_comments`, `get_data_type`, `get_xrefs` and `get_call_edges`. Each child must also be individually enabled; batch access cannot reach disabled tools.
+
+```json
+{
+  "target": "default",
+  "requests": [
+    {"id": "function", "tool": "get_function", "arguments": {"address": "0x401000"}, "fields": ["entry", "name"]},
+    {"id": "references", "tool": "get_xrefs", "arguments": {"address": "0x401000", "direction": "to", "limit": 20}}
+  ],
+  "timeout_seconds": 10,
+  "max_output_chars": 12000
+}
+```
+
+IDs must be unique, 1–32 ASCII letters/digits/underscores/hyphens. `arguments` uses the child's usual parameters without `target`. All input shapes, types, selectors and tool exposure checks run before execution. The sum of page limits for xrefs/call edges must not exceed 2,000. Dependencies between requests, recursive batches, writes and scripts are unsupported.
+
+Optional `fields` (1–32 keys) projects top-level result keys, or row keys for paged tools while retaining `program`, `revision`, `has_more` and `next_cursor`. Missing keys are omitted; nested paths are not interpreted. Continue each child's page with its original query arguments and cursor.
+
+The response is one JSON text block. Overall `status` is `ok` if all items succeeded, `partial` if some succeeded, and `error` if none succeeded. Inspect `succeeded_count`, `failed_count`, `not_run_count`, and ordered `items` containing `id`, `tool`, `status`, and `data` or `error`. Expected query failures continue; unexpected backend failures abort. MCP `isError=true` means no reads succeeded or the entire request failed; a partial result has `isError=false` and still contains failed items.
+
+Optional `expected_revision` rejects stale reads before execution. A revision/context change during execution fails the entire batch with `SESSION_CHANGED`, discarding mixed results. `timeout_seconds` (default 10, range 1–60) is checked before starting each read after lock acquisition. It is not a hard interruption deadline and does not include lock waits. Unstarted requests become `not_run` with reason `time_budget_exhausted`.
+
+`max_output_chars` (default 12,000, range 2,048–12,000) bounds the entire response JSON text, excluding the outer MCP envelope; it is not a token count. This tool uses its own output limit. Oversized batches store all projected items in one result-cache entry and return counts, item statuses, complete small results that fit, and a shared `result_id`. Use an omitted item's `offset_items` to retrieve it with `read_result`, for example:
+
+```json
+{"result_id": "returned-id", "mode": "json", "path": "/items", "offset_items": 1, "limit_items": 1}
+```
+
+Increase `limit_items` to retrieve several items together. If a single item exceeds the retrieval limit, `read_result` skips it (`item_too_large=true`, `next_offset_items` advances past it) and reports its raw-text offset: read it with `mode="text"` or locate relevant text with `search_result`. If even the status manifest exceeds the budget, counts and `item_summaries_omitted=true` remain inline; retrieve the manifest from the cache. Cache refusal returns `result_unavailable=true`; IDs remain subject to normal LRU eviction. In `large_result_mode=inline`, oversized responses fail with guidance to narrow fields, page limits or request count.
 
 <a id="function-analysis"></a>
 
@@ -175,6 +211,20 @@ Requires `--add-category bsim` and a database URL. See the [BSim guide](bsim.md)
 | `bsim_apply_matches` | Rename default-named functions after their best match in one transaction (`dry_run` available) |
 | `bsim_load_matched_executable` | Open the executable behind a match as a new target; `ghidra://` matches need `--bsim-remote-cache-dir` |
 
+<a id="scripts"></a>
+
+## Ghidra scripts
+
+Exposed by the tool profile / category flags like every other category (`--tool-profile full` or `--add-category scripts`); `run_script` takes the script text directly; `--script-root` only adds a catalog of pre-made scripts. Scripts run with the server process's OS privileges. See [script execution](configuration.md#scripts) for how runs are wrapped in a transaction and what happens on failure.
+
+| Tool | Purpose |
+| --- | --- |
+| `list_scripts` | Catalog of executable scripts (`script_id` = `<root>:<file name>`; only the top-level files of each root are listed, subdirectories are not, as in the Script Manager) with runtime (`Java` / `Jython` / `PyGhidra`), category, description and availability; `include_bundled=true` adds Ghidra's own scripts when the operator allowed them |
+| `get_script_info` | One script's header metadata and (with `include_source=true`) its source, so its expected `args` can be read before running |
+| `run_script` | Run a script against the loaded program, as the Script Manager would. Pass `source` (the script text; Java is recognised by `public class X extends GhidraScript`, Python by an `# @runtime PyGhidra` / `# @runtime Jython` header, else pass `runtime`) or `script_id` (a catalog script). `args` are positional strings. The run is wrapped in a transaction: committed on success, rolled back on exception or timeout. The result carries `transaction_outcome`, stdout/stderr and Java compiler diagnostics, so a failing script can be corrected and re-run |
+
+Failures roll back: `SCRIPT_FAILED` / `SCRIPT_TIMEOUT` carry `details.transaction_outcome` (`rolled_back`, `unchanged`, `unknown`), captured `stdout` / `stderr` (bounded, with `dropped_bytes`), and for Java `SCRIPT_COMPILE_FAILED` the compiler diagnostics.
+
 <a id="result-retrieval"></a>
 
 ## Large-result retrieval
@@ -187,3 +237,5 @@ Exposed in `--large-result-mode resource`. See [retrieval and cache behavior](co
 | `search_result` | Regex-search a stored large tool result; returns at most 100 snippets with up to 2,000 context characters per side, plus match offsets usable as `read_result` offsets. `max_matches=0` counts up to the 10,000-match scan cap without snippets; check `scan_truncated` before treating `match_count` as complete |
 
 Save edits with `save_project_program`. Editing versioned shared files requires a checkout. `remove_struct_members.members` accepts either member-name strings or `{"name": ...}` objects.
+
+For `add_struct_members`, an explicit member `offset` switches a packed structure (including those created by `parse_c_declarations`) to manual layout before editing, preserving the offsets of members outside the replacement. The structure grows if needed to accommodate the specified position. An omitted `offset` appends using the structure's current layout policy; members are processed in the order supplied.

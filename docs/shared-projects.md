@@ -57,7 +57,7 @@ In the Ghidra GUI:
 Set `GHIDRA_INSTALL_DIR` as in [local setup](usage.md#local-setup). Set `GHIDRA_SERVER_PASSWORD` in the server process environment, then point to the existing MCP cache:
 
 ```bash
-uv run ghidra-mcp \
+uv run mecha_ghidra \
   --project-location /work/mcp-cache/shared.gpr \
   --transport stdio \
   --add-category shared_sync \

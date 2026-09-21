@@ -147,6 +147,8 @@ def dispatch_tool(
     if result_adapter is not None:
         result = result_adapter(result, target)
     result = _validate_output(spec_name, spec.output_model, result)
+    if spec.presenter == "batch":
+        result = _validate_batch_output(params["requests"], result)
     if spec.empty_list_policy == "normalize":
         result = normalize_empty_list_result(result)
     return maybe_compact_tool_result(
@@ -156,6 +158,30 @@ def dispatch_tool(
         config=presentation_config or ToolPresentationConfig(),
         store=result_store,
     )
+
+
+def _validate_batch_output(requests, result):
+    """Validate complete child results before applying presentation projections."""
+    if len(result["items"]) != len(requests):
+        raise ValueError("batch_read output count does not match requests")
+    projected = []
+    for request, item in zip(requests, result["items"]):
+        projected_item = item
+        if item.get("id") != request["id"] or item.get("tool") != request["tool"]:
+            raise ValueError("batch_read output identity does not match request")
+        if item.get("status") not in {"ok", "error", "not_run"}:
+            raise ValueError("invalid batch_read item status")
+        if item["status"] == "ok":
+            child = get_tool_spec(request["tool"])
+            data = _validate_output(child.name, child.output_model, item["data"])
+            if fields := request.get("fields"):
+                if child.name in {"get_xrefs", "get_call_edges"}:
+                    data = {**data, "items": [{k: row[k] for k in fields if k in row} for row in data["items"]]}
+                else:
+                    data = {k: data[k] for k in fields if k in data}
+            projected_item = {**item, "data": data}
+        projected.append(projected_item)
+    return {**result, "items": projected}
 
 
 __all__ = [

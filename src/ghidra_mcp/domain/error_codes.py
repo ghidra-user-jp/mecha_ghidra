@@ -86,6 +86,21 @@ _CODE_TABLE: dict[str, ErrorClassification] = {
     "JVM_NOT_HEADLESS": ErrorClassification(ErrorCode.JVM_NOT_HEADLESS),
     "HEADLESS_UNSUPPORTED": ErrorClassification(ErrorCode.HEADLESS_UNSUPPORTED),
     "READ_ONLY_PROGRAM": ErrorClassification(ErrorCode.READ_ONLY_PROGRAM),
+    # Ghidra script execution. Timeouts are not retryable: the script may
+    # already have produced external side effects.
+    "SCRIPTS_DISABLED": ErrorClassification(ErrorCode.SCRIPTS_DISABLED),
+    "SCRIPT_NOT_FOUND": ErrorClassification(ErrorCode.SCRIPT_NOT_FOUND),
+    "AMBIGUOUS_SCRIPT": ErrorClassification(ErrorCode.AMBIGUOUS_SCRIPT),
+    "SCRIPT_RUNTIME_AMBIGUOUS": ErrorClassification(ErrorCode.SCRIPT_RUNTIME_AMBIGUOUS),
+    "SCRIPT_RUNTIME_UNAVAILABLE": ErrorClassification(ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE),
+    "SCRIPT_COMPILE_FAILED": ErrorClassification(ErrorCode.SCRIPT_COMPILE_FAILED),
+    "SCRIPT_LOAD_FAILED": ErrorClassification(ErrorCode.SCRIPT_LOAD_FAILED),
+    "SCRIPT_FAILED": ErrorClassification(ErrorCode.SCRIPT_FAILED),
+    "SCRIPT_TIMEOUT": ErrorClassification(ErrorCode.SCRIPT_TIMEOUT),
+    "SCRIPT_CANCELLED": ErrorClassification(ErrorCode.SCRIPT_CANCELLED),
+    "TARGET_EXECUTION_INVALID": ErrorClassification(ErrorCode.TARGET_EXECUTION_INVALID),
+    "TARGET_ORPHAN_UNRELEASED": ErrorClassification(ErrorCode.TARGET_ORPHAN_UNRELEASED),
+    "RUNTIME_DEGRADED": ErrorClassification(ErrorCode.RUNTIME_DEGRADED),
 }
 
 

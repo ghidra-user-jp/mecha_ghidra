@@ -135,10 +135,11 @@ def test_default_profile_contains_current_non_shared_sync_tools():
     legacy_default_specs = {
         name
         for name, spec in get_all_tool_specs().items()
-        if spec.category_tag not in {ToolCategoryTag.SHARED_SYNC, ToolCategoryTag.BSIM}
+        if spec.category_tag not in {ToolCategoryTag.SHARED_SYNC, ToolCategoryTag.BSIM, ToolCategoryTag.SCRIPTS}
     }
 
     assert set(default_specs) == legacy_default_specs
+    assert "run_script" not in default_specs
     assert "get_project_sync_status" not in default_specs
     assert "bsim_query" not in default_specs
 

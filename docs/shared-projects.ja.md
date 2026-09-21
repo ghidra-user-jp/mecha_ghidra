@@ -57,7 +57,7 @@ Ghidra GUIで次の準備をします。
 [ローカル導入](usage.ja.md#local-setup)と同様に `GHIDRA_INSTALL_DIR` を設定します。サーバープロセスの環境変数 `GHIDRA_SERVER_PASSWORD` にパスワードを設定し、作成済みのMCP用キャッシュを指定してください。
 
 ```bash
-uv run ghidra-mcp \
+uv run mecha_ghidra \
   --project-location /work/mcp-cache/shared.gpr \
   --transport stdio \
   --add-category shared_sync \

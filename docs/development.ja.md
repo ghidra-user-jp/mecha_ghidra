@@ -28,7 +28,7 @@ uv run pytest
 | [`ghidra_headless`](../src/ghidra_headless) | JVM起動、プロジェクト・セッションの所有、Ghidraコマンド |
 | [`tests`](../tests) | 単体、スキーマ、構成、明示的に有効化する実機テスト |
 
-[`test_layering.py`](../tests/test_layering.py)が依存方向を検査します。presentationはapplicationを使い、applicationはinfrastructureが実装する接続インターフェースを定義し、infrastructureは `ghidra_headless` を使います。`domain` と `contracts` は上位層をimportせず、`ghidra_headless` は `ghidra_mcp` をimportしません。applicationが必要とする新しい機能は[ports.py](../src/ghidra_mcp/application/services/ports.py)へ追加します。
+CLI はサーバーの状態をモジュールスコープに持ちません。`main()` が `CLIApplication`（ランタイムバンドルと、そのレジストリに束縛したツール関数。`presentation/cli.py` の `build_application`/`bind_tools`）を1つ組み立てて引き渡し、テストは `tests/cli_support.py` 経由で自前のものを作ります。モジュールレベルの可変状態は ruff（`PLW0603`）が拒否します。JVMクラスの遅延取得には `functools.cache` を、リセットが必要なプロセス全体の状態には明示的なホルダーオブジェクト（`ghidra_headless/scripts/providers.py` を参照）を使ってください。各パッケージの `__init__` は再エクスポートを遅延解決します（`ghidra_mcp/_lazy.py`）。そのため `ghidra_mcp.contracts` のような葉の層をimportしても、CLI・MCP SDK・JVMブリッジは読み込まれません。`test_layering.py` はこれを別プロセスで検査します。[`test_layering.py`](../tests/test_layering.py)が依存方向を検査します。presentationはapplicationを使い、applicationはinfrastructureが実装する接続インターフェースを定義し、infrastructureは `ghidra_headless` を使います。`domain` と `contracts` は上位層をimportせず、`ghidra_headless` は `ghidra_mcp` をimportしません。唯一の例外が[`ghidra_headless/contracts`](../src/ghidra_headless/contracts)です。コアが強制するJVM非依存の規則（現在は `batch_read` のリクエスト規則）を置く場所で、`ghidra_mcp/contracts` がここをimportすることでスキーマとコアが同じコードで検証します。レイヤリングテストは、このパッケージのimportで `jpype`/`pyghidra`/`ghidra` が読み込まれないことも検査します。applicationが必要とする新しい機能は[ports.py](../src/ghidra_mcp/application/services/ports.py)へ追加します。
 
 ツール定義は[tool_spec.py](../src/ghidra_mcp/contracts/tool_spec.py)にあります。ハンドラで新しい `params.get(...)` キーを読む場合は、スキーマと `COMMAND_DEP_KEYS` を更新してください。[test_spec_handler_parameters.py](../tests/test_spec_handler_parameters.py)が対応関係を検査します。
 
@@ -52,7 +52,21 @@ macOSでは特に重要です。MCP 2.xはワーカースレッドでハンド�
 
 ### MCP SDK
 
-対応範囲は `mcp>=2.1.1,<3` です。`MCPServer`、`Tool.from_function`、`read_resource`、`run()` のキーワード引数など、公開APIを使います。CIの `latest-mcp-sdk` が範囲内の最新版を検証し、Dependabotが `mcp`／`mcp-types` の更新をまとめます。
+対応範囲は `mcp>=2.2.0,<3` です。公式の低レベル `Server` に `on_list_tools`、`on_call_tool`、リソース用ハンドラーを登録し、`mcp.types.Tool` で入出力スキーマを明示します。SDKの関数メタデータは上書きしません。入力はPydanticのstrictモデル、送信する `structuredContent` はJSON Schemaで検証します。同期処理はワーカースレッドへ渡します。HTTPは `Server.streamable_http_app(stateless_http=True, json_response=True, ...)`、stdioは `stdio_server()` と `Server.run()` を使います。CIの `latest-mcp-sdk` が範囲内の最新版を検証し、Dependabotが `mcp`／`mcp-types` の更新をまとめます。
+
+Javaクラスは `jpype.JClass`、スレッドIDは `Thread.threadId()` を使います。raw importのオプションは読み取り専用の `FileByteProvider` と `BinaryLoader` の公開APIで取得します。`ProgramLoader` の非公開メソッドへのリフレクションや、非推奨の `RandomAccessByteProvider` は使いません。Ghidraの `HexLong` オプションは接頭辞がなくても16進数として解釈するため、整数のファイルオフセットと長さは `hex()` で渡します。
+
+### PyGhidraの依存バージョンとスクリプト失敗
+
+PyGhidraは上流コミット [`263160cf57db21a9e25f1e0a8bc42fde5b8824eb`](https://github.com/NationalSecurityAgency/ghidra/commit/263160cf57db21a9e25f1e0a8bc42fde5b8824eb) に固定しています。パッケージのバージョン表記は3.2.0ですが、**未リリースのスナップショット**です。2026-09-20時点でPyPIの最新版は3.1.0で、スクリプトの例外を握りつぶします（[上流Issue](https://github.com/NationalSecurityAgency/ghidra/issues/9288)）。このスナップショットでは例外が伝播するため、非公開runnerへのローカルパッチを撤去しました。この固定は `pyproject.toml` の `[tool.uv.sources]` にあり、`uv sync`/`uv run`（およびDockerイメージ）に適用され、`uv.lock` にSHA-256を記録します。公開メタデータ側は `pyghidra>=3.1.0` のみを要求するため、PyPIからのインストールと公開は可能です。修正を含まないPyPI版PyGhidraでは起動時プローブが全スクリプトランタイムを利用不可（`SCRIPT_RUNTIME_UNAVAILABLE`）にし、他のツールは動作します。初回の `uv sync` ではGhidraのソースアーカイブを取得します。修正を含むリリースが出たら、sourcesのエントリ削除と下限バージョンの引き上げを同じコミットで行ってください（スナップショットも3.2.0を名乗るため）。
+
+PyPI公開はリリース対象外です。リポジトリとリリース添付物での配布には、この検証済みコミット固定を維持します。PyGhidraの正式版を待つことはv1.0の公開条件に含めません。依存を更新するときはlockfileを更新し、以下の実機・パッケージ検証を再実行してください。ローカルwheelとリポジトリからのインストールは、この依存で検証済みです。
+
+起動時に標準providerで例外伝播を検証します。失敗した場合は、子スクリプト経由の実行も防ぐためJava・Jython・PyGhidraの全言語を使用不可にし、通常の解析ツールは利用可能に保ちます。各スクリプト実行入口でもトランザクション開始前に検証状態を確認します。Jythonが導入済みなら、全言語の実行に `GhidraState` 経由で共有interpreterを渡し、子Jythonの例外と出力を呼び出し元へ返します。`runScript()` はサブディレクトリのファイルや実行中に登録したソースも呼び出せるため、カタログ直下の `.py` の有無で共有を省略しません。上流runnerの差し替えや非公開loaderメソッドへのアクセスは行いません。
+
+コメントの読み書きには `ghidra.program.model.listing.CommentType` と、それを受け取る公開APIを使用します。削除予定の整数定数・整数引数のオーバーロードは使用しません。`ScriptBarrier` は一つの `Condition` 内で待機と所有状態の更新を行い、待機後に期限のない別のロック取得を挟みません。
+
+[2026-09-20の検証記録](release-fixes-validation-20260920.ja.md)には、raw importのバイト範囲、親子全9通りの言語の組み合わせ、ロールバック、プロセス状態の復元、stdio／HTTPの結果を記録しています。
 
 ## 実機検証
 
@@ -69,6 +83,12 @@ uv run pytest \
 ```
 
 `/bin/ls` はmacOS/Linuxの例です。ほかの環境では適切なバイナリを指定してください。変更系の検証にはテスト専用のプロジェクトを使います。起動中のMCPサーバーやGUIと同じローカルプロジェクトを開かないでください。
+
+`tests/test_runtime_mcp_transport.py` は同じ実機フラグで、実際のCLIを別プロセスとして起動し、stdioとlocalhostのStreamable HTTPを検証します。専用プロジェクトと小さなraw binaryを自動生成するため、`GHIDRA_RUNTIME_BINARY_PATH` は不要です。入出力スキーマ、変更とロールバック、大きな結果の取得に加え、HTTPの初期化なしの呼び出し・セッションIDなしの応答・別接続からのリソース取得を確認します。
+
+Jythonまで検証する場合は、使用するGhidraと同じバージョンのJython拡張を導入し、`GHIDRA_RUNTIME_VALIDATION=1`に加えて`GHIDRA_JYTHON_RUNTIME_VALIDATION=1`を指定して、`tests/test_runtime_script_commands.py`と`tests/test_runtime_mcp_transport.py`を実行します。この追加フラグではJythonが未導入なら失敗にし、MCPのstdio／HTTPにもJythonのケースを追加します。通常のGhidra設定から分離する場合は、Javaの`-Dapplication.settingsdir=...`で専用の設定領域を使い、その領域のGhidra拡張ディレクトリへインストールします。
+
+推奨APIへの移行後の実測結果は[2026-09-16の実機検証記録](recommended-api-runtime-validation-20260916.ja.md)にまとめています。
 
 | 検証対象 | 追加で設定する環境変数 |
 | --- | --- |
@@ -101,7 +121,7 @@ Linux ARM64用スクリプトは、ほかのホストでは `linux/arm64` のDoc
 2. タグ作成前に `release-decompiler-natives` を手動実行し、`mecha-ghidra-release-assets` artifactを検証します。
 3. [ghidra_release.env](../scripts/ghidra_release.env)の `MECHA_GHIDRA_RELEASE_NATIVE_ASSET_RUN_ID` にrunを記録します。ネイティブファイルの内容を変えた場合は、検証済みassetのハッシュと[Dockerfile](../Dockerfile)の固定値をそろえます。
 4. タグのビルドは検証済みのnative ZIPを再利用し、Pythonパッケージは最終タグから作り直します。公開したnative ZIPのハッシュが固定値と一致することを確認します。
-5. 利用者向けの2つのZIP（Ghidra一式と追加ファイル）、Python source distributionの添付を確認します。PyPI公開はリリース担当者が別途行います。
+5. 利用者向けの2つのZIP（Ghidra一式と追加ファイル）、Python source distributionの添付を確認します。PyPI公開はリリース対象外です。
 
 手動実行はartifactをアップロードし、リリースは公開しません。既存タグの再実行はリリースノートを置き換えずassetを更新し、公開時に旧assetと単独の `.sha256` を削除します。リリースノートにはZIPの選び方と追加したプラットフォームのパスを記載します。バージョンやハッシュの既定値を複数の文書へコピーせず、正式なリリース設定へリンクしてください。
 

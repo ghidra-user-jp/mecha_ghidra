@@ -1202,8 +1202,8 @@ class BsimService:
             project_location,
             project_name=project_name,
             domain_path=domain_path,
+            validate=lambda: self._validate_loaded_match(requested_target, ref),
         )
-        self._validate_loaded_match(requested_target, ref)
         self._remember_loaded_match(
             target=requested_target,
             executable_md5=executable_md5,

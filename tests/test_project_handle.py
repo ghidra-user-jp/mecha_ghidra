@@ -98,6 +98,8 @@ def build_handle(monkeypatch):
     handle._refcount = 0
     handle._closed = False
     handle._open_programs = set()
+    handle._read_only_programs = []
+    handle._orphaned_programs = []
     return handle
 
 
@@ -399,7 +401,10 @@ def test_open_program_reports_cleanup_failure_after_flat_api_init_fails(monkeypa
 
     assert handle.project.closed == [opened_programs[0]]
     assert handle._open_programs == set()
-    assert handle._refcount == 0
+    # The consumer could not be released, so the handle keeps owning it: the
+    # project must stay open under it and shutdown must see it as unreleased.
+    assert handle._refcount == 1
+    assert handle.orphaned_program_count() == 1
 
 
 def test_close_can_skip_save(monkeypatch):
@@ -2067,203 +2072,177 @@ def test_is_repository_project_from_metadata_is_false_for_local_project(tmp_path
     assert session.ProjectHandle.is_repository_project_from_metadata(str(tmp_path), "sample") is False
 
 
-def test_import_program_auto_uses_legacy_import_path(monkeypatch, tmp_path):
+@pytest.fixture
+def auto_import(monkeypatch, tmp_path):
     handle = build_handle(monkeypatch)
     binary_path = tmp_path / "sample.bin"
     binary_path.write_bytes(b"\x90")
-    imported_program = DummyProgram("/sample.bin")
-
-    class DummyProjectData:
-        def getFile(self, _domain_path):
-            return None
+    state = types.SimpleNamespace(
+        handle=handle,
+        path=binary_path,
+        calls=[],
+        closed=0,
+        saved=0,
+        missing_primary=False,
+        load_error=None,
+        save_error=None,
+        close_error=None,
+        deleted=[],
+    )
 
     class ImportProject(DummyProject):
-        def __init__(self) -> None:
-            super().__init__()
-            self.saved_as = None
-            self.imported = []
-
         def getProjectData(self):
-            return DummyProjectData()
+            return types.SimpleNamespace(getFile=lambda _path: None)
 
-        def importProgram(self, java_file):
-            self.imported.append(java_file)
-            return imported_program
+        def importProgram(self, *_args):
+            pytest.fail("the deprecated GhidraProject.importProgram API must not be used")
 
-        def saveAs(self, program, program_dir, program_name, overwrite):
-            self.saved_as = (program, program_dir, program_name, overwrite)
+    class Loaded:
+        def save(self, monitor):
+            state.saved += 1
+            assert monitor is None
+            if state.save_error:
+                raise state.save_error
+            return DummyDomainFile("/sample.bin")
 
-    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
+    class LoadResults:
+        def getPrimary(self):
+            return None if state.missing_primary else Loaded()
+
+        def close(self):
+            state.closed += 1
+            if state.close_error:
+                raise state.close_error
+
+    class Builder:
+        def __getattr__(self, name):
+            # No loader/language override: auto import must keep format detection.
+            if name not in {"project", "projectFolderPath", "source", "name", "monitor"}:
+                raise AttributeError(name)
+
+            def option(value):
+                state.calls.append((name, value))
+                return self
+
+            return option
+
+        def load(self):
+            state.calls.append(("load", None))
+            if state.load_error:
+                raise state.load_error
+            return LoadResults()
+
+    monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", Builder)
+    monkeypatch.setattr(handle, "_delete_domain_file_locked", lambda path: state.deleted.append(path))
     handle.project = ImportProject()
+    return state
 
-    domain_file = handle.import_program(str(binary_path))
+
+def test_import_program_auto_uses_public_program_loader(auto_import):
+    state = auto_import
+    domain_file = state.handle.import_program(str(state.path))
 
     assert domain_file.getPathname() == "/sample.bin"
-    assert handle.project.imported == [str(binary_path)]
-    assert handle.project.saved_as == (imported_program, "/", "sample.bin", True)
-    assert handle.project.closed == [imported_program]
+    assert state.calls == [
+        ("project", state.handle.project.getProject()),
+        ("projectFolderPath", "/"),
+        ("source", str(state.path)),
+        ("name", "sample.bin"),
+        ("monitor", None),
+        ("load", None),
+    ]
+    assert state.saved == state.closed == 1
+    assert state.handle.project.closed == []  # LoadResults owns the imported objects.
 
 
-def test_import_program_rolls_back_when_post_processing_fails(monkeypatch, tmp_path):
-    handle = build_handle(monkeypatch)
-    binary_path = tmp_path / "sample.bin"
-    binary_path.write_bytes(b"\x90")
-    imported_program = DummyProgram("/sample.bin")
-    deleted_paths: list[str] = []
-
-    class DummyProjectData:
-        def getFile(self, _domain_path):
-            return None
-
-    class ImportProject(DummyProject):
-        def getProjectData(self):
-            return DummyProjectData()
-
-        def importProgram(self, java_file):  # noqa: ARG002
-            return imported_program
-
-        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
-            return None
+def test_import_program_rolls_back_when_post_processing_fails(monkeypatch, auto_import):
+    state = auto_import
 
     def fail_post_process(*_args, **_kwargs):
+        assert state.closed == 1, "release the loader's consumers before reopening for analysis"
         raise RuntimeError("analysis failed")
 
-    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
-    monkeypatch.setattr(handle, "_post_process_imported_program_locked", fail_post_process)
-    monkeypatch.setattr(
-        handle,
-        "_delete_domain_file_locked",
-        lambda path: deleted_paths.append(path) or {"domain_path": path},
-    )
-    handle.project = ImportProject()
-
+    monkeypatch.setattr(state.handle, "_post_process_imported_program_locked", fail_post_process)
     with pytest.raises(RuntimeError, match="IMPORT_POST_PROCESS_FAILED: rolled back imported program /sample.bin"):
-        handle.import_program(str(binary_path), entry_offset=0)
+        state.handle.import_program(str(state.path), entry_offset=0)
 
-    assert deleted_paths == ["/sample.bin"]
-    assert handle.project.closed == [imported_program]
+    assert state.deleted == ["/sample.bin"]
+    assert state.closed == 1
 
 
-def test_import_program_preserves_import_when_post_processing_close_fails(monkeypatch, tmp_path):
-    handle = build_handle(monkeypatch)
-    binary_path = tmp_path / "sample.bin"
-    binary_path.write_bytes(b"\x90")
-    imported_program = DummyProgram("/sample.bin")
-    deleted_paths: list[str] = []
-
-    class DummyProjectData:
-        def getFile(self, _domain_path):
-            return None
-
-    class ImportProject(DummyProject):
-        def getProjectData(self):
-            return DummyProjectData()
-
-        def importProgram(self, java_file):  # noqa: ARG002
-            return imported_program
-
-        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
-            return None
+def test_import_program_preserves_import_when_post_processing_close_fails(monkeypatch, auto_import):
+    state = auto_import
 
     def fail_post_process_close(*_args, **_kwargs):
-        raise session.project_handle._ImportedProgramCloseError(  # noqa: SLF001
+        raise session.project_handle._ImportedProgramCloseError(
             "PROGRAM_CLOSE_FAILED: failed to close imported program /sample.bin: close failed"
         )
 
-    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
-    monkeypatch.setattr(handle, "_post_process_imported_program_locked", fail_post_process_close)
-    monkeypatch.setattr(
-        handle,
-        "_delete_domain_file_locked",
-        lambda path: deleted_paths.append(path) or {"domain_path": path},
-    )
-    handle.project = ImportProject()
-
+    monkeypatch.setattr(state.handle, "_post_process_imported_program_locked", fail_post_process_close)
     with pytest.raises(RuntimeError, match="IMPORT_CLOSE_FAILED: imported program /sample.bin"):
-        handle.import_program(str(binary_path), entry_offset=0)
+        state.handle.import_program(str(state.path), entry_offset=0)
 
-    assert deleted_paths == []
-    assert handle.project.closed == [imported_program]
+    assert state.deleted == []
+    assert state.closed == 1
 
 
-def test_import_program_auto_close_failure_reports_imported_path_without_rollback(monkeypatch, tmp_path):
-    handle = build_handle(monkeypatch)
-    binary_path = tmp_path / "sample.bin"
-    binary_path.write_bytes(b"\x90")
-    imported_program = DummyProgram("/sample.bin")
-    deleted_paths: list[str] = []
-
-    class DummyProjectData:
-        def getFile(self, _domain_path):
-            return None
-
-    class FailingCloseImportProject(DummyProject):
-        def getProjectData(self):
-            return DummyProjectData()
-
-        def importProgram(self, java_file):  # noqa: ARG002
-            return imported_program
-
-        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
-            return None
-
-        def close(self, program=None):
-            super().close(program)
-            raise RuntimeError("close failed")
-
-    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
-    monkeypatch.setattr(
-        handle,
-        "_delete_domain_file_locked",
-        lambda path: deleted_paths.append(path) or {"domain_path": path},
-    )
-    handle.project = FailingCloseImportProject()
-
+def test_import_program_auto_close_failure_reports_imported_path_without_rollback(auto_import):
+    state = auto_import
+    state.close_error = RuntimeError("close failed")
     with pytest.raises(RuntimeError, match="PROGRAM_CLOSE_FAILED: failed to close imported program /sample.bin"):
-        handle.import_program(str(binary_path))
+        state.handle.import_program(str(state.path))
 
-    assert deleted_paths == []
-    assert handle.project.closed == [imported_program]
+    assert state.saved == state.closed == 1
+    assert state.deleted == []
 
 
-def test_import_program_auto_reports_cleanup_close_failure_after_import_failure(monkeypatch, tmp_path):
-    handle = build_handle(monkeypatch)
-    binary_path = tmp_path / "sample.bin"
-    binary_path.write_bytes(b"\x90")
-    imported_program = DummyProgram("/sample.bin")
-
-    class DummyProjectData:
-        def getFile(self, _domain_path):
-            return None
-
-    class FailingSaveAndCloseProject(DummyProject):
-        def getProjectData(self):
-            return DummyProjectData()
-
-        def importProgram(self, java_file):  # noqa: ARG002
-            return imported_program
-
-        def saveAs(self, _program, _program_dir, _program_name, _overwrite):
-            raise RuntimeError("saveAs failed")
-
-        def close(self, program=None):
-            super().close(program)
-            raise RuntimeError("close failed")
-
-    monkeypatch.setattr(session.project_handle.pycore, "JClass", lambda _name: lambda value: value)
-    handle.project = FailingSaveAndCloseProject()
-
+def test_import_program_auto_reports_cleanup_close_failure_after_import_failure(auto_import):
+    state = auto_import
+    state.save_error = RuntimeError("save failed")
+    state.close_error = RuntimeError("close failed")
     with pytest.raises(
-        RuntimeError,
-        match="PROGRAM_CLOSE_FAILED: failed to close imported program after auto import failure",
-    ) as exc_info:
-        handle.import_program(str(binary_path))
+        RuntimeError, match="PROGRAM_CLOSE_FAILED: failed to close imported program after auto import failure"
+    ) as failed:
+        state.handle.import_program(str(state.path))
 
-    assert "saveAs failed" in str(exc_info.value)
-    assert handle.project.closed == [imported_program]
+    assert "save failed" in str(failed.value)
+    assert "close failed" in str(failed.value)
+    assert failed.value.__cause__ is state.save_error
+    assert state.closed == 1
 
 
-def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
+def test_import_program_auto_save_failure_releases_results_and_preserves_error(auto_import):
+    state = auto_import
+    state.save_error = RuntimeError("save failed")
+    with pytest.raises(RuntimeError, match="save failed") as failed:
+        state.handle.import_program(str(state.path))
+    assert failed.value is state.save_error
+    assert state.saved == state.closed == 1
+    assert state.deleted == []
+
+
+def test_import_program_auto_missing_primary_releases_results(auto_import):
+    state = auto_import
+    state.missing_primary = True
+    with pytest.raises(RuntimeError, match="Failed to add program"):
+        state.handle.import_program(str(state.path))
+    assert state.saved == 0
+    assert state.closed == 1
+
+
+def test_import_program_auto_load_failure_preserves_error(auto_import):
+    state = auto_import
+    state.load_error = RuntimeError("unsupported format")
+    with pytest.raises(RuntimeError, match="unsupported format") as failed:
+        state.handle.import_program(str(state.path))
+    assert failed.value is state.load_error
+    assert state.saved == state.closed == 0
+
+
+@pytest.mark.parametrize(
+    "base_address", ["0x401000", "4198400", oct(0x401000), bin(0x401000), "0X401000", "  +4198400  "]
+)
+def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path, base_address):
     handle = build_handle(monkeypatch)
     binary_path = tmp_path / "shellcode.bin"
     binary_path.write_bytes(b"\x90\xc3")
@@ -2336,7 +2315,7 @@ def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
     monkeypatch.setattr(
         handle,
         "_resolve_binary_loader_args_locked",
-        lambda _builder, *, required_options=None: {
+        lambda _path, **_kwargs: {
             "Base Address": "Base Address",
             "File Offset": "File Offset",
             "Length": "Length",
@@ -2351,7 +2330,7 @@ def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
         import_mode="raw_binary",
         language_id="x86:LE:32:default",
         compiler_spec_id="gcc",
-        base_address="0x401000",
+        base_address=base_address,
         file_offset=4,
         length=16,
         block_name=".text",
@@ -2365,12 +2344,12 @@ def test_import_program_raw_binary_uses_binary_loader(monkeypatch, tmp_path):
         ("projectFolderPath", "/"),
         ("source", str(binary_path)),
         ("name", "shellcode.bin"),
-        ("loaders", "ghidra.app.util.opinion.BinaryLoader"),
+        ("loaders", "BinaryLoader"),
         ("language", "x86:LE:32:default"),
         ("compiler", "gcc"),
-        ("addLoaderArg", ("Base Address", "0x401000")),
-        ("addLoaderArg", ("File Offset", "4")),
-        ("addLoaderArg", ("Length", "16")),
+        ("addLoaderArg", ("Base Address", "401000")),
+        ("addLoaderArg", ("File Offset", "0x4")),
+        ("addLoaderArg", ("Length", "0x10")),
         ("addLoaderArg", ("Block Name", ".text")),
         ("addLoaderArg", ("Overlay", "true")),
         ("load", None),
@@ -2426,7 +2405,7 @@ def test_import_program_raw_binary_close_failure_reports_imported_path(monkeypat
             return FakeLoadResults()
 
     monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", FakeBuilder, raising=False)
-    monkeypatch.setattr(handle, "_resolve_binary_loader_args_locked", lambda _builder, *, required_options=None: {})
+    monkeypatch.setattr(handle, "_resolve_binary_loader_args_locked", lambda _path, **_kwargs: {})
     monkeypatch.setattr(
         handle,
         "_delete_domain_file_locked",
@@ -2495,7 +2474,7 @@ def test_import_program_raw_binary_reports_cleanup_close_failure_after_save_fail
             return FakeLoadResults()
 
     monkeypatch.setattr(session.project_handle.pyghidra, "program_loader", FakeBuilder, raising=False)
-    monkeypatch.setattr(handle, "_resolve_binary_loader_args_locked", lambda _builder, *, required_options=None: {})
+    monkeypatch.setattr(handle, "_resolve_binary_loader_args_locked", lambda _path, **_kwargs: {})
     handle.project = RawImportProject()
 
     with pytest.raises(
@@ -2554,7 +2533,7 @@ def test_import_program_raw_binary_rejects_unavailable_loader_option(monkeypatch
     monkeypatch.setattr(
         handle,
         "_resolve_binary_loader_args_locked",
-        lambda _builder, *, required_options=None: {
+        lambda _path, **_kwargs: {
             "File Offset": "File Offset",
             "Length": "Length",
             "Block Name": "Block Name",
@@ -2619,6 +2598,79 @@ def test_import_program_raw_binary_rejects_unresolved_loader_options(monkeypatch
             base_address="0x401000",
             analyze_imported=False,
         )
+
+
+@pytest.mark.parametrize(
+    "failure,base_address",
+    [(None, None), ("metadata", None), ("language", None), ("missing", None)]
+    + [(None, value) for value in ("0", "0x7fffffffffffffff", "0xffffffffffffffff", "-1", "0x10000000000000000")],
+)
+@pytest.mark.parametrize("unit_size", [1, 2])
+def test_raw_loader_metadata_uses_public_api_and_closes_provider(monkeypatch, failure, base_address, unit_size):
+    handle = build_handle(monkeypatch)
+    calls = []
+    provider = types.SimpleNamespace(close=lambda: calls.append("closed"))
+    space = types.SimpleNamespace(
+        getAddressableUnitSize=lambda: unit_size,
+        getMinAddress=lambda: types.SimpleNamespace(getOffsetAsBigInteger=lambda: "0"),
+        getMaxAddress=lambda: types.SimpleNamespace(getOffsetAsBigInteger=lambda: str((1 << 64) - 1)),
+    )
+    load_spec = types.SimpleNamespace(
+        getLanguageCompilerSpec=lambda: types.SimpleNamespace(
+            getLanguage=lambda: types.SimpleNamespace(getDefaultSpace=lambda: space)
+        )
+    )
+
+    def options(source, spec, domain, load_into, mirror):
+        assert source is provider and spec is load_spec
+        assert domain is None and load_into is False and mirror is False
+        if failure == "metadata":
+            raise RuntimeError("metadata failed")
+        return [
+            types.SimpleNamespace(getName=lambda: "File Offset", getArg=lambda: "-loader-fileOffset"),
+            types.SimpleNamespace(getName=lambda: "Overlay", getArg=lambda: None),
+        ]
+
+    def chooser(language, compiler):
+        assert (language, compiler) == ("x86:LE:64:default", "windows")
+        if failure == "language":
+            raise ValueError("unknown language")
+        return types.SimpleNamespace(choose=lambda _map: None if failure == "missing" else load_spec)
+
+    def open_provider(path, fsrl, mode):
+        assert (path, fsrl, mode) == ("sample.bin", None, "READ")
+        return provider
+
+    classes = {
+        "java.io.File": str,
+        "java.nio.file.AccessMode": types.SimpleNamespace(READ="READ"),
+        "ghidra.app.util.bin.FileByteProvider": open_provider,
+        "ghidra.app.util.opinion.BinaryLoader": lambda: types.SimpleNamespace(
+            findSupportedLoadSpecs=lambda _source: [load_spec], getDefaultOptions=options
+        ),
+        "ghidra.app.util.opinion.LoaderMap": lambda: types.SimpleNamespace(put=lambda *_args: None),
+        "ghidra.program.model.lang.LanguageID": str,
+        "ghidra.program.model.lang.CompilerSpecID": str,
+        "ghidra.app.util.importer.LcsHintLoadSpecChooser": chooser,
+    }
+    monkeypatch.setattr(session.project_handle.jpype, "JClass", classes.__getitem__)
+    kwargs = dict(
+        language_id="x86:LE:64:default",
+        compiler_spec_id="windows",
+        required_options={"File Offset"},
+        base_address=base_address,
+    )
+    if failure:
+        with pytest.raises(RuntimeError, match="RAW_LOADER_OPTION_UNAVAILABLE"):
+            handle._resolve_binary_loader_args_locked(pathlib.Path("sample.bin"), **kwargs)
+    elif base_address is not None and not 0 <= int(base_address, 0) <= ((1 << 64) - 1) // unit_size:
+        with pytest.raises(ValueError, match="base_address.*outside the default address space"):
+            handle._resolve_binary_loader_args_locked(pathlib.Path("sample.bin"), **kwargs)
+    else:
+        assert handle._resolve_binary_loader_args_locked(pathlib.Path("sample.bin"), **kwargs) == {
+            "File Offset": "-loader-fileOffset"
+        }
+    assert calls == ["closed"]
 
 
 def test_post_process_imported_program_bootstraps_entry_and_analysis(monkeypatch):

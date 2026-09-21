@@ -6,12 +6,14 @@ Run Mecha Ghidra with Ghidra and Java included in the image. Install Docker with
 
 ## Build and start
 
+For an existing installation using the `ghidra-mcp` service, follow the [upgrade steps](troubleshooting.md#upgrading-older-configurations) before updating the configuration.
+
 ```bash
 mkdir -p samples exports
 ./build_docker_image.sh
 docker compose up -d
 docker compose ps
-docker compose logs --tail=100 ghidra-mcp
+docker compose logs --tail=100 mecha_ghidra
 ```
 
 Connect your [MCP client](clients.md) to `http://127.0.0.1:8081/mcp`. The service starts with target `default` and project metadata only. On a fresh volume, complete the next section before using analysis tools.

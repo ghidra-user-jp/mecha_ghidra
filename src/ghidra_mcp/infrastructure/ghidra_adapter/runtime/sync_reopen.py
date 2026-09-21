@@ -9,7 +9,7 @@ from ghidra_headless.session import ProjectHandle
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.infrastructure.ghidra_adapter.program_lease import ProgramLease
 
-from .session_store import RuntimeSessionStore
+from .session_store import RuntimeSessionStore, bind_session_project
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ class SyncReopenMixin:
         remove_target_lock_on_cleanup: bool = True,
         reopen_version: int | None = None,
     ):
+        self._store.ensure_not_quarantined(name, operation="reopen")
         with self._store.registry_lock.read_lock():
             session = self._store.ensure_session(name)
         handle = session.get_project_handle()
@@ -91,6 +92,7 @@ class SyncReopenMixin:
                 reopened = active_handle.open_program(reopen_domain_path, version=reopen_version)
             try:
                 self._store.core_accessor().initialize(reopened.get_program(), key=name)
+                bind_session_project(self._store.core_accessor, name, reopened)
                 with self._store.registry_lock.write_lock():
                     self._store.sessions[name] = reopened
                 reopened_session_bound = True

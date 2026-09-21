@@ -15,12 +15,15 @@ from pathlib import Path
 
 import pytest
 
-from ghidra_mcp import cli
+from cli_support import ToolHarness
 from test_runtime_readonly_commands import (
     _ensure_project_created,
     _resolve_runtime_binary_path,
     _start_pyghidra_if_needed,
 )
+
+# Tool callables bound to a swappable registry (see tests/cli_support.py).
+cli_tools = ToolHarness()
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("GHIDRA_RUNTIME_VALIDATION") != "1",
@@ -44,11 +47,13 @@ def test_import_and_decompile_from_worker_thread_do_not_block(tmp_path: Path):
 
     def work() -> None:
         try:
-            cli.register_target(target=target, project_location=str(project_dir), project_name="worker_validation")
-            imported = cli.import_program(target=target, binary_path=binary_path, analyze_imported=True)
-            cli.load_project_program(target=target, domain_path=imported["program"])
-            functions = cli.list_functions(offset=0, limit=1, target=target)
-            outcome["decompiled"] = cli.decompile_function(name=functions[0]["name"], target=target)
+            cli_tools.register_target(
+                target=target, project_location=str(project_dir), project_name="worker_validation"
+            )
+            imported = cli_tools.import_program(target=target, binary_path=binary_path, analyze_imported=True)
+            cli_tools.load_project_program(target=target, domain_path=imported["program"])
+            functions = cli_tools.list_functions(offset=0, limit=1, target=target)
+            outcome["decompiled"] = cli_tools.decompile_function(name=functions[0]["name"], target=target)
         except Exception as exc:  # pragma: no cover - surfaced through the assertion below
             outcome["error"] = exc
 
@@ -62,6 +67,6 @@ def test_import_and_decompile_from_worker_thread_do_not_block(tmp_path: Path):
     finally:
         if not thread.is_alive():
             try:
-                cli.close_session(target)
+                cli_tools.close_session(target)
             except Exception:
                 pass

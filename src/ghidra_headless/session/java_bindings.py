@@ -1,27 +1,26 @@
-"""Lazy JVM class bindings for session helpers."""
+"""Lazy JVM class bindings for session helpers.
+
+Each binding is a cached zero-argument function: the ``JClass`` lookup runs on
+first use (after the JVM is up) and never again.  ``functools.cache`` replaces
+the former module-level ``global`` caches so that no module carries mutable
+state.
+"""
 
 from __future__ import annotations
 
-import pyghidra.core as pycore
+from functools import cache
 
-_FLAT_API_CLASS = None
-_CONSOLE_MONITOR_CLASS = None
-_DEFAULT_CHECKIN_HANDLER_CLASS = None
-_PROGRAM_DIFF_CLASS = None
-_PROGRAM_DIFF_FILTER_CLASS = None
-_PROGRAM_DIFF_DETAILS_CLASS = None
-_JAVA_OBJECT_CLASS = None
-_GHIDRA_PROGRAM_UTILITIES_CLASS = None
-_GHIDRA_SCRIPT_UTIL_CLASS = None
-_TIMEOUT_TASK_MONITOR_CLASS = None
-_TIME_UNIT_CLASS = None
+import jpype
 
 
+@cache
 def _flat_program_api_class():
-    global _FLAT_API_CLASS
-    if _FLAT_API_CLASS is None:
-        _FLAT_API_CLASS = pycore.JClass("ghidra.program.flatapi.FlatProgramAPI")
-    return _FLAT_API_CLASS
+    return jpype.JClass("ghidra.program.flatapi.FlatProgramAPI")
+
+
+@cache
+def _task_monitor_class():
+    return jpype.JClass("ghidra.util.task.TaskMonitor")
 
 
 def _console_monitor():
@@ -31,73 +30,64 @@ def _console_monitor():
     to Java's ``System.out``, which is the same descriptor the MCP stdio
     transport uses for JSON-RPC framing.
     """
-    global _CONSOLE_MONITOR_CLASS
-    if _CONSOLE_MONITOR_CLASS is None:
-        _CONSOLE_MONITOR_CLASS = pycore.JClass("ghidra.util.task.TaskMonitor")
-    return _CONSOLE_MONITOR_CLASS.DUMMY
+    return _task_monitor_class().DUMMY
+
+
+@cache
+def _timeout_task_monitor_class():
+    return jpype.JClass("ghidra.util.task.TimeoutTaskMonitor")
+
+
+@cache
+def _time_unit_class():
+    return jpype.JClass("java.util.concurrent.TimeUnit")
 
 
 def _timeout_task_monitor(*, timeout_seconds: int = 60):
-    global _TIMEOUT_TASK_MONITOR_CLASS
-    global _TIME_UNIT_CLASS
     normalized_timeout = int(timeout_seconds)
     if normalized_timeout < 1:
         raise ValueError("timeout_seconds must be >= 1")
-    if _TIMEOUT_TASK_MONITOR_CLASS is None:
-        _TIMEOUT_TASK_MONITOR_CLASS = pycore.JClass("ghidra.util.task.TimeoutTaskMonitor")
-    if _TIME_UNIT_CLASS is None:
-        _TIME_UNIT_CLASS = pycore.JClass("java.util.concurrent.TimeUnit")
-    return _TIMEOUT_TASK_MONITOR_CLASS.timeoutIn(
+    return _timeout_task_monitor_class().timeoutIn(
         normalized_timeout,
-        _TIME_UNIT_CLASS.SECONDS,
+        _time_unit_class().SECONDS,
         _console_monitor(),
     )
 
 
+@cache
 def _default_checkin_handler_class():
-    global _DEFAULT_CHECKIN_HANDLER_CLASS
-    if _DEFAULT_CHECKIN_HANDLER_CLASS is None:
-        _DEFAULT_CHECKIN_HANDLER_CLASS = pycore.JClass("ghidra.framework.data.DefaultCheckinHandler")
-    return _DEFAULT_CHECKIN_HANDLER_CLASS
+    return jpype.JClass("ghidra.framework.data.DefaultCheckinHandler")
 
 
+@cache
 def _program_diff_class():
-    global _PROGRAM_DIFF_CLASS
-    if _PROGRAM_DIFF_CLASS is None:
-        _PROGRAM_DIFF_CLASS = pycore.JClass("ghidra.program.util.ProgramDiff")
-    return _PROGRAM_DIFF_CLASS
+    return jpype.JClass("ghidra.program.util.ProgramDiff")
 
 
+@cache
 def _program_diff_details_class():
-    global _PROGRAM_DIFF_DETAILS_CLASS
-    if _PROGRAM_DIFF_DETAILS_CLASS is None:
-        _PROGRAM_DIFF_DETAILS_CLASS = pycore.JClass("ghidra.program.util.ProgramDiffDetails")
-    return _PROGRAM_DIFF_DETAILS_CLASS
+    return jpype.JClass("ghidra.program.util.ProgramDiffDetails")
 
 
+@cache
 def _program_diff_filter_class():
-    global _PROGRAM_DIFF_FILTER_CLASS
-    if _PROGRAM_DIFF_FILTER_CLASS is None:
-        _PROGRAM_DIFF_FILTER_CLASS = pycore.JClass("ghidra.program.util.ProgramDiffFilter")
-    return _PROGRAM_DIFF_FILTER_CLASS
+    return jpype.JClass("ghidra.program.util.ProgramDiffFilter")
+
+
+@cache
+def _java_object_class():
+    return jpype.JClass("java.lang.Object")
 
 
 def _java_object():
-    global _JAVA_OBJECT_CLASS
-    if _JAVA_OBJECT_CLASS is None:
-        _JAVA_OBJECT_CLASS = pycore.JClass("java.lang.Object")
-    return _JAVA_OBJECT_CLASS()
+    return _java_object_class()()
 
 
+@cache
 def _ghidra_program_utilities():
-    global _GHIDRA_PROGRAM_UTILITIES_CLASS
-    if _GHIDRA_PROGRAM_UTILITIES_CLASS is None:
-        _GHIDRA_PROGRAM_UTILITIES_CLASS = pycore.JClass("ghidra.program.util.GhidraProgramUtilities")
-    return _GHIDRA_PROGRAM_UTILITIES_CLASS
+    return jpype.JClass("ghidra.program.util.GhidraProgramUtilities")
 
 
+@cache
 def _ghidra_script_util():
-    global _GHIDRA_SCRIPT_UTIL_CLASS
-    if _GHIDRA_SCRIPT_UTIL_CLASS is None:
-        _GHIDRA_SCRIPT_UTIL_CLASS = pycore.JClass("ghidra.app.script.GhidraScriptUtil")
-    return _GHIDRA_SCRIPT_UTIL_CLASS
+    return jpype.JClass("ghidra.app.script.GhidraScriptUtil")

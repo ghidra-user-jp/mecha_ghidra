@@ -1,0 +1,90 @@
+{
+  "scope": "Synthetic SDK CallToolResult JSON characters, not tokens. No JVM/LLM/network timing.",
+  "source": "/Users/samsepi0l/ghidra/mecha_ghidra/src/ghidra_mcp/presentation/result_compaction.py",
+  "payloads": {
+    "text_100k": {
+      "inline_json_chars": 101833,
+      "first_response_json_chars": 4994,
+      "compaction_and_sdk_ms": 0.08,
+      "extra_peak_mib": 0.13
+    },
+    "paged_1000": {
+      "inline_json_chars": 156264,
+      "first_response_json_chars": 2095,
+      "compaction_and_sdk_ms": 1.175,
+      "extra_peak_mib": 0.181,
+      "preview_item_count": 9
+    },
+    "paged_10000": {
+      "inline_json_chars": 1560264,
+      "first_response_json_chars": 2099,
+      "compaction_and_sdk_ms": 10.97,
+      "extra_peak_mib": 1.794,
+      "preview_item_count": 9
+    },
+    "flat_20000": {
+      "inline_json_chars": 3100053,
+      "first_response_json_chars": 2041,
+      "compaction_and_sdk_ms": 28.437,
+      "extra_peak_mib": 3.587
+    }
+  },
+  "read_all_default": {
+    "additional_calls": 9,
+    "response_json_chars": 107955
+  },
+  "read_4000_encoding_calls": 1,
+  "search_20": {
+    "plain_json_chars": 12183,
+    "matches": 19,
+    "merged_json_chars": 5496,
+    "merged_matches": 20
+  },
+  "search_100_encoding_calls": 18,
+  "search_100_ms": 1.597,
+  "page_1000_row_conversions": 1000,
+  "script_error": {
+    "json_chars": 4526,
+    "is_error": true,
+    "stored": true
+  },
+  "tool_definitions": [
+    {
+      "mode": "full",
+      "count": 55,
+      "json_chars": 37865
+    },
+    {
+      "mode": "short",
+      "count": 55,
+      "json_chars": 34093
+    }
+  ],
+  "source_sha256": "96e1f1b47267460b161536eb5e3b59f968de1193ce35998c41012ced377c5efe",
+  "source_hashes": {
+    "ghidra_headless.handlers.commands.query_support": "4f1747cef46ade72903c236e5958f556878b2a7d7359629125ab7acd200952b4",
+    "ghidra_mcp.contracts.tool_spec": "936704d19dcbde1373db4992d766dd716ca05dfe30ceb68fd680b3ec1759d402",
+    "ghidra_mcp.presentation.config": "82521947bb077b12eca229be3361e257b9352e5a3880e56d0f26225de110c6ee",
+    "ghidra_mcp.presentation.tool_registry": "e1ca5d191cdf94c0814fedd2bd7687db6009792247772e6fddb1bbd09fcc879b",
+    "ghidra_mcp.presentation.result_store": "c4b376983fe062bcb54f85f6fbedda524077517afbaa905de8947c539cf68b94",
+    "ghidra_mcp.presentation.result_compaction": "96e1f1b47267460b161536eb5e3b59f968de1193ce35998c41012ced377c5efe",
+    "ghidra_mcp.presentation.result_errors": "d7140681c2fb6c5f397ff2337117f574177d6fdd94840fefde92c6cfb0209968",
+    "ghidra_mcp.presentation.result_json": "f0a96717c519a6b52ab6ec8e0a4139137dd49e7b4a34f2e1415efaf013f567e2",
+    "ghidra_mcp.presentation.result_tools": "398f2f22681caab9f2a10254ea626a562f2a5e52d2484b6d5cd3645bbb1a1853",
+    "ghidra_mcp.presentation.result_resources": "06ec0a3f86b79fac715d14eee5ece89b076f4cb67deb79124317dd378b3626d7",
+    "ghidra_mcp.presentation.mcp_server": "a4781e19447be504ba287a97e831dfd8a07f1784acce0380357030394662698f"
+  },
+  "environment": {
+    "python": "3.12.11 | packaged by conda-forge | (main, Jun  4 2025, 14:38:53) [Clang 18.1.8 ]",
+    "platform": "darwin",
+    "packages": {
+      "mcp": "2.1.1",
+      "pydantic": "2.13.4",
+      "pydantic-core": "2.46.4",
+      "regex": "2026.6.28"
+    },
+    "timing_repeats": 9,
+    "timing_statistic": "median"
+  },
+  "baseline_commit": null
+}

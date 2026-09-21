@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 
-from mcp.server.mcpserver import Audio, Image
 from mcp.types import CallToolResult, ContentBlock, ResourceLink, TextContent
 from pydantic import BaseModel
 from pydantic_core import to_json
@@ -101,7 +102,7 @@ def _is_plain_text_call_result(value: CallToolResult) -> bool:
 
 def _contains_explicit_content(value: Any) -> bool:
     """Return whether the MCP SDK will adapt any value into a non-generic block."""
-    if isinstance(value, ContentBlock) or isinstance(value, (Image, Audio)):  # noqa: SIM101 - ContentBlock is a Union
+    if isinstance(value, ContentBlock):
         return True
     if isinstance(value, (list, tuple)):
         return any(_contains_explicit_content(item) for item in value)
@@ -115,22 +116,18 @@ def _content_block_payload(block: ContentBlock) -> dict[str, Any]:
 
 
 def _prepare_result_for_compaction(value: Any) -> tuple[Any, bool]:
-    """Normalize stateful the MCP SDK adapters and container subclasses once.
+    """Normalize surrogate text and container subclasses once.
 
-    the MCP SDK converts Image/Audio helpers once and iterates list/tuple subclasses
-    using their Python iterator. The compaction pipeline performs several probes
-    (storage, threshold, wire comparison, preview), so sharing one prepared value
-    prevents repeated file reads/base64 work and keeps every probe on one order.
+    The MCP SDK iterates list/tuple subclasses using their Python iterator. The
+    compaction pipeline performs several probes (storage, threshold, wire
+    comparison, preview), so sharing one prepared value keeps every probe on
+    one order and avoids repeating the normalization work.
     Dicts are atomic to the MCP SDK's converter; pydantic_core observes their base
     storage rather than an overridden ``items()``, which we mirror for previews.
     """
     if isinstance(value, str):
         normalized = _normalize_surrogate_text(value)
         return normalized, normalized is not value
-    if isinstance(value, Image):
-        return value.to_image_content(), True
-    if isinstance(value, Audio):
-        return value.to_audio_content(), True
     if isinstance(value, list):
         if type(value) is not list:
             prepared_items: list[Any] = []
@@ -173,7 +170,8 @@ def _prepare_result_for_compaction(value: Any) -> tuple[Any, bool]:
     return value, False
 
 
-def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, int | None]:
+def _serialize_result(result: Any, *, tool_name: str, encode_json=None) -> tuple[str, str, str, int | None]:
+    serialize_json = encode_json or _json_text
     if isinstance(result, str):
         mime_type = "text/x-c" if tool_name == "decompile_function" else "text/plain"
         return result, mime_type, "string", None
@@ -181,7 +179,7 @@ def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, in
         if _is_plain_text_call_result(result):
             return result.content[0].text, "text/plain", "call_tool_result_text", None
         return (
-            _json_text(result.model_dump(mode="json", by_alias=True, exclude_none=True)),
+            serialize_json(result.model_dump(mode="json", by_alias=True, exclude_none=True)),
             "application/json",
             "call_tool_result",
             len(result.content),
@@ -193,7 +191,7 @@ def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, in
         if _is_plain_text_content(result):
             return result.text, "text/plain", "text_content", None
         return (
-            _json_text(_content_block_payload(result)),
+            serialize_json(_content_block_payload(result)),
             "application/json",
             "text_content_block",
             None,
@@ -203,47 +201,52 @@ def _serialize_result(result: Any, *, tool_name: str) -> tuple[str, str, str, in
         # MCP structure as JSON so resource reads can reconstruct what the MCP SDK
         # would otherwise have delivered inline.
         return (
-            _json_text(_content_block_payload(result)),
+            serialize_json(_content_block_payload(result)),
             "application/json",
             "content_block",
             None,
         )
-    if isinstance(result, (Image, Audio)):
-        # These public the MCP SDK helpers have deliberately small repr strings,
-        # while their wire blocks contain base64 payloads. Convert them before
-        # thresholding/storing so large binary results cannot bypass compaction.
-        block = _inline_content_blocks(result)[0]
-        result_type = "image_content" if isinstance(result, Image) else "audio_content"
-        return (
-            _json_text(_content_block_payload(block)),
-            "application/json",
-            result_type,
-            None,
-        )
     if isinstance(result, (list, tuple)):
         if _contains_explicit_content(result):
-            # the MCP SDK recursively flattens mixed lists containing ContentBlock,
-            # Image, or Audio values. Store that actual wire-equivalent sequence
-            # instead of helper repr strings that cannot reconstruct the result.
+            # The MCP SDK recursively flattens mixed lists containing ContentBlock
+            # values. Store that actual wire-equivalent sequence instead of a
+            # JSON dump of the blocks' model representation.
             blocks = _inline_content_blocks(result)
             return (
-                _json_text([_content_block_payload(block) for block in blocks]),
+                serialize_json([_content_block_payload(block) for block in blocks]),
                 "application/json",
                 "content_blocks",
                 len(blocks),
             )
-        return _json_text(result), "application/json", "list", len(result)
+        return serialize_json(result), "application/json", "list", len(result)
     if isinstance(result, dict):
         # item_count counts top-level entries, mirroring list semantics.
-        return _json_text(result), "application/json", "dict", len(result)
+        return serialize_json(result), "application/json", "dict", len(result)
     if isinstance(result, BaseModel):
         # the MCP SDK uses pydantic_core JSON for model results. Keep the compact
         # structural form in the resource rather than Python's repr.
-        return _json_text(result), "application/json", "pydantic_model", None
+        return serialize_json(result), "application/json", "pydantic_model", None
     # Match the MCP SDK's generic conversion. pydantic_core handles dataclasses and
     # other supported values structurally, then uses repr-like fallback only
     # for values without a JSON representation.
-    return _json_text(result), "application/json", type(result).__name__, None
+    return serialize_json(result), "application/json", type(result).__name__, None
+
+
+def _serialize_stored_result(result: Any, *, tool_name: str):
+    # Keep plain str storage: creating a str subclass from bytes entails an
+    # intermediate decoded string and another payload-sized copy in CPython.
+    encoded_metadata = None
+
+    def encode_json(value):
+        nonlocal encoded_metadata
+        data = to_json(value, fallback=str)
+        encoded_metadata = len(data), hashlib.sha256(data).hexdigest()
+        return data.decode("utf-8")
+
+    serialized = _serialize_result(result, tool_name=tool_name, encode_json=encode_json)
+    if encoded_metadata is None:
+        encoded_metadata = _utf8_size_and_sha256(serialized[0])
+    return (*serialized, *encoded_metadata)
 
 
 def _delivered_inline_size(
@@ -286,9 +289,6 @@ def _delivered_inline_size(
         return len(_json_text(_content_block_payload(result), indent=2))
     if isinstance(result, ContentBlock):
         return len(_json_text(_content_block_payload(result), indent=2))
-    if isinstance(result, (Image, Audio)):
-        block = next(_iter_inline_content_blocks(result))
-        return _delivered_content_block_size(block)
     if isinstance(result, (list, tuple)):
         # Nested CallToolResult values are not passed through by the MCP SDK: only a
         # top-level CallToolResult is special. Its recursive list converter turns
@@ -359,6 +359,33 @@ def _dict_preview(mapping: dict, budget: int) -> tuple[str, int, int] | None:
     return _container_preview(pieces, "{", "}", budget)
 
 
+def _page_preview(mapping: dict, budget: int) -> tuple[str, str, int] | None:
+    """Show selected items and the original query cursor, never a false raw offset."""
+    items = mapping.get("items")
+    if (
+        not isinstance(items, (list, tuple))
+        or type(mapping.get("has_more")) is not bool
+        or "next_cursor" not in mapping
+    ):
+        return None
+    metadata = {key: mapping[key] for key in ("program", "revision", "has_more", "next_cursor") if key in mapping}
+    tail = _json_text(metadata)[1:]
+    prefix = '{"items":['
+    cost = len(prefix) + len(tail) + 2  # ],
+    if cost > budget:
+        return None
+    pieces = []
+    for item in items:
+        piece = _json_text(item)
+        addition = len(piece) + bool(pieces)
+        if cost + addition > budget:
+            break
+        pieces.append(piece)
+        cost += addition
+    preview = prefix + ",".join(pieces) + "]," + tail
+    return preview, f"showing {len(pieces)} of {len(items)} items (summary; raw reads start at zero)", 0
+
+
 def _preview_slice(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
@@ -389,6 +416,9 @@ def _preview_for_budget(
         container_preview = _list_preview(result, budget)
         noun = "items"
     elif result_type == "dict" and isinstance(result, dict):
+        page_preview = _page_preview(result, budget)
+        if page_preview is not None:
+            return page_preview
         container_preview = _dict_preview(result, budget)
         noun = "entries"
     if container_preview is not None:
@@ -446,6 +476,8 @@ def _build_compacted_result(
         "resource_uri": entry.uri,
         "size_chars": entry.size_chars,
         "preview_chars": len(preview),
+        "continue_offset_chars": continue_offset,
+        "preview_kind": "summary" if preview and continue_offset == 0 else "prefix",
         "mime_type": entry.mime_type,
         "result_type": display_result_type,
         "item_count": entry.item_count,
@@ -488,6 +520,7 @@ def _uncacheable_result(
     result_type: str,
     item_count: int | None,
     cache_max_bytes: int,
+    cache_max_memory_bytes: int | None = None,
 ) -> CallToolResult:
     display_tool, tool_truncated = _bounded_json_string(
         tool_name,
@@ -504,10 +537,11 @@ def _uncacheable_result(
     message = (
         f"RESULT_TOO_LARGE: [{display_tool}] completed successfully and produced "
         f"{len(text):,} chars ({size_bytes:,} UTF-8 payload bytes), but the payload "
-        f"and its metadata could not be retained within the result cache limit of "
-        f"{cache_max_bytes:,} bytes. The full payload was not returned inline. "
+        f"and its metadata could not be retained within the result cache budgets "
+        f"({cache_max_bytes:,} logical bytes; {cache_max_memory_bytes or cache_max_bytes:,} retained-memory bytes). "
+        "The full payload was not returned inline. "
         "Do not re-run a non-idempotent tool solely to recover this payload; narrow "
-        "a subsequent query or increase --result-cache-max-bytes before a future call."
+        "a subsequent query or increase --result-cache-max-bytes / --result-cache-max-memory-bytes before a future call."
     )
     return CallToolResult(
         is_error=False,
@@ -521,6 +555,7 @@ def _uncacheable_result(
             "size_chars": len(text),
             "size_bytes": size_bytes,
             "cache_max_bytes": cache_max_bytes,
+            "cache_max_memory_bytes": cache_max_memory_bytes,
             "mime_type": mime_type,
             "result_type": display_result_type,
             "item_count": item_count,
@@ -597,12 +632,6 @@ def _iter_inline_content_blocks(result: Any):
     if isinstance(result, ContentBlock):
         yield result
         return
-    if isinstance(result, Image):
-        yield result.to_image_content()
-        return
-    if isinstance(result, Audio):
-        yield result.to_audio_content()
-        return
     if isinstance(result, (list, tuple)):
         for item in result:
             yield from _iter_inline_content_blocks(item)
@@ -615,11 +644,63 @@ def _inline_content_blocks(result: Any) -> list[ContentBlock]:
     return list(_iter_inline_content_blocks(result))
 
 
+def structured_result(value: Any, *, content=None, is_error: bool = False) -> CallToolResult:
+    """Keep human-readable content alongside an explicit JSON data envelope.
+
+    The result envelope represents arrays, scalars and null unambiguously, even
+    on transports that omit optional fields with None values.
+    """
+    data = json.loads(_json_text(value))
+    if content is None:
+        content = _inline_content_blocks(value)
+    return CallToolResult(content=content, structured_content={"result": data}, is_error=is_error)
+
+
+def structured_result_wire_chars(value: Any, *, indent=None, is_error=False) -> int:
+    text = _json_text(value, indent=indent)
+    result = structured_result(value, content=[TextContent(type="text", text=text)], is_error=is_error)
+    return _call_tool_result_wire_chars(result)
+
+
 def _inline_result_wire_chars(result: Any) -> int:
     """Serialized CallToolResult size the MCP SDK would deliver without compaction."""
     if isinstance(result, CallToolResult):
         return _call_tool_result_wire_chars(result)
-    return _call_tool_result_wire_chars(CallToolResult(content=_inline_content_blocks(result)))
+    if _contains_explicit_content(result):
+        return _call_tool_result_wire_chars(CallToolResult(content=_inline_content_blocks(result)))
+    return _call_tool_result_wire_chars(structured_result(result))
+
+
+def _dict_payload_exceeds_threshold(value: dict, threshold: int) -> bool:
+    """Prove size from built-in values without evaluating custom serializers.
+
+    Stop as soon as the lower bound suffices. Small dictionaries keep the old
+    single threshold probe, including dictionaries with stateful fallback=str.
+    Shared containers are counted once, making this only a lower bound.
+    """
+    pending = [iter((value,))]
+    seen = set()
+    size = 0
+    while pending:
+        try:
+            item = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        if type(item) is str:
+            size += len(item)
+        elif type(item) in (int, float, bool) or item is None:
+            size += 1
+        elif type(item) in (dict, list, tuple) and id(item) not in seen:
+            seen.add(id(item))
+            if isinstance(item, dict):
+                pending.append(iter(dict.values(item)))
+                pending.append(iter(dict.keys(item)))
+            else:
+                pending.append(iter(item))
+        if size > threshold:
+            return True
+    return False
 
 
 def _maybe_compact_tool_result(
@@ -637,29 +718,34 @@ def _maybe_compact_tool_result(
         if result.is_error or _is_normalized_empty_list_result(result):
             return result
     if fallback is not None:
-        # Preparing the MCP SDK Image/Audio helpers can consume one-shot state. If a
-        # later helper fails, returning the original value would make the MCP SDK
-        # consume the earlier helper again and turn a completed mutation into an
-        # apparent tool error. Start with a serialization-safe success notice;
-        # replace it with the exact prepared value only after preparation ends.
+        # Preparation may fail part-way (e.g. a model whose serializer raises).
+        # Returning the original value would then make the SDK hit the same
+        # fault and turn a completed mutation into an apparent tool error. Start
+        # with a serialization-safe success notice; replace it with the exact
+        # prepared value only after preparation ends.
         fallback.value = _presentation_failure_result(tool_name, target)
     prepared_result, prepared = _prepare_result_for_compaction(result)
-    # A prepared helper/block sequence is wire-equivalent to the original and
-    # avoids making the MCP SDK invoke a stateful adapter a second time on fallback.
+    # A prepared value is wire-equivalent to the original and already carries
+    # the normalization the SDK would otherwise have to repeat on fallback.
     inline_result = prepared_result if prepared else result
     if fallback is not None:
         fallback.value = inline_result
     threshold = config.large_result_threshold_chars
-    inline_chars = _delivered_inline_size(
-        prepared_result,
-        tool_name=tool_name,
-        stop_after=threshold,
+    # Dictionaries are atomic generic JSON to the SDK. Compact JSON is a
+    # lower bound on their pretty-printed delivery, so large dictionaries do
+    # not need a second complete serialization merely to test the threshold.
+    serialized = (
+        _serialize_stored_result(prepared_result, tool_name=tool_name)
+        if isinstance(prepared_result, dict) and _dict_payload_exceeds_threshold(prepared_result, threshold)
+        else None
     )
+    inline_chars = len(serialized[0]) if serialized is not None else 0
+    if inline_chars <= threshold:
+        inline_chars = _delivered_inline_size(prepared_result, tool_name=tool_name, stop_after=threshold)
     if inline_chars <= threshold:
         return inline_result
-    text, mime_type, result_type, item_count = _serialize_result(
-        prepared_result,
-        tool_name=tool_name,
+    text, mime_type, result_type, item_count, size_bytes, payload_hash = serialized or _serialize_stored_result(
+        prepared_result, tool_name=tool_name
     )
 
     # Both the delivered payload measurement and the compact stored form are
@@ -683,7 +769,6 @@ def _maybe_compact_tool_result(
             inline_wire_chars = _inline_result_wire_chars(prepared_result)
         return candidate_wire_chars < inline_wire_chars
 
-    size_bytes, payload_hash = _utf8_size_and_sha256(text)
     if size_bytes > store.max_bytes:
         uncacheable = _uncacheable_result(
             tool_name=tool_name,
@@ -694,6 +779,7 @@ def _maybe_compact_tool_result(
             result_type=result_type,
             item_count=item_count,
             cache_max_bytes=store.max_bytes,
+            cache_max_memory_bytes=store.max_memory_bytes,
         )
         # A deliberately tiny threshold/cache must not turn a short result into
         # a larger error envelope.  Real oversized payloads still take the
@@ -797,6 +883,7 @@ def _maybe_compact_tool_result(
             result_type=result_type,
             item_count=item_count,
             cache_max_bytes=store.max_bytes,
+            cache_max_memory_bytes=store.max_memory_bytes,
         )
         if not _candidate_is_smaller(uncacheable):
             return inline_result
@@ -823,7 +910,7 @@ def maybe_compact_tool_result(
     this presentation layer runs. A serializer/adapter/cache defect must not
     convert that completed operation into an MCP error, because an agent could
     then repeat a non-idempotent call. Fall back to the latest wire-equivalent
-    result (including any already-converted stateful helpers) and log only the
+    result (including any already-normalized values) and log only the
     exception class; exception messages can contain result data and must not
     leak payloads into server logs.
     """

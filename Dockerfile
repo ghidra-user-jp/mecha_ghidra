@@ -37,7 +37,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 RUN set -eu; \
-    mkdir -p /tmp/ghidra /opt /data/projects /data/exports /samples; \
+    mkdir -p /tmp/ghidra /opt /data/projects /data/exports /data/scripts /samples; \
     image_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     ghidra_dist_url="${GHIDRA_DIST_URL:-}"; \
     ghidra_dist_sha256="${GHIDRA_DIST_SHA256:-}"; \
@@ -80,6 +80,11 @@ RUN set -eu; \
       echo >&2 "Hint: use the default decompiler natives overlay or set GHIDRA_DECOMPILER_NATIVES_URL and GHIDRA_DECOMPILER_NATIVES_SHA256 for an overlay matching the Ghidra distribution."; \
       exit 1; \
     fi; \
+    jython_zip="$(find "${GHIDRA_INSTALL_DIR}/Extensions/Ghidra" -maxdepth 1 -name '*_Jython.zip' | head -n 1)"; \
+    if [ -n "${jython_zip}" ]; then \
+      mkdir -p "${GHIDRA_INSTALL_DIR}/Ghidra/Extensions"; \
+      unzip -q "${jython_zip}" -d "${GHIDRA_INSTALL_DIR}/Ghidra/Extensions"; \
+    fi; \
     rm -rf /tmp/ghidra
 
 RUN pip install --no-cache-dir uv==0.11.2
@@ -104,16 +109,18 @@ ENV HOME=/home/ghidra
 
 EXPOSE 8081
 
-# A TCP-level probe is enough to tell a hung JVM from a listening server; the
-# MCP endpoint itself requires a session and is not a plain GET target.
+# A TCP-level probe checks the listener, not JVM health or tool execution.
+# The stateless MCP endpoint accepts JSON-RPC POST requests, not a plain GET.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
   CMD python3 -c "import socket,sys; s=socket.create_connection(('127.0.0.1', 8081), timeout=3); s.close()" || exit 1
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 # --no-sync: the environment is fully built above; never resolve at start-up.
 # Import, project and export roots are pinned to the mounted volumes so an MCP
-# client cannot read or write outside them.
-CMD ["uv", "run", "--frozen", "--no-sync", "ghidra-mcp", \
+# client cannot read or write outside them.  Scripts stay disabled: add
+# "--add-category", "scripts", "--script-root", "/data/scripts" (mounted
+# read-only) to expose and enable the scripts tools.
+CMD ["uv", "run", "--frozen", "--no-sync", "mecha_ghidra", \
      "--project-location", "/data/projects", "--project-name", "default", \
      "--allowed-import-root", "/samples", "--allowed-project-root", "/data/projects", \
      "--allowed-export-root", "/data/exports", \

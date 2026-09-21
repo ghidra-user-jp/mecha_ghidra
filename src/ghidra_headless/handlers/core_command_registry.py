@@ -54,8 +54,11 @@ from ghidra_headless.handlers.commands import (
 )
 from ghidra_headless.handlers.commands.analysis_queries import disassemble, get_call_edges, get_data_type, get_xrefs
 from ghidra_headless.handlers.commands.batch_edits import apply_edits
+from ghidra_headless.handlers.commands.batch_read import batch_read
+from ghidra_headless.handlers.commands.scripts import run_script
 
 COMMAND_NAMES = (
+    "batch_read",
     "get_xrefs",
     "get_call_edges",
     "disassemble",
@@ -109,6 +112,7 @@ COMMAND_NAMES = (
     "bsim_register_target",
     "bsim_apply_matches",
     "bsim_update_target_signatures",
+    "run_script",
 )
 
 INTERNAL_COMMAND_NAMES = (
@@ -125,9 +129,12 @@ INTERNAL_COMMAND_NAMES = (
     "bsim_register_target",
     "bsim_apply_matches",
     "bsim_update_target_signatures",
+    # run_script is exposed through the registry so the script service gates it first.
+    "run_script",
 )
 
 COMMAND_TO_IMPL = {
+    "batch_read": batch_read,
     "get_xrefs": get_xrefs,
     "get_call_edges": get_call_edges,
     "disassemble": disassemble,
@@ -181,13 +188,15 @@ COMMAND_TO_IMPL = {
     "bsim_register_target": bsim_register_target,
     "bsim_apply_matches": bsim_apply_matches,
     "bsim_update_target_signatures": bsim_update_target_signatures,
+    "run_script": run_script,
 }
 
 # command -> dependency profile for keyword argument injection into command impl.
 COMMAND_PROFILE = {
+    "batch_read": ("ensure_context", "execute_read"),
     "get_xrefs": ("ensure_context", "get_address", "iter_items"),
     "get_call_edges": ("ensure_context", "get_address", "find_function_by_name", "iter_items"),
-    "disassemble": ("ensure_context", "get_address", "find_function_by_name", "iter_items", "code_unit"),
+    "disassemble": ("ensure_context", "get_address", "find_function_by_name", "iter_items", "comment_types"),
     "get_data_type": (
         "ensure_context",
         "dt_manager",
@@ -202,7 +211,7 @@ COMMAND_PROFILE = {
         "get_address",
         "decompile_high_function",
         "iter_items",
-        "code_unit",
+        "comment_types",
     ),
     "bsim_validate_match": ("ensure_context", "get_address"),
     "list_functions": ("ensure_context", "to_int", "collect", "iter_items", "source_type"),
@@ -304,9 +313,9 @@ COMMAND_PROFILE = {
     "create_function": ("ensure_context", "get_address", "txn"),
     "delete_function": ("ensure_context", "get_address", "txn"),
     "analyze_program": ("ensure_context", "analyze_program_impl"),
-    "set_comment": ("ensure_context", "get_address", "txn", "code_unit"),
+    "set_comment": ("ensure_context", "get_address", "txn", "comment_types"),
     "get_program_info": ("ensure_context", "safe_call", "iter_items"),
-    "get_comments": ("ensure_context", "get_address", "code_unit"),
+    "get_comments": ("ensure_context", "get_address", "comment_types"),
     "search_symbols": ("ensure_context", "to_int", "iter_items", "safe_call"),
     "create_label": ("ensure_context", "get_address", "txn", "source_type"),
     "undo_program_change": ("ensure_context", "safe_call", "iter_items"),
@@ -336,6 +345,7 @@ COMMAND_PROFILE = {
     "bsim_register_target": ("ensure_context", "txn"),
     "bsim_apply_matches": ("ensure_context", "get_address", "find_function_by_name", "txn", "source_type"),
     "bsim_update_target_signatures": ("ensure_context",),
+    "run_script": ("ensure_context", "current_key"),
 }
 
 
