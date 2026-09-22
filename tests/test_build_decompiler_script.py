@@ -85,7 +85,7 @@ def test_ghidra_1214_release_builds_all_missing_native_platforms():
         "MECHA_GHIDRA_GHIDRA_DIST_SHA256=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
         in release_env
     )
-    assert "MECHA_GHIDRA_DECOMPILER_NATIVES_RELEASE_TAG=v1.0.1" in release_env
+    assert "MECHA_GHIDRA_DECOMPILER_NATIVES_RELEASE_TAG=v1.0.0" in release_env
     assert "MECHA_GHIDRA_RELEASE_NATIVE_ASSET_RUN_ID=35679647311" in release_env
     assert "MECHA_GHIDRA_RELEASE_NATIVE_ASSET_SOURCE_COMMIT=1a41e4e" in release_env
     assert (
@@ -97,7 +97,7 @@ def test_ghidra_1214_release_builds_all_missing_native_platforms():
         "997d27abc2c1a707e63e45d5ded9b6f67d3e48ed5b574841de61002bf1a4a3bd" in release_env
     )
     assert "Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip" in dockerfile
-    assert "v1.0.1/ghidra_decompiler_natives_all.zip" in dockerfile
+    assert "v1.0.0/ghidra_decompiler_natives_all.zip" in dockerfile
     assert "3a8de764a310c7542442978da1cd9cb463861ce9fb345275f2a00c60cdb5c7c6" in dockerfile
     assert "github-token: ${{ github.token }}" in workflow
     assert "run-id: ${{ steps.native_asset_source.outputs.run_id }}" in workflow
