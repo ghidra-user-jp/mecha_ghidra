@@ -1,17 +1,31 @@
 # Mecha Ghidra
 
-A Ghidra MCP server built for fully automated AI analysis and handing findings back to human analysts. It runs independently of Ghidra plugins and lets the LLM compose low-level tools into an analysis workflow.
+A Ghidra MCP server that supports fully automated AI analysis and the handoff of results and insights to human analysts. It runs independently of Ghidra plugins and provides low-level tools for operations such as decompilation and editing. The AI decides the analysis strategy and steps, selecting and combining the tools it needs.
 
 [English](README.md) | [日本語](README.ja.md) · [Get started](docs/usage.md) · [Tools](docs/tools.md) · [Releases](https://github.com/ghidra-user-jp/mecha_ghidra/releases)
 
 <img src="https://github.com/user-attachments/assets/0adbf0e3-4ad9-4a7b-87a6-62a2f9921bb7" alt="Mecha Ghidra" width="480" />
 
-## Design philosophy
+## Features
 
-- **Run independently of Ghidra plugins.** Mecha Ghidra is a standalone MCP server that accesses Ghidra APIs through PyGhidra. AI agents can automate project creation, analysis, editing, and saving without installing a plugin or operating the GUI.
-- **Bring AI findings back to people.** Ghidra Server support lets an AI agent check in names, types, comments, and other edits to a shared repository. Human analysts can retrieve and review those changes in the Ghidra GUI and continue the analysis.
-- **Keep context available for analysis.** Expose only the tools needed for the task, shorten tool descriptions, and retrieve or search large results in parts. These controls limit the context consumed by tool definitions and output. See [tool exposure](docs/configuration.md#tool-exposure) and [large results](docs/configuration.md#large-results).
-- **Leave advanced analysis workflows to the LLM.** The server provides low-level operations such as decompilation, reference lookups, and name or type edits. The model forms hypotheses and chooses how to combine those operations. Keeping analysis workflows out of the server lets the project benefit from improvements in LLM capabilities.
+- Run independently of Ghidra plugins
+  - A standalone MCP server that accesses Ghidra APIs through PyGhidra
+  - No plugin installation or GUI operation required
+- Hand AI analysis results back to people
+  - Save names, types, comments, and other AI edits to a shared Ghidra Server repository
+  - Human analysts can retrieve the changes in the Ghidra GUI and continue the analysis
+- The AI decides the analysis strategy and steps
+  - Provide tools for decompilation, reference lookups, and name or type edits
+  - The AI selects and combines tools without the server prescribing a fixed analysis workflow
+- Reduce context consumption
+  - Expose only the tools needed for the task to reduce context consumed by tool definitions
+  - Page through or search large results to retrieve only the parts needed
+- Switch between and compare multiple analysis targets
+  - Keep multiple sessions open and switch targets during analysis
+  - Compare variants and versions, or investigate related EXEs and DLLs
+- Use previous analysis results through BSim
+  - Search registered binaries for similar functions
+  - Open a matched binary as another analysis target and compare the code
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture.dark.svg">
