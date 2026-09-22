@@ -30,18 +30,18 @@ Install Mecha Ghidra, connect an MCP client, and open your first program. The sh
 | Java | The JDK required by that Ghidra distribution; Ghidra 12.1.x uses JDK 21 |
 | MCP client | Streamable HTTP or stdio support |
 
-The build scripts pin Ghidra 12.1.3 in [ghidra_release.env](../scripts/ghidra_release.env). Ghidra Server and a BSim database are optional.
+The build scripts pin Ghidra 12.1.4 in [ghidra_release.env](../scripts/ghidra_release.env). Ghidra Server and a BSim database are optional.
 
 <a id="native-decompiler-artifacts"></a>
 
 ### Native decompiler files
 
-The upstream Ghidra 12.1.3 ZIP omits native decompiler directories for Linux ARM64 and both macOS architectures. Choose the matching assets from [Mecha Ghidra releases](https://github.com/ghidra-user-jp/mecha_ghidra/releases):
+The upstream Ghidra 12.1.4 ZIP omits native decompiler directories for Linux ARM64 and both macOS architectures. Choose the matching assets from [Mecha Ghidra releases](https://github.com/ghidra-user-jp/mecha_ghidra/releases):
 
 | Asset | Use |
 | --- | --- |
-| `ghidra_12.1.3_decompiler_natives_all.zip` | A complete Ghidra installation with the additional natives already installed |
-| `ghidra_decompiler_natives_all.zip` | An overlay to extract into an existing Ghidra 12.1.3 installation |
+| `ghidra_12.1.4_decompiler_natives_all.zip` | A complete Ghidra installation with the additional natives already installed |
+| `ghidra_decompiler_natives_all.zip` | An overlay to extract into an existing Ghidra 12.1.4 installation |
 | GitHub's `Source code` archives | Mecha Ghidra source code; not a Ghidra installation |
 
 The overlay supplies matching `decompile` and `sleigh` files under `Ghidra/Features/Decompiler/os/{linux_arm_64,mac_arm_64,mac_x86_64}/`. Keep the native files and Ghidra version together. To build them yourself, see [native builds](development.md#native-builds).

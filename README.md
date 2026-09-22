@@ -53,7 +53,7 @@ Choose a setup:
 | You want Ghidra bundled in a container | [Docker guide](docs/docker.md) |
 | The server is already running | [Connect your MCP client](docs/clients.md) |
 
-The local setup requires Python 3.10+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Ghidra, and a compatible JDK. The repository's native builds currently target Ghidra 12.1.3. See [requirements and native decompiler files](docs/usage.md#requirements) before choosing a Ghidra distribution.
+The local setup requires Python 3.10+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Ghidra, and a compatible JDK. The repository's native builds currently target Ghidra 12.1.4. See [requirements and native decompiler files](docs/usage.md#requirements) before choosing a Ghidra distribution.
 
 For an **existing** `analysis.gpr` project, this is the minimal stdio launch command. Replace both absolute paths:
 

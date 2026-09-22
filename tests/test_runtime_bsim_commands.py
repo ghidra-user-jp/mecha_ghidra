@@ -26,6 +26,8 @@ def _resolve_ghidra_install_dir() -> Path:
     explicit = os.environ.get("GHIDRA_INSTALL_DIR")
     candidates = [
         explicit,
+        str(Path.home() / "ghidra" / "ghidra_12.1.4_PUBLIC"),
+        str(Path.home() / "Library" / "ghidra" / "ghidra_12.1.4_PUBLIC"),
         str(Path.home() / "ghidra" / "ghidra_12.1.3_PUBLIC"),
         str(Path.home() / "Library" / "ghidra" / "ghidra_12.1.3_PUBLIC"),
         str(Path.home() / "ghidra" / "ghidra_12.1.2_PUBLIC"),
