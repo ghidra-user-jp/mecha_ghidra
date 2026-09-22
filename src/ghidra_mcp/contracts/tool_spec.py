@@ -1860,14 +1860,20 @@ _TOOL_SPECS["batch_read"] = replace(
         ),
         description=(
             "Read 1-20 independent requests on one target under one lock. Supported tools: get_function, "
-            "get_comments, get_data_type, get_xrefs, get_call_edges; each must also be enabled individually. "
+            "get_comments, get_data_type, get_xrefs, get_call_edges, decompile_function, disassemble; "
+            "each must also be enabled individually. "
             "Use unique short ids and each tool's usual arguments without target. Optional fields select top-level "
-            "data keys, or row keys for paged tools (page metadata is preserved). All inputs are validated first; "
+            "data keys, or row keys for paged tools (page metadata is preserved); no fields for C strings. "
+            "All inputs are validated first; "
             "item query failures continue, revision changes fail the entire batch. Inspect status and all item statuses. "
-            "Page limits total at most 2000 rows. timeout_seconds is a soft deadline checked between reads, "
-            "not a hard interrupt; unstarted items are not_run. max_output_chars bounds response JSON text "
+            "Page limits total at most 2000 rows; at most 5 decompiles, with batch-only item_timeout_seconds "
+            "(default 15, 1-60). timeout_seconds (default 10, max 60) starts after locking; heavy reads "
+            "cooperatively stop within the remaining time. This is not a hard interrupt. Retained payloads "
+            "are limited to 8 MiB; unstarted items report time_budget_exhausted or result_budget_exhausted. "
+            "max_output_chars bounds response JSON text "
             "(not the MCP envelope). Large batches use one result_id: read_result(mode='json', path='/items', "
-            "offset_items=N) retrieves item N. Inline mode rejects oversized responses."
+            "offset_items=N) retrieves item N. read_result(mode='text', path='/items/N/data') and search_result "
+            "with the same path retrieve/search decoded C text. Inline mode rejects oversized responses."
         ),
     ),
     input_model=batch_input_model(_TOOL_SPECS),

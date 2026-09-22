@@ -61,6 +61,8 @@ def present_batch_result(result, *, target, max_output_chars, config, store):
     summaries = []
     for index, item in enumerate(result["items"]):
         summary = {"id": item["id"], "status": item["status"], "offset_items": index}
+        if entry is not None and item["status"] == "ok" and isinstance(item["data"], str):
+            summary["text_path"] = "/items/%d/data" % index
         if item["status"] == "error":
             summary["error_code"] = item["error"]["code"]
         if item["status"] == "not_run":

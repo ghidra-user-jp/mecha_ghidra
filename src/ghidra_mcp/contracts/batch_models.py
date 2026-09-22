@@ -20,18 +20,16 @@ class BatchInput(ToolInputModel):
         # The typed request models above fix the field shapes; the semantic
         # rules (required selectors, unique ids, the 2000-row page budget) run
         # once here and once more in the core for callers that bypass MCP.
-        validate_requests(
-            [
-                {"id": request.id, "tool": request.tool, "arguments": request.arguments.model_dump(exclude_none=True)}
-                for request in self.requests
-            ]
-        )
+        validate_requests([request.model_dump(exclude_none=True) for request in self.requests])
         return self
 
 
 def batch_input_model(specs):
     variants = []
     for name in sorted(BATCH_READ_TOOLS):
+        extra = (
+            {"item_timeout_seconds": (Annotated[int, Field(ge=1, le=60)], 15)} if name == "decompile_function" else {}
+        )
         variants.append(
             create_model(
                 "Batch" + specs[name].input_model.__name__,
@@ -46,6 +44,7 @@ def batch_input_model(specs):
                     | None,
                     None,
                 ),
+                **extra,
             )
         )
     request_type = Annotated[Union[tuple(variants)], Field(discriminator="tool")]

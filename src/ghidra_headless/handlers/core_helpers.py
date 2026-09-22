@@ -4,6 +4,7 @@ from __future__ import absolute_import, print_function
 
 import functools
 import os
+from contextlib import nullcontext
 
 import jpype
 from ghidra.app.decompiler import DecompInterface
@@ -574,15 +575,29 @@ def _with_decompiler(ctx, action):
     return results
 
 
-def _decompile_function_object(ctx, function):
+def _decompile_function_object(ctx, function, *, budget=None):
     def _run(interface):
-        results = interface.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, ctx.monitor())
+        with budget.monitor() if budget is not None else nullcontext(ctx.monitor()) as monitor:
+            timeout = budget.native_timeout() if budget is not None else DECOMPILE_TIMEOUT_SECONDS
+            results = interface.decompileFunction(function, timeout, monitor)
+            if budget is not None:
+                budget.check("DECOMPILE_TIMEOUT")
+                if monitor.isCancelled() or (results is not None and results.isTimedOut()):
+                    raise HeadlessError("DECOMPILE_TIMEOUT: decompilation exceeded its time budget")
+        if budget is not None and (results is None or not results.decompileCompleted()):
+            detail = "" if results is None else str(results.getErrorMessage() or "").strip()
+            raise HeadlessError("DECOMPILE_FAILED: %s" % (detail or "decompilation failed"))
         if results is None:
             raise RuntimeError("Decompilation failed")
         decompiled = results.getDecompiledFunction()
         if decompiled is not None:
-            return decompiled.getC()
+            code = decompiled.getC()
+            if budget is not None:
+                budget.check("DECOMPILE_TIMEOUT")
+            return code
         detail = (results.getErrorMessage() or "").strip()
+        if budget is not None:
+            raise HeadlessError("DECOMPILE_FAILED: %s" % (detail or "decompilation result is empty"))
         if detail:
             raise RuntimeError("Decompilation result is empty: %s" % detail)
         raise RuntimeError("Decompilation result is empty")

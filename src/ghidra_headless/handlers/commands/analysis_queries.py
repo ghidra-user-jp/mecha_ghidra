@@ -134,7 +134,7 @@ def get_call_edges(params, *, ensure_context, get_address, find_function_by_name
     return page(ctx, "get_call_edges", params, incoming() if direction == "in" else outgoing(), convert=describe)
 
 
-def disassemble(params, *, ensure_context, get_address, find_function_by_name, iter_items, comment_types):
+def disassemble(params, *, ensure_context, get_address, find_function_by_name, iter_items, comment_types, budget=None):
     ctx = ensure_context()
     function_selector = bool(params.get("address") or params.get("name"))
     range_selector = any(params.get(k) is not None for k in ("start_address", "end_address", "length"))
@@ -193,6 +193,7 @@ def disassemble(params, *, ensure_context, get_address, find_function_by_name, i
         instructions,
         convert=lambda inst: _instruction_to_dict(inst, comment_types),
         seek_key=lambda inst: str(inst.getAddress()),
+        check=None if budget is None else budget.check,
     )
 
 

@@ -175,7 +175,7 @@ def _validate_batch_output(requests, result):
             child = get_tool_spec(request["tool"])
             data = _validate_output(child.name, child.output_model, item["data"])
             if fields := request.get("fields"):
-                if child.name in {"get_xrefs", "get_call_edges"}:
+                if child.name in {"get_xrefs", "get_call_edges", "disassemble"}:
                     data = {**data, "items": [{k: row[k] for k in fields if k in row} for row in data["items"]]}
                 else:
                     data = {k: data[k] for k in fields if k in data}

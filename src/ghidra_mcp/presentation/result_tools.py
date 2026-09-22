@@ -21,7 +21,7 @@ from ghidra_mcp.presentation.result_compaction import (
     _json_text,
     structured_result_wire_chars,
 )
-from ghidra_mcp.presentation.result_json import read_json_items
+from ghidra_mcp.presentation.result_json import read_json_items, select_text_result
 from ghidra_mcp.presentation.result_store import ResultResourceStore, StoredToolResult
 from ghidra_mcp.presentation.tool_binding import bind_function
 from ghidra_mcp.presentation.tool_errors import ToolError
@@ -38,6 +38,8 @@ _ResultId = Annotated[
     str,
     Field(min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$"),
 ]
+_TextPath = Annotated[str, Field(max_length=25, pattern=r"^(?:|/items/(?:0|[1-9][0-9]{0,5})/data)$")]
+_ReadPath = Annotated[str, Field(max_length=25, pattern=r"^(?:|/items|/items/(?:0|[1-9][0-9]{0,5})/data)$")]
 
 
 # Static pattern screening cannot reliably separate safe expressions from ReDoS
@@ -66,6 +68,7 @@ def _read_result_payload(
     *,
     offset: int,
     chunk: str,
+    path: str = "",
 ) -> dict[str, Any]:
     tool, tool_truncated = _bounded_json_string(
         entry.tool,
@@ -82,6 +85,7 @@ def _read_result_payload(
     next_offset = offset + len(chunk)
     has_more = next_offset < entry.size_chars
     return {
+        **({"path": path} if path else {}),
         "result_id": entry.result_id,
         "tool": tool,
         "target": target,
@@ -102,16 +106,17 @@ def _fit_read_result_chunk(
     offset: int,
     candidate: str,
     configured_budget: int,
+    path: str = "",
 ) -> dict[str, Any]:
     budget = max(configured_budget, _MIN_RESULT_TOOL_RESPONSE_CHARS)
-    full = _read_result_payload(entry, offset=offset, chunk=candidate)
+    full = _read_result_payload(entry, offset=offset, chunk=candidate, path=path)
     if structured_result_wire_chars(full) <= budget:
         return full
     low = 0
     high = len(candidate) - 1
     while low < high:
         middle = (low + high + 1) // 2
-        payload = _read_result_payload(entry, offset=offset, chunk=candidate[:middle])
+        payload = _read_result_payload(entry, offset=offset, chunk=candidate[:middle], path=path)
         if structured_result_wire_chars(payload) <= budget:
             low = middle
         else:
@@ -121,7 +126,7 @@ def _fit_read_result_chunk(
     # still makes progress without violating the complete-response cap.
     if candidate and low == 0:
         raise AssertionError("read_result response metadata exhausted the minimum budget")
-    return _read_result_payload(entry, offset=offset, chunk=candidate[:low])
+    return _read_result_payload(entry, offset=offset, chunk=candidate[:low], path=path)
 
 
 def _search_result_payload(
@@ -178,6 +183,7 @@ def _search_stored_result(
     count_mode: str = "bounded",
     offset_chars: int = 0,
     cursor: str | None = None,
+    path: str = "",
 ) -> dict[str, Any]:
     _validate_search_pattern(pattern)
     if count_mode not in {"bounded", "none"}:
@@ -188,7 +194,8 @@ def _search_stored_result(
         compiled = regex.compile(pattern)
     except regex.error as exc:
         raise ValueError(f"Invalid regex pattern: {exc}") from exc
-    fingerprint = hashlib.sha256(pattern.encode("utf-8", errors="replace")).hexdigest()[:16]
+    search_identity = _json_text([pattern, path])
+    fingerprint = hashlib.sha256(search_identity.encode("utf-8", errors="replace")).hexdigest()[:16]
     offset = min(max(0, offset_chars), entry.size_chars)
     skip = 0
     if cursor is not None:
@@ -208,7 +215,7 @@ def _search_stored_result(
             ):
                 raise ValueError
         except (ValueError, TypeError) as exc:
-            raise ValueError("Invalid search cursor or cursor belongs to a different result/pattern") from exc
+            raise ValueError("Invalid search cursor or cursor belongs to a different result/pattern/path") from exc
     reverse = bool(getattr(compiled, "flags", 0) & regex.REVERSE)
     if reverse and (cursor is not None or count_mode == "none" or offset_chars):
         raise ValueError("Reverse regex supports bounded search from the beginning only")
@@ -279,6 +286,8 @@ def _search_stored_result(
             matches=matches,
         )
         data["count_complete"] = not scan_truncated
+        if path:
+            data["path"] = path
         if matches and not reverse and (scan_truncated or len(matches) < match_count):
             last = matches[-1]
             resume = [entry.result_id, fingerprint, last["end_offset"], int(last["match_chars"] == 0)]
@@ -338,7 +347,8 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
         "response is capped at max(threshold, 1024) serialized characters. mode=json reads array items "
         "at path='' (root) or '/items' with offset_items/limit_items and optional object fields. "
         "An oversized item is skipped: item_too_large reports its raw offset_chars/item_chars for mode=text "
-        "and next_offset_items advances past it."
+        "and next_offset_items advances past it. For a batch C string, use mode=text with "
+        "path='/items/N/data'; offsets then refer to decoded text, not escaped JSON. Keep the same path when paging."
     )
 
     def read_result(
@@ -346,7 +356,7 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
         offset_chars: int = 0,
         limit_chars: int | None = None,
         mode: Literal["text", "json"] = "text",
-        path: Literal["", "/items"] = "",
+        path: _ReadPath = "",
         offset_items: Annotated[int, Field(ge=0)] = 0,
         limit_items: Annotated[int, Field(ge=1, le=1000)] = 20,
         fields: Annotated[list[Annotated[str, Field(max_length=128)]] | None, Field(max_length=32)] = None,
@@ -369,8 +379,12 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
                 )
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
-        if path or offset_items or fields is not None or limit_items != 20:
+        if offset_items or fields is not None or limit_items != 20 or path == "/items":
             raise ToolError("JSON selectors require mode=json")
+        try:
+            entry = select_text_result(store, entry, path)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         offset = min(max(0, offset_chars), entry.size_chars)
         if limit_chars is None:
             limit_chars = config.large_result_threshold_chars
@@ -383,6 +397,7 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
             offset=offset,
             candidate=candidate,
             configured_budget=config.large_result_threshold_chars,
+            path=path,
         )
 
     search_description = (
@@ -399,7 +414,8 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
         "the echoed pattern and displayed snippets may be shortened. merge_context=true shares overlapping "
         "contexts; matches reference context_index. count_mode=none stops after the requested snippets "
         "without counting all matches. count_complete discloses incomplete counts; next_cursor resumes "
-        "after returned matches with the same result_id/pattern. Reverse regex cannot use continuation."
+        "after returned matches with the same result_id/pattern/path. path='/items/N/data' searches a decoded "
+        "batch C string; use that same path in read_result for its offsets. Reverse regex cannot use continuation."
     )
 
     async def search_result(
@@ -422,12 +438,13 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
         count_mode: Literal["bounded", "none"] = "bounded",
         offset_chars: Annotated[int, Field(ge=0)] = 0,
         cursor: Annotated[str | None, Field(max_length=256)] = None,
+        path: _TextPath = "",
     ) -> dict[str, Any]:
         entry = _get_entry(store, result_id)
-        try:
-            return await asyncio.to_thread(
-                _search_stored_result,
-                entry,
+
+        def search():
+            return _search_stored_result(
+                select_text_result(store, entry, path),
                 pattern=pattern,
                 context_chars=context_chars,
                 max_matches=max_matches,
@@ -436,7 +453,11 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
                 count_mode=count_mode,
                 offset_chars=offset_chars,
                 cursor=cursor,
+                path=path,
             )
+
+        try:
+            return await asyncio.to_thread(search)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 

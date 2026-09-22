@@ -21,7 +21,7 @@ def program_metadata(ctx):
     }
 
 
-def page(ctx, tool, params, rows, *, convert=None, seek_key=None):
+def page(ctx, tool, params, rows, *, convert=None, seek_key=None, check=None):
     limit = int(params.get("limit", 100))
     if not 1 <= limit <= 10000:
         raise ValueError("limit must be between 1 and 10000")
@@ -55,8 +55,16 @@ def page(ctx, tool, params, rows, *, convert=None, seek_key=None):
         rows = rows(offset["seek"] if isinstance(offset, dict) else None)
     if isinstance(offset, dict):
         offset = 0
+    if check is not None:
+        rows = _checked_rows(rows, check)
     selected = list(islice(rows, offset, offset + limit + 1))
-    items = selected[:limit] if convert is None else [convert(row) for row in selected[:limit]]
+    items = []
+    for row in selected[:limit]:
+        if check is not None:
+            check()
+        items.append(row if convert is None else convert(row))
+    if check is not None:
+        check()
     if program_revision(ctx) != metadata["revision"]:
         raise HeadlessError("SESSION_CHANGED: program changed while reading; restart pagination")
     has_more = len(selected) > limit
@@ -72,6 +80,18 @@ def page(ctx, tool, params, rows, *, convert=None, seek_key=None):
             ).encode()
         ).decode()
     return {**metadata, "items": items, "has_more": has_more, "next_cursor": next_cursor}
+
+
+def _checked_rows(rows, check):
+    iterator = iter(rows)
+    while True:
+        check()
+        try:
+            row = next(iterator)
+        except StopIteration:
+            return
+        check()
+        yield row
 
 
 def resolve_function(ctx, params, get_address, find_function_by_name):

@@ -28,7 +28,9 @@ def _instruction_to_dict(inst, comment_types):
     }
 
 
-def decompile_function(params, *, ensure_context, get_address, find_function_by_name, decompile_function_object):
+def decompile_function(
+    params, *, ensure_context, get_address, find_function_by_name, decompile_function_object, budget=None
+):
     ctx = ensure_context()
     address_text = params.get("address")
     name = params.get("name")
@@ -37,11 +39,12 @@ def decompile_function(params, *, ensure_context, get_address, find_function_by_
         function = ctx.function_manager.getFunctionContaining(address)
         if function is None:
             raise LookupError("No function found for address: %s" % address_text)
-        return decompile_function_object(ctx, function)
-    if not name:
-        raise ValueError("address or name is required")
-    function = find_function_by_name(ctx, name)
-    if function is None:
-        raise LookupError("Function not found: %s" % name)
-
+    else:
+        if not name:
+            raise ValueError("address or name is required")
+        function = find_function_by_name(ctx, name)
+        if function is None:
+            raise LookupError("Function not found: %s" % name)
+    if budget is not None:
+        return decompile_function_object(ctx, function, budget=budget)
     return decompile_function_object(ctx, function)

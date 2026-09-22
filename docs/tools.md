@@ -43,27 +43,33 @@ See [first analysis](usage.md#first-analysis) for operation order and saving beh
 
 ## Batch reads
 
-`batch_read` executes 1–20 independent reads on one `target` sequentially, with one tool call and one target/project lock acquisition. It is exposed in the default, readonly and full profiles. Supported children are `get_function`, `get_comments`, `get_data_type`, `get_xrefs` and `get_call_edges`. Each child must also be individually enabled; batch access cannot reach disabled tools.
+`batch_read` executes 1–20 independent reads on one `target` sequentially, with one tool call and one target/project lock acquisition. It is exposed in the default, readonly and full profiles. Supported children are `get_function`, `get_comments`, `get_data_type`, `get_xrefs`, `get_call_edges`, `decompile_function` and `disassemble`. Each child must also be individually enabled; batch access cannot reach disabled tools.
 
 ```json
 {
   "target": "default",
   "requests": [
     {"id": "function", "tool": "get_function", "arguments": {"address": "0x401000"}, "fields": ["entry", "name"]},
-    {"id": "references", "tool": "get_xrefs", "arguments": {"address": "0x401000", "direction": "to", "limit": 20}}
+    {"id": "references", "tool": "get_xrefs", "arguments": {"address": "0x401000", "direction": "to", "limit": 20}},
+    {"id": "c", "tool": "decompile_function", "arguments": {"address": "0x401000"}, "item_timeout_seconds": 15},
+    {"id": "asm", "tool": "disassemble", "arguments": {"address": "0x401000", "limit": 40}, "fields": ["address", "mnemonic", "operands"]}
   ],
-  "timeout_seconds": 10,
+  "timeout_seconds": 30,
   "max_output_chars": 12000
 }
 ```
 
-IDs must be unique, 1–32 ASCII letters/digits/underscores/hyphens. `arguments` uses the child's usual parameters without `target`. All input shapes, types, selectors and tool exposure checks run before execution. The sum of page limits for xrefs/call edges must not exceed 2,000. Dependencies between requests, recursive batches, writes and scripts are unsupported.
+IDs must be unique, 1–32 ASCII letters/digits/underscores/hyphens. `arguments` uses the child's usual parameters without `target`. All input shapes, types, selectors and tool exposure checks run before execution. The sum of page limits for xrefs/call edges/disassembly must not exceed 2,000, including default limits. A batch may contain at most 5 decompiles. Dependencies between requests, recursive batches, writes, scripts and automatic analysis are unsupported.
 
 Optional `fields` (1–32 keys) projects top-level result keys, or row keys for paged tools while retaining `program`, `revision`, `has_more` and `next_cursor`. Missing keys are omitted; nested paths are not interpreted. Continue each child's page with its original query arguments and cursor.
 
+Disassembly uses the usual function or address-range selectors and cursor. `fields` selects instruction row keys. Decompilation returns a C string and rejects `fields`; its batch-only `item_timeout_seconds` (default 15, range 1–60) belongs beside `arguments`, not inside it. Standalone decompilation retains its 120-second timeout.
+
 The response is one JSON text block. Overall `status` is `ok` if all items succeeded, `partial` if some succeeded, and `error` if none succeeded. Inspect `succeeded_count`, `failed_count`, `not_run_count`, and ordered `items` containing `id`, `tool`, `status`, and `data` or `error`. Expected query failures continue; unexpected backend failures abort. MCP `isError=true` means no reads succeeded or the entire request failed; a partial result has `isError=false` and still contains failed items.
 
-Optional `expected_revision` rejects stale reads before execution. A revision/context change during execution fails the entire batch with `SESSION_CHANGED`, discarding mixed results. `timeout_seconds` (default 10, range 1–60) is checked before starting each read after lock acquisition. It is not a hard interruption deadline and does not include lock waits. Unstarted requests become `not_run` with reason `time_budget_exhausted`.
+Optional `expected_revision` rejects stale reads before execution. A revision/context change during execution fails the entire batch with `SESSION_CHANGED`, discarding mixed results. `timeout_seconds` (default 10, range 1–60) starts after lock acquisition. Heavy reads also check it while running: decompilation uses the smaller of its item limit and remaining batch time, with a per-call cancellation monitor; disassembly checks during enumeration and conversion. Fewer than one second remaining prevents starting a new decompile. These are cooperative deadlines, not hard interrupts: locks remain held until the call returns. Unstarted requests become `not_run` with reason `time_budget_exhausted`. Stopped timeouts (`DECOMPILE_TIMEOUT` / `READ_TIMEOUT`) and native decompilation failures (`DECOMPILE_FAILED`) are item errors; other reads can continue if time remains. An incomplete disassembly page is not returned as a successful page.
+
+Retained item payloads have a separate 8 MiB budget, measured as compact UTF-8 JSON with room reserved for metadata and errors. An oversized item returns `ITEM_RESULT_TOO_LARGE`, without truncated C presented as success. A result that exceeds the remaining aggregate capacity returns `RESULT_BUDGET_EXHAUSTED`; later reads are `not_run / result_budget_exhausted`. Oversized error details are explicitly shortened. This bounds retained results, not the peak allocation inside Ghidra/native decompilation.
 
 `max_output_chars` (default 12,000, range 2,048–12,000) bounds the entire response JSON text, excluding the outer MCP envelope; it is not a token count. This tool uses its own output limit. Oversized batches store all projected items in one result-cache entry and return counts, item statuses, complete small results that fit, and a shared `result_id`. Use an omitted item's `offset_items` to retrieve it with `read_result`, for example:
 
@@ -72,6 +78,8 @@ Optional `expected_revision` rejects stale reads before execution. A revision/co
 ```
 
 Increase `limit_items` to retrieve several items together. If a single item exceeds the retrieval limit, `read_result` skips it (`item_too_large=true`, `next_offset_items` advances past it) and reports its raw-text offset: read it with `mode="text"` or locate relevant text with `search_result`. If even the status manifest exceeds the budget, counts and `item_summaries_omitted=true` remain inline; retrieve the manifest from the cache. Cache refusal returns `result_unavailable=true`; IDs remain subject to normal LRU eviction. In `large_result_mode=inline`, oversized responses fail with guidance to narrow fields, page limits or request count.
+
+For a C string, read `read_result(result_id, mode="text", path="/items/2/data", offset_chars=0, limit_chars=3000)` or search `search_result(result_id, path="/items/2/data", pattern="decode")`. The item index is zero-based; compacted string items include `text_path`. Offsets and matches refer to the decoded C text, not escaped JSON. Keep the same path when paging or following a search cursor. An empty path preserves raw-text retrieval/search.
 
 <a id="function-analysis"></a>
 

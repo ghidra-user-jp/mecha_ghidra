@@ -56,9 +56,11 @@ from ghidra_headless.handlers.core_runtime import (
 )
 
 
-def _execute_nested_command(command, params):
+def _execute_nested_command(command, params, *, budget=None):
     # Bounded edit/read handlers validate commands before entering this path;
     # the outer core call already holds the target/project locks.
+    if budget is not None:
+        return SUPPORTED_COMMANDS[command](params, budget=budget)
     return SUPPORTED_COMMANDS[command](params)
 
 
@@ -122,8 +124,11 @@ def _make_handler(command):
     impl = COMMAND_TO_IMPL[command]
     profile = COMMAND_PROFILE[command]
 
-    def _handler(params):
-        return impl(params or {}, **_build_profile_kwargs(profile))
+    def _handler(params, *, budget=None):
+        kwargs = _build_profile_kwargs(profile)
+        if budget is not None:
+            kwargs["budget"] = budget
+        return impl(params or {}, **kwargs)
 
     _handler.__name__ = command
     _handler.__doc__ = "Generated core handler for %s" % command

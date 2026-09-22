@@ -5,10 +5,38 @@ from __future__ import annotations
 import json
 import re
 from array import array
+from dataclasses import replace
 from typing import Any
 
 _WHITESPACE = re.compile(r"\s*")
 _DECODER = json.JSONDecoder()
+_TEXT_PATH = re.compile(r"/items/(0|[1-9][0-9]{0,5})/data\Z")
+_MAX_TEXT_ITEM_CHARS = 8 * 1024 * 1024
+
+
+def select_text_result(store, entry, path):
+    """A bounded temporary view of one decoded string; no second stored JSON tree."""
+    if not path:
+        return entry
+    match = _TEXT_PATH.fullmatch(path)
+    if match is None:
+        raise ValueError("Text path must be /items/<index>/data")
+    if entry.mime_type != "application/json":
+        raise ValueError("Text path requires an application/json result")
+    index = store.json_index(entry, "/items")
+    item_index = int(match.group(1))
+    if item_index >= len(index) // 2:
+        raise ValueError("Text path item does not exist")
+    start, end = index[item_index * 2 : item_index * 2 + 2]
+    if end - start > _MAX_TEXT_ITEM_CHARS:
+        raise ValueError("Selected item exceeds the text decode budget; read the raw JSON with path='' instead")
+    item = json.loads(entry.text[start:end])
+    text = item.get("data") if isinstance(item, dict) else None
+    if not isinstance(text, str):
+        raise ValueError("Selected data is not a JSON string")
+    return replace(
+        entry, text=text, size_chars=len(text), mime_type="text/plain", result_type="string", item_count=None
+    )
 
 
 def _space(text: str, pos: int) -> int:

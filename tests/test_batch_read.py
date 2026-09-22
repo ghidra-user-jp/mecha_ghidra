@@ -36,7 +36,7 @@ class Registry:
         self.reads = []
         self.execute = execute or (lambda _tool, _args: {"name": "main", "entry": "00001000"})
 
-    def read(self, tool, args):
+    def read(self, tool, args, **_kwargs):
         self.reads.append((tool, args))
         return self.execute(tool, args)
 

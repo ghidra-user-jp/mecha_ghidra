@@ -158,7 +158,9 @@ Ghidra スクリプト（Java、Jython、PyGhidra）はサーバープロセス�
 
 JSONの配列は `read_result(result_id, mode="json", path="/items", offset_items=0, limit_items=20, fields=["from", "to"])` のように、必要な項目・フィールドだけ取得できます。`path=""` はルート配列、`path="/items"` はトップレベルのitems配列です。文字オフセットとは併用できません。省略した `fields` は全フィールド、空配列は空のオブジェクトを返します。索引は初回アクセス時に作成し、元JSONの二重保持を避け、キャッシュ予算へ計上します。1項目が大きすぎる場合はその項目を飛ばし、`item_too_large=true` と生テキスト用の `offset_chars` / `item_chars` を返し、`next_offset_items` は次の項目を指します。フィールドを絞るか `mode="text"` で取得してください。
 
-`search_result(..., merge_context=true)` は重複する周辺文脈を `contexts` に統合し、各一致の `context_index` から参照します。既定の `false` は従来の一致ごとの文脈を返します。`count_mode="none"` は要求したスニペット件数で走査を止め、未確定の件数を `count_complete=false` で示します。既定の `"bounded"` は最大10,000件まで集計します。件数はその検索開始位置以降の値です。`next_cursor` を同じ `result_id` / `pattern` へ渡すと、返却済みの最後の一致から続きます。サイズ調整で省かれた一致も次の取得に含まれます。ゼロ長一致でも継続でき、検索時間制限は維持します。逆方向正規表現は先頭からの `bounded` 検索のみ対応し、継続カーソルは提供しません。
+バッチ項目の文字列は`read_result(result_id, mode="text", path="/items/0/data", offset_chars=0, limit_chars=3000)`で取得し、`search_result(result_id, path="/items/0/data", pattern="decode")`で検索できます。位置は復号した文字列上の文字位置です。両ツールは選択したpathを返し、継続時も同じpathを指定します。文字列の選択は`/items/<index>/data`のみ対応し、選択する項目はJSONの状態で最大8×1,024×1,024文字です。項目がない場合やdataが文字列でない場合はエラーになります。復号した内容は要求中だけ保持し、配列索引は既存のキャッシュ予算へ計上します。空のpathは元のJSONテキスト全体を取得・検索します。
+
+`search_result(..., merge_context=true)` は重複する周辺文脈を `contexts` に統合し、各一致の `context_index` から参照します。既定の `false` は従来の一致ごとの文脈を返します。`count_mode="none"` は要求したスニペット件数で走査を止め、未確定の件数を `count_complete=false` で示します。既定の `"bounded"` は最大10,000件まで集計します。件数はその検索開始位置以降の値です。`next_cursor` を同じ `result_id` / `pattern` / `path` へ渡すと、返却済みの最後の一致から続きます。サイズ調整で省かれた一致も次の取得に含まれます。ゼロ長一致でも継続でき、検索時間制限は維持します。逆方向正規表現は先頭からの `bounded` 検索のみ対応し、継続カーソルは提供しません。
 
 `disassemble` の新しいカーソルは次の命令アドレスから再開します。関数の非連続な範囲を維持し、先行ページの命令を再変換しません。従来のオフセット形式のカーソルも受け付けます。プログラムのrevisionやクエリが異なるカーソルは引き続き拒否します。
 

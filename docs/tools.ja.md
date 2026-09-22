@@ -43,27 +43,33 @@
 
 ## 読み取りのバッチ実行
 
-`batch_read` は同じ `target` への独立した読み取り1〜20件を、1回のツール呼び出し・1回のターゲット／プロジェクトロック取得で順番に実行します。既定・readonly・fullプロファイルで公開されます。対応ツールは `get_function`、`get_comments`、`get_data_type`、`get_xrefs`、`get_call_edges` です。それぞれが単独でも公開されている必要があり、無効化したツールをバッチ経由で呼ぶことはできません。
+`batch_read` は同じ `target` への独立した読み取り1〜20件を、1回のツール呼び出し・1回のターゲット／プロジェクトロック取得で順番に実行します。既定・readonly・fullプロファイルで公開されます。対応ツールは `get_function`、`get_comments`、`get_data_type`、`get_xrefs`、`get_call_edges`、`decompile_function`、`disassemble` です。それぞれが単独でも公開されている必要があり、無効化したツールをバッチ経由で呼ぶことはできません。
 
 ```json
 {
   "target": "default",
   "requests": [
     {"id": "function", "tool": "get_function", "arguments": {"address": "0x401000"}, "fields": ["entry", "name"]},
-    {"id": "references", "tool": "get_xrefs", "arguments": {"address": "0x401000", "direction": "to", "limit": 20}}
+    {"id": "references", "tool": "get_xrefs", "arguments": {"address": "0x401000", "direction": "to", "limit": 20}},
+    {"id": "c", "tool": "decompile_function", "arguments": {"address": "0x401000"}, "item_timeout_seconds": 15},
+    {"id": "asm", "tool": "disassemble", "arguments": {"address": "0x401000", "limit": 40}, "fields": ["address", "mnemonic", "operands"]}
   ],
-  "timeout_seconds": 10,
+  "timeout_seconds": 30,
   "max_output_chars": 12000
 }
 ```
 
-`id` は英数字・`_`・`-`からなる1〜32文字の一意な値です。`arguments` は各ツールと同じ引数で、`target` は含めません。構造・型・セレクター・公開設定を全件検証してから実行します。`get_xrefs` / `get_call_edges` の `limit` の合計は最大2,000です。前の項目の結果を後の引数に使う依存関係や、再帰バッチ、書き込み、スクリプトは扱いません。
+`id` は英数字・`_`・`-`からなる1〜32文字の一意な値です。`arguments` は各ツールと同じ引数で、`target` は含めません。構造・型・セレクター・公開設定を全件検証してから実行します。`get_xrefs` / `get_call_edges` / `disassemble` の `limit` の合計は、既定値も含めて最大2,000です。逆コンパイルは1バッチ最大5件です。前の項目の結果を後の引数に使う依存関係や、再帰バッチ、書き込み、スクリプト、自動的な追加解析は扱いません。
 
 任意の `fields`（1〜32個）は返すキーを選びます。通常は結果オブジェクトの直下、ページ付きツールでは各行のキーを選び、`program`・`revision`・`has_more`・`next_cursor` は保持します。存在しないキーは省略し、ネストしたパスは解釈しません。項目ごとのページ継続は従来と同じクエリとcursorを使います。
 
+逆アセンブルは単独呼び出しと同じ関数・アドレス範囲指定とcursorを使い、`fields`は命令行に適用します。逆コンパイルはC文字列を返し、`fields`は指定できません。バッチ専用の`item_timeout_seconds`（既定15、1〜60）は`arguments`の外側に指定します。単独の逆コンパイルは従来の120秒設定を維持します。
+
 応答は1つのJSONテキストです。全体の `status` は全件成功なら `ok`、一部成功なら `partial`、成功がなければ `error`。`succeeded_count`・`failed_count`・`not_run_count` と、要求順の `items`（`id`・`tool`・`status`・`data` または `error`）を確認してください。項目の未検出・曖昧な名前などでは残りを続行します。成功が0件の場合はMCPの `isError=true`、部分成功は `isError=false` でも失敗項目を含みます。
 
-`expected_revision` は任意です。開始前の不一致、または読取中の編集・再読み込みを検出した場合は、混在した結果を返さず全体を `SESSION_CHANGED` で失敗させます。`timeout_seconds`（既定10、1〜60）はロック取得後、各読み取りの開始前に確認する時間予算です。実行中の処理やロック待機を打ち切る期限ではありません。予算超過後の項目は `not_run` / `time_budget_exhausted` になります。
+`expected_revision` は任意です。開始前の不一致、または読取中の編集・再読み込みを検出した場合は、混在した結果を返さず全体を `SESSION_CHANGED` で失敗させます。`timeout_seconds`（既定10、1〜60）はロック取得後から計測します。重い読み取りでは実行中も期限を確認し、逆コンパイルは項目上限とバッチ残時間の短い方を使って、その呼び出し専用monitorで停止を要求します。残時間が1秒未満なら逆コンパイルを開始しません。逆アセンブルは列挙・変換中に確認します。協調停止のため厳密な実時間上限ではなく、処理が戻るまでロックを保持します。予算超過後の項目は `not_run` / `time_budget_exhausted` です。停止を確認したtimeout（`DECOMPILE_TIMEOUT` / `READ_TIMEOUT`）や逆コンパイル失敗（`DECOMPILE_FAILED`）は項目エラーとし、残時間があれば後続を実行します。中断した逆アセンブルのページを成功として返しません。
+
+保持する項目の本文には別途8 MiBの上限があり、compactなUTF-8 JSONとして計測し、状態・エラー用の余地を確保します。1項目が大きすぎる場合は`ITEM_RESULT_TOO_LARGE`とし、途中までのCを成功として返しません。残りの合計容量を超えた項目は`RESULT_BUDGET_EXHAUSTED`、以降は`not_run / result_budget_exhausted`になります。大きすぎるエラー詳細は省略を明示します。Ghidraやnativeデコンパイラ内部での生成時の最大メモリ使用量を保証するものではありません。
 
 `max_output_chars`（既定12,000、2,048〜12,000）はバッチ全体のJSONテキスト上限です。MCPの外側の包み・トークン数は含まず、このツール固有の上限を使います。大きい結果は選択済みの全項目を1つの結果キャッシュに保存し、応答には件数・項目の状態・収まる小さい結果・共通の `result_id` を返します。省略項目の `offset_items` を使い、例えば次の呼び出しで2番目の結果を取得します。
 
@@ -72,6 +78,8 @@
 ```
 
 取得ツールは `read_result` です。`limit_items` を増やせば複数項目をまとめて取得できます。1項目が取得上限を超える場合、`read_result` はその項目を飛ばし（`item_too_large=true`、`next_offset_items` は次の項目を指す）、生テキスト位置を返すので、`mode="text"` で読むか `search_result` で必要な箇所を探します。状態一覧だけでも予算を超える場合は `item_summaries_omitted=true` と件数を返し、一覧もキャッシュから取得します。キャッシュ上限で保存できなければ `result_unavailable=true` と明示します。通常のLRU追い出しにより、後からIDが利用できなくなる場合もあります。`large_result_mode=inline` では上限超過をエラーにするため、`fields`・`limit`・要求件数を絞ってください。
+
+C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_chars=0, limit_chars=3000)`で取得し、`search_result(result_id, path="/items/2/data", pattern="decode")`で検索できます。項目番号は0始まりで、省略された文字列項目には`text_path`を返します。位置はJSONエスケープ後ではなく、復号したC文字列上の文字位置です。ページ継続・検索cursorでは同じpathを指定してください。空のpathは従来どおり生テキストの取得・検索です。
 
 <a id="function-analysis"></a>
 
