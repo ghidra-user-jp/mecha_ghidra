@@ -128,7 +128,7 @@ Fixed limits: `.py` scripts must carry an `@runtime Jython` or `@runtime PyGhidr
 
 Runtimes: Java and the PyGhidra provider ship with Ghidra; install the Python dependency pinned by this project (see the [pinned PyGhidra snapshot](development.md#pyghidra-dependency-and-script-failures)). Jython is a Ghidra Extension: unzip `Extensions/Ghidra/ghidra_<version>_Jython.zip` into `Ghidra/Extensions/` and restart (the Docker image does this). Missing runtimes show as `available=false` in `list_scripts`. If the startup exception propagation check fails, all script runtimes become unavailable and execution returns `SCRIPT_RUNTIME_UNAVAILABLE`; other analysis tools remain usable.
 
-Console output is captured per stream up to 64 KiB (`dropped_bytes` reports the rest). Use `println` / `printerr` in Java, `print` / `printerr` in PyGhidra, and `print` / `sys.stderr.write` in Jython, including nested scripts. Java `System.out` / `System.err` and CPython `sys.stdout.write` / `sys.stderr.write` bypass these per-script streams. Ghidra 12.1.3 does not pass script writers to a Jython child of a Jython parent; use the shared interpreter's Python output functions instead of `println` / `printerr` in that child.
+Console output is captured per stream up to 64 KiB (`dropped_bytes` reports the rest). Use `println` / `printerr` in Java, `print` / `printerr` in PyGhidra, and `print` / `sys.stderr.write` in Jython, including nested scripts. Java `System.out` / `System.err` and CPython `sys.stdout.write` / `sys.stderr.write` bypass these per-script streams. Ghidra 12.1.4 does not pass script writers to a Jython child of a Jython parent; use the shared interpreter's Python output functions instead of `println` / `printerr` in that child.
 
 <a id="large-results"></a>
 

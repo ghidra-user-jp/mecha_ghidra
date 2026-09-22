@@ -30,18 +30,18 @@ Mecha Ghidraを導入し、MCPクライアントから最初のプログラム�
 | Java | 使用するGhidraが要求するJDK。Ghidra 12.1系はJDK 21 |
 | MCPクライアント | Streamable HTTPまたはstdioに対応したもの |
 
-ビルド対象のGhidraは[ghidra_release.env](../scripts/ghidra_release.env)で12.1.3に固定されています。Ghidra ServerとBSimデータベースは必要な場合だけ用意します。
+ビルド対象のGhidraは[ghidra_release.env](../scripts/ghidra_release.env)で12.1.4に固定されています。Ghidra ServerとBSimデータベースは必要な場合だけ用意します。
 
 <a id="native-decompiler-artifacts"></a>
 
 ### ネイティブデコンパイラ
 
-Ghidra 12.1.3の公式ZIPには、Linux ARM64とmacOSの両アーキテクチャ向けネイティブデコンパイラが含まれていません。[Mecha Ghidraのリリース](https://github.com/ghidra-user-jp/mecha_ghidra/releases)から用途に合う配布物を選んでください。
+Ghidra 12.1.4の公式ZIPには、Linux ARM64とmacOSの両アーキテクチャ向けネイティブデコンパイラが含まれていません。[Mecha Ghidraのリリース](https://github.com/ghidra-user-jp/mecha_ghidra/releases)から用途に合う配布物を選んでください。
 
 | 配布物 | 用途 |
 | --- | --- |
-| `ghidra_12.1.3_decompiler_natives_all.zip` | ネイティブファイルを追加済みのGhidra一式 |
-| `ghidra_decompiler_natives_all.zip` | 既存のGhidra 12.1.3へ展開する追加ファイル |
+| `ghidra_12.1.4_decompiler_natives_all.zip` | ネイティブファイルを追加済みのGhidra一式 |
+| `ghidra_decompiler_natives_all.zip` | 既存のGhidra 12.1.4へ展開する追加ファイル |
 | GitHubの `Source code` アーカイブ | Mecha Ghidraのソースコード。Ghidra本体は含まれない |
 
 追加先は `Ghidra/Features/Decompiler/os/{linux_arm_64,mac_arm_64,mac_x86_64}/` で、対応する `decompile` と `sleigh` を含みます。Ghidra本体とネイティブファイルのバージョンをそろえてください。自分で生成する場合は[ネイティブビルド](development.ja.md#native-builds)を参照してください。

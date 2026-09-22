@@ -128,7 +128,7 @@ Ghidra スクリプト（Java、Jython、PyGhidra）はサーバープロセス�
 
 ランタイム: JavaとPyGhidraのproviderはGhidraに同梱されています。Python側にはこのプロジェクトで固定した依存を導入してください（[固定したPyGhidraスナップショット](development.ja.md#pyghidraの依存バージョンとスクリプト失敗)参照）。JythonはGhidra Extensionで、`Extensions/Ghidra/ghidra_<version>_Jython.zip` を `Ghidra/Extensions/` に展開して再起動します（Dockerイメージでは済んでいます）。無いランタイムは `list_scripts` で `available=false` になります。起動時の例外伝播チェックが失敗した場合は全言語が使用不可となり、実行を `SCRIPT_RUNTIME_UNAVAILABLE` で拒否します。他の解析ツールは利用できます。
 
-コンソール出力はストリームごとに64 KiBまで捕捉します（超過分は `dropped_bytes`）。子スクリプトを含め、Javaは `println`／`printerr`、PyGhidraは `print`／`printerr`、Jythonは `print`／`sys.stderr.write` を使ってください。Javaの `System.out`／`System.err` とCPythonの `sys.stdout.write`／`sys.stderr.write` はスクリプト別の出力捕捉を経由しません。Ghidra 12.1.3ではJython親から呼ぶJython子にscript writerが渡らないため、その子では `println`／`printerr` の代わりに共有interpreterのPython出力関数を使います。
+コンソール出力はストリームごとに64 KiBまで捕捉します（超過分は `dropped_bytes`）。子スクリプトを含め、Javaは `println`／`printerr`、PyGhidraは `print`／`printerr`、Jythonは `print`／`sys.stderr.write` を使ってください。Javaの `System.out`／`System.err` とCPythonの `sys.stdout.write`／`sys.stderr.write` はスクリプト別の出力捕捉を経由しません。Ghidra 12.1.4ではJython親から呼ぶJython子にscript writerが渡らないため、その子では `println`／`printerr` の代わりに共有interpreterのPython出力関数を使います。
 
 <a id="large-results"></a>
 

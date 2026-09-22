@@ -53,7 +53,7 @@ AIによる完全自動解析と、人への解析結果・知見の引き継ぎ
 | Ghidra同梱のコンテナで使う | [Dockerガイド](docs/docker.ja.md) |
 | MCPサーバーはすでに起動している | [MCPクライアントの接続](docs/clients.ja.md) |
 
-ローカル導入にはPython 3.10以上、[uv](https://docs.astral.sh/uv/getting-started/installation/)、Ghidra、対応するJDKが必要です。このリポジトリのネイティブビルドは現在Ghidra 12.1.3を対象としています。配布物の選び方は[前提環境とネイティブデコンパイラ](docs/usage.ja.md#requirements)を確認してください。
+ローカル導入にはPython 3.10以上、[uv](https://docs.astral.sh/uv/getting-started/installation/)、Ghidra、対応するJDKが必要です。このリポジトリのネイティブビルドは現在Ghidra 12.1.4を対象としています。配布物の選び方は[前提環境とネイティブデコンパイラ](docs/usage.ja.md#requirements)を確認してください。
 
 **既存の** `analysis.gpr` を使う最小のstdio起動例です。2つの絶対パスを実際の環境に置き換えてください。
 
