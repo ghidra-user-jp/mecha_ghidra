@@ -321,6 +321,9 @@ def _sample_for_field(name: str, annotation: Any) -> Any:
 def _required_raw_args(spec_name: str) -> dict[str, Any]:
     if spec_name == "batch_read":
         return {"requests": [{"id": "a", "tool": "get_function", "arguments": {"address": "0x1000"}}]}
+    if spec_name == "apply_edits":
+        # Function edits require at least one of two individually optional fields.
+        return {"edits": [{"kind": "rename_function", "address": "0x401000", "namespace_path": "AI"}]}
     spec = get_tool_spec(spec_name)
     raw: dict[str, Any] = {}
     for key, field in spec.input_model.model_fields.items():

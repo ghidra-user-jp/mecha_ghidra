@@ -77,6 +77,6 @@ SHORT_TOOL_DESCRIPTIONS = {
     "get_call_edges": "Read incoming/outgoing function calls, including optional tail calls and unresolved edges; accepts address or unique name.",
     "disassemble": "Read existing instructions for a function OR address range; cursor resumes within the same program revision.",
     "get_data_type": "Describe a data type by full path (preferred) or unique name.",
-    "apply_edits": "Apply 1-100 ordered function/data/variable renames, prototypes, types or comments to one target.",
+    "apply_edits": "Apply 1-100 ordered renames, prototypes, types or comments. rename_function accepts new_name and/or namespace_path; create_namespace creates missing parents.",
     "bsim_query": "Search BSim with scope=program or functions; function scope requires address/name selectors. Returns matched_ref.",
 }

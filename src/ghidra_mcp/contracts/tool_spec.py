@@ -1816,7 +1816,7 @@ _CONSOLIDATED_SPECS = (
             ("expected_revision", Annotated[str, Field(max_length=128)] | None, None),
         ),
         checkout_required=True,
-        description="Apply 1-100 ordered function/data/variable renames, prototypes, types or comments to one target. atomic=true rolls everything back on any failure; false retains successful items. dry_run executes then rolls back. Inspect status and each result; results include before/after state. expected_revision from get_program_info rejects stale edits. Requires a writable program and checkout even for dry_run.",
+        description="Apply 1-100 ordered function/data/variable renames, prototypes, types or comments to one target. rename_function requires new_name and/or namespace_path: omitted/null fields keep the current value, an empty namespace_path means Global; create_namespace=true creates missing parents. Namespace-only edits preserve the name and its source. atomic=true rolls everything back on any failure; false retains successful items. dry_run executes then rolls back. Inspect status and each result; results include before/after state. expected_revision from get_program_info rejects stale edits. Requires a writable program and checkout even for dry_run.",
     ),
 )
 

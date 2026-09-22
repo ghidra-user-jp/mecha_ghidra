@@ -109,7 +109,10 @@ def test_headless_contracts_import_without_the_jvm_stack():
     """Dynamic half of the exemption: importing the package in a fresh interpreter loads no JVM module."""
 
     loaded = _modules_loaded_by(
-        "ghidra_headless.contracts", "ghidra_headless.contracts.batch_read", watched=JVM_STACK_MODULES
+        "ghidra_headless.contracts",
+        "ghidra_headless.contracts.batch_read",
+        "ghidra_headless.contracts.function_edits",
+        watched=JVM_STACK_MODULES,
     )
     assert loaded == []
 

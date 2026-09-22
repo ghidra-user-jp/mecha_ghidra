@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from ghidra_headless.handlers.commands.mutating_symbols import rename_function
 from ghidra_headless.handlers.commands.read_only_decompile import decompile_function
 from ghidra_headless.handlers.commands.read_only_functions import get_function
@@ -15,8 +17,14 @@ class _Function:
         self.name = new_name
         self.renamed_with = source_type
 
-    def getName(self):  # noqa: N802
+    def getName(self, _full=False):  # noqa: N802
         return self.name
+
+    def getParentNamespace(self):  # noqa: N802
+        return SimpleNamespace(getID=lambda: 0, isGlobal=lambda: True, getName=lambda _full=False: "Global")
+
+    def getSymbol(self):  # noqa: N802
+        return SimpleNamespace(getSource=lambda: self.renamed_with)
 
     def getEntryPoint(self):  # noqa: N802
         return self.entry
@@ -119,5 +127,13 @@ def test_rename_function_prefers_address_over_name():
         source_type=_SourceType,
     )
 
-    assert result == {"name": "renamed", "entry": "0x401000"}
+    assert result == {
+        "name": "renamed",
+        "entry": "0x401000",
+        "full_name": "renamed",
+        "namespace": "",
+        "name_source": str(_SourceType.USER_DEFINED),
+        "changed": True,
+        "created_namespaces": [],
+    }
     assert address_function.renamed_with is _SourceType.USER_DEFINED

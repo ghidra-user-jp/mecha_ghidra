@@ -2,7 +2,9 @@
 
 from typing import Annotated, Literal, Union
 
-from pydantic import Field
+from pydantic import Field, model_validator
+
+from ghidra_headless.contracts.function_edits import validate_function_rename
 
 from .tool_models import ToolInputModel
 
@@ -14,7 +16,21 @@ TypeName = Annotated[str, Field(min_length=1, max_length=8192)]
 class RenameFunctionEdit(ToolInputModel):
     kind: Literal["rename_function"]
     address: Address
-    new_name: Name
+    new_name: Name | None = Field(
+        default=None, description="Simple function name; omitted/null keeps the current name."
+    )
+    namespace_path: Annotated[str, Field(max_length=4096)] | None = Field(
+        default=None,
+        description="Global-rooted namespace path (AI::crypto); omitted/null keeps the namespace, empty string uses Global.",
+    )
+    create_namespace: bool = Field(
+        default=False, description="Create missing namespace parents; requires namespace_path."
+    )
+
+    @model_validator(mode="after")
+    def validate_rename(self):
+        validate_function_rename(self.new_name, self.namespace_path, self.create_namespace)
+        return self
 
 
 class RenameDataEdit(ToolInputModel):

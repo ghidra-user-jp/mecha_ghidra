@@ -157,6 +157,21 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 }
 ```
 
+`rename_function` は `new_name`、`namespace_path` の少なくとも一方を指定します。省略・`null` の項目は現状を維持し、`new_name` は関数の単純名を指定します。Namespace パスは Global 基点（例: `AI::config`）で、空文字列は Global への移動です。`create_namespace=true` の場合は不足する親も含めて作成し、既定では既存のパスを要求します。移動先として通常の Namespace を解決・作成し、Class・Library・関数スコープは使用しません。Namespace だけの変更では、関数名と名前の出所情報を維持します。
+
+```json
+{
+  "target": "default",
+  "edits": [
+    {"kind": "rename_function", "address": "0x401000", "namespace_path": "AI::config", "create_namespace": true}
+  ]
+}
+```
+
+この編集に `"new_name": "decode_config"` を加えると、名前と Namespace を同時に変更できます。Namespace の作成と関数の変更は一つのトランザクションで扱います。関数編集の結果には `changed`、`created_namespaces`、変更前後の完全修飾名・Namespace・名前の出所情報が含まれます。同じ状態への編集は `changed=false` になり、Ghidra が許容する同名関数はアドレスで区別します。試行・ロールバック時の `created_namespaces` は作成を試みたパスであり、確定して残った Namespace を示すものではありません。
+
+既定名の thunk は転送先関数の Namespace を継承します。Ghidra が Namespace だけの変更を保持できない場合は失敗としてロールバックします。独立した名前・Namespace を設定する場合は `new_name` も明示してください。
+
 既定の `atomic=true` では全件をまとめて確定し、1件でも失敗すると全件をロールバックします。`atomic=false` は成功した項目を保持し、失敗を個別に報告します。`dry_run=true` は実際に編集して変更前後の状態を取得した後、ロールバックします。このためdry runでも書き込み可能なプログラムと、共有管理済みファイルのチェックアウトが必要です。編集内容は残りませんが、revisionは進む場合があります。
 
 読み取り後に別の編集が入っていないことを確認するには、最新の `get_program_info` または解析結果の `revision` を `expected_revision` に渡します。プレビュー後に `dry_run=false` で適用するときは、プレビューが返したrevisionを使えます。

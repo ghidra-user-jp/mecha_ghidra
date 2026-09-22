@@ -2,7 +2,28 @@
 
 from __future__ import absolute_import, print_function
 
+from ghidra_headless.contracts.function_edits import validate_function_rename
+from ghidra_headless.errors import HeadlessError
 from ghidra_headless.handlers.commands.read_only_memory_data import _bookmark_to_dict, validate_hex_payload_size
+
+
+def _resolve_rename_namespace(ctx, parts, create_namespace, source_type, created):
+    namespace = ctx.program.getGlobalNamespace()
+    for part in parts:
+        # Functions are namespaces too; resolve ordinary namespaces explicitly
+        # rather than accidentally selecting a same-named function scope.
+        symbols = list(ctx.symbol_table.getSymbols(part, namespace))
+        child = next((s.getObject() for s in symbols if str(s.getSymbolType()) == "Namespace"), None)
+        path = part if namespace.isGlobal() else "%s::%s" % (namespace.getName(True), part)
+        if child is None:
+            if any(str(s.getSymbolType()) not in {"Label", "Function"} for s in symbols):
+                raise HeadlessError("INVALID_NAMESPACE_TYPE: expected an ordinary namespace at %s" % path)
+            if not create_namespace:
+                raise HeadlessError("NAMESPACE_NOT_FOUND: %s" % path)
+            child = ctx.symbol_table.createNameSpace(namespace, part, source_type.USER_DEFINED)
+            created.append(str(child.getName(True)))
+        namespace = child
+    return namespace
 
 
 def rename_function(params, *, ensure_context, get_address, find_function_by_name, txn, source_type):
@@ -10,8 +31,9 @@ def rename_function(params, *, ensure_context, get_address, find_function_by_nam
     address_text = params.get("address")
     old_name = params.get("oldName")
     new_name = params.get("newName")
-    if not new_name:
-        raise ValueError("newName is required")
+    namespace_path = params.get("namespace_path")
+    create_namespace = params.get("create_namespace", False)
+    parts = validate_function_rename(new_name, namespace_path, create_namespace)
     if address_text:
         address = get_address(ctx, address_text)
         function = ctx.function_manager.getFunctionContaining(address)
@@ -24,12 +46,50 @@ def rename_function(params, *, ensure_context, get_address, find_function_by_nam
         if function is None:
             raise LookupError("Function not found: %s" % old_name)
 
-    def _rename():
-        function.setName(new_name, source_type.USER_DEFINED)
-        return True
+    created = []
 
-    txn(ctx, "Rename function", _rename)
-    return {"name": function.getName(), "entry": str(function.getEntryPoint())}
+    def _rename():
+        parent = function.getParentNamespace()
+        original_name = str(function.getName())
+        original_source = function.getSymbol().getSource()
+        namespace = (
+            parent if parts is None else _resolve_rename_namespace(ctx, parts, create_namespace, source_type, created)
+        )
+        name_changed = new_name is not None and new_name != original_name
+        namespace_changed = namespace.getID() != parent.getID()
+        if new_name is not None and namespace_changed:
+            function.getSymbol().setNameAndNamespace(new_name, namespace, source_type.USER_DEFINED)
+        elif name_changed:
+            function.setName(new_name, source_type.USER_DEFINED)
+        elif namespace_changed:
+            # Preserve the symbol's name source on namespace-only edits.
+            function.setParentNamespace(namespace)
+        # Default thunks inherit their destination's namespace. Ghidra can
+        # accept a setter without giving the requested effective state, so
+        # verify inside the transaction instead of reporting a false success.
+        expected_name = original_name if new_name is None else new_name
+        if (
+            str(function.getName()) != expected_name
+            or function.getParentNamespace().getID() != namespace.getID()
+            or (new_name is None and function.getSymbol().getSource() != original_source)
+        ):
+            raise HeadlessError(
+                "FUNCTION_RENAME_FAILED: Ghidra did not retain the requested name, namespace or name source; "
+                "default thunks may require an explicit new_name to stop inheriting their destination's namespace"
+            )
+        return name_changed or namespace_changed
+
+    changed = txn(ctx, "Rename function", _rename)
+    parent = function.getParentNamespace()
+    return {
+        "name": str(function.getName()),
+        "entry": str(function.getEntryPoint()),
+        "full_name": str(function.getName(True)),
+        "namespace": "" if parent.isGlobal() else str(parent.getName(True)),
+        "name_source": str(function.getSymbol().getSource()),
+        "changed": changed,
+        "created_namespaces": created,
+    }
 
 
 def rename_data(params, *, ensure_context, get_address, txn, source_type):

@@ -32,6 +32,11 @@ def server(registry):
         ("apply_edits", {"edits": []}),
         ("apply_edits", {"edits": [{"kind": "run_script", "script": "x"}]}),
         ("apply_edits", {"edits": [{"kind": "rename_function", "address": "0x1000", "newName": "main"}]}),
+        ("apply_edits", {"edits": [{"kind": "rename_function", "address": "0x1000"}]}),
+        (
+            "apply_edits",
+            {"edits": [{"kind": "rename_function", "address": "0x1000", "new_name": "main", "create_namespace": True}]},
+        ),
         (
             "apply_edits",
             {"edits": [{"kind": "set_comment", "address": "0x1000", "comment": "c", "comment_type": "bad"}]},

@@ -6,7 +6,12 @@ from .mutating_symbols import COMMENT_KINDS
 from .query_support import function_ref, program_metadata, program_revision
 
 _FIELDS = {
-    "rename_function": {"address": "address", "new_name": "newName"},
+    "rename_function": {
+        "address": "address",
+        "new_name": "newName",
+        "namespace_path": "namespace_path",
+        "create_namespace": "create_namespace",
+    },
     "rename_data": {"address": "address", "new_name": "newName"},
     "rename_variable": {"function_address": "functionAddress", "old_name": "oldName", "new_name": "newName"},
     "set_function_prototype": {"function_address": "function_address", "prototype": "prototype"},
@@ -36,6 +41,12 @@ def _snapshot(ctx, edit, *, after, get_address, decompile_high_function, iter_it
     if function is None:
         raise LookupError("Function not found: %s" % address)
     state = {"function": function_ref(function)}
+    if kind == "rename_function":
+        parent = function.getParentNamespace()
+        state["function"].update(
+            namespace="" if parent.isGlobal() else str(parent.getName(True)),
+            name_source=str(function.getSymbol().getSource()),
+        )
     if kind == "set_function_prototype":
         state["prototype"] = str(function.getPrototypeString(True, True))
     if kind in {"rename_variable", "set_local_variable_type"}:
@@ -93,8 +104,11 @@ def apply_edits(
                     for public, internal in _FIELDS[edit["kind"]].items()
                     if edit.get(public) is not None
                 }
-                execute_edit(edit["kind"], args)
+                outcome = execute_edit(edit["kind"], args)
                 result["after"] = _snapshot(ctx, edit, after=True, **snapshot_args)
+                if edit["kind"] == "rename_function":
+                    result["changed"] = outcome["changed"]
+                    result["created_namespaces"] = outcome["created_namespaces"]
                 result["status"] = "applied"
                 item_ok = True
             except Exception as exc:

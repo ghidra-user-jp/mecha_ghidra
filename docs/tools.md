@@ -157,6 +157,21 @@ Example arguments (replace addresses):
 }
 ```
 
+For `rename_function`, supply `new_name`, `namespace_path`, or both. Omitted/null fields keep the current value; `new_name` is a simple name. Namespace paths are rooted at Global (`AI::config`); an empty string moves the function to Global. Set `create_namespace=true` to create missing parents, otherwise the entire path must exist. Only ordinary namespaces are resolved or created; class/library/function scopes are not used as destination namespaces. A namespace-only edit preserves the function name and its source. For example:
+
+```json
+{
+  "target": "default",
+  "edits": [
+    {"kind": "rename_function", "address": "0x401000", "namespace_path": "AI::config", "create_namespace": true}
+  ]
+}
+```
+
+Adding `"new_name": "decode_config"` to that edit changes both the name and namespace. Namespace creation and the function change form one transaction. Function edit results include `changed`, `created_namespaces`, and before/after function names, namespaces and name sources. Same-state edits report `changed=false`; same-named functions are allowed where Ghidra permits them and remain addressable by address. For simulated/rolled-back edits, `created_namespaces` describes the attempted creation, not namespaces retained in the program.
+
+Default thunks inherit the destination function's namespace. If Ghidra cannot retain a namespace-only move, the edit fails and rolls back; explicitly supply `new_name` to give the thunk its own name and namespace.
+
 The default `atomic=true` commits all edits together or rolls all of them back. `atomic=false` keeps successful items and reports failures individually. `dry_run=true` executes the edits to obtain their actual before/after states, then rolls back; it still requires a writable program and a checkout for a versioned shared file. A dry run can advance the revision even though it leaves no edits behind.
 
 To guard against intervening edits, pass `expected_revision` from the latest `get_program_info` or query response. A successful preview returns the revision to use for applying its edits with `dry_run=false`.
