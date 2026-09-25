@@ -95,6 +95,13 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE /app/
 RUN uv sync --frozen --no-install-project --no-dev
 
+# PyGhidra finds a JDK by starting two JVMs (java -version and LaunchSupport)
+# at every server start unless JAVA_HOME_OVERRIDE names one.  Link the JDK
+# installed above at a path that does not depend on the architecture.
+RUN ln -s "$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")" /opt/java \
+ && test -x /opt/java/bin/java
+ENV JAVA_HOME_OVERRIDE=/opt/java
+
 COPY src /app/src
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN uv sync --frozen --no-dev \

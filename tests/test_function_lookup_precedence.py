@@ -108,7 +108,8 @@ def test_decompile_function_prefers_address_over_name():
         decompile_function_object=lambda _ctx, function: function.getName(),
     )
 
-    assert result == "by_address"
+    # The first line names the function the address resolved to, and its entry.
+    assert result == "/* by_address @ 0x401000 */\nby_address"
 
 
 def test_rename_function_prefers_address_over_name():

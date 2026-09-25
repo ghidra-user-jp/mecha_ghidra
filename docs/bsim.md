@@ -51,7 +51,7 @@ For a `ghidra://` match stored on Ghidra Server, configure `--bsim-remote-cache-
 | Task | Tool / behavior |
 | --- | --- |
 | Add a metadata category | `bsim_add_executable_category` |
-| Register the loaded program | `bsim_register_target`; optional `categories` is a category-to-single-value object |
+| Register the loaded program | `bsim_register_target`; optional `categories` is a category-to-single-value object. Signatures cover the functions analysis found, and loading never analyzes: run `analyze_program` first when `get_program_info` reports `is_analyzed: false`. A large program can take minutes: after 40 seconds the call replies `deferred: true` and keeps registering, so wait with `get_operation` ([long calls](usage.md#long-calls)) |
 | Browse existing records | `list_bsim_executables`, `get_bsim_executable` |
 | Change an existing record's categories | `bsim_update_executable_metadata`; identify it by md5 or exact name |
 | Update names and metadata after renaming | `bsim_update_target_signatures`; feature vectors are not regenerated |

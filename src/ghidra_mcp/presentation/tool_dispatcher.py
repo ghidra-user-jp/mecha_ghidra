@@ -7,7 +7,9 @@ from typing import Any
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, get_tool_spec
+from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolCategoryTag, ToolSafetyTag, ToolSpec, get_tool_spec
+from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_codes import REFUSED_BEFORE_ANY_CHANGE
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.error_mapper import map_exception
 from ghidra_mcp.presentation.result_resources import ResultResourceStore, maybe_compact_tool_result
@@ -73,6 +75,59 @@ def _empty_list_payload_from_call_tool_result(result: Any) -> list[Any] | None:
     return []
 
 
+# Locks every background job holds, wherever it runs; the others are per target and project.
+_SHARED_LOCKS = frozenset({"runtime", "script_barrier"})
+
+
+def _name_lock_holder(exc: Exception, registry, target: str) -> Exception:
+    """Point a LOCK_TIMEOUT at the background job holding the lock, so the caller knows what to wait for."""
+    if not isinstance(exc, DomainError) or exc.code != ErrorCode.LOCK_TIMEOUT:
+        return exc
+    details = dict(exc.details or {})
+    lock_holder = getattr(getattr(registry, "operations", None), "lock_holder", None)
+    if lock_holder is None or "operation_id" in details:
+        return exc
+    try:
+        operation_id = lock_holder(target, any_target=details.get("lock") in _SHARED_LOCKS)
+    except Exception:
+        return exc
+    if operation_id is None:
+        return exc
+    return DomainError(
+        code=exc.code,
+        message=exc.message,
+        hint="A background job holds this lock; wait for details.operation_id with get_operation, then retry",
+        retryable=exc.retryable,
+        details={**details, "operation_id": operation_id},
+    )
+
+
+def _with_output_state(spec: ToolSpec, exc: Exception) -> Exception:
+    """Say what a failed project or repository write left behind, as a program write and a job do.
+
+    Program writes (core_execution), jobs and BSim tools set ``output_state``
+    themselves.  Here the code tells: a refusal or a retryable failure left
+    nothing, anything else may have done part of the work.
+    """
+    if (
+        not isinstance(exc, DomainError)
+        or spec.safety_tag == ToolSafetyTag.READ_ONLY
+        or spec.executor_kind == ExecutorKind.CORE_COMMAND
+        or spec.presenter == "operation"
+        or spec.category_tag == ToolCategoryTag.BSIM
+        or "output_state" in (exc.details or {})
+    ):
+        return exc
+    state = "absent" if exc.retryable or exc.code in REFUSED_BEFORE_ANY_CHANGE else "uncertain"
+    return DomainError(
+        code=exc.code,
+        message=exc.message,
+        hint=exc.hint,
+        retryable=exc.retryable,
+        details={**(exc.details or {}), "output_state": state},
+    )
+
+
 def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | None) -> dict[str, Any]:
     try:
         parsed = model_cls.model_validate(raw_args or {})
@@ -112,6 +167,9 @@ def dispatch_tool(
 ) -> Any:
     spec = get_tool_spec(spec_name)
     params = _validate_raw_args(spec_name, spec.input_model, raw_args)
+    if spec.replays_requests:
+        # The MCP server answers resends by it (GhidraMCPServer); the handler never sees it.
+        params.pop("request_id", None)
     result_adapter = None
     if spec.result_adapter:
         result_adapter = _RESULT_ADAPTERS.get(spec.result_adapter)
@@ -137,10 +195,11 @@ def dispatch_tool(
             else:
                 result = method(**kwargs)
     except Exception as exc:
+        named = _with_output_state(spec, _name_lock_holder(exc, registry, target))
         if error_adapter is not None:
-            raise error_adapter(exc, target) from exc
-        mapped = map_exception(exc)
-        if mapped is not exc:
+            raise error_adapter(named, target) from exc
+        mapped = map_exception(named)
+        if mapped is not named:
             raise mapped from exc
         raise
 
@@ -151,6 +210,10 @@ def dispatch_tool(
         result = _validate_batch_output(params["requests"], result)
     if spec.empty_list_policy == "normalize":
         result = normalize_empty_list_result(result)
+    if spec.presenter == "operation":
+        # Bounded job records stay directly readable, even when result
+        # compaction is configured with an unusually small limit.
+        return result
     return maybe_compact_tool_result(
         tool_name=spec_name,
         target=target,

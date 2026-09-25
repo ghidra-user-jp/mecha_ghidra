@@ -20,6 +20,9 @@ class _FakeLauncher:
     def add_vmargs(self, *args):
         self.calls.append(("vmargs", args))
 
+    def check_ghidra_version(self):
+        self.calls.append(("version", None))
+
     def start(self):
         self.calls.append(("start", None))
 
@@ -35,18 +38,58 @@ def _fake_jvm(monkeypatch):
 
 
 @pytest.mark.parametrize("install_dir", ["/tmp/ghidra", None])
-def test_headless_flag_is_added_before_start(install_dir):
+def test_headless_and_signal_flags_are_added_before_start(install_dir):
     result = launcher.start_headless_jvm(install_dir)
 
     assert result is _FakeLauncher.instances[0]
     assert result.install_dir == install_dir
-    assert result.calls == [("vmargs", (launcher.HEADLESS_VM_ARG,)), ("start", None)]
+    assert result.calls == [
+        ("vmargs", (launcher.HEADLESS_VM_ARG, launcher.REDUCE_SIGNAL_USAGE_VM_ARG)),
+        ("version", None),
+        ("start", None),
+    ]
+
+
+def test_prepared_launcher_is_checked_before_the_jvm_starts():
+    prepared = launcher.prepare_headless_launcher("/tmp/ghidra")
+
+    # The installation and version checks run without starting anything.
+    assert prepared.calls == [
+        ("vmargs", (launcher.HEADLESS_VM_ARG, launcher.REDUCE_SIGNAL_USAGE_VM_ARG)),
+        ("version", None),
+    ]
+    assert launcher.start_headless_jvm("/tmp/ghidra", launcher=prepared) is prepared
+    assert prepared.calls[-1] == ("start", None)
+    assert _FakeLauncher.instances == [prepared]
 
 
 def test_already_running_headless_jvm_is_reused(_fake_jvm):
     _fake_jvm["started"] = True
+    assert launcher.prepare_headless_launcher("/tmp/ghidra") is None
     assert launcher.start_headless_jvm("/tmp/ghidra") is None
     assert _FakeLauncher.instances == []
+
+
+def test_detach_releases_only_a_non_main_thread_that_is_attached(monkeypatch):
+    import threading
+    import types
+
+    calls = []
+    java_thread = types.SimpleNamespace(isAttached=lambda: True, detach=lambda: calls.append("detach"))
+    monkeypatch.setattr(launcher.jpype, "isJVMStarted", lambda: True)
+    monkeypatch.setattr(launcher.jpype, "java", types.SimpleNamespace(lang=types.SimpleNamespace(Thread=java_thread)))
+
+    launcher.detach_current_thread()  # the main thread keeps its attachment
+    worker = threading.Thread(target=launcher.detach_current_thread)
+    worker.start()
+    worker.join()
+    assert calls == ["detach"]
+
+    java_thread.isAttached = lambda: False
+    worker = threading.Thread(target=launcher.detach_current_thread)
+    worker.start()
+    worker.join()
+    assert calls == ["detach"]
 
 
 def test_already_running_non_headless_jvm_is_rejected(_fake_jvm):

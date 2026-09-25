@@ -905,3 +905,16 @@ def test_bundle_lookups_use_the_silent_getGhidraBundle(monkeypatch):
     assert providers.unregister_source_root("/snap/inline/x") is False
     assert providers.source_bundle_for("/snap/team") is None
     assert [call[0] for call in calls] == ["getGhidraBundle", "add", "getGhidraBundle", "getGhidraBundle"]
+
+
+def test_server_threads_attached_during_a_run_are_not_strays():
+    from ghidra_headless.scripts import execution
+
+    assert execution._expected_thread({"kind": "java", "name": "AnyIO worker thread", "id": 1})
+    assert execution._expected_thread({"kind": "java", "name": "ghidra-jobs", "id": 2})
+    # JPype's default name for a thread attached on its first Java call is a stray.
+    assert not execution._expected_thread({"kind": "java", "name": "Thread-7", "id": 3})
+    assert not execution._expected_thread({"kind": "java", "name": "ghidra-jobs-extra", "id": 4})
+    # Python threads a script starts are recorded, whatever they are called.
+    assert not execution._expected_thread({"kind": "python", "name": "AnyIO worker thread", "id": 5})
+    assert execution._expected_thread({"kind": "java", "name": "Timer-3", "id": 6})

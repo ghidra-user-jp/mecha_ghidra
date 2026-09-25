@@ -340,3 +340,99 @@ def test_shared_context_decompiler_is_reused_and_reset_on_failure(monkeypatch: p
     assert created[0].disposed
     assert core_helpers._decompile_function_object(ctx, object()) == "int main(void) {}"
     assert len(created) == 2
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_job_analysis_uses_the_job_monitor_and_never_marks_a_cancelled_run(monkeypatch: pytest.MonkeyPatch, cancelled):
+    core_helpers = _import_core_helpers(monkeypatch)
+    calls: list[object] = []
+    monitor = types.SimpleNamespace(isCancelled=lambda: cancelled)
+
+    class FlatProgramAPI:
+        def __init__(self, _program, job_monitor):
+            calls.append(("flat_api", job_monitor))
+
+        def analyzeAll(self, _program):
+            calls.append("analyzeAll")
+
+    flatapi = types.ModuleType("ghidra.program.flatapi")
+    flatapi.FlatProgramAPI = FlatProgramAPI
+    monkeypatch.setitem(sys.modules, flatapi.__name__, flatapi)
+    _stub_analysis_support(monkeypatch, core_helpers, calls)
+    # The context's own FlatProgramAPI ignores cancel(); the job must not use it.
+    ctx = types.SimpleNamespace(
+        program=_Program(calls), flat_api=types.SimpleNamespace(analyzeAll=lambda _p: pytest.fail("used DUMMY monitor"))
+    )
+
+    if cancelled:
+        with pytest.raises(RuntimeError, match="ANALYSIS_CANCELLED"):
+            core_helpers._analyze_program(ctx, monitor=monitor)
+        # Not marked analyzed, and the aborted transaction rolls the analysis back.
+        assert calls == [("flat_api", monitor), "analyzeAll", ("end", False)]
+    else:
+        assert core_helpers._analyze_program(ctx, monitor=monitor) is True
+        assert calls == [("flat_api", monitor), "analyzeAll", "mark", ("end", True)]
+
+
+@pytest.mark.parametrize(
+    "options,analyzes",
+    [({}, True), ({"Analyzed": False, "Should Ask To Analyze": False}, True), ({"Analyzed": True}, False)],
+    ids=["never-analyzed", "prompt-declined", "analyzed"],
+)
+def test_analysis_skips_exactly_the_programs_reported_as_analyzed(monkeypatch: pytest.MonkeyPatch, options, analyzes):
+    core_helpers = _import_core_helpers(monkeypatch)
+    calls: list[object] = []
+    _stub_analysis_support(monkeypatch, core_helpers, calls)
+    ctx = types.SimpleNamespace(
+        program=_Program(calls, options),
+        flat_api=types.SimpleNamespace(analyzeAll=lambda _p: calls.append("analyzeAll")),
+    )
+    # A user who declined Ghidra's "analyze now?" prompt for good still gets an analysis on request.
+    assert core_helpers._analyze_program(ctx) is analyzes
+    assert ("analyzeAll" in calls) is analyzes
+
+
+class _Options:
+    def __init__(self, values):
+        self._values = values
+
+    def contains(self, name):
+        return name in self._values
+
+    def getBoolean(self, name, default):
+        return self._values.get(name, default)
+
+
+class _Program:
+    def __init__(self, calls, options=None):
+        self._calls = calls
+        self._options = _Options(options or {})
+
+    def getOptions(self, _category):
+        return self._options
+
+    def startTransaction(self, _description):
+        return 1
+
+    def endTransaction(self, _transaction, commit):
+        self._calls.append(("end", commit))
+
+
+def _stub_analysis_support(monkeypatch, core_helpers, calls):
+    class Utilities:
+        def shouldAskToAnalyze(self, _program):
+            pytest.fail("is_analyzed decides whether analysis runs")
+
+        def markProgramAnalyzed(self, _program):
+            calls.append("mark")
+
+    class ScriptUtil:
+        def acquireBundleHostReference(self):
+            return None
+
+        def releaseBundleHostReference(self):
+            return None
+
+    monkeypatch.setattr(core_helpers, "_ghidra_program_utilities", lambda: Utilities())
+    monkeypatch.setattr(core_helpers, "_ghidra_script_util", lambda: ScriptUtil())
+    monkeypatch.setattr(core_helpers, "_ensure_checkout_for_versioned_program", lambda _ctx: None)

@@ -138,7 +138,8 @@ def test_direct_tool_calls_and_result_reads_are_sessionless_json(transport):
 
             targets = successful_result(await request(app, "tools/call", {"name": "list_targets", "arguments": {}}))
             assert targets["isError"] is False
-            assert [json.loads(item["text"]) for item in targets["content"]] == [{"target": "sample"}]
+            # One text block holds the whole list, as compact JSON.
+            assert [json.loads(item["text"]) for item in targets["content"]] == [[{"target": "sample"}]]
             read = successful_result(
                 await request(
                     app,

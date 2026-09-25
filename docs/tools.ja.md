@@ -2,9 +2,18 @@
 
 # ツール一覧
 
-用途からツールを探すための一覧です。呼び出し前にクライアントのツールスキーマを確認してください。全引数・制約・エラーコードはMCPリソース `ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}` にあります。
+用途からツールを探すための一覧です。呼び出し前にクライアントのツールスキーマを確認してください。全引数・制約・エラーコードはMCPリソース `ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}` にあります。`tools/list` の出力スキーマは、ツール固有の結果の形は完全に示しますが、全ツールに共通する応答（保存した大きな結果の通知、先送りの応答、エラー）は短い形だけです。それらの完全な形は `ghidra://docs/tools/{tool_name}` にあります。
 
 多くのツールは `target`（既定値 `default`）で対象を選びます。`shared_sync` と `bsim` は既定では公開されません。[設定](configuration.ja.md#tool-exposure)で追加してください。
+
+応答とエラーは、どのツールでも次の決まりに従います。
+
+- プログラムを扱うツールの応答は、結果の出典を `source` に示します。`target`、`program`（domain path）、`revision` の3つで、ツールの実行直後の値です。この `revision` を `expected_revision` に渡すと、古い読み取りに基づく編集を拒否できます。モデルに文字列しか見せないクライアントのため、`source` は最後の文字列ブロックにも入ります。
+- 文字列ブロックには結果そのものが入ります。文字列はそのまま、それ以外は詰めたJSONを1つのブロックにします。リストは1行に1項目です。
+- 書き込みが失敗すると、何が残ったかを `error.details.output_state` で示します。`absent`（何も変わっていない。一時的なエラーなら再試行できる）、`created`（変更が未保存で残っている）、`uncertain`（続ける前にプログラムを確かめる）のいずれかです。保存、commit、書き出しなど、プロジェクトやリポジトリへの書き込みでは、変更の前に断るエラーなら `absent`、それ以外は `uncertain` です。
+- プログラムへの書き込みは、どれもクライアントが作ったUUIDを `request_id` に受け付けます。同じ `request_id` と引数で送り直すと、書き込みを再び適用せず、`replayed: true` を付けた最初の呼び出しの応答を返します。詳しくは[シンボルとコメント](#symbol-comment-edit)の `apply_edits` を参照してください。
+- エラーの `code` は失敗の種類を、`hint` は次に呼ぶツールを（あれば）示します。関数、データ型、変数、ブックマークが見つからなければ `NOT_FOUND`、引数の誤りは `VALIDATION_ERROR` で、どちらも理由を `message` に示します。プログラムを読み込んでいないtargetは `PROGRAM_NOT_OPEN`、存在しないtargetは `TARGET_NOT_REGISTERED` です。
+- すべてのツールが `readOnlyHint`、`destructiveHint`（削除、バイトの上書き、commitやpullなどのリポジトリ操作、スクリプトはtrue）、`openWorldHint`（BSimのデータベース、Ghidra Server、スクリプトはtrue）を宣言します。
 
 - [プロジェクトとセッション](#core)
 - [読み取りのバッチ実行](#batch-read)
@@ -27,13 +36,15 @@
 | --- | --- |
 | `list_targets` | 登録済みターゲットと紐づくプロジェクト情報を一覧表示 |
 | `create_project` | 空のローカルGhidraプロジェクトを作成 |
-| `open_program` | 既存プロジェクトのプログラムを開いてターゲットを追加 |
+| `open_program` | 既存プロジェクトのプログラムを開いてターゲットを追加。解析はせず、解析済みかどうかを`is_analyzed`で返す |
 | `register_target` | プログラムを開かずにターゲットへプロジェクト情報のみ登録 |
 | `close_session` | ターゲットのセッションを閉じる。`discard_changes=true` で保存せずに閉じる（`TARGET_EXECUTION_INVALID` 後の復旧経路でもある） |
 | `close_session_and_remove_program` | セッションを閉じたうえでプログラムをプロジェクトから削除 |
 | `list_project_programs` | ターゲットが開いているプロジェクト内プログラム一覧を取得 |
-| `import_program` | バイナリまたは `.gzf` をプロジェクトへインポート |
-| `load_project_program` | 既存プログラムを指定 `domain_path` で読み込み。ターゲットが既に保持しているプログラムを指定すると再読み込み、`version=N` で共有プロジェクトの過去バージョンを読み取り専用で開く |
+| `import_program` | バイナリまたは `.gzf` をバックグラウンドのジョブとしてインポートし、既定で解析まで行う（`analyze_imported=false`で解析を省略）。応答は最大`wait_seconds`秒待ってジョブの記録を返す |
+| `get_operation` | `operation_id`（または`request_id`）で、ジョブの状態・結果を取得。取り込み・解析・スクリプトのジョブと、40秒で終わらず`deferred: true`を返した呼び出し（[長い呼び出し](usage.ja.md#long-calls)）が対象。完了まで待つこともできる。`result`にはそのツールが返す値が入る。Ghidraのロックは取らない |
+| `cancel_operation` | 待機中・実行中の取り込み・解析・スクリプトのジョブを取り消す。まだプログラムを変更し始めていないジョブはその場で`OPERATION_CANCELLED`で終わり、実行中のジョブは次の取り消しの確認で巻き戻す |
+| `load_project_program` | 既存プログラムを指定 `domain_path` で読み込み。ターゲットが既に保持しているプログラムを指定すると再読み込み、`version=N` で共有プロジェクトの過去バージョンを読み取り専用で開く。読み込みでは解析しない（`is_analyzed`を参照） |
 | `save_project_program` | 編集後の読み込み中のプログラムをGhidraプロジェクトに保存 |
 | `get_program_info` | 言語、コンパイラ、イメージベース、md5/sha256、エントリポイント、解析済みフラグ、未保存変更、取り消し可否、変更を検出する `revision` |
 | `undo_program_change` / `redo_program_change` | 読み込み中のプログラムの直近トランザクションを取り消し・やり直し |
@@ -89,12 +100,12 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 | --- | --- |
 | `list_functions` | 関数一覧（サイズと thunkフラグ付き）。`filter` で名前を絞り、`only_default_names=true` で未命名の `FUN_` 関数だけを取得 |
 | `list_namespaces` | 名前空間一覧を `{name, is_class}` で取得（ページング対応）。`classes_only=true` でクラスのみ |
-| `decompile_function` | 関数名またはアドレス指定で C風の疑似コードを取得（両方指定時は `address` 優先） |
+| `decompile_function` | 関数名またはアドレス指定で C風の疑似コードを取得（両方指定時は `address` 優先）。先頭行は、関数の完全名とエントリーアドレスを書いたコメント（例：`/* entry @ 00401e46 */`） |
 | `disassemble` | 関数またはアドレス範囲の既存命令をページ単位で取得 |
 | `get_function` | 関数名またはアドレス指定でシグネチャ、引数、ローカル変数、本体範囲、thunk先、名前空間を取得（両方指定時は `address` 優先） |
 | `create_function` | アドレスに関数を作成 |
 | `delete_function` | アドレス指定で関数を削除 |
-| `analyze_program` | 未解析のプログラムに解析を実行。`force=true` で再実行 |
+| `analyze_program` | Ghidraの自動解析をバックグラウンドのジョブとして実行（`force=true`で解析済みでも再実行）。応答は最大`wait_seconds`秒待ってジョブの記録を返す。解析の結果は未保存のまま |
 | `get_call_edges` | 関数の呼び出し元・先を呼び出し位置付きで取得。tail call、thunk転送、未解決の呼び出しを区別 |
 
 ### 解析結果と続きの取得
@@ -174,7 +185,9 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 
 既定の `atomic=true` では全件をまとめて確定し、1件でも失敗すると全件をロールバックします。`atomic=false` は成功した項目を保持し、失敗を個別に報告します。`dry_run=true` は実際に編集して変更前後の状態を取得した後、ロールバックします。このためdry runでも書き込み可能なプログラムと、共有管理済みファイルのチェックアウトが必要です。編集内容は残りませんが、revisionは進む場合があります。
 
-読み取り後に別の編集が入っていないことを確認するには、最新の `get_program_info` または解析結果の `revision` を `expected_revision` に渡します。プレビュー後に `dry_run=false` で適用するときは、プレビューが返したrevisionを使えます。
+読み取り後に別の編集が入っていないことを確認するには、編集の根拠にした応答の `source.revision`、または `get_program_info` の `revision` を `expected_revision` に渡します。プレビュー後に `dry_run=false` で適用するときは、プレビューが返したrevisionを使えます。
+
+再送を安全にするには、クライアントが作ったUUIDを `request_id` に渡します。応答が失われて同じ `request_id` と引数で送り直すと、サーバーは編集を再び適用せず、最初の呼び出しの応答を返します。その応答には、`structuredContent`と最後の文字列ブロックに`replayed: true`が付きます。最初の呼び出しがまだ実行中なら、再送はその終了を待ち、`deferred: true` で同じ記録を返すことがあります。同じ `request_id` で引数が違うと `REQUEST_ID_CONFLICT` になります。`get_operation(request_id=...)` でもこの呼び出しを探せます。記録はジョブと同じく、サーバーのメモリにだけあります。ほかのプログラムへの書き込みと `bsim_apply_matches` も、同じように `request_id` を受け付けます。
 
 応答の `status`、`applied_count`、各 `results` を確認してください。全体のstatusは `applied`、`partial`、`rolled_back`、`dry_run`、`dry_run_failed` です。項目別の失敗も通常のツール応答に含まれるため、通信が成功しただけでは編集成功とは限りません。成功した項目には `before` / `after` が付き、取り消した項目と試行だけの項目は区別されます。残した変更は `save_project_program` で保存します。
 
@@ -231,7 +244,7 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 | `bsim_update_target_signatures` | 読み込み中のプログラムの現在の関数名を既存レコードに書き戻す |
 | `bsim_delete_executable` | 実行ファイルとその関数レコードを削除（`confirm` に md5 または名前を再入力） |
 | `bsim_query` | `scope="program"` で全体、`scope="functions"` と `addresses` / `function_names` で選択した関数を検索。自己一致は既定で除外 |
-| `bsim_apply_matches` | 既定名のままの関数を最良一致の名前で一括リネーム（`dry_run` 可） |
+| `bsim_apply_matches` | 既定名のままの関数を最良一致の名前で一括リネーム（`dry_run`・`request_id` 可） |
 | `bsim_load_matched_executable` | 一致した実行ファイルを新しいターゲットとして開く。`ghidra://` の一致には `--bsim-remote-cache-dir` が必要 |
 
 <a id="scripts"></a>
@@ -244,9 +257,9 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 | --- | --- |
 | `list_scripts` | 実行可能なスクリプトの一覧（`script_id` = `<ルート>:<ファイル名>`。Script Manager と同じくルート直下のファイルだけを列挙し、サブディレクトリは対象外）。ランタイム（`Java` / `Jython` / `PyGhidra`）、カテゴリ、説明、実行可否を返す。`include_bundled=true` で運用者が許可した Ghidra 同梱スクリプトも含める |
 | `get_script_info` | 1 本のヘッダ情報。`include_source=true` でソース本文を返し、実行前に期待する `args` を確認できる |
-| `run_script` | 読み込み中のプログラムに対して、Script Manager と同じようにスクリプトを実行する。`source`（スクリプト本文。Java は `public class X extends GhidraScript`、Python は `# @runtime PyGhidra` / `# @runtime Jython` ヘッダで判定、無ければ `runtime` を指定）か `script_id`（カタログのスクリプト）を渡す。`args` は位置引数の文字列。実行はトランザクションで包まれ、成功時はコミット、例外やタイムアウト時はロールバック。結果には `transaction_outcome`、stdout／stderr、Java のコンパイル診断が付くので、失敗したスクリプトを直して再実行できる |
+| `run_script` | 読み込み中のプログラムに対して、Script Manager と同じようにスクリプトをバックグラウンドのジョブとして実行する。応答は最大`wait_seconds`秒待ってジョブの記録を返す。`source`（スクリプト本文。Java は `public class X extends GhidraScript`、Python は `# @runtime PyGhidra` / `# @runtime Jython` ヘッダで判定、無ければ `runtime` を指定）か `script_id`（カタログのスクリプト）を渡す。`args` は位置引数の文字列。実行はトランザクションで包まれ、成功時はコミット、例外やタイムアウト時はロールバック。ジョブの`result`には `transaction_outcome`、stdout／stderr、Java のコンパイル診断が付くので、失敗したスクリプトを直して再実行できる |
 
-失敗はロールバックされます。`SCRIPT_FAILED` / `SCRIPT_TIMEOUT` は `details.transaction_outcome`（`rolled_back` / `unchanged` / `unknown`）、上限付きで捕捉した `stdout` / `stderr`（`dropped_bytes` 付き）、Java の `SCRIPT_COMPILE_FAILED` ではコンパイラ診断を含みます。
+失敗はロールバックされます。`SCRIPT_FAILED` / `SCRIPT_TIMEOUT` のジョブの`operation_error`は、`details.transaction_outcome`（`rolled_back` / `unchanged` / `unknown`）、上限付きで捕捉した `stdout` / `stderr`（`dropped_bytes` 付き）、Java の `SCRIPT_COMPILE_FAILED` ではコンパイラ診断を含みます。`details.output_state`はトランザクションの結果に従います。`rolled_back`と`unchanged`は`absent`、`committed`は`created`（未保存）、`unknown`と、`execution_state`が`invalid`の場合は`uncertain`です（スクリプトが残した処理が、後でプログラムを変えるおそれがあり、ターゲットは隔離されます）。対象はプログラムの変更だけで、ファイルや通信への影響は含みません。大きな診断は、他の大きな結果と同じく結果の保存先へ移り、`operation_error.result_id`で全文を読めます。
 
 <a id="result-retrieval"></a>
 

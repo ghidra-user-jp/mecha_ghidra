@@ -337,7 +337,7 @@ def build_result_tools(*, store: ResultResourceStore, config: ToolPresentationCo
     resources/read, so paged reads and regex search over stored payloads must be
     reachable through tools/call.
     """
-    annotations = ToolAnnotations(read_only_hint=True, idempotent_hint=True)
+    annotations = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
 
     read_description = (
         "Read a slice of a stored large tool result. Use the result_id from a "

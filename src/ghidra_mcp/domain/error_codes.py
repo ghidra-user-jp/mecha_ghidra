@@ -66,10 +66,12 @@ _CODE_TABLE: dict[str, ErrorClassification] = {
     "TARGET_ALREADY_LOADED": ErrorClassification(ErrorCode.TARGET_ALREADY_LOADED),
     "PROGRAM_ALREADY_IMPORTED": ErrorClassification(ErrorCode.PROGRAM_ALREADY_IMPORTED),
     "PROGRAM_NOT_OPEN": ErrorClassification(ErrorCode.PROGRAM_NOT_OPEN),
+    "TARGET_NOT_REGISTERED": ErrorClassification(ErrorCode.TARGET_NOT_REGISTERED),
+    "NOT_FOUND": ErrorClassification(ErrorCode.NOT_FOUND),
     "PROGRAM_OPEN_FAILED": ErrorClassification(ErrorCode.PROGRAM_OPEN_FAILED),
     "IMPORT_CLOSE_FAILED": ErrorClassification(ErrorCode.IMPORT_FAILED),
     "IMPORT_POST_PROCESS_FAILED": ErrorClassification(ErrorCode.IMPORT_FAILED),
-    "RAW_LOADER_OPTION_UNAVAILABLE": ErrorClassification(ErrorCode.IMPORT_FAILED),
+    "RAW_LOADER_OPTION_UNAVAILABLE": ErrorClassification(ErrorCode.RAW_LOADER_OPTION_UNAVAILABLE),
     "REOPEN_FAILED": ErrorClassification(ErrorCode.REOPEN_FAILED),
     "SAVE_FAILED": ErrorClassification(ErrorCode.SAVE_FAILED),
     "SESSION_CLOSE_FAILED": ErrorClassification(ErrorCode.SESSION_CLOSE_FAILED),
@@ -86,6 +88,7 @@ _CODE_TABLE: dict[str, ErrorClassification] = {
     "JVM_NOT_HEADLESS": ErrorClassification(ErrorCode.JVM_NOT_HEADLESS),
     "HEADLESS_UNSUPPORTED": ErrorClassification(ErrorCode.HEADLESS_UNSUPPORTED),
     "READ_ONLY_PROGRAM": ErrorClassification(ErrorCode.READ_ONLY_PROGRAM),
+    "PROGRAM_NOT_ANALYZED": ErrorClassification(ErrorCode.PROGRAM_NOT_ANALYZED),
     # Ghidra script execution. Timeouts are not retryable: the script may
     # already have produced external side effects.
     "SCRIPTS_DISABLED": ErrorClassification(ErrorCode.SCRIPTS_DISABLED),
@@ -102,6 +105,47 @@ _CODE_TABLE: dict[str, ErrorClassification] = {
     "TARGET_ORPHAN_UNRELEASED": ErrorClassification(ErrorCode.TARGET_ORPHAN_UNRELEASED),
     "RUNTIME_DEGRADED": ErrorClassification(ErrorCode.RUNTIME_DEGRADED),
 }
+
+
+# Codes that refuse a call before it changes anything: a bad argument, a
+# missing item, or a guard on the target, project or repository state.  With a
+# retryable code (raised only before any side effect) they tell a failed write
+# left nothing behind; any other failure may have done part of its work.
+REFUSED_BEFORE_ANY_CHANGE: frozenset[ErrorCode] = frozenset(
+    {
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.NOT_FOUND,
+        ErrorCode.PROGRAM_NOT_FOUND,
+        ErrorCode.TARGET_NOT_REGISTERED,
+        ErrorCode.PROGRAM_NOT_OPEN,
+        ErrorCode.SESSION_NOT_FOUND,
+        ErrorCode.PATH_NOT_ALLOWED,
+        ErrorCode.CORE_EXECUTOR_UNAVAILABLE,
+        ErrorCode.PROJECT_ALREADY_EXISTS,
+        ErrorCode.PROJECT_IN_USE,
+        ErrorCode.TARGET_ALREADY_LOADED,
+        ErrorCode.PROGRAM_ALREADY_IMPORTED,
+        ErrorCode.READ_ONLY_PROGRAM,
+        ErrorCode.TARGET_EXECUTION_INVALID,
+        ErrorCode.CHECKOUT_REQUIRED,
+        ErrorCode.CHECKOUT_NOT_FOUND,
+        ErrorCode.NOT_CHECKED_OUT,
+        ErrorCode.NOT_SHARED_PROJECT,
+        ErrorCode.HIJACKED_PROGRAM,
+        ErrorCode.LOCAL_CHANGES_EXIST,
+        ErrorCode.MERGE_REQUIRED,
+        ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED,
+        ErrorCode.ADD_TO_VERSION_CONTROL_NOT_ALLOWED,
+        ErrorCode.CHECKIN_NOT_ALLOWED,
+        ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE,
+        ErrorCode.UNSAFE_VERSIONED_DELETE,
+        ErrorCode.UNSAFE_PROGRAM_REMOVE,
+        ErrorCode.PRIVATE_FILE_DELETE_NOT_ALLOWED,
+        ErrorCode.SHARED_FILE_DELETE_BLOCKED,
+        ErrorCode.LATEST_VERSION_MISMATCH,
+        ErrorCode.VERSION_NOT_FOUND,
+    }
+)
 
 
 def error_code_prefix(message: str) -> str | None:
@@ -127,6 +171,7 @@ def classify_runtime_error(exc: BaseException) -> ErrorClassification | None:
 
 
 __all__ = [
+    "REFUSED_BEFORE_ANY_CHANGE",
     "ErrorClassification",
     "classify_error_code",
     "classify_runtime_error",

@@ -132,5 +132,23 @@ def test_partial_success_survives_sdk_request_handler():
     error = result.structured_content["error"]
     assert error["code"] == "REOPEN_FAILED"
     assert error["retryable"] is False
-    assert error["details"] == details
+    assert error["details"] == {**details, "output_state": "uncertain"}
+    assert json.loads(result.content[0].text) == result.structured_content
+
+
+def test_an_argument_the_schema_refuses_is_a_validation_error_with_its_reason():
+    class Registry:
+        def call(self, *_args):
+            pytest.fail("invalid request reached executor")
+
+    result = asyncio.run(
+        server(Registry()).handle_call_tool(
+            None, CallToolRequestParams(name="list_functions", arguments={"target": "t", "limit": 0})
+        )
+    )
+    assert result.is_error
+    error = result.structured_content["error"]
+    assert error["code"] == "VALIDATION_ERROR" and error["retryable"] is False
+    assert error["message"].startswith("list_functions input validation failed:") and "limit" in error["message"]
+    assert error["hint"] == "Correct the argument the message names, then call again"
     assert json.loads(result.content[0].text) == result.structured_content

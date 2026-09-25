@@ -19,7 +19,7 @@ Server options are passed to `uv run mecha_ghidra`. Run `uv run mecha_ghidra --h
 
 Streamable HTTP (`--transport http` or `streamable-http`) always uses the [official Python SDK's recommended configuration](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py): `stateless_http=True` and `json_response=True`. Requests receive JSON responses without an MCP session ID. There is no stateful compatibility setting. Ghidra targets, program changes and the result cache remain in the server process across HTTP requests; `--session` configures Ghidra targets, not HTTP sessions. Continue using the same `target` and returned `result_id` values. Restarting the process clears the result cache, and the normal cache limits still apply.
 
-HTTP responses contain the final result, without SSE progress or keepalive events. Allow enough time for analysis in the client and any reverse proxy. A lost response does not prove that a change failed; inspect the program state before retrying a modifying operation. Protocol-level statelessness does not share Ghidra state or cached results between server processes.
+HTTP responses contain the final result, without SSE progress or keepalive events. Every call still replies within about 50 seconds: jobs within `wait_seconds` (at most 50), and any other call still running after 40 seconds replies `deferred: true` and continues on the server ([long calls](usage.md#long-calls)). The 60-second limits of common clients and reverse proxies are therefore enough. A lost response does not prove that a change failed; inspect the program state before retrying a modifying operation. Protocol-level statelessness does not share Ghidra state or cached results between server processes.
 
 For a local HTTP deployment, use the [bounded-path startup example](usage.md#local-setup). The MCP endpoint has no built-in client authentication. Ghidra Server and BSim passwords authenticate those backends; they do not authenticate MCP clients.
 
@@ -31,7 +31,7 @@ In stdio mode, JVM `System.out` is redirected to stderr after startup to keep Gh
 
 ## Targets and concurrent calls
 
-`--project-location`, optional `--project-name`, and `--target-name` (default `default`) define the initial target. `--domain-path /folder/program` opens a program at startup; omit it to register only project metadata. At least one project or `--session` is required.
+`--project-location`, optional `--project-name`, and `--target-name` (default `default`) define the initial target. `--domain-path /folder/program` opens a program in the background once the server is serving, and tool calls wait until it is open; omit it to register only project metadata. At least one project or `--session` is required.
 
 To register multiple targets at startup, repeat `--session`. These examples point to existing projects:
 
@@ -44,9 +44,9 @@ uv run mecha_ghidra \
 
 Session definitions are comma-separated `key=value` pairs, not JSON; values cannot contain commas. Supported keys are `name`, `project_location`, optional `project_name`, and optional `domain_path`. See [project concepts](usage.md#project-concepts) for the different path types.
 
-`--lock-timeout-seconds` defaults to `30`. Calls competing for a busy target wait for its lock and return retryable `LOCK_TIMEOUT` when that wait expires. This is a queue timeout, not an analysis execution limit. Set MCP client timeouts separately. The same wait bounds every other call while `run_script` executes: a script holds the process-wide script barrier, and calls that cannot enter within the timeout return retryable `LOCK_TIMEOUT` (with `script_state` and `waited_seconds` in the details) instead of waiting for the script; shutdown likewise stops waiting for a script after this timeout. While a script is merely *queued* behind running operations, other calls are held for at most about one second at a time (a long read on any target lets new reads through), so a pending script never blocks the server.
+`--lock-timeout-seconds` defaults to `30`. Calls competing for a busy target wait for its lock and return retryable `LOCK_TIMEOUT` when that wait expires. This is a queue timeout, not an analysis execution limit. Set MCP client timeouts separately. The server serves before Ghidra is up, so a tool call that arrives during startup also waits at most this long for Ghidra, then returns `LOCK_TIMEOUT` with `details.lock` set to `startup`. That wait counts against the 40-second deferral below and against a job's `wait_seconds`. A background job (`import_program`, `analyze_program` or `run_script`) is the exception: until it starts writing, it keeps waiting for the lock (`phase: waiting_for_lock`) until the lock frees, `cancel_operation` cancels it or the server stops. Keep this value below 40 seconds: a call still waiting for a lock at 40 seconds replies `deferred: true` instead of `LOCK_TIMEOUT`. `create_project` needs exclusive use of the server: while other operations run, it waits at most this long without holding them up, then returns `LOCK_TIMEOUT`. The same wait bounds every other call while `run_script` executes: a script holds the process-wide script barrier, and calls that cannot enter within the timeout return retryable `LOCK_TIMEOUT` (with `script_state` and `waited_seconds` in the details) instead of waiting for the script; shutdown likewise stops waiting for a script after this timeout. While a script is merely *queued* behind running operations, other calls are held for at most about one second at a time (a long read on any target lets new reads through), so a pending script never blocks the server.
 
-`--script-queue-timeout-seconds` defaults to `300`. It is how long `run_script` waits for in-flight operations to finish before the script starts; a run that cannot start in time returns retryable `LOCK_TIMEOUT` without executing. It is separate from `--lock-timeout-seconds` because a requested script run should outwait a running analysis rather than fail after 30 seconds.
+`--script-queue-timeout-seconds` defaults to `300`. It is how long one attempt of a `run_script` job waits for in-flight operations to finish before the script starts; the job then tries again and stays `waiting_for_lock` until it starts, is cancelled or the server stops. It is separate from `--lock-timeout-seconds` because a script run should outwait a running analysis.
 
 <a id="file-access"></a>
 
@@ -76,7 +76,7 @@ Configure all three root types for HTTP deployments. The startup warning is emit
 
 Omitting profile flags selects `default`. Add optional categories with `--add-category shared_sync` or `--add-category bsim`.
 
-The `readonly` profile filters exposed tools. It does not mount projects read-only or prevent analysis/saving during program loading. Use a historical version for immutable version inspection; see [shared projects](shared-projects.md#history).
+The `readonly` profile only filters exposed tools; it does not mount projects read-only. Use a historical version for immutable version inspection; see [shared projects](shared-projects.md#history).
 
 Each tool has three tags:
 
@@ -92,6 +92,7 @@ Filtering order:
 2. Apply `--allow-safety` and `--allow-operation-level`. Repeated values of one allow flag are OR; different tag types combine with AND.
 3. Add explicit `--enable-tool` names.
 4. Remove `--disable-tool` names last. Disabling always wins.
+5. If `import_program`, `analyze_program` or `run_script` remains, `get_operation` is kept too, because job results are read through it. Disabling `get_operation` while any of them stays enabled is a startup error; to hide jobs, disable them together with `get_operation`. `cancel_operation` follows `get_operation` and is dropped with it. Without `get_operation`, no call is [deferred](usage.md#long-calls).
 
 Append these options to your normal startup command:
 
@@ -104,7 +105,7 @@ Append these options to your normal startup command:
 
 The exact tool arguments and error codes are exposed in `tools/list` and MCP resources `ghidra://docs/tools` / `ghidra://docs/tools/{tool_name}`. See the [tool reference](tools.md) for an overview. The removed `--enable-shared-project-sync` flag is covered in [upgrades](troubleshooting.md#upgrading).
 
-`tools/list` publishes `inputSchema` and `outputSchema` for every exposed tool. Ordinary values and data from `read_result`, `search_result`, and `batch_read` appear in `structuredContent.result`; `content` retains human-readable text. Arrays, strings, and null use the same envelope. For ordinary tools, compaction metadata such as `result_id`, and `error`, remain at the top level of `structuredContent`. Batch retrieval metadata stays inside the batch data at `structuredContent.result`. The advertised schema covers these variants and is validated before delivery. Tool documentation keeps the logical value schema in `output_schema` and the wire data schema in `structured_output_schema`.
+`tools/list` publishes `inputSchema` and `outputSchema` for every exposed tool. Ordinary values and data from `read_result`, `search_result`, and `batch_read` appear in `structuredContent.result`; `content` retains human-readable text. Arrays, strings, and null use the same envelope. For ordinary tools, compaction metadata such as `result_id`, and `error`, remain at the top level of `structuredContent`. Batch retrieval metadata stays inside the batch data at `structuredContent.result`. The advertised schema covers these variants, and replies are validated against it before delivery. It gives the variants every tool shares (compaction notices, deferred replies, errors) in a short form that only tells them apart. Tool documentation keeps the logical value schema in `output_schema` and the full wire data schema in `structured_output_schema`.
 
 Retrieval budgets of `max(threshold, 1024)` include both `content` and `structuredContent` in the tool response. SDK server information and outer JSON-RPC framing are excluded. A page may contain fewer characters or items now that structured output also fits the budget. `batch_read.max_output_chars` instead bounds the response JSON text alone (the `content` text, which `structuredContent` duplicates), as the [tool reference](tools.md#batch-read) states. Follow `has_more`, `next_offset_chars`, or `next_cursor` to continue.
 
@@ -114,7 +115,7 @@ Retrieval budgets of `max(threshold, 1024)` include both `content` and `structur
 
 Ghidra scripts (Java, Jython, PyGhidra) are arbitrary code running with the server's OS privileges. The `scripts` tools are exposed like every other category (`--tool-profile full`, or `--add-category scripts` on top of another profile; the default and readonly profiles do not include them).
 
-`run_script` takes the script text directly (`source`), so a client such as an AI assistant can write a script, run it, read the diagnostics and try again. Scripts run inside the server JVM against the loaded program, the way the Ghidra Script Manager runs them, wrapped in a transaction: on success the changes are committed, on an exception or timeout they are rolled back. The result reports `transaction_outcome` (`committed`, `unchanged`, `rolled_back`, `unknown`) read after the transaction ended, plus captured `stdout` / `stderr` and, for Java, compiler diagnostics. A script that leaks a transaction or leaves work running makes the program state unverifiable: the target is quarantined (`TARGET_EXECUTION_INVALID`, mutating tools refused) until `close_session(discard_changes=true)` and a reload. Jython cancellation is cooperative only.
+`run_script` takes the script text directly (`source`), so a client such as an AI assistant can write a script, run it, read the diagnostics and try again. Scripts run inside the server JVM against the loaded program, the way the Ghidra Script Manager runs them, wrapped in a transaction: on success the changes are committed, on an exception, timeout or `cancel_operation` they are rolled back. Each run is a background job ([long calls](usage.md#long-calls)); the job's result reports `transaction_outcome` (`committed`, `unchanged`, `rolled_back`, `unknown`) read after the transaction ended, plus captured `stdout` / `stderr` and, for Java, compiler diagnostics. A script that leaks a transaction or leaves work running makes the program state unverifiable: the target is quarantined (`TARGET_EXECUTION_INVALID`, mutating tools refused) until `close_session(discard_changes=true)` and a reload. Jython cancellation is cooperative only.
 
 | Option | Effect |
 | --- | --- |
@@ -122,9 +123,9 @@ Ghidra scripts (Java, Jython, PyGhidra) are arbitrary code running with the serv
 
 Roots containing `META-INF/MANIFEST.MF` are supported. Ghidra processes the manifest and its dependencies; load or compilation failures return diagnostics.
 
-Script contents are not hashed or checked for integrity. `catalog_revision` is an opaque identifier generated for each catalog build. `expected_revision` checks whether the loaded program has changed since it was last inspected. A `run_script` request that waits longer than `--script-queue-timeout-seconds` for other operations returns `LOCK_TIMEOUT` without starting the script.
+Script contents are not hashed or checked for integrity. `catalog_revision` is an opaque identifier generated for each catalog build. `expected_revision` checks whether the loaded program has changed since it was last inspected. A `run_script` job waits for other operations in attempts of `--script-queue-timeout-seconds` each, and keeps waiting until it can start.
 
-Fixed limits: `.py` scripts must carry an `@runtime Jython` or `@runtime PyGhidra` header (or `run_script` is given `runtime`), a `source` is at most 256 KiB, a root may hold at most 2000 files, and `timeout_seconds` is 300 by default and at most 3600. The timeout cancels through the script monitor, which is cooperative: a script that never calls `monitor.checkCancelled()` (or an equivalent) cannot be interrupted and holds the runtime-wide lock until it ends, so only a server restart stops it.
+Fixed limits: `.py` scripts must carry an `@runtime Jython` or `@runtime PyGhidra` header (or `run_script` is given `runtime`), a `source` is at most 256 KiB, a root may hold at most 2000 files, and `timeout_seconds` is 300 by default and at most 3600. The timeout and `cancel_operation` cancel through the script monitor, which is cooperative: a script that never calls `monitor.checkCancelled()` (or an equivalent) cannot be interrupted and holds the runtime-wide lock and the job queue until it ends, so only a server restart stops it. At shutdown the server waits for such a script only as long as `--lock-timeout-seconds`, then closes the projects the script does not hold.
 
 Runtimes: Java and the PyGhidra provider ship with Ghidra; install the Python dependency pinned by this project (see the [pinned PyGhidra snapshot](development.md#pyghidra-dependency-and-script-failures)). Jython is a Ghidra Extension: unzip `Extensions/Ghidra/ghidra_<version>_Jython.zip` into `Ghidra/Extensions/` and restart (the Docker image does this). Missing runtimes show as `available=false` in `list_scripts`. If the startup exception propagation check fails, all script runtimes become unavailable and execution returns `SCRIPT_RUNTIME_UNAVAILABLE`; other analysis tools remain usable.
 

@@ -23,11 +23,8 @@ def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
 
 
-def _annotation_payload(spec: ToolSpec) -> dict[str, Any] | None:
-    annotations = tool_annotations_for_spec(spec)
-    if annotations is None:
-        return None
-    return annotations.model_dump(by_alias=True, exclude_none=True)
+def _annotation_payload(spec: ToolSpec) -> dict[str, Any]:
+    return tool_annotations_for_spec(spec).model_dump(by_alias=True, exclude_none=True)
 
 
 def tool_docs_index(specs: dict[str, ToolSpec]) -> dict[str, Any]:
@@ -57,11 +54,13 @@ def tool_docs_detail(spec: ToolSpec) -> dict[str, Any]:
         "input_schema": public_input_schema(spec),
         "output_schema": public_output_schema(spec),
         "structured_output_schema": spec_wire_output_schema(spec),
-        "large_result_output_schema": _large_result_output_schema(),
         "large_error_output_schema": _large_error_output_schema(),
         "annotations": _annotation_payload(spec),
         "checkout_required": spec.checkout_required,
     }
+    if spec.presenter != "operation":
+        # Background-job records are always returned inline.
+        detail["large_result_output_schema"] = _large_result_output_schema()
     if spec.presenter == "batch":
         logical = public_output_schema(spec)
         compact = {

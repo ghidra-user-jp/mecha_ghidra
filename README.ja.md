@@ -68,7 +68,7 @@ uv run mecha_ghidra \
   --transport stdio
 ```
 
-[クライアント設定例](docs/clients.ja.md)に沿って、このコマンドをMCPクライアントから起動します。接続後は `list_project_programs` でプログラムを選び、`load_project_program` で開いてから、`list_functions` や `decompile_function` を使います。
+[クライアント設定例](docs/clients.ja.md)に沿って、このコマンドをMCPクライアントから起動します。接続後は `list_project_programs` でプログラムを選び、`load_project_program` で開いてから、`list_functions` や `decompile_function` を使います。読み込みでは解析しないため、応答が`is_analyzed: false`なら先に`analyze_program`を実行してください。
 
 **バイナリファイルから始める場合：** [最初の解析](docs/usage.ja.md#first-analysis)で、プロジェクト作成 → インポート → 読み込みまで進めてください。サーバーを起動するだけでは、プロジェクトや解析対象は作成されません。
 

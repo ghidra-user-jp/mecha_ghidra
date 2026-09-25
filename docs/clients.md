@@ -93,8 +93,8 @@ For a client using the `mcpServers` stdio format, including Roo Code, the launch
 
 1. Confirm that the client lists Mecha Ghidra's tools.
 2. Call `list_targets`. A registered target does not necessarily have a program loaded.
-3. Follow [first analysis](usage.md#first-analysis) or use `list_project_programs` and `load_project_program` for an existing project.
+3. Follow [first analysis](usage.md#first-analysis) or use `list_project_programs` and `load_project_program` for an existing project. Loading never analyzes; run `analyze_program` when the load reports `is_analyzed: false`.
 
-If a GUI client cannot find `uv`, use its absolute executable path. Give the stdio process `GHIDRA_INSTALL_DIR` explicitly, as above; a GUI app may not inherit shell variables. Configure a client timeout long enough for import and analysis; `--lock-timeout-seconds` only controls queue waiting and does not extend client timeouts.
+If a GUI client cannot find `uv`, use its absolute executable path. Give the stdio process `GHIDRA_INSTALL_DIR` explicitly, as above; a GUI app may not inherit shell variables. No call keeps the client waiting for more than about 50 seconds: `import_program`, `analyze_program` and `run_script` reply within `wait_seconds` and run as background jobs, and any other call still running after 40 seconds replies `deferred: true` and continues on the server ([long calls](usage.md#long-calls)). A default 60-second client timeout is therefore enough. `--lock-timeout-seconds` only controls queue waiting and does not extend client timeouts.
 
 Shared-repository credentials belong to the server's [Ghidra Server configuration](shared-projects.md), not the HTTP client entry.

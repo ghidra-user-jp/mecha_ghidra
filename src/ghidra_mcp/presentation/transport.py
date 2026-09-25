@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import signal
+import threading
 from typing import Any
 
 from mcp.server.transport_security import TransportSecuritySettings
@@ -116,13 +119,54 @@ def uvicorn_log_level(log_level: str | None) -> str:
     return normalize_server_log_level(log_level).lower()
 
 
-def run_mcp_server(server, *, transport: str, log_level: str = "INFO", **kwargs) -> None:
+@contextlib.contextmanager
+def _graceful_hangup(http_server):
+    """Give SIGHUP the graceful shutdown uvicorn gives only SIGINT and SIGTERM.
+
+    uvicorn stops accepting, finishes the requests in flight and then replays
+    the signals it caught; SIGHUP is replayed the same way once serving ends,
+    so the CLI's handler cleans up and exits with 128 + SIGHUP.
+    """
+    sighup = getattr(signal, "SIGHUP", None)
+    if (
+        sighup is None
+        or threading.current_thread() is not threading.main_thread()
+        or signal.getsignal(sighup) is signal.SIG_IGN
+    ):
+        yield
+        return
+    hangups: list[int] = []
+
+    def hang_up(signum, frame):
+        hangups.append(signum)
+        http_server.handle_exit(signum, frame)
+
+    previous = signal.signal(sighup, hang_up)
+    try:
+        yield
+    finally:
+        signal.signal(sighup, signal.SIG_DFL if previous is None else previous)
+    if hangups:
+        signal.raise_signal(sighup)
+
+
+def run_mcp_server(server, *, transport: str, log_level: str = "INFO", startup=None, **kwargs) -> None:
+    """Serve ``server`` until the transport ends.
+
+    ``startup`` (a ``presentation.startup.BackgroundStartup``) begins once the
+    transport accepts requests, with the event loop for its main-thread steps.
+    A failed startup ends an HTTP server; a stdio server keeps answering, with
+    the failure, until its client disconnects.
+    """
     normalized = normalize_transport(transport)
 
     async def serve_stdio():
         from mcp.server.stdio import stdio_server
 
         async with stdio_server() as (read_stream, write_stream):
+            # fd 1 now points at stderr, so nothing the startup prints reaches the wire.
+            if startup is not None:
+                startup.start(loop=asyncio.get_running_loop())
             await server.run(read_stream, write_stream, server.create_initialization_options())
 
     async def serve_http():
@@ -135,7 +179,15 @@ def run_mcp_server(server, *, transport: str, log_level: str = "INFO", **kwargs)
         # uvicorn accepts only its own level names: the CLI's WARN/FATAL
         # aliases must be normalised first, exactly as the MCP server does.
         config = uvicorn.Config(app, host=host, port=port, log_level=uvicorn_log_level(log_level))
-        await uvicorn.Server(config).serve()
+        http_server = uvicorn.Server(config)
+        if startup is not None:
+
+            def stop_serving() -> None:
+                http_server.should_exit = True
+
+            startup.start(loop=asyncio.get_running_loop(), stop_serving=stop_serving)
+        with _graceful_hangup(http_server):
+            await http_server.serve()
 
     if normalized == "stdio":
         asyncio.run(serve_stdio())

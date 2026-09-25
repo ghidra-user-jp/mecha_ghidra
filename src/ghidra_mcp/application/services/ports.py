@@ -7,6 +7,7 @@ only the protocols so the dependency direction stays application -> ports.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 
@@ -54,6 +55,41 @@ class BsimBackendPort(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class OperationControl(Protocol):
+    """Job control handed to a background import or analysis; the runtime drives it.
+
+    ``expected_project_key`` is the project admission resolved; the runtime
+    refuses to work anywhere else. An analysis also carries the
+    ``expected_generation`` of the session it was accepted for (``None`` for an
+    import); the runtime refuses to analyze any other session. ``check_active``
+    raises once shutdown has begun; the runtime calls it as soon as it holds the
+    job's locks and before it opens or changes anything. ``begin`` is called
+    immediately before the loader or the analysis writes anything: from then on
+    a failure may have left changes. ``bind_cancel`` registers (or with ``None``
+    clears) the callable that cancels the running analysis; it runs at once if
+    cancellation was already requested.
+    """
+
+    expected_project_key: str
+    expected_generation: int | None
+
+    def check_active(self) -> None: ...
+
+    def begin(self) -> None: ...
+
+    def bind_cancel(self, cancel: Callable[[], None] | None) -> None: ...
+
+
+@dataclass(frozen=True)
+class LoadedProgram:
+    """The program a target holds, as analysis admission records it."""
+
+    project_key: str
+    domain_path: str
+    # Changes whenever the target's session is replaced (load, reload, reopen, close).
+    generation: int
+
+
 class TargetRuntimePort(Protocol):
     def create_project(
         self,
@@ -91,7 +127,18 @@ class TargetRuntimePort(Protocol):
         repository_url: str,
     ) -> dict[str, Any]: ...
 
-    def import_program(self, name: str, binary_path: str, **kwargs: Any) -> str: ...
+    def import_program(
+        self,
+        name: str,
+        binary_path: str,
+        *,
+        control: OperationControl | None = None,
+        **options: Any,
+    ) -> str: ...
+
+    def loaded_program(self, name: str) -> LoadedProgram: ...
+
+    def analyze_program(self, name: str, *, force: bool = False, control: OperationControl) -> dict[str, Any]: ...
 
     def save_project_program(self, name: str, *, domain_path: str | None = None) -> dict[str, Any]: ...
 
@@ -194,9 +241,21 @@ class ScriptRuntimePort(Protocol):
 
     def script_runtime_availability(self) -> dict[str, bool]: ...
 
-    def run_script(self, name: str, *, request: dict[str, Any]) -> dict[str, Any]: ...
+    def run_script(
+        self, name: str, *, request: dict[str, Any], control: OperationControl | None = None
+    ) -> dict[str, Any]: ...
 
     def project_lock_key(self, name: str) -> str | None: ...
 
+    def loaded_program(self, name: str) -> LoadedProgram: ...
 
-__all__ = ["BsimBackendPort", "CoreGatewayPort", "ScriptRuntimePort", "SyncRuntimePort", "TargetRuntimePort"]
+
+__all__ = [
+    "BsimBackendPort",
+    "CoreGatewayPort",
+    "LoadedProgram",
+    "OperationControl",
+    "ScriptRuntimePort",
+    "SyncRuntimePort",
+    "TargetRuntimePort",
+]

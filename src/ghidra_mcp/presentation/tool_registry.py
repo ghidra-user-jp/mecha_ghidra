@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, create_model
 from ghidra_mcp.contracts.tool_models import PayloadToolOutputModel
 from ghidra_mcp.contracts.tool_spec import (
     ExecutorKind,
+    ToolCategoryTag,
     ToolSafetyTag,
     ToolSpec,
 )
@@ -184,16 +185,16 @@ def public_output_schema(spec: ToolSpec) -> dict[str, Any]:
     List/scalar/map output models validate through an internal
     ``{"payload": ...}`` wrapper that dispatch_tool never returns to clients;
     publishing the wrapper verbatim would recreate on the output side the
-    schema drift public_input_schema fixes for inputs.
+    schema drift public_input_schema fixes for inputs.  Generated titles are
+    dropped, as on the input side.
     """
     schema = dict(spec.output_model.model_json_schema())
     if not issubclass(spec.output_model, PayloadToolOutputModel):
-        return schema
+        return _without_schema_titles(schema)
     payload_schema = dict(schema.get("properties", {}).get("payload", {}))
     if "$defs" in schema:
         payload_schema["$defs"] = schema["$defs"]
-    payload_schema["title"] = schema.get("title", payload_schema.get("title"))
-    return payload_schema
+    return _without_schema_titles(payload_schema)
 
 
 def _build_callable(
@@ -301,22 +302,47 @@ def select_tool_description(spec: ToolSpec, mode: ToolDescriptionMode) -> str | 
     return None
 
 
-def tool_annotations_for_spec(spec: ToolSpec) -> ToolAnnotations | None:
-    read_only_hint = True if spec.safety_tag == ToolSafetyTag.READ_ONLY else None
-    destructive_hint = True if spec.safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE else None
+def tool_annotations_for_spec(spec: ToolSpec) -> ToolAnnotations:
+    """Every hint the spec can answer; a client assumes the worst for a missing one.
+
+    MCP's defaults for an unset hint are a destructive, non-idempotent tool
+    that reaches outside systems.
+    """
+    read_only = spec.safety_tag == ToolSafetyTag.READ_ONLY
     idempotent_hint = spec.idempotent_hint
-    if idempotent_hint is None and read_only_hint:
+    if idempotent_hint is None and read_only:
         # A read-only tool is idempotent by definition; clients treat an
         # unset hint as ``False`` and may refuse to retry it.
         idempotent_hint = True
+    return ToolAnnotations(
+        read_only_hint=read_only,
+        # Only meaningful for a tool that writes.  The safety tag marks
+        # deletions, byte overwrites, repository operations and scripts.
+        destructive_hint=None if read_only else spec.safety_tag == ToolSafetyTag.DESTRUCTIVE_WRITE,
+        idempotent_hint=idempotent_hint,
+        open_world_hint=_reaches_outside(spec),
+    )
 
-    if read_only_hint is not None or destructive_hint is not None or idempotent_hint is not None:
-        return ToolAnnotations(
-            read_only_hint=read_only_hint,
-            destructive_hint=destructive_hint,
-            idempotent_hint=idempotent_hint,
-        )
-    return None
+
+def _reaches_outside(spec: ToolSpec) -> bool:
+    """The BSim database, the Ghidra Server, or whatever a script's code touches; else the local project."""
+    if spec.category_tag in {ToolCategoryTag.BSIM, ToolCategoryTag.SHARED_SYNC}:
+        return True
+    return spec.category_tag == ToolCategoryTag.SCRIPTS and spec.safety_tag != ToolSafetyTag.READ_ONLY
+
+
+def anticipated_error_result(exc: BaseException) -> CallToolResult | None:
+    """The error result for an exception carrying ``error_mapper``'s ``domain_error``, else ``None``."""
+
+    payload = getattr(exc, "domain_error", None)
+    if payload is None:
+        return None
+    error = {"message": str(exc), **payload}
+    return CallToolResult(
+        is_error=True,
+        structured_content={"error": error},
+        content=[TextContent(type="text", text=json.dumps({"error": error}, ensure_ascii=False))],
+    )
 
 
 def as_anticipated_tool_failure(
@@ -340,14 +366,9 @@ def as_anticipated_tool_failure(
         except ToolError:
             raise
         except Exception as exc:
-            payload = getattr(exc, "domain_error", None)
-            if payload is not None:
-                error = {"message": str(exc), **payload}
-                result = CallToolResult(
-                    is_error=True,
-                    structured_content={"error": error},
-                    content=[TextContent(type="text", text=json.dumps({"error": error}, ensure_ascii=False))],
-                )
+            result = anticipated_error_result(exc)
+            if result is not None:
+                error = result.structured_content["error"]
                 if error_presenter is not None:
                     bound = inspect.signature(tool_fn).bind(*args, **kwargs)
                     return error_presenter(
@@ -360,11 +381,22 @@ def as_anticipated_tool_failure(
     return _entry
 
 
-def spec_wire_output_schema(spec: ToolSpec) -> dict[str, Any]:
-    """structuredContent schema for a spec: its logical output plus the envelopes its presenter emits."""
+def spec_wire_output_schema(spec: ToolSpec, *, detailed: bool = True) -> dict[str, Any]:
+    """structuredContent schema for a spec: its logical output plus the envelopes its presenter emits.
+
+    ``detailed=False`` is the short form tools/list publishes (see ``wire_output_schema``).
+    """
     from ghidra_mcp.presentation.response_schemas import wire_output_schema
 
-    return wire_output_schema(public_output_schema(spec), batch=spec.presenter == "batch")
+    return wire_output_schema(
+        public_output_schema(spec),
+        batch=spec.presenter == "batch",
+        compactable=spec.presenter != "operation",
+        deferrable=spec.deferrable,
+        sourced=spec.reports_source,
+        replayable=spec.replays_requests,
+        detailed=detailed,
+    )
 
 
 def build_tool_object(
@@ -378,7 +410,7 @@ def build_tool_object(
         description=select_tool_description(spec, config.description_mode),
         annotations=tool_annotations_for_spec(spec),
         input_schema=public_input_schema(spec),
-        output_schema=spec_wire_output_schema(spec),
+        output_schema=spec_wire_output_schema(spec, detailed=False),
     )
 
 
@@ -412,6 +444,7 @@ class ToolRegistry:
 
 __all__ = [
     "ToolRegistry",
+    "anticipated_error_result",
     "as_anticipated_tool_failure",
     "build_tool_functions",
     "build_tool_object",

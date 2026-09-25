@@ -54,6 +54,36 @@ jobs:
       - name: Compile Python sources
         run: uv run python -m compileall -q src
 
+  docker-image:
+    # Build the image the way docs/docker.md does, then run its default command
+    # end to end: import, analysis and decompilation of Ghidra's own exercise
+    # PE, and the cleanup on each shutdown signal (tests/test_docker_image.py).
+    name: Docker image (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Build the image
+        run: ./build_docker_image.sh --tag mecha_ghidra:ci
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.2
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Test the image
+        env:
+          MECHA_GHIDRA_DOCKER_IMAGE: mecha_ghidra:ci
+        run: uv run pytest -q tests/test_docker_image.py
+
   latest-mcp-sdk:
     # Early warning for the next mcp release: resolve the newest compatible SDK
     # inside the declared range and run the suite against it. Failures here do

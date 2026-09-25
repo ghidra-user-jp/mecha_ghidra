@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ghidra_mcp.application.locks import SCRIPT_BARRIER
+from ghidra_mcp.application.services.ports import OperationControl
 
 from .core_execution import RuntimeCoreExecution
 from .session_store import RuntimeSessionStore
@@ -32,8 +33,10 @@ class RuntimeScriptExecution:
         with SCRIPT_BARRIER.read_lock():
             return providers.runtime_availability()
 
-    def run_script(self, name: str, *, request: Dict[str, Any]) -> Dict[str, Any]:
-        return self._core_execution.call("run_script", dict(request), target=name, exclusive=True)
+    def run_script(
+        self, name: str, *, request: Dict[str, Any], control: OperationControl | None = None
+    ) -> Dict[str, Any]:
+        return self._core_execution.call("run_script", dict(request), target=name, exclusive=True, control=control)
 
 
 __all__ = ["RuntimeScriptExecution"]

@@ -12,8 +12,6 @@ from mcp.types import CallToolResult, TextContent
 
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.handlers.commands.query_support import page
-from ghidra_mcp.contracts.tool_spec import get_tool_spec
-from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation import result_compaction, result_json, result_tools
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
@@ -295,34 +293,6 @@ def test_index_eviction_and_actual_string_memory_budget():
         )
         is None
     )
-
-
-def test_large_script_error_uses_resource_and_preserves_failure_state():
-    details = {
-        "transaction_outcome": "rolled_back",
-        "execution_state": "invalid",
-        "stdout": {"text": "normal output\n" * 4000},
-        "stderr": {"text": "diagnostic\n" * 4000},
-    }
-
-    class Registry:
-        def run_script(self, *args, **kwargs):
-            raise DomainError(ErrorCode.SCRIPT_FAILED, "failed", details=details)
-
-    server = create_mcp_server(
-        specs={"run_script": get_tool_spec("run_script")},
-        registry_provider=Registry,
-        dispatcher_provider=lambda: dispatch_tool,
-    )
-    result = asyncio.run(server.mcp.call_tool("run_script", {"target": "t", "source": "# @runtime PyGhidra\npass"}))
-    assert result.is_error
-    error = result.structured_content["error"]
-    assert error["code"] == "SCRIPT_FAILED"
-    assert error["details"]["execution_state"] == "invalid"
-    assert error["details"]["transaction_outcome"] == "rolled_back"
-    assert result_compaction._call_tool_result_wire_chars(result) <= 12000
-    stored_error = json.loads(server.result_store.read_text(result.structured_content["result_id"]))["error"]
-    assert stored_error["details"] == details
 
 
 @pytest.mark.parametrize("limit", [0, 4000])

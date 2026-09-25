@@ -2,21 +2,23 @@
 
 # Troubleshooting and upgrades
 
-Tool failures set MCP `isError: true`. Domain errors retain `code`, `message`, `retryable`, `hint`, and `details` under `structuredContent.error` and in matching JSON text. Branch on stable codes and inspect partial completion in `details` before retrying. Argument validation failures also include `structuredContent.error.message`. Batch-edit item failures use `status` and `results` in a normal response. Large-result availability is handled [separately](configuration.md#large-results).
+Tool failures set MCP `isError: true`. Domain errors retain `code`, `message`, `retryable`, `hint`, and `details` under `structuredContent.error` and in matching JSON text. Branch on stable codes and inspect partial completion in `details` before retrying. An argument the input schema refuses is `VALIDATION_ERROR` too, with the schema's reason in `structuredContent.error.message`. Batch-edit item failures use `status` and `results` in a normal response. Large-result availability is handled [separately](configuration.md#large-results).
 
 ## Startup and connection
 
 | Symptom | Check / action |
 | --- | --- |
-| Ghidra cannot be found (`Ghidra installation directory does not exist` or `Failed to start the Ghidra JVM: ...`, exit code 1) | Set `GHIDRA_INSTALL_DIR` to the extracted distribution root (the directory holding `Ghidra/application.properties`), or pass `--ghidra-path`; configure it in the stdio client's environment |
+| Ghidra cannot be found (`Ghidra installation directory does not exist` or `Failed to start the Ghidra JVM: ...`) | Set `GHIDRA_INSTALL_DIR` to the extracted distribution root (the directory holding `Ghidra/application.properties`), or pass `--ghidra-path`; configure it in the stdio client's environment. A wrong installation path is found before serving and ends with exit code 1. A JVM that will not start (for example, no JDK found) is only found after serving has begun: over stdio every tool call then returns `STARTUP_FAILED`, and an HTTP server exits with code 1 |
+| The first tool call after connecting is slow | The server serves before Ghidra is up, and only tool calls wait for it to finish starting. The server log shows how long that took (`Ghidra ready in ...`). A call still waiting after `--lock-timeout-seconds` returns `LOCK_TIMEOUT` with `details.lock` set to `startup`; retry shortly |
 | Native decompiler missing or not executable | Install matching `decompile` and `sleigh` files for the host OS/CPU; see [native artifacts](usage.md#native-decompiler-artifacts) |
 | Project locked / already in use | Close that local project in the other process, or use a separate shared-project cache; do not delete active lock files |
 | Invalid project name | Omit `.gpr` from `project_name`, or use an existing `.gpr` path as `project_location` without a name |
 | Project not found on a fresh setup | Start with a project directory plus name, then call `create_project`; see [first analysis](usage.md#first-analysis) |
-| No program loaded | Call `list_project_programs` and `load_project_program`; target registration alone does not load a program |
+| No program loaded (`PROGRAM_NOT_OPEN`) | Call `list_project_programs` and `load_project_program`; target registration alone does not load a program |
 | HTTP client cannot connect | Confirm transport, host, port, `/mcp` path, and server logs; the legacy `/sse` endpoint has been removed |
 | Invalid Host/Origin after wildcard binding | Match the configured fixed host and client-facing address; see [transport settings](configuration.md#transports) |
-| Client timeout during import/analysis | Set an appropriate client tool timeout; the server lock timeout only limits queue waiting |
+| Client timeout on a long call | No call waits more than about 50 seconds: jobs (`import_program`, `analyze_program`, `run_script`) reply within `wait_seconds`, and any other call still running after 40 seconds replies `deferred: true`. Call `get_operation` with the returned `operation_id` rather than raising the timeout or repeating the call. A timeout below 50 seconds can still cut calls; see [long calls](usage.md#long-calls) |
+| Few or no functions after loading | Loading never analyzes. When the load reports `is_analyzed: false`, run `analyze_program` and wait for the job |
 | A tool is missing | Check the profile, category filters, and explicit enable/disable flags; reconnect/refresh the client's tool list after changing startup flags |
 
 ## Tool errors
@@ -24,20 +26,34 @@ Tool failures set MCP `isError: true`. Domain errors retain `code`, `message`, `
 | Code | Meaning / next step |
 | --- | --- |
 | `PATH_NOT_ALLOWED` | Use a path inside the corresponding allowed root, after symlink resolution |
-| `LOCK_TIMEOUT` | Another call holds the target lock, or a `run_script` run is still executing; `details.script_state` says whether a script is `running` or only `queued` (then `retry_after_seconds` applies). A `run_script` that itself reports `LOCK_TIMEOUT` waited `--script-queue-timeout-seconds` for `details.active_readers` operations and did not start |
+| `NOT_FOUND` | The function, data type, variable, data symbol or bookmark named in `message` does not exist; `hint` names the tool that finds it, such as `list_functions` or `list_data_types` |
+| `VALIDATION_ERROR` | `message` says which argument was refused and why (file paths show as `<path>`); correct it and call again |
+| `PROGRAM_NOT_OPEN` | The target has no program loaded: find one with `list_project_programs` and load it with `load_project_program`, or add one with `import_program` |
+| `TARGET_NOT_REGISTERED` | No target has that name: `list_targets` shows them, and `register_target` adds one |
+| `STARTUP_FAILED` | The startup that runs after serving has begun (starting the JVM, checking the script runtimes, configuring Ghidra Server authentication, loading the startup programs) failed. `details.stage` names the step and `message` the cause; the server log has the same line. Retrying does not help: fix the configuration and restart the server |
+| `LOCK_TIMEOUT` | Another call holds the target lock, or a `run_script` run is still executing. When `details.lock` is `startup`, Ghidra is still starting: retry shortly. When a background job or a deferred call holds it, `details.operation_id` names it: wait for it with `get_operation`, then retry. `create_project` also returns it while other operations, such as a background import, are running (`details.lock` is `runtime`); retry after they finish. For `run_script`, `details.script_state` says whether a script is `running` or only `queued` (then `retry_after_seconds` applies). A `run_script` job does not fail with it: it keeps waiting (`phase: waiting_for_lock`) until it can start |
 | `SCRIPT_RUNTIME_UNAVAILABLE` | Check provider installation and the startup propagation-probe log. A failed probe disables all script languages; install the [pinned PyGhidra dependency](development.md#pyghidra-dependency-and-script-failures) and restart. Stock PyGhidra 3.1.0 fails this check |
-| `RAW_LOADER_OPTION_UNAVAILABLE` | Ghidra could not resolve public BinaryLoader metadata for the selected language/compiler or requested option; check these values and the supported Ghidra version |
+| `RAW_LOADER_OPTION_UNAVAILABLE` | Ghidra could not resolve public BinaryLoader metadata for the selected language/compiler or requested option; check these values and the supported Ghidra version. `details.cause_message` names the option |
 | `AMBIGUOUS_FUNCTION`, `AMBIGUOUS_DATA_TYPE` | Inspect `details.candidates`; use a function address/qualified name or a full type path |
-| `SESSION_CHANGED` | Read current state and restart pagination or update the revision for edits |
+| `SESSION_CHANGED` | Read current state and restart pagination or update the revision for edits. From an analysis or script job: the target was reloaded, closed or switched before the job started, and nothing ran; submit it again |
 | `BSIM_MATCH_STALE` | The loaded program MD5, path, or function entry differs from the match; verify the original program and query result |
 | `PROGRAM_NOT_ANALYZED` | Run `analyze_program` before local variable naming/type operations |
 | `CHECKOUT_REQUIRED` | Check out the versioned shared file before editing |
 | `CHECKOUT_UNAVAILABLE` | Inspect repository checkout status; another user may hold an exclusive checkout |
 | `READ_ONLY_PROGRAM` | A historical version is loaded; load the current file to edit |
-| `MERGE_REQUIRED`, `UNSAFE_MERGE_REQUIRED` | Follow the [conflict workflow](shared-projects.md#conflicts); headless merging is unsupported |
+| `MERGE_REQUIRED` | Follow the [conflict workflow](shared-projects.md#conflicts); headless merging is unsupported |
 | `JVM_NOT_HEADLESS`, `HEADLESS_UNSUPPORTED` | Check the [JVM startup rules](development.md); do not retry a display-dependent API in headless mode |
 | `BSIM_URL_REQUIRED`, `BSIM_URL_INVALID` | Supply a supported BSim URL |
 | `BSIM_AUTHENTICATION_FAILED`, `BSIM_DATABASE_UNREACHABLE` | Check backend credentials and connectivity |
+| `IMPORT_IN_PROGRESS` | Another import is writing the same program name; follow `details.operation_id` with `get_operation` |
+| `ANALYSIS_IN_PROGRESS` | Another analysis of the same program with different arguments is queued or running; follow `details.operation_id` with `get_operation` |
+| `IMPORT_OUTPUT_UNCERTAIN` | An earlier import of that name failed without confirmed cleanup; inspect `details.operation_id` and the project. This server process refuses the name until it restarts |
+| `OPERATION_QUEUE_FULL` | 16 jobs are already waiting and nothing was accepted; retry later |
+| `REQUEST_ID_CONFLICT` | The `request_id` already identifies a job with different arguments; send the intended arguments or a new UUID |
+| `OPERATION_NOT_FOUND` | This server process has no record of the job (it restarted, or the record was dropped after 4,096 later jobs); inspect the project before submitting the job again |
+| `TARGET_REBOUND` | The target was registered to another project after the import was accepted; nothing was written, so import again |
+| `OPERATION_CANCELLED` | `cancel_operation` stopped the job; `details.output_state` says what it left (`absent` when it had not started or rolled back) |
+| `OPERATION_SHUTDOWN`, `OPERATION_WORKER_UNAVAILABLE`, `OPERATION_WORKER_FAILED` | The server is stopping, or its job worker failed; check `details.output_state` and the server log, then restart the server |
 | `BSIM_PARAMETER_INVALID`, `BSIM_INVALID_MATCHED_REF` | Use schema bounds and an unmodified query result reference |
 | `BSIM_ALREADY_REGISTERED` | Update the existing record, or explicitly delete it before re-registration |
 | `BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED` | Add the category first and match its case exactly |
@@ -79,6 +95,30 @@ Version 0.1.5 adds Ghidra 12.1.3 support and matching native overlays. Choose th
 - Conflict policies and clear modes are enumerated in schemas, and numeric bounds are published. Refresh cached client schemas after upgrading.
 
 Version 0.1.4 moved to MCP 2.x (`mcp>=2.1.1,<3`) and worker-thread tool execution. For integration changes, follow the [development checks](development.md).
+
+### Background jobs and loading
+
+- `import_program` and `analyze_program` run as background jobs and return a job record. While `state` is `queued` or `running`, call `get_operation`; the former result is in `result` (`result.program` for an import). See [usage](usage.md#saving-and-analysis).
+- `import_program` analyzes every format by default; pass `analyze_imported=false` to skip it.
+- Loading never analyzes. `load_project_program` and `open_program` report `is_analyzed`; run `analyze_program` when it is `false`. Its result stays unsaved until `save_project_program`.
+- `analyze_program` now requires `target`.
+- New error codes come with the jobs: `OPERATION_QUEUE_FULL`, `OPERATION_SHUTDOWN`, `OPERATION_WORKER_UNAVAILABLE`, `OPERATION_WORKER_FAILED`, `OPERATION_NOT_FOUND`, `REQUEST_ID_CONFLICT`, `IMPORT_IN_PROGRESS`, `IMPORT_OUTPUT_UNCERTAIN`, `TARGET_REBOUND` and `ANALYSIS_IN_PROGRESS` (see the table above). A `LOCK_TIMEOUT` caused by a running job names it in `details.operation_id`.
+- Docker Compose now allows 120 seconds to stop (`stop_grace_period`), so a cancelled analysis can be rolled back.
+- `run_script` runs as a background job too and returns a job record: the script's summary is in `result`, a failure in `operation_error` with `details.output_state`. Resending the same arguments while it is pending returns the same job.
+- Any other call still running after 40 seconds replies `deferred: true` with a job record and keeps running; `get_operation` returns its outcome. `get_operation` records therefore carry any tool name in `kind` and any JSON in `result`. See [long calls](usage.md#long-calls).
+- `cancel_operation` is new and cancels a queued or running job (`OPERATION_CANCELLED`).
+- `list_targets` no longer waits for target locks, so it answers at once while a job runs.
+- SIGINT and SIGHUP now stop the server the way SIGTERM does: running jobs are cancelled and rolled back, projects are closed, and the exit code is 130 or 129. Before, SIGINT could leave a stdio server running or end it without cleanup, and SIGHUP, or any of these signals during the JVM's start, ended it without cleanup.
+- BSim tools report a failure with `error.code`, the `BSIM_...` name its message starts with, and with `retryable`, which is true only for `BSIM_DATABASE_UNREACHABLE`. Some codes also carry a `hint`. The message text is unchanged; before, the code was only in the text.
+- Every tool declares all its hints. Write tools report `readOnlyHint: false`; `destructiveHint` is true for deletions, byte overwrites, repository operations and scripts, and `openWorldHint` only for BSim, shared-project and script tools. Clients that decide confirmations from these hints may now prompt less for ordinary edits.
+- Every program write, and `bsim_apply_matches`, accepts `request_id`: a resend with the same one returns the first reply, marked `replayed: true`, instead of applying again (see [batch annotations](tools.md#symbol-comment-edit)).
+- A failed write reports `error.details.output_state` (`absent`, `created` or `uncertain`), and `retryable` is true only when nothing was left behind. A project or repository write reports `absent` when its error refused the call before any change, and `uncertain` otherwise.
+- Errors say more. A missing function, data type, variable or bookmark fails with `NOT_FOUND` (before, `OPERATION_FAILED`); a target with no program loaded fails with `PROGRAM_NOT_OPEN`, and an unknown target with `TARGET_NOT_REGISTERED` (both before, `SESSION_NOT_FOUND`). `NOT_FOUND` and `VALIDATION_ERROR` messages keep the reason, which fixed text used to replace, and `hint` names the next tool instead of `Check runtime state`. A Java exception inside Ghidra, such as a NullPointerException, is `OPERATION_FAILED`, no longer `VALIDATION_ERROR`. `PROGRAM_NOT_ANALYZED` and `RAW_LOADER_OPTION_UNAVAILABLE` are now codes of their own (before, `OPERATION_FAILED` and `IMPORT_FAILED`), with the cause in `details.cause_message`. An argument the input schema refuses now has `code` `VALIDATION_ERROR` and a `hint`; before, its error had only `message`.
+- A reply's text content is compact JSON: a list is one text block with one item per line, instead of one indented block per item. `structuredContent` is unchanged.
+- `decompile_function`'s pseudocode starts with a comment line naming the function and its entry address, such as `/* entry @ 00401e46 */`.
+- A program tool's reply carries `source` (`target`, `program`, `revision`) beside `result` in `structuredContent`, and as a last text block. Clients that compare `structuredContent` with `{"result": ...}` exactly must allow the extra key.
+- `tools/list` is about half its former size: each tool's output schema keeps its full result shape but only a short form of the replies every tool shares (stored-result notices, deferred replies, errors). Their full shapes are in `ghidra://docs/tools/{tool_name}`. Replies are unchanged, and both forms validate them.
+- The JVM starts with `-Xrs`, so it leaves those signals to the server. `kill -3` (SIGQUIT) now prints the Python threads' stacks instead of a Java thread dump; `jcmd <pid> Thread.print` still prints the Java threads.
 
 ## Report a reproducible problem
 

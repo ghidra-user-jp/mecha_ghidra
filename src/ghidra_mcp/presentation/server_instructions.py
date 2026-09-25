@@ -79,6 +79,23 @@ def build_server_instructions(*, specs: Mapping[str, ToolSpec], config: ToolPres
         parts.append("No analysis capabilities are advertised for this tool selection; consult the tool catalog.")
     if "list_targets" in enabled:
         parts.append("Start with list_targets to identify the program context.")
+    jobs = [name for name in ("import_program", "analyze_program", "run_script") if name in enabled]
+    if jobs:
+        names = jobs[0] if len(jobs) == 1 else ", ".join(jobs[:-1]) + " and " + jobs[-1]
+        parts.append(
+            f"{names} {'run as background jobs' if len(jobs) > 1 else 'runs as a background job'}: "
+            "while a job is queued or running, call get_operation (it waits server-side), not list_targets. "
+            "Job records are lost on restart; never auto-retry OPERATION_NOT_FOUND."
+        )
+    if "get_operation" in enabled:
+        parts.append(
+            "A call still running after 40 s replies deferred=true: get its result with get_operation, "
+            "never by repeating the call."
+        )
+    if "analyze_program" in enabled:
+        parts.append(
+            "Loading never analyzes: run analyze_program when a load or get_program_info reports is_analyzed=false."
+        )
     if any(spec.include_target for spec in specs.values()):
         parts.append("Pass the intended target across calls; paths refer to the server filesystem.")
     parts.append("Tool details: ghidra://docs/tools and ghidra://docs/tools/{tool_name}.")

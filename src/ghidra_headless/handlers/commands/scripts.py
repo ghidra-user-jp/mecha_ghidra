@@ -24,8 +24,13 @@ def _require_str(params, name):
     return value
 
 
-def run_script(params, *, ensure_context, current_key):
-    """Run a catalog script in this JVM and return the execution summary."""
+def run_script(params, *, ensure_context, current_key, current_task_monitor=None, begin_command=None):
+    """Run a catalog script in this JVM and return the execution summary.
+
+    In a background job, ``current_task_monitor`` returns the job's cancellable
+    monitor and ``begin_command`` marks the moment the script's transaction
+    starts; both are absent for a direct call.
+    """
 
     import os
 
@@ -62,6 +67,8 @@ def run_script(params, *, ensure_context, current_key):
             project=ctx.project,
             description="Script: %s" % script_id,
             request=request,
+            monitor=current_task_monitor() if current_task_monitor is not None else None,
+            on_start=begin_command,
         )
         revision_after = program_revision(ctx)
         reset_decompiler = not (

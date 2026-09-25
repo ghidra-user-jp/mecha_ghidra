@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import getpass
 import math
 import os
@@ -139,6 +140,66 @@ def _classified_bsim_error(
     if isinstance(exc, ValueError):
         return ValueError(message)
     return RuntimeError(message)
+
+
+# How a BSim tool reports a failure (see _reports_bsim_errors): only an
+# unreachable database is worth retrying as is, and a few messages name no next step.
+_RETRYABLE_BSIM_CODES = frozenset({ErrorCode.BSIM_DATABASE_UNREACHABLE})
+_BSIM_HINTS: dict[ErrorCode, str] = {
+    ErrorCode.BSIM_DATABASE_UNREACHABLE: "Check that the BSim database is running and reachable, then retry",
+    ErrorCode.BSIM_AUTHENTICATION_FAILED: "Check the BSim user and password",
+    ErrorCode.BSIM_EXECUTABLE_NOT_FOUND: "list_bsim_executables shows the executables in the database",
+    ErrorCode.BSIM_EXECUTABLE_AMBIGUOUS: "Pass md5 to select one executable",
+    ErrorCode.BSIM_UNSAVED_PROGRAM: "Save the program with save_project_program first",
+}
+_BSIM_CODE_NAME_RE = re.compile(r"^(BSIM_[A-Z0-9_]+)")
+
+
+def _bsim_tool_error(exc: Exception) -> DomainError:
+    """The DomainError a BSim tool reports for ``exc``: the code its message names, and that message.
+
+    BSim failures carry their code at the start of the message ("BSIM_...:
+    detail"), but the MCP boundary gives ``error.code``, ``retryable`` and
+    ``hint`` only to a DomainError.  The masked message stays the public text
+    (see ``presentation.error_mapper``).
+    """
+    message = mask_bsim_urls_in_text(str(exc)).strip() or "unknown error"
+    if _BSIM_CODE_RE.match(message) is None:
+        message = _classify_bsim_message(message)
+    name = _BSIM_CODE_NAME_RE.match(message)
+    code = ErrorCode.__members__.get(name.group(1)) if name else None
+    if code is None:
+        code = ErrorCode.BSIM_OPERATION_FAILED
+    # Set by _call_bsim for a write that failed after it ran.
+    output_state = getattr(exc, "output_state", None)
+    return DomainError(
+        code=code,
+        message=message,
+        hint=_BSIM_HINTS.get(code),
+        retryable=code in _RETRYABLE_BSIM_CODES and output_state in (None, "absent"),
+        details=None if output_state is None else {"output_state": output_state},
+    )
+
+
+def _reports_bsim_errors(method: Callable[..., _T]) -> Callable[..., _T]:
+    """Make a BSim tool fail only with a DomainError (see _bsim_tool_error)."""
+
+    @functools.wraps(method)
+    def call(*args: Any, **kwargs: Any) -> _T:
+        public_error: DomainError | None = None
+        try:
+            return method(*args, **kwargs)
+        except DomainError:
+            raise
+        except Exception as exc:
+            public_error = _bsim_tool_error(exc)
+        # Raised outside the except suite, as in _call_bsim, so the raw error
+        # (which may hold credential URLs) is not attached as __context__.
+        if public_error is None:  # pragma: no cover - the method either returned or raised
+            raise AssertionError("BSim tool failed without an exception")
+        raise public_error from None
+
+    return call
 
 
 def _mask_bsim_payload_credentials(value: Any) -> Any:
@@ -609,9 +670,15 @@ class BsimService:
             # generic OPERATION_FAILED with the headless message intact; without
             # reclassification the same database outage would surface as
             # BSIM_DATABASE_UNREACHABLE via the Java-backend path but as an opaque
-            # OPERATION_FAILED via the core-command path.
-            if exc.code is ErrorCode.OPERATION_FAILED:
+            # OPERATION_FAILED via the core-command path.  A missing function or
+            # executable arrives as NOT_FOUND and becomes its BSIM_ code the same way.
+            if exc.code in (ErrorCode.OPERATION_FAILED, ErrorCode.NOT_FOUND):
                 public_error = _classified_bsim_error(exc, default_code=default_code)
+                # What a failed write left behind survives the reclassification
+                # (see _bsim_tool_error).
+                output_state = (exc.details or {}).get("output_state")
+                if output_state is not None:
+                    public_error.output_state = output_state
             else:
                 # Preserve the structured contract while preventing credentials embedded
                 # in a runtime message, hint, or details value from escaping this boundary.
@@ -653,6 +720,7 @@ class BsimService:
         )
         return masked
 
+    @_reports_bsim_errors
     def get_bsim_database_status(self, *, bsim_url: str | None = None) -> dict[str, Any]:
         return self.get_database_status(bsim_url=bsim_url)
 
@@ -681,6 +749,7 @@ class BsimService:
         )
         return self._mask_response_url(result, resolved)
 
+    @_reports_bsim_errors
     def bsim_add_executable_category(
         self,
         *,
@@ -714,6 +783,7 @@ class BsimService:
         )
         return self._mask_response_url(result, resolved)
 
+    @_reports_bsim_errors
     def list_bsim_executables(
         self,
         *,
@@ -747,6 +817,7 @@ class BsimService:
         )
         return self._mask_response_url(result, resolved)
 
+    @_reports_bsim_errors
     def get_bsim_executable(
         self,
         *,
@@ -783,6 +854,7 @@ class BsimService:
         )
         return self._mask_response_url(result, resolved)
 
+    @_reports_bsim_errors
     def bsim_update_executable_metadata(
         self,
         *,
@@ -798,18 +870,19 @@ class BsimService:
             name=name,
         )
 
+    @_reports_bsim_errors
     def bsim_query(
         self, target: str, *, scope: str, addresses=None, function_names=None, min_function_size=0, **kwargs
     ):
         if scope == "functions":
             if min_function_size:
-                raise ValueError("min_function_size is only available for program scope")
+                raise ValueError("BSIM_PARAMETER_INVALID: min_function_size is only available for program scope")
             return self.query_function(target, addresses=addresses, function_names=function_names, **kwargs)
         if scope == "program":
             if addresses is not None or function_names is not None:
-                raise ValueError("program scope does not accept function selectors")
+                raise ValueError("BSIM_PARAMETER_INVALID: program scope does not accept function selectors")
             return self.query_target(target, min_function_size=min_function_size, **kwargs)
-        raise ValueError("scope must be program or functions")
+        raise ValueError("BSIM_PARAMETER_INVALID: scope must be program or functions")
 
     def query_target(
         self,
@@ -1008,6 +1081,7 @@ class BsimService:
             min_function_size=min_function_size,
         )
 
+    @_reports_bsim_errors
     def bsim_apply_matches(self, target: str, **kwargs: Any) -> dict[str, Any]:
         return self.apply_matches(target, **kwargs)
 
@@ -1023,6 +1097,7 @@ class BsimService:
         )
         return self._mask_response_url(result, resolved)
 
+    @_reports_bsim_errors
     def bsim_update_target_signatures(self, target: str, *, bsim_url: str | None = None) -> dict[str, Any]:
         return self.update_target_signatures(target, bsim_url=bsim_url)
 
@@ -1058,6 +1133,7 @@ class BsimService:
         )
         return self._mask_response_url(result, resolved)
 
+    @_reports_bsim_errors
     def bsim_delete_executable(
         self,
         *,
@@ -1113,6 +1189,7 @@ class BsimService:
         )
         return self._mask_response_url(result, resolved)
 
+    @_reports_bsim_errors
     def bsim_register_target(
         self,
         target: str,
@@ -1249,6 +1326,7 @@ class BsimService:
             return f"md5:{executable_md5.lower()}"
         return f"target:{requested_target}::{domain_path}"
 
+    @_reports_bsim_errors
     def bsim_load_matched_executable(
         self,
         *,

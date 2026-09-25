@@ -182,7 +182,6 @@ class SyncReopenMixin:
                 handle_key = handle.get_key()
                 if self._store.project_handles.get(handle_key) is handle:
                     self._store.project_handles.pop(handle_key, None)
-            self._store.clear_analyzed_loads_for_target(name)
             self._store.clear_dirty_programs_for_target(name)
         try:
             self._store.core_accessor().remove_context(name)

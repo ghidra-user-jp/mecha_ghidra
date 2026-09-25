@@ -255,13 +255,11 @@ def _delivered_inline_size(
     tool_name: str,
     stop_after: int | None = None,
 ) -> int:
-    """Chars the MCP SDK would put in context if this result were returned inline.
+    """Chars a client would put in context if this result were returned inline.
 
-    The compaction decision must reflect what the client actually receives.
-    the MCP SDK re-serializes non-string results with pydantic_core.to_json(indent=2)
-    (per item for lists), which is ~1.6-1.8x larger than compact json.dumps. We
-    still *store* the compact form (cheaper to page), but we *decide* on the
-    indent=2 size so results are not silently delivered inline over the cap.
+    The compaction decision must reflect what the client actually receives: the
+    text blocks ``structured_result`` builds (``result_text`` for plain values).
+    Explicit non-text blocks count as their indented JSON payload.
     """
     if isinstance(result, str):
         return len(result)
@@ -290,17 +288,30 @@ def _delivered_inline_size(
     if isinstance(result, ContentBlock):
         return len(_json_text(_content_block_payload(result), indent=2))
     if isinstance(result, (list, tuple)):
-        # Nested CallToolResult values are not passed through by the MCP SDK: only a
-        # top-level CallToolResult is special. Its recursive list converter turns
-        # each nested value into a TextContent JSON string. Measure those actual
-        # converted blocks instead of applying top-level semantics recursively.
-        return _delivered_blocks_size(
-            _iter_inline_content_blocks(result),
-            stop_after=stop_after,
-        )
+        return _delivered_list_size(result, stop_after=stop_after)
     if result is None:
         return 0
-    return len(_json_text(result, indent=2))
+    return len(result_text(result))
+
+
+def _delivered_list_size(items, *, stop_after: int | None) -> int:
+    """The ``result_text`` length of a list, item by item so a huge list stops early.
+
+    Only a top-level CallToolResult is passed through as it is; an item that is
+    or holds an explicit block counts as the blocks it is delivered as.
+    """
+    total = 0
+    empty = True
+    for item in items:
+        empty = False
+        if _contains_explicit_content(item):
+            total += _delivered_blocks_size(_iter_inline_content_blocks(item), stop_after=None)
+        else:
+            # Its JSON, plus the array's brackets for the first item or ",\n" for a later one.
+            total += len(_json_text(item)) + 2
+        if stop_after is not None and total > stop_after:
+            break
+    return len(result_text(items)) if empty else total
 
 
 # Preview budgets by result type, as fractions of the configured
@@ -625,19 +636,32 @@ def _delivered_blocks_size(
     return total
 
 
+def result_text(value: Any) -> str:
+    """The text block of a result: a string as is, anything else as compact JSON.
+
+    A list puts one item on each line, so a model reading the text still sees
+    where each record starts; the text stays valid JSON.  Indented JSON would
+    cost about 1.6-1.8 times the characters of the same data.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "[" + ",\n".join(_json_text(item) for item in value) + "]"
+    return _json_text(value)
+
+
 def _iter_inline_content_blocks(result: Any):
-    """Mirror the MCP SDK's unstructured result conversion for wire comparison."""
+    """The content blocks a result is delivered as: its explicit blocks, else one text block."""
     if result is None:
         return
     if isinstance(result, ContentBlock):
         yield result
         return
-    if isinstance(result, (list, tuple)):
+    if isinstance(result, (list, tuple)) and _contains_explicit_content(result):
         for item in result:
             yield from _iter_inline_content_blocks(item)
         return
-    text = result if isinstance(result, str) else _json_text(result, indent=2)
-    yield TextContent(type="text", text=text)
+    yield TextContent(type="text", text=result_text(result))
 
 
 def _inline_content_blocks(result: Any) -> list[ContentBlock]:
@@ -731,9 +755,9 @@ def _maybe_compact_tool_result(
     if fallback is not None:
         fallback.value = inline_result
     threshold = config.large_result_threshold_chars
-    # Dictionaries are atomic generic JSON to the SDK. Compact JSON is a
-    # lower bound on their pretty-printed delivery, so large dictionaries do
-    # not need a second complete serialization merely to test the threshold.
+    # A dictionary is delivered as its compact JSON, which the stored form
+    # already is, so large dictionaries do not need a second complete
+    # serialization merely to test the threshold.
     serialized = (
         _serialize_stored_result(prepared_result, tool_name=tool_name)
         if isinstance(prepared_result, dict) and _dict_payload_exceeds_threshold(prepared_result, threshold)
@@ -749,11 +773,12 @@ def _maybe_compact_tool_result(
     )
 
     # Both the delivered payload measurement and the compact stored form are
-    # lower bounds for most inline results, but each has one exceptional shape:
-    # pretty-printed explicit content blocks can make ``inline_chars`` larger
-    # than their compact wire form, while nested list delimiters can make
-    # ``text`` larger than the MCP SDK's flattened content sequence. Their minimum
-    # is therefore a safe wire-size lower bound for every supported shape. Most
+    # lower bounds for most inline results, but each has exceptional shapes:
+    # indented explicit content blocks and the line breaks between list items
+    # can make ``inline_chars`` larger than the compact wire form, while list
+    # delimiters can make ``text`` larger than a flattened sequence of explicit
+    # blocks. Their minimum is therefore a safe wire-size lower bound for every
+    # supported shape. Most
     # genuinely large results exceed a compact candidate by this bound alone,
     # avoiding a second, potentially many-times-larger serialization of the
     # complete payload merely to compare lengths.

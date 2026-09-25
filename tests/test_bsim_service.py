@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -80,6 +83,17 @@ class FakeTargetService:
         return {"status": "ok", "project_location": project_location, "project_name": project_name}
 
     cache_projects: list[tuple[str, str | None, str]] = []
+
+
+@contextmanager
+def _raises_bsim_error(code: ErrorCode, match: str | None = None):
+    """A BSim tool's failure: a DomainError whose message starts with its code."""
+    with pytest.raises(DomainError) as raised:
+        yield raised
+    assert raised.value.code is code
+    assert raised.value.message.startswith(code.value), raised.value.message
+    if match is not None:
+        assert re.search(match, raised.value.message), raised.value.message
 
 
 class FakeJavaBackend:
@@ -375,7 +389,7 @@ def test_bsim_add_executable_category_uses_configured_url_and_masks_response():
 def test_bsim_add_executable_category_rejects_invalid_category_name():
     service, _core, _target = _service()
 
-    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_CATEGORY_INVALID"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_CATEGORY_INVALID):
         service.bsim_add_executable_category(category="bad$category")
 
 
@@ -418,14 +432,14 @@ def test_bsim_update_executable_metadata_normalizes_categories_and_masks_respons
 def test_bsim_update_executable_metadata_requires_lookup_key():
     service, _core, _target = _service()
 
-    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_REQUIRED"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_LOOKUP_REQUIRED):
         service.bsim_update_executable_metadata(categories={"FAMILY": "Emotet"})
 
 
 def test_bsim_update_executable_metadata_rejects_partial_md5():
     service, _core, _target = _service()
 
-    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_INVALID"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_LOOKUP_INVALID):
         service.bsim_update_executable_metadata(
             md5="01234567",
             categories={"FAMILY": "Emotet"},
@@ -435,7 +449,7 @@ def test_bsim_update_executable_metadata_rejects_partial_md5():
 def test_bsim_update_executable_metadata_requires_non_empty_categories():
     service, _core, _target = _service()
 
-    with pytest.raises(ValueError, match="categories must be a non-empty object"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_METADATA_INVALID, "categories must be a non-empty object"):
         service.bsim_update_executable_metadata(
             md5="0123456789abcdef0123456789abcdef",
             categories={},
@@ -447,11 +461,13 @@ def test_bsim_update_executable_metadata_classifies_not_found_errors():
     backend = service._java_backend  # type: ignore[attr-defined]
     backend.errors["update_executable_metadata"] = LookupError("BSIM_EXECUTABLE_NOT_FOUND")
 
-    with pytest.raises(LookupError, match="BSIM_EXECUTABLE_NOT_FOUND"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_NOT_FOUND) as raised:
         service.bsim_update_executable_metadata(
             md5="0123456789abcdef0123456789abcdef",
             categories={"FAMILY": "Emotet"},
         )
+    assert raised.value.hint == "list_bsim_executables shows the executables in the database"
+    assert raised.value.retryable is False
 
 
 def test_bsim_url_scheme_is_validated():
@@ -760,13 +776,14 @@ def test_bsim_query_function_classifies_function_lookup_errors():
         service.query_function("fw", function_name="missing_func")
 
 
-def test_bsim_query_function_classifies_runtime_wrapped_lookup_errors():
+@pytest.mark.parametrize("wrapped_code", [ErrorCode.OPERATION_FAILED, ErrorCode.NOT_FOUND])
+def test_bsim_query_function_classifies_runtime_wrapped_lookup_errors(wrapped_code):
     # Production wiring never delivers raw headless exceptions here:
-    # RuntimeBackend._invoke pre-wraps them as DomainError(OPERATION_FAILED,
-    # message=<original headless message>). Classification must still fire.
+    # RuntimeBackend._invoke pre-wraps them as a DomainError with the original
+    # headless message, NOT_FOUND for a LookupError. Classification must still fire.
     service, core, _target = _service()
     core.errors["bsim_query_function"] = DomainError(
-        code=ErrorCode.OPERATION_FAILED,
+        code=wrapped_code,
         message="Function not found: missing_func",
     )
 
@@ -995,7 +1012,7 @@ def test_bsim_register_target_rejects_unconfigured_category():
     service, core, _target = _service()
     service._java_backend = _CategoriesBackend(["FAMILY"])
 
-    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED: Famly"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED, "Famly"):
         service.bsim_register_target("fw", categories={"Famly": "Emotet"})
 
     assert core.calls == []
@@ -1061,7 +1078,7 @@ def test_bsim_apply_matches_validates_and_forwards_parameters():
     assert result["query"]["scope"] == "apply"
     assert result["query"]["max_results"] == 10
 
-    with pytest.raises(ValueError, match="max_functions must be <= 10000"):
+    with _raises_bsim_error(ErrorCode.BSIM_PARAMETER_INVALID, "max_functions must be <= 10000"):
         service.bsim_apply_matches("fw", max_functions=10_001)
 
 
@@ -1085,11 +1102,11 @@ def test_bsim_delete_executable_requires_matching_confirmation():
     service, _core, _target = _service(java_backend=backend)
     md5 = "0123456789abcdef0123456789abcdef"
 
-    with pytest.raises(ValueError, match="BSIM_DELETE_CONFIRMATION_MISMATCH"):
+    with _raises_bsim_error(ErrorCode.BSIM_DELETE_CONFIRMATION_MISMATCH):
         service.bsim_delete_executable(confirm="wrong", md5=md5)
-    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_REQUIRED"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_LOOKUP_REQUIRED):
         service.bsim_delete_executable(confirm="x")
-    with pytest.raises(ValueError, match="BSIM_EXECUTABLE_LOOKUP_INVALID"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_LOOKUP_INVALID):
         service.bsim_delete_executable(confirm="abc", md5="abc")
     assert backend.deleted == []
 
@@ -1108,7 +1125,7 @@ def test_bsim_delete_executable_classifies_not_found():
     backend.errors["delete_executable"] = LookupError("BSIM_EXECUTABLE_NOT_FOUND")
     service, _core, _target = _service(java_backend=backend)
 
-    with pytest.raises(LookupError, match="BSIM_EXECUTABLE_NOT_FOUND"):
+    with _raises_bsim_error(ErrorCode.BSIM_EXECUTABLE_NOT_FOUND):
         service.bsim_delete_executable(confirm="sample", name="sample")
 
 
@@ -1268,6 +1285,96 @@ def test_unified_bsim_query_routes_program_and_selected_functions():
 )
 def test_unified_bsim_query_rejects_conflicting_or_missing_selectors(kwargs):
     service, core, _target = _service()
-    with pytest.raises(ValueError):
+    with _raises_bsim_error(ErrorCode.BSIM_PARAMETER_INVALID):
         service.bsim_query("fw", **kwargs)
     assert core.calls == []
+
+
+def test_an_unreachable_bsim_database_is_retryable_and_the_error_keeps_no_credentials():
+    backend = FakeJavaBackend()
+    backend.errors["add_executable_category"] = RuntimeError(
+        "Connection refused: postgresql://user:secret@localhost/bsim"
+    )
+    service, _core, _target = _service(java_backend=backend)
+
+    with _raises_bsim_error(ErrorCode.BSIM_DATABASE_UNREACHABLE) as raised:
+        service.bsim_add_executable_category(category="FAMILY")
+    error = raised.value
+    assert error.retryable is True
+    assert error.hint == "Check that the BSim database is running and reachable, then retry"
+    assert "secret" not in error.message
+    # The raw backend error, which holds the credentials, does not ride along.
+    assert error.__context__ is None and error.__cause__ is None
+
+
+def test_a_bsim_tool_failure_without_a_code_gets_one_and_runtime_errors_keep_theirs():
+    service, core, _target = _service()
+    core.errors["bsim_update_target_signatures"] = RuntimeError("boom")
+    with _raises_bsim_error(ErrorCode.BSIM_UPDATE_FAILED, "boom"):
+        service.bsim_update_target_signatures("fw")
+
+    core.errors["bsim_update_target_signatures"] = DomainError(
+        code=ErrorCode.SESSION_NOT_FOUND, message="Session 'fw' does not exist"
+    )
+    with pytest.raises(DomainError) as raised:
+        service.bsim_update_target_signatures("fw")
+    assert raised.value.code is ErrorCode.SESSION_NOT_FOUND
+
+
+def test_every_bsim_code_in_the_source_is_an_error_code():
+    source = Path(__file__).resolve().parents[1] / "src"
+    names: set[str] = set()
+    constants: set[str] = set()
+    for path in source.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        names.update(re.findall(r"[\"'](BSIM_[A-Z0-9_]+)(?=[:\"'])", text))
+        if path.name != "errors.py":
+            # Module constants such as BSIM_MATCHED_REF_VERSION, which __all__ names.
+            constants.update(re.findall(r"^(BSIM_[A-Z0-9_]+)\s*[:=]", text, re.MULTILINE))
+    # A code with no ErrorCode member would reach the client as BSIM_OPERATION_FAILED.
+    assert "BSIM_URL_REQUIRED" in names
+    assert sorted(names - constants - set(ErrorCode.__members__)) == []
+
+
+def test_a_bsim_tool_failure_reaches_the_mcp_client_with_its_code():
+    import asyncio
+    from types import SimpleNamespace
+
+    from ghidra_mcp.contracts.tool_spec import get_tool_spec
+    from ghidra_mcp.presentation.mcp_server import create_mcp_server
+    from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
+
+    backend = FakeJavaBackend()
+    backend.errors["add_executable_category"] = RuntimeError("could not connect to server")
+    service, _core, _target = _service(java_backend=backend)
+    registry = SimpleNamespace(bsim_add_executable_category=service.bsim_add_executable_category)
+    runtime = create_mcp_server(
+        specs={"bsim_add_executable_category": get_tool_spec("bsim_add_executable_category")},
+        registry_provider=lambda: registry,
+        dispatcher_provider=lambda: dispatch_tool,
+    )
+
+    result = asyncio.run(runtime.mcp.call_tool("bsim_add_executable_category", {"category": "FAMILY"}))
+
+    assert result.is_error
+    assert result.structured_content["error"] == {
+        "message": "BSIM_DATABASE_UNREACHABLE: could not connect to server",
+        "code": "BSIM_DATABASE_UNREACHABLE",
+        "retryable": True,
+        "hint": "Check that the BSim database is running and reachable, then retry",
+    }
+
+
+def test_a_failed_bsim_write_keeps_what_the_runtime_said_it_left_behind():
+    service, core, _target = _service()
+    core.errors["bsim_apply_matches"] = DomainError(
+        code=ErrorCode.OPERATION_FAILED,
+        message="BSIM_APPLY_MATCHES_FAILED: rename conflict",
+        details={"operation": "bsim_apply_matches", "output_state": "created"},
+    )
+
+    with _raises_bsim_error(ErrorCode.BSIM_APPLY_MATCHES_FAILED, "rename conflict") as raised:
+        service.bsim_apply_matches("fw")
+
+    assert raised.value.details == {"output_state": "created"}
+    assert raised.value.retryable is False

@@ -51,7 +51,7 @@ Ghidra Serverにある `ghidra://` の一致を開くには、MCPサーバーへ
 | やりたいこと | ツール・動作 |
 | --- | --- |
 | メタデータのカテゴリを追加 | `bsim_add_executable_category` |
-| 読み込み中のプログラムを登録 | `bsim_register_target`。任意の `categories` はカテゴリごとに1値を持つオブジェクト |
+| 読み込み中のプログラムを登録 | `bsim_register_target`。任意の `categories` はカテゴリごとに1値を持つオブジェクト。署名は解析で見つかった関数だけを対象とし、読み込みでは解析しない。`get_program_info`が`is_analyzed: false`を返すなら、先に`analyze_program`を実行する。大きなプログラムでは数分かかる。40秒たつと`deferred: true`を返して登録を続けるので、`get_operation`で待つ（[長い呼び出し](usage.ja.md#long-calls)） |
 | 登録済みレコードを確認 | `list_bsim_executables`、`get_bsim_executable` |
 | 登録済みレコードのカテゴリを更新 | `bsim_update_executable_metadata`。md5または完全一致の名前で指定 |
 | 関数名変更後に名前とメタデータを更新 | `bsim_update_target_signatures`。特徴ベクトルは再生成しない |

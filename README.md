@@ -68,7 +68,7 @@ uv run mecha_ghidra \
   --transport stdio
 ```
 
-Configure your MCP client to launch that command using the [client examples](docs/clients.md). After connecting, call `list_project_programs`, load a program with `load_project_program`, then use `list_functions` and `decompile_function`.
+Configure your MCP client to launch that command using the [client examples](docs/clients.md). After connecting, call `list_project_programs`, load a program with `load_project_program`, then use `list_functions` and `decompile_function`. Loading never analyzes: if the load reports `is_analyzed: false`, run `analyze_program` first.
 
 **Starting from a binary file?** Follow [first analysis](docs/usage.md#first-analysis): create a project, import the binary, then load it. Starting the server alone does not create a project or import a file.
 

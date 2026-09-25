@@ -30,6 +30,7 @@ from ghidra.program.model.data import (
 
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.installation import validate_linux_arm64_decompiler_install
+from ghidra_headless.session.models import program_is_analyzed
 
 
 def _to_int(value, default):
@@ -501,31 +502,32 @@ def _ghidra_script_util():
     return GhidraScriptUtil
 
 
-def _analyze_program_if_needed(ctx):
-    utilities = _ghidra_program_utilities()
-    if not utilities.shouldAskToAnalyze(ctx.program):
-        return False
-    script_util = _ghidra_script_util()
-    script_util.acquireBundleHostReference()
-    try:
-        ctx.flat_api.analyzeAll(ctx.program)
-        utilities.markProgramAnalyzed(ctx.program)
-    finally:
-        script_util.releaseBundleHostReference()
-    return True
-
-
-def _analyze_program(ctx, force=False):
+def _analyze_program(ctx, force=False, monitor=None):
     _ensure_checkout_for_versioned_program(ctx)
     utilities = _ghidra_program_utilities()
-    if not force and not utilities.shouldAskToAnalyze(ctx.program):
+    # The same "Analyzed" flag that load responses and get_program_info report as
+    # is_analyzed. shouldAskToAnalyze would also skip a program whose user declined
+    # Ghidra's "analyze now?" prompt for good, leaving is_analyzed false for ever.
+    if not force and program_is_analyzed(ctx.program):
         return False
+    if monitor is None:
+        flat_api = ctx.flat_api
+    else:
+        # The context's FlatProgramAPI runs with TaskMonitor.DUMMY, which
+        # ignores cancel(); a background job passes a monitor it can cancel.
+        from ghidra.program.flatapi import FlatProgramAPI
+
+        flat_api = FlatProgramAPI(ctx.program, monitor)
     script_util = _ghidra_script_util()
     script_util.acquireBundleHostReference()
     try:
 
         def _analyze():
-            ctx.flat_api.analyzeAll(ctx.program)
+            flat_api.analyzeAll(ctx.program)
+            # A cancelled analysis can return normally; never mark it analyzed.
+            # Raising aborts the transaction, which rolls the analysis back.
+            if monitor is not None and bool(monitor.isCancelled()):
+                raise HeadlessError("ANALYSIS_CANCELLED: auto-analysis was cancelled before it finished")
             utilities.markProgramAnalyzed(ctx.program)
             return True
 
@@ -780,7 +782,6 @@ __all__ = [
     "_hexdump",
     "_ghidra_program_utilities",
     "_ghidra_script_util",
-    "_analyze_program_if_needed",
     "_analyze_program",
     "_decompile_function_object",
     "_decompile_high_function",

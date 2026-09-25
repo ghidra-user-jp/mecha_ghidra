@@ -20,6 +20,11 @@ _SURFACED_CLOSE_CODES = frozenset(
 )
 
 
+def format_project_key(key: tuple[str, str]) -> str:
+    """The ``location::name`` string that project locks and import admission use."""
+    return f"{key[0]}::{key[1]}"
+
+
 def _java_project_of(session: ProgramSession):
     """Best-effort ``ghidra.framework.model.Project`` for a session (None if unavailable)."""
     try:
@@ -56,7 +61,6 @@ class RuntimeSessionStore:
         self.project_locks = state.project_locks
         self.target_projects = state.target_projects
         self.project_handles = state.project_handles
-        self.analyzed_loads = state.analyzed_loads
         self.dirty_programs = state.dirty_programs
         self.pending_sync_programs = state.pending_sync_programs
         self.invalid_targets = state.invalid_targets
@@ -201,22 +205,23 @@ class RuntimeSessionStore:
         )
         return True
 
+    def missing_session_error(self, name: str) -> RuntimeError:
+        """Why ``name`` has no session: nothing is loaded for it, or no such target is registered."""
+        if name in self.target_projects:
+            return RuntimeError(f"PROGRAM_NOT_OPEN: target '{name}' has no program loaded")
+        return RuntimeError(f"TARGET_NOT_REGISTERED: target '{name}' is not registered")
+
     def ensure_session(self, name: str) -> ProgramSession:
         try:
             return self.sessions[name]
         except KeyError:
-            if name in self.target_projects:
-                raise RuntimeError(
-                    f"Session '{name}' is not initialized (program not loaded). "
-                    "Open a program with load_project_program"
-                )
-            raise RuntimeError(f"Session '{name}' is not initialized")
+            raise self.missing_session_error(name) from None
 
     def ensure_lock(self, name: str):
         try:
             return self.locks[name]
         except KeyError:
-            raise RuntimeError(f"Session '{name}' is not initialized")
+            raise self.missing_session_error(name) from None
 
     def ensure_project_lock(self, key: tuple[str, str]) -> threading.RLock:
         lock = self.project_locks.get(key)
@@ -278,7 +283,7 @@ class RuntimeSessionStore:
         try:
             return self.target_projects[name]
         except KeyError:
-            raise RuntimeError(f"Target '{name}' is not initialized")
+            raise self.missing_session_error(name) from None
 
     def cleanup_session(
         self,
@@ -362,23 +367,7 @@ class RuntimeSessionStore:
                     key = session.get_project_handle().get_key()
             if key is None:
                 return None
-            return f"{key[0]}::{key[1]}"
-
-    def is_analyzed_load(self, name: str, domain_path: str) -> bool:
-        return (name, domain_path) in self.analyzed_loads
-
-    def mark_analyzed_load(self, name: str, domain_path: str) -> None:
-        self.analyzed_loads.add((name, domain_path))
-
-    def clear_analyzed_loads_for_target(self, name: str) -> None:
-        if not self.analyzed_loads:
-            return
-        remove_keys = [key for key in self.analyzed_loads if key[0] == name]
-        for key in remove_keys:
-            self.analyzed_loads.discard(key)
-
-    def clear_analyzed_loads(self) -> None:
-        self.analyzed_loads.clear()
+            return format_project_key(key)
 
     def is_dirty_program(self, name: str, domain_path: str) -> bool:
         return (name, domain_path) in self.dirty_programs
@@ -410,6 +399,21 @@ class RuntimeSessionStore:
     def clear_dirty_programs(self) -> None:
         self.dirty_programs.clear()
         self.pending_sync_programs.clear()
+
+    @staticmethod
+    def session_generation(session: ProgramSession) -> int:
+        """Identifies the session object; every open, reload and reopen makes a new one.
+
+        The checkout guard's internal reopen of an unchanged program keeps it
+        (``carry_generation``).
+        """
+        serial = getattr(session, "serial", None)
+        return serial if isinstance(serial, int) else id(session)
+
+    @staticmethod
+    def carry_generation(previous: ProgramSession, reopened: ProgramSession) -> None:
+        """Give a session reopened for the same, unchanged program the generation it replaces."""
+        reopened.serial = RuntimeSessionStore.session_generation(previous)
 
     @staticmethod
     def session_domain_path(session: ProgramSession) -> str:

@@ -5,8 +5,34 @@ from __future__ import annotations
 from typing import Any
 
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_hints import recovery_hint
+from ghidra_mcp.domain.error_utils import sanitize_cause_message
 
 _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
+    ErrorCode.REQUEST_ID_CONFLICT: "REQUEST_ID_CONFLICT: request_id already identifies a job with different arguments",
+    ErrorCode.IMPORT_IN_PROGRESS: (
+        "IMPORT_IN_PROGRESS: another import job is writing this program; see details.operation_id"
+    ),
+    ErrorCode.ANALYSIS_IN_PROGRESS: (
+        "ANALYSIS_IN_PROGRESS: another analysis job for this program is queued or running; see details.operation_id"
+    ),
+    ErrorCode.IMPORT_OUTPUT_UNCERTAIN: (
+        "IMPORT_OUTPUT_UNCERTAIN: an earlier import of this program did not clean up; "
+        "inspect details.operation_id and the project"
+    ),
+    ErrorCode.OPERATION_QUEUE_FULL: "OPERATION_QUEUE_FULL: the job queue is full and nothing was accepted; retry later",
+    ErrorCode.OPERATION_NOT_FOUND: (
+        "OPERATION_NOT_FOUND: no job record in this server process; inspect the project before submitting the job again"
+    ),
+    ErrorCode.OPERATION_WORKER_UNAVAILABLE: "OPERATION_WORKER_UNAVAILABLE: the job worker is stopping or unavailable",
+    ErrorCode.OPERATION_WORKER_FAILED: "OPERATION_WORKER_FAILED: the job worker failed; inspect the project before retrying",
+    ErrorCode.OPERATION_SHUTDOWN: (
+        "OPERATION_SHUTDOWN: the server stopped before the job finished; the details say what was left behind"
+    ),
+    ErrorCode.OPERATION_CANCELLED: (
+        "OPERATION_CANCELLED: cancel_operation stopped the job; details.output_state says what was left behind"
+    ),
+    ErrorCode.TARGET_REBOUND: "TARGET_REBOUND: the target's project changed before the import started; nothing was written",
     ErrorCode.AMBIGUOUS_FUNCTION: "AMBIGUOUS_FUNCTION: use a function address or a unique qualified name",
     ErrorCode.AMBIGUOUS_DATA_TYPE: "AMBIGUOUS_DATA_TYPE: use the full data type path",
     ErrorCode.BSIM_MATCH_STALE: "BSIM_MATCH_STALE: the loaded program does not match the BSim reference",
@@ -41,9 +67,10 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.LOCK_TIMEOUT: "LOCK_TIMEOUT: failed to acquire lock",
     ErrorCode.TARGET_ALREADY_LOADED: "TARGET_ALREADY_LOADED: program is already loaded; use the existing target",
     ErrorCode.PROGRAM_ALREADY_IMPORTED: "PROGRAM_ALREADY_IMPORTED: program already exists in project; use load_project_program",
-    ErrorCode.SESSION_NOT_FOUND: "SESSION_NOT_FOUND: session not found",
+    ErrorCode.SESSION_NOT_FOUND: "SESSION_NOT_FOUND: the target has no loaded program",
     ErrorCode.TARGET_NOT_REGISTERED: "TARGET_NOT_REGISTERED: target is not registered",
     ErrorCode.PROGRAM_NOT_FOUND: "PROGRAM_NOT_FOUND: program not found",
+    ErrorCode.NOT_FOUND: "NOT_FOUND: the named item was not found",
     ErrorCode.VALIDATION_ERROR: "VALIDATION_ERROR: input validation failed",
     ErrorCode.REOPEN_FAILED: "REOPEN_FAILED: failed to reopen program",
     ErrorCode.SAVE_FAILED: "SAVE_FAILED: save operation failed",
@@ -61,7 +88,7 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.KEEP_FILE_NOT_FOUND: "KEEP_FILE_NOT_FOUND: the .keep copy of the discarded checkout was not found",
     ErrorCode.VERSION_NOT_FOUND: "VERSION_NOT_FOUND: requested version does not exist in the history",
     ErrorCode.VERSION_DIFF_TIMEOUT: "VERSION_DIFF_TIMEOUT: version diff exceeded its time limit",
-    ErrorCode.PROGRAM_NOT_OPEN: "PROGRAM_NOT_OPEN: the program is not open in this project handle",
+    ErrorCode.PROGRAM_NOT_OPEN: "PROGRAM_NOT_OPEN: the program is not open",
     ErrorCode.PROGRAM_OPEN_FAILED: "PROGRAM_OPEN_FAILED: the program could not be opened",
     ErrorCode.IMPORT_FAILED: "IMPORT_FAILED: the import did not complete cleanly; check partial_import details",
     ErrorCode.SESSION_CLOSE_FAILED: "SESSION_CLOSE_FAILED: the session could not be closed cleanly",
@@ -73,6 +100,13 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.SESSION_CHANGED: "SESSION_CHANGED: the target session changed during the operation; retry",
     ErrorCode.HEADLESS_UNSUPPORTED: "HEADLESS_UNSUPPORTED: this Ghidra operation needs a display and is not available in the headless server",
     ErrorCode.JVM_NOT_HEADLESS: "JVM_NOT_HEADLESS: the JVM was started without java.awt.headless=true",
+    ErrorCode.PROGRAM_NOT_ANALYZED: (
+        "PROGRAM_NOT_ANALYZED: the program has not been analyzed, so the decompiler's variables are unavailable"
+    ),
+    ErrorCode.RAW_LOADER_OPTION_UNAVAILABLE: (
+        "RAW_LOADER_OPTION_UNAVAILABLE: Ghidra's raw binary loader has no option this import needs "
+        "for the chosen language or compiler"
+    ),
     ErrorCode.READ_ONLY_PROGRAM: (
         "READ_ONLY_PROGRAM: the target holds a past version opened read-only; "
         "load the current version with load_project_program before mutating"
@@ -107,7 +141,36 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.RUNTIME_DEGRADED: (
         "RUNTIME_DEGRADED: the runtime is degraded after a script run left work running; restart the server process"
     ),
+    ErrorCode.STARTUP_FAILED: (
+        "STARTUP_FAILED: Ghidra did not start, so no tool can run; fix the server configuration and restart it"
+    ),
 }
+
+
+# BsimService writes these messages itself, from its own checks and from backend
+# text with credentials masked, and each starts with its code: they are public
+# as they are.  BSIM_MATCH_STALE, which the core raises, keeps its text above.
+_MESSAGE_IS_PUBLIC: frozenset[ErrorCode] = frozenset(
+    code for code in ErrorCode if code.value.startswith("BSIM_") and code not in _PUBLIC_MESSAGES
+)
+
+# Our own code writes these messages to say which argument was wrong or what is
+# missing ("Invalid address: 0xZZZ", "Function not found: main"), from what
+# the caller sent: they follow the code instead of the fixed text above.  Java
+# exceptions never get these codes (see error_mapping._code_by_type).
+_DETAIL_IS_PUBLIC: frozenset[ErrorCode] = frozenset(
+    {
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.NOT_FOUND,
+        ErrorCode.PROGRAM_NOT_OPEN,
+        ErrorCode.TARGET_NOT_REGISTERED,
+    }
+)
+# A validation message can quote a file path the caller sent (binary_path);
+# like a cause message it shows <path> for it.  The others name program items
+# and domain paths, which are not host paths and would be lost to that rule.
+_DETAIL_MAY_QUOTE_HOST_PATHS: frozenset[ErrorCode] = frozenset({ErrorCode.VALIDATION_ERROR})
+_MAX_PUBLIC_DETAIL_CHARS = 500
 
 
 def map_exception(
@@ -115,15 +178,21 @@ def map_exception(
 ) -> Exception:
     if isinstance(exc, DomainError):
         payload = {"code": exc.code.value, "retryable": exc.retryable}
-        if exc.hint is not None:
-            payload["hint"] = exc.hint
+        hint = exc.hint if exc.hint is not None else recovery_hint(exc.code, exc.message)
+        if hint is not None:
+            payload["hint"] = hint
         if exc.details:
             payload["details"] = exc.details
         if details:
             payload.update(details)
-        public_message = (
-            fallback_message if fallback_message is not None else _PUBLIC_MESSAGES.get(exc.code, exc.code.value)
-        )
+        if fallback_message is not None:
+            public_message = fallback_message
+        elif exc.code in _MESSAGE_IS_PUBLIC:
+            public_message = exc.message
+        elif exc.code in _DETAIL_IS_PUBLIC and _public_detail(exc):
+            public_message = f"{exc.code.value}: {_public_detail(exc)}"
+        else:
+            public_message = _PUBLIC_MESSAGES.get(exc.code, exc.code.value)
         public_message = _with_safe_cause(public_message, exc)
         mapped = RuntimeError(public_message)
         mapped.domain_error = payload
@@ -132,12 +201,23 @@ def map_exception(
     return exc
 
 
+def _public_detail(exc: DomainError) -> str:
+    """The message of a ``_DETAIL_IS_PUBLIC`` error without its code prefix, capped in length."""
+    detail = exc.message.strip().removeprefix(f"{exc.code.value}:").strip()
+    if exc.code in _DETAIL_MAY_QUOTE_HOST_PATHS:
+        return sanitize_cause_message(detail)
+    if len(detail) <= _MAX_PUBLIC_DETAIL_CHARS:
+        return detail
+    return detail[: _MAX_PUBLIC_DETAIL_CHARS - 3] + "..."
+
+
 def _with_safe_cause(message: str, exc: DomainError) -> str:
     if exc.code not in {
         ErrorCode.OPERATION_FAILED,
         ErrorCode.SYNC_OPERATION_FAILED,
         ErrorCode.PROJECT_LOCKED,
         ErrorCode.HEADLESS_UNSUPPORTED,
+        ErrorCode.STARTUP_FAILED,
     }:
         return message
     details = exc.details or {}
@@ -152,6 +232,12 @@ def _with_safe_cause(message: str, exc: DomainError) -> str:
     if cause_message.startswith(f"{cause_type}:"):
         return f"{message} ({cause_message})"
     return f"{message} ({cause_type}: {cause_message})"
+
+
+def operation_error_payload(error: DomainError) -> dict[str, Any]:
+    """Use the same public error wording for a stored operation as for a tool failure."""
+    mapped = map_exception(error)
+    return {"message": str(mapped), **mapped.domain_error}
 
 
 __all__ = ["map_exception"]

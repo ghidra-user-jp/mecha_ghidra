@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 
 import pytest
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
+from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.core_execution import RuntimeCoreExecution
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 
@@ -15,12 +17,20 @@ class _Core:
         self.initialized: list[tuple[object, str]] = []
         self.removed: list[str] = []
         self.on_execute = None
+        self.failure: Exception | None = None
+        # What the real core reports after a command (ghidra_headless.handlers.core).
+        self.outcome: str | None = None
 
     def execute(self, command: str, params: dict, *, key: str):
         self.calls.append((command, params, key))
         if self.on_execute is not None:
             self.on_execute(key)
+        if self.failure is not None:
+            raise self.failure
         return {"status": "ok"}
+
+    def transaction_outcome(self) -> str | None:
+        return self.outcome
 
     def initialize(self, program, key: str):  # noqa: ANN001
         self.initialized.append((program, key))
@@ -211,11 +221,19 @@ def _build_core_execution(
     )
 
 
+@contextmanager
+def _refused_before_running(match: str):
+    """A write the runtime's checks refused: nothing ran, and the error says so."""
+    with pytest.raises(DomainError, match=match) as raised:
+        yield raised
+    assert raised.value.details["output_state"] == "absent"
+
+
 def test_mutating_checkout_guard_refreshes_external_version_control_state():
     handle = _Handle()
     execution, _store, core = _build_core_execution(handle)
 
-    with pytest.raises(RuntimeError, match="CHECKOUT_REQUIRED"):
+    with _refused_before_running("CHECKOUT_REQUIRED"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1
@@ -260,7 +278,7 @@ def test_mutating_checkout_guard_aborts_when_refresh_fails():
     handle = _FailingRefreshHandle()
     execution, _store, core = _build_core_execution(handle)
 
-    with pytest.raises(RuntimeError, match="SYNC_OPERATION_FAILED"):
+    with _refused_before_running("SYNC_OPERATION_FAILED"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1
@@ -271,7 +289,7 @@ def test_mutating_checkout_guard_rejects_hijacked_program():
     handle = _HijackedHandle()
     execution, _store, core = _build_core_execution(handle)
 
-    with pytest.raises(RuntimeError, match="HIJACKED_PROGRAM"):
+    with _refused_before_running("HIJACKED_PROGRAM"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1
@@ -292,7 +310,7 @@ def test_core_call_rechecks_session_after_target_lock_acquisition(monkeypatch: p
 
     monkeypatch.setattr(store, "ensure_lock", ensure_lock)
 
-    with pytest.raises(RuntimeError, match="Session 'fw' is not initialized"):
+    with _refused_before_running("PROGRAM_NOT_OPEN: target 'fw' has no program loaded"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 0
@@ -303,7 +321,7 @@ def test_mutating_checkout_guard_reopens_stale_unversioned_active_program():
     handle = _ReopenVersionedHandle()
     execution, _store, core = _build_core_execution(handle)
 
-    with pytest.raises(RuntimeError, match="CHECKOUT_REQUIRED"):
+    with _refused_before_running("CHECKOUT_REQUIRED"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1
@@ -321,9 +339,8 @@ def test_mutating_checkout_guard_preserves_reopened_session_when_rollback_close_
 
     core.initialize = fail_initialize
 
-    with pytest.raises(
-        RuntimeError,
-        match="PROGRAM_CLOSE_FAILED: failed to close reopened session during checkout guard rollback",
+    with _refused_before_running(
+        "PROGRAM_CLOSE_FAILED: failed to close reopened session during checkout guard rollback"
     ):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
@@ -338,7 +355,7 @@ def test_mutating_checkout_guard_rejects_dirty_stale_unversioned_active_program(
     handle = _ReopenVersionedHandle()
     execution, _store, core = _build_core_execution(handle, changed=True)
 
-    with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
+    with _refused_before_running("LOCAL_CHANGES_EXIST"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1
@@ -350,7 +367,7 @@ def test_mutating_checkout_guard_fails_closed_when_dirty_state_unavailable():
     handle = _ReopenVersionedHandle()
     execution, _store, core = _build_core_execution(handle, fail_changed=True)
 
-    with pytest.raises(RuntimeError, match="LOCAL_CHANGES_EXIST"):
+    with _refused_before_running("LOCAL_CHANGES_EXIST"):
         execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
 
     assert handle.refresh_calls == 1
@@ -361,10 +378,15 @@ def test_mutating_checkout_guard_fails_closed_when_dirty_state_unavailable():
 def test_mutating_checkout_guard_allows_repeated_mcp_mutations_on_unversioned_program():
     handle = _UnversionedAddableHandle()
     execution, store, core = _build_core_execution(handle)
+    before = store.sessions["fw"]
+    generation = store.session_generation(before)
 
     result = execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
     assert result == {"status": "ok"}
     assert store.is_dirty_program("fw", "/main")
+    # The guard reopened the unchanged program; a job accepted before still matches it.
+    assert store.sessions["fw"] is not before
+    assert store.session_generation(store.sessions["fw"]) == generation
 
     result = execution.call("rename_function", {"oldName": "new", "newName": "newer"}, target="fw")
 
@@ -375,3 +397,31 @@ def test_mutating_checkout_guard_allows_repeated_mcp_mutations_on_unversioned_pr
         ("rename_function", {"oldName": "old", "newName": "new"}, "fw"),
         ("rename_function", {"oldName": "new", "newName": "newer"}, "fw"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "output_state"),
+    [("rolled_back", "absent"), ("unchanged", "absent"), ("committed", "created"), (None, "uncertain")],
+)
+def test_a_failed_write_says_what_it_left_behind(outcome, output_state):
+    execution, _store, core = _build_core_execution(_CheckedOutAfterRefreshHandle())
+    core.failure = DomainError(code=ErrorCode.LOCK_TIMEOUT, message="lock wait expired", retryable=True)
+    core.outcome = outcome
+
+    with pytest.raises(DomainError) as raised:
+        execution.call("rename_function", {"oldName": "old", "newName": "new"}, target="fw")
+
+    assert raised.value.code is ErrorCode.LOCK_TIMEOUT
+    assert raised.value.details["output_state"] == output_state
+    # A transient cause is only worth retrying when nothing was written.
+    assert raised.value.retryable is (output_state == "absent")
+
+
+def test_a_failed_read_is_not_described_as_a_write():
+    execution, _store, core = _build_core_execution(_CheckedOutAfterRefreshHandle())
+    core.failure = RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom") as raised:
+        execution.call("list_functions", target="fw")
+
+    assert not isinstance(raised.value, DomainError)

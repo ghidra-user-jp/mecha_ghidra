@@ -9,6 +9,9 @@ from typing import Any, Callable, get_type_hints
 from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, create_model
 
+from ghidra_mcp.domain import ErrorCode
+from ghidra_mcp.domain.error_hints import recovery_hint
+
 from .response_schemas import wire_output_schema
 from .result_compaction import _is_normalized_empty_list_result, _json_text, structured_result
 
@@ -37,7 +40,7 @@ def bind_function(
         name=function.__name__,
         description=description,
         input_schema=arguments.model_json_schema(),
-        output_schema=wire_output_schema(output_schema),
+        output_schema=wire_output_schema(output_schema, detailed=False),
         annotations=annotations,
     )
     return ToolBinding(definition, function, arguments, compact_json=True)
@@ -52,8 +55,14 @@ def complete_tool_result(value: Any, *, compact_json: bool = False) -> CallToolR
     return structured_result(value, content=content)
 
 
-def error_result(message: str) -> CallToolResult:
-    error = {"error": {"message": message}}
+def error_result(message: str, *, code: ErrorCode | None = None) -> CallToolResult:
+    detail: dict[str, Any] = {"message": message}
+    if code is not None:
+        detail.update(code=code.value, retryable=False)
+        hint = recovery_hint(code, message)
+        if hint is not None:
+            detail["hint"] = hint
+    error = {"error": detail}
     return CallToolResult(
         is_error=True,
         content=[TextContent(type="text", text=_json_text(error))],

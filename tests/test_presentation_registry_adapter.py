@@ -80,8 +80,8 @@ class RecordingService:
                     "created": True,
                     "overwritten": bool(kwargs.get("overwrite", False)),
                 }
-            if name in {"load_program", "import_program"}:
-                return "/program"
+            if name == "load_program":
+                return {"program": "/program", "is_analyzed": False}
             if name == "save_project_program":
                 target = args[0]
                 return {
@@ -98,6 +98,7 @@ class RecordingService:
                     "project_location": project_location,
                     "project_name": kwargs.get("project_name"),
                     "domain_path": kwargs.get("domain_path"),
+                    "is_analyzed": False,
                 }
             if name == "close_session":
                 target = args[0]
@@ -334,8 +335,11 @@ def _required_raw_args(spec_name: str) -> dict[str, Any]:
     return raw
 
 
-@pytest.mark.parametrize("tool_name", sorted(get_all_tool_specs().keys()))
-def test_service_registry_adapter_routes_all_tools(tool_name: str):
+# Background-job tools exercise the real manager/runtime in test_mcp_import_operations.py.
+@pytest.mark.parametrize(
+    "tool_name", sorted(name for name, spec in get_all_tool_specs().items() if spec.presenter != "operation")
+)
+def test_service_registry_adapter_routes_synchronous_tools(tool_name: str):
     spec = get_tool_spec(tool_name)
     target_name = "fw"
     raw_args = _required_raw_args(tool_name)

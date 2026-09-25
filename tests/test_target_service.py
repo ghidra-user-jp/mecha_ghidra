@@ -117,6 +117,7 @@ def test_target_service_lifecycle_and_lock_routing():
         "project_location": "/tmp/prj",
         "project_name": "sample",
         "domain_path": "/main",
+        "is_analyzed": False,
     }
     assert service.list_targets() == [{"target": "fw"}]
     assert service.list_programs("fw") == []
@@ -317,3 +318,20 @@ def test_target_service_preserves_program_already_imported_error_details():
         "operation": "import_program",
         "target": "fw",
     }
+
+
+@pytest.mark.parametrize("analyzed", [False, True])
+def test_open_program_reports_whether_the_opened_program_is_analyzed(analyzed):
+    class Session:
+        def to_dict(self):
+            return {"project_location": "/tmp/prj", "project_name": "sample", "domain_path": "/main"}
+
+        def is_analyzed(self):
+            return analyzed
+
+    class Runtime(DummyRuntime):
+        def create_session(self, name, project_location, **kwargs):
+            return Session()
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+    assert service.create_session("fw", "/tmp/prj", domain_path="/main")["is_analyzed"] is analyzed

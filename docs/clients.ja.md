@@ -93,8 +93,8 @@ Roo Codeなど、`mcpServers` 形式のstdio設定を使うクライアントで
 
 1. クライアントにMecha Ghidraのツール一覧が表示されることを確認します。
 2. `list_targets` を呼びます。ターゲットの登録だけでは、プログラムは読み込まれていない場合があります。
-3. [最初の解析](usage.ja.md#first-analysis)に進みます。既存プロジェクトなら `list_project_programs` と `load_project_program` を使います。
+3. [最初の解析](usage.ja.md#first-analysis)に進みます。既存プロジェクトなら `list_project_programs` と `load_project_program` を使います。読み込みでは解析しないため、応答が`is_analyzed: false`なら`analyze_program`を実行します。
 
-GUIクライアントから `uv` が見つからない場合は、実行ファイルを絶対パスで指定してください。GUIアプリはシェルの環境変数を引き継がない場合があるため、stdioでは上記のように `GHIDRA_INSTALL_DIR` を明示します。インポートや解析に十分なクライアント側タイムアウトを設定してください。`--lock-timeout-seconds` は待ち行列での待機時間だけを制御し、クライアント側のタイムアウトは延長しません。
+GUIクライアントから `uv` が見つからない場合は、実行ファイルを絶対パスで指定してください。GUIアプリはシェルの環境変数を引き継がない場合があるため、stdioでは上記のように `GHIDRA_INSTALL_DIR` を明示します。どの呼び出しも、クライアントを待たせるのは最大で約50秒です。`import_program`・`analyze_program`・`run_script`は`wait_seconds`以内に応答してバックグラウンドのジョブとして動き、それ以外の呼び出しは40秒で終わらなければ`deferred: true`を返してサーバー上で処理を続けます（[長い呼び出し](usage.ja.md#long-calls)）。そのため、クライアント側の既定の60秒のタイムアウトで足ります。`--lock-timeout-seconds` は待ち行列での待機時間だけを制御し、クライアント側のタイムアウトは延長しません。
 
 共有リポジトリの認証情報はHTTPクライアント設定ではなく、サーバーの[Ghidra Server設定](shared-projects.ja.md)で指定します。

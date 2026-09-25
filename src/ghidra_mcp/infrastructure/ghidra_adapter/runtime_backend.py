@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import Any, Dict, List, Optional
 
 from ghidra_headless.session import ProgramSession
+from ghidra_mcp.application.services.ports import LoadedProgram, OperationControl
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 
 from .runtime import (
@@ -116,7 +117,15 @@ class RuntimeBackend:
     ) -> Dict[str, Any]: ...
 
     @_delegate("_target_lifecycle")
-    def import_program(self, name: str, binary_path: str, **kwargs) -> str: ...
+    def import_program(
+        self, name: str, binary_path: str, *, control: OperationControl | None = None, **kwargs
+    ) -> str: ...
+
+    @_delegate("_target_lifecycle")
+    def loaded_program(self, name: str) -> LoadedProgram: ...
+
+    @_delegate("_core_execution")
+    def analyze_program(self, name: str, *, force: bool = False, control: OperationControl) -> Dict[str, Any]: ...
 
     @_delegate("_target_lifecycle")
     def save_project_program(self, name: str, *, domain_path: str | None = None) -> Dict[str, Any]: ...
@@ -133,7 +142,9 @@ class RuntimeBackend:
             raise to_domain_error(exc, operation="script_runtime_availability") from exc
 
     @_delegate("_script_execution")
-    def run_script(self, name: str, *, request: Dict[str, Any]) -> Dict[str, Any]: ...
+    def run_script(
+        self, name: str, *, request: Dict[str, Any], control: OperationControl | None = None
+    ) -> Dict[str, Any]: ...
 
     @_delegate("_target_lifecycle")
     def close_all(self) -> None: ...

@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from cli_support import analyze_and_wait, import_and_wait, run_script_and_wait
 from test_runtime_import_lifecycle import bundle as _bundle
 
 bundle = _bundle
@@ -19,7 +20,8 @@ def loaded(bundle, tmp_path):
     api["register_target"](target=TARGET, project_location=str(tmp_path), project_name="state")
     binary = tmp_path / "tiny.bin"
     binary.write_bytes(bytes.fromhex("b8 2a 00 00 00 c3"))
-    api["import_program"](
+    import_and_wait(
+        api,
         target=TARGET,
         binary_path=str(binary),
         import_mode="raw_binary",
@@ -33,7 +35,12 @@ def loaded(bundle, tmp_path):
     try:
         yield bundle
     finally:
-        bundle.script_service.shutdown()
+        from ghidra_headless.scripts import providers
+
+        try:
+            bundle.script_service.shutdown()
+        finally:
+            providers.shutdown()
 
 
 def _comment_edit(text="temporary"):
@@ -94,7 +101,7 @@ def test_unchanged_operation_preserves_actual_dirty_state(loaded, monkeypatch, p
     if operation == "existing_function":
         assert not api["create_function"](target=TARGET, address="0x1000")["created"]
     elif operation == "analyzed":
-        assert not api["analyze_program"](target=TARGET)["analyzed"]
+        assert not analyze_and_wait(api, target=TARGET)["analyzed"]
     elif operation == "preview":
         assert api["apply_edits"](target=TARGET, edits=[_comment_edit()], dry_run=True)["status"] == "dry_run"
     elif operation == "rollback":
@@ -102,7 +109,7 @@ def test_unchanged_operation_preserves_actual_dirty_state(loaded, monkeypatch, p
         assert result["status"] == "rolled_back"
     else:
         _prepare_scripts(loaded)
-        result = api["run_script"](target=TARGET, source='print("no edits")', runtime="PyGhidra")
+        result = run_script_and_wait(api, target=TARGET, source='print("no edits")', runtime="PyGhidra")
         assert result["transaction_outcome"] == "unchanged"
     _assert_dirty(loaded, prior_changes, monkeypatch)
     comments = api["get_comments"](target=TARGET, address="0x1000")
@@ -153,7 +160,8 @@ def test_failed_script_retains_prior_dirty_state(loaded, monkeypatch, prior_chan
     if prior_changes:
         _add_prior_edit(api)
     with pytest.raises(Exception, match="SCRIPT_FAILED"):
-        api["run_script"](
+        run_script_and_wait(
+            api,
             target=TARGET,
             source='setPlateComment(currentProgram.getMinAddress(), "discard")\nraise RuntimeError("expected failure")',
             runtime="PyGhidra",
@@ -162,3 +170,57 @@ def test_failed_script_retains_prior_dirty_state(loaded, monkeypatch, prior_chan
     comments = api["get_comments"](target=TARGET, address="0x1000")
     assert comments["plate"] is None
     assert comments["eol"] == ("unsaved" if prior_changes else None)
+
+
+def test_a_write_that_fails_inside_its_transaction_says_nothing_changed(loaded, monkeypatch):
+    api = loaded.runtime.tools
+    # Ghidra rejects the name inside the command's transaction, which it then aborts.
+    with pytest.raises(Exception) as failed:
+        api["create_label"](target=TARGET, address="0x1000", name="not a valid name")
+    details = failed.value.domain_error["details"]
+    assert details["output_state"] == "absent", failed.value.domain_error
+    _assert_dirty(loaded, False, monkeypatch)
+
+
+@pytest.mark.parametrize("command", ["undo_program_change", "redo_program_change"])
+def test_partial_history_failure_reports_the_changes_already_applied(loaded, monkeypatch, command):
+    from ghidra_headless.handlers import core, core_runtime
+
+    api = loaded.runtime.tools
+    for kind, text in [("pre", "first"), ("eol", "second")]:
+        api["apply_edits"](
+            target=TARGET,
+            edits=[{"kind": "set_comment", "address": "0x1000", "comment_type": kind, "comment": text}],
+        )
+    if command == "redo_program_change":
+        api["undo_program_change"](target=TARGET, count=2)
+    before = api["get_comments"](target=TARGET, address="0x1000")
+    context = core_runtime._CONTEXTS[TARGET]
+    program = context.program
+    method = "undo" if command == "undo_program_change" else "redo"
+
+    class FailSecondStep:
+        count = 0
+
+        def __getattr__(self, name):
+            return getattr(program, name)
+
+        def step(self):
+            self.count += 1
+            if self.count == 2:
+                raise OSError("simulated I/O failure on the second history step")
+            return getattr(program, method)()
+
+    proxy = FailSecondStep()
+    setattr(proxy, method, proxy.step)
+    with monkeypatch.context() as patch:
+        patch.setattr(context, "program", proxy)
+        with pytest.raises(Exception) as failed:
+            api[command](target=TARGET, count=2)
+        outcome = core.transaction_outcome()
+    after = api["get_comments"](target=TARGET, address="0x1000")
+    assert before != after, "the first history step changed the real program"
+    assert outcome == "committed"
+    error = failed.value.domain_error
+    assert error["details"]["output_state"] == "created"
+    assert error["retryable"] is False

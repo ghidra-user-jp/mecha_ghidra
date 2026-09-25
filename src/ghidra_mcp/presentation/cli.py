@@ -20,6 +20,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import atexit
+import contextlib
+import faulthandler
 import functools
 import logging
 import os
@@ -29,11 +33,11 @@ import threading
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, NoReturn
 
 import jpype
 
-from ghidra_headless.launcher import start_headless_jvm
+from ghidra_headless.launcher import detach_current_thread, prepare_headless_launcher, start_headless_jvm
 from ghidra_mcp.application.services.bsim_service import BsimConfig
 from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.application.services.script_catalog import parse_root_argument
@@ -59,8 +63,14 @@ from ghidra_mcp.domain import (
     configure_script_queue_timeout_seconds,
 )
 from ghidra_mcp.ghidra_installation import validate_linux_arm64_decompiler_install
-from ghidra_mcp.presentation.cli_runtime import CLIRuntimeBundle, ServiceRegistryAdapter, create_cli_runtime
+from ghidra_mcp.presentation.cli_runtime import (
+    SHUTDOWN_SIGNALS,
+    CLIRuntimeBundle,
+    ServiceRegistryAdapter,
+    create_cli_runtime,
+)
 from ghidra_mcp.presentation.config import ToolPresentationConfig
+from ghidra_mcp.presentation.startup import FAILED, BackgroundStartup, StartupGate, StartupStep
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 from ghidra_mcp.presentation.tool_registry import build_tool_functions
 from ghidra_mcp.presentation.transport import (
@@ -158,6 +168,7 @@ def build_application(
     presentation_config: ToolPresentationConfig | None = None,
     path_policy: PathPolicy | None = None,
     script_config: ScriptConfig | None = None,
+    startup_gate: StartupGate | None = None,
 ) -> CLIApplication:
     effective_specs = _DEFAULT_TOOL_SPECS if selected_specs is None else selected_specs
     bound: dict[str, Any] = {}
@@ -179,6 +190,8 @@ def build_application(
         runtime_kwargs["path_policy"] = path_policy
     if script_config is not None:
         runtime_kwargs["script_config"] = script_config
+    if startup_gate is not None:
+        runtime_kwargs["startup_gate"] = startup_gate
     bundle = create_cli_runtime(**runtime_kwargs)
     bound["registry"] = bundle.registry
     return CLIApplication(bundle=bundle, tools=bind_tools(registry_provider, presentation_config=presentation_config))
@@ -440,9 +453,11 @@ def parse_args(argv: list[str]):
     if args.script_queue_timeout_seconds <= 0:
         parser.error("--script-queue-timeout-seconds must be > 0")
     try:
-        # Surface presentation-config range/cross-field errors as a standard
-        # argparse usage error (exit 2) instead of an unhandled traceback.
+        # Surface presentation-config range/cross-field errors and conflicting
+        # tool filters as a standard argparse usage error (exit 2) instead of
+        # an unhandled traceback.
         presentation_config_from_args(args)
+        resolve_tool_specs_from_args(args)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -538,14 +553,18 @@ def redirect_java_stdout_to_stderr() -> None:
     java_system.setOut(java_system.err)
 
 
-def configure_ghidra_server_auth(args) -> None:
+def _ghidra_server_credentials(args) -> tuple[str, str, str] | None:
+    """``(user, password, log label)`` from the Ghidra Server flags, or ``None`` without them.
+
+    Needs no JVM, so a bad combination is reported before serving.
+    """
     username = (getattr(args, "ghidra_server_user", None) or "").strip()
     password_arg = getattr(args, "ghidra_server_password", None)
     password_env_name = (getattr(args, "ghidra_server_password_env", None) or "").strip()
     has_password_arg = password_arg is not None
     has_password_env = bool(password_env_name)
     if not username and not has_password_arg and not has_password_env:
-        return
+        return None
     if not username or not (has_password_arg or has_password_env):
         raise ValueError(
             "--ghidra-server-user and one of --ghidra-server-password/--ghidra-server-password-env must be set together"
@@ -565,7 +584,14 @@ def configure_ghidra_server_auth(args) -> None:
         if password == "":
             raise ValueError(f"Environment variable '{password_env_name}' is empty")
         password_log_hint = f"password_env={password_env_name}"
+    return username, password, password_log_hint
 
+
+def configure_ghidra_server_auth(args) -> None:
+    credentials = _ghidra_server_credentials(args)
+    if credentials is None:
+        return
+    username, password, password_log_hint = credentials
     authenticator = _password_client_authenticator_class()(username, password)
     _client_util_class().setClientAuthenticator(authenticator)
     logger.info(
@@ -585,26 +611,143 @@ def _ensure_supported_ghidra_installation(ghidra_path: str | None) -> None:
     validate_linux_arm64_decompiler_install(ghidra_path)
 
 
-def _start_pyghidra_headless(ghidra_path: str | None) -> None:
+def _rearm_python_signals() -> None:
+    """Take the shutdown signals back from a JVM that installed its own handlers.
+
+    The JVM this CLI starts runs with ``-Xrs`` and leaves them alone (see
+    ``ghidra_headless.launcher``).  One started without it replaces the Python
+    handlers with its own, which end the process without the Python cleanup:
+    a running job is not cancelled and projects are not closed.  Installing the
+    current Python handlers again (``main()``'s, or uvicorn's while it serves
+    HTTP) takes the signals back.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for signum in SHUTDOWN_SIGNALS:
+        handler = signal.getsignal(signum)
+        if callable(handler):
+            signal.signal(signum, handler)
+
+
+def _prepare_event_loop_thread() -> None:
+    """Runs on the event loop's thread once the startup thread has started the JVM.
+
+    Besides taking the shutdown signals back, it attaches this thread to the
+    JVM under its own name before any script can run: cancel_operation calls
+    Java here, and a thread attached while a script runs would count as one the
+    script started.
+    """
+    from ghidra_headless.scripts.execution import attach_server_thread
+
+    _rearm_python_signals()
+    attach_server_thread()
+
+
+def _prepare_pyghidra_headless(ghidra_path: str | None):
+    """Check the installation before serving (see ghidra_headless.launcher.prepare_headless_launcher)."""
+
+    return prepare_headless_launcher(ghidra_path)
+
+
+def _start_pyghidra_headless(ghidra_path: str | None, launcher=None) -> None:
     """Start the JVM through the shared headless launcher (see ghidra_headless.launcher)."""
 
-    start_headless_jvm(ghidra_path)
+    start_headless_jvm(ghidra_path, launcher=launcher)
+
+
+class _Terminated(SystemExit):
+    """Raised by the shutdown signal handler with the exit code 128 + the signal number."""
+
+
+def _exit_without_joining_threads(code: int) -> NoReturn:
+    """End the process after a shutdown signal once cleanup has finished.
+
+    The stdio transport reads stdin in a worker thread that cannot be
+    interrupted. When the signal comes while the client still holds stdin open,
+    that thread never returns, and interpreter shutdown would wait for it until
+    the process is killed. The exit handlers still run; one of them shuts the
+    JVM down.
+    """
+    atexit._run_exitfuncs()
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    os._exit(code)
+
+
+def _raise_terminated(signum: int) -> NoReturn:
+    logger.info("Received %s: cancelling running jobs and closing Ghidra projects", signal.Signals(signum).name)
+    raise _Terminated(128 + signum)
+
+
+def _dump_stacks_on_sigquit() -> Callable[[], None]:
+    """Answer SIGQUIT with every Python thread's stack instead of dying; return the undo.
+
+    Under ``-Xrs`` the JVM no longer prints its thread dump on SIGQUIT, and the
+    default action would end the server.  ``jcmd <pid> Thread.print`` still
+    prints the Java threads.
+    """
+    sigquit = getattr(signal, "SIGQUIT", None)
+    if sigquit is None or signal.getsignal(sigquit) is not signal.SIG_DFL:
+        return lambda: None
+    faulthandler.register(sigquit, all_threads=True)
+    return functools.partial(faulthandler.unregister, sigquit)
 
 
 def main(argv: list[str] | None = None) -> int:
     if threading.current_thread() is not threading.main_thread():
         return _run_cli(argv)
 
-    def terminate(signum, _frame):
-        # Uvicorn replays SIGTERM after graceful HTTP shutdown.  Raising here
-        # also unwinds our project/script cleanup, including in stdio mode.
-        raise SystemExit(128 + signum)
+    received: list[int] = []
 
-    previous_handler = signal.signal(signal.SIGTERM, terminate)
+    def terminate(signum, _frame):
+        # Uvicorn replays SIGINT and SIGTERM after graceful HTTP shutdown, and
+        # the transport replays SIGHUP.  Raising here also unwinds our
+        # project/script cleanup, including in stdio mode.  Raising instead of
+        # cancelling the main task matters there: asyncio's own SIGINT handler
+        # cancels it, and the stdio transport then waits forever for its stdin
+        # reader while the client holds stdin open.
+        # Only the first signal raises: a process-group signal can arrive twice,
+        # and a repeat must not interrupt the cleanup the first one started.
+        if received:
+            return
+        received.append(signum)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            _raise_terminated(signum)
+        # While the event loop runs, the handler can interrupt any of its
+        # callbacks, such as the one handing a worker thread's result to its
+        # task; raising there leaves that task waiting forever, and the loop
+        # never finishes shutting down. Raise from a callback of its own.
+        loop.call_soon_threadsafe(_raise_terminated, signum)
+
+    # A signal the parent process ignores stays ignored, as under nohup.
+    previous_handlers = {
+        signum: signal.signal(signum, terminate)
+        for signum in SHUTDOWN_SIGNALS
+        if signal.getsignal(signum) is not signal.SIG_IGN
+    }
+    undo_sigquit = _dump_stacks_on_sigquit()
     try:
         return _run_cli(argv)
+    except BaseException as exc:
+        # Decided by the signal, not by the exception that got here: a cleanup
+        # step that failed after the signal replaces _Terminated with its own
+        # error.  The transport starts before the JVM, so a signal may come
+        # while its stdin reader runs even though the JVM has not started.
+        if received:
+            if not isinstance(exc, _Terminated):
+                logger.error("Cleanup after %s failed", signal.Signals(received[0]).name, exc_info=exc)
+            _exit_without_joining_threads(128 + received[0])
+        raise
     finally:
-        signal.signal(signal.SIGTERM, previous_handler)
+        undo_sigquit()
+        for signum, handler in previous_handlers.items():
+            if handler is not None:
+                signal.signal(signum, handler)
 
 
 def _run_cli(argv: list[str] | None = None) -> int:
@@ -636,6 +779,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
         except Exception as exc:
             logger.error("--bsim-remote-cache-dir is outside the allowed project roots: %s", exc)
             return 2
+    startup_gate = StartupGate()
     app = build_application(
         selected_specs,
         bsim_config=BsimConfig(
@@ -648,13 +792,23 @@ def _run_cli(argv: list[str] | None = None) -> int:
         presentation_config=presentation_config,
         path_policy=path_policy,
         script_config=script_config,
+        startup_gate=startup_gate,
     )
     registry = app.registry
     script_service = app.script_service
     # The runtime owns no Ghidra resources until the JVM is up: closing it
     # earlier would import the core handlers (and fail) without a JVM and mask
     # the real startup error.
-    jvm_started = False
+    ghidra = {"jvm_started": False, "closed": False}
+
+    def close_ghidra() -> None:
+        # Once: a failed startup closes what it opened, and the final cleanup
+        # must not close again.
+        if ghidra["jvm_started"] and not ghidra["closed"]:
+            registry.close_all()
+            ghidra["closed"] = True
+
+    startup: BackgroundStartup | None = None
     try:
         scripts_exposed = any(spec.category_tag == ToolCategoryTag.SCRIPTS for spec in selected_specs.values())
         if scripts_exposed:
@@ -678,9 +832,10 @@ def _run_cli(argv: list[str] | None = None) -> int:
                 transport,
             )
 
+        # Every tool tools/list will list: the profile's, and the result-retrieval ones.
         logger.info(
             "Starting PyGhidra MCP server with %d tools (profile=%s)",
-            len(selected_specs),
+            len(app.mcp.bindings),
             args.tool_profile,
         )
 
@@ -692,62 +847,57 @@ def _run_cli(argv: list[str] | None = None) -> int:
                 logger.error("%s", exc)
                 return 1
             logger.debug("pyghidra.start install_dir=%s", ghidra_path)
+        # What can be checked without the JVM is checked before serving: a
+        # misconfiguration is an operator error, not a crash, and still ends
+        # with one line and exit code 1 before any client connects.
         try:
-            _start_pyghidra_headless(ghidra_path or None)
+            launcher = _prepare_pyghidra_headless(ghidra_path or None)
         except Exception as exc:
-            # A misconfigured installation is an operator error, not a crash:
-            # one line and exit code 1, like every other startup failure.
             logger.error("Failed to start the Ghidra JVM: %s", exc)
             return 1
-        jvm_started = True
-        if transport == "stdio":
-            redirect_java_stdout_to_stderr()
         try:
-            _prepare_script_runtime(script_service)
-        except Exception as exc:
-            logger.error("Failed to prepare script runtimes: %s", exc)
-            return 1
-
-        try:
-            configure_ghidra_server_auth(args)
-        except Exception as exc:
+            _ghidra_server_credentials(args)
+        except ValueError as exc:
             logger.error("Failed to configure Ghidra server authentication: %s", exc)
             return 1
 
-        if args.session:
-            for definition in args.session:
-                try:
-                    config = _parse_session_definition(definition)
-                    domain_path = config.get("domain_path")
-                    if domain_path:
-                        registry.create_session(
-                            config["name"],
-                            project_location=config["project_location"],
-                            project_name=config.get("project_name"),
-                            domain_path=domain_path,
+        # Programs open in the background; targets with project metadata only
+        # need no JVM and are registered now.
+        session_steps: list[StartupStep] = []
+        for definition in args.session or []:
+            try:
+                config = _parse_session_definition(definition)
+                if config.get("domain_path"):
+                    path_policy.validate_project_location(config["project_location"])
+                    session_steps.append(
+                        StartupStep(
+                            f"session:{config['name']}",
+                            functools.partial(_load_startup_session, registry, config),
+                            f"Error while processing session definition '{definition}'",
                         )
-                        logger.info("Loaded session '%s'", config["name"])
-                    else:
-                        registry.register_target(
-                            config["name"],
-                            project_location=config["project_location"],
-                            project_name=config.get("project_name"),
-                        )
-                        logger.info("Registered target '%s' with project metadata only", config["name"])
-                except Exception as exc:
-                    logger.error("Error while processing session definition '%s': %s", definition, exc)
-                    return 1
+                    )
+                else:
+                    registry.register_target(
+                        config["name"],
+                        project_location=config["project_location"],
+                        project_name=config.get("project_name"),
+                    )
+                    logger.info("Registered target '%s' with project metadata only", config["name"])
+            except Exception as exc:
+                logger.error("Error while processing session definition '%s': %s", definition, exc)
+                return 1
 
         if args.project_location:
             try:
                 if args.domain_path:
-                    registry.create_session(
-                        args.target_name,
-                        project_location=args.project_location,
-                        project_name=args.project_name,
-                        domain_path=args.domain_path,
+                    path_policy.validate_project_location(args.project_location)
+                    session_steps.append(
+                        StartupStep(
+                            "default_session",
+                            functools.partial(_load_default_session, registry, args),
+                            "Failed to initialize default session",
+                        )
                     )
-                    logger.info("Loaded default target '%s'", args.target_name)
                 else:
                     registry.register_target(
                         args.target_name,
@@ -762,18 +912,54 @@ def _run_cli(argv: list[str] | None = None) -> int:
                 logger.error("Failed to initialize default session: %s", exc)
                 return 1
 
-        if not registry.has_targets():
+        if not (session_steps or registry.has_targets()):
             logger.error("Specify at least one target via --session or --project-location")
             return 1
 
-        _core()  # import the headless core now that the JVM is up
+        def start_jvm() -> None:
+            _start_pyghidra_headless(ghidra_path or None, launcher)
+            ghidra["jvm_started"] = True
+            if transport == "stdio":
+                redirect_java_stdout_to_stderr()
 
+        startup = BackgroundStartup(
+            [
+                StartupStep("jvm", start_jvm, "Failed to start the Ghidra JVM"),
+                StartupStep(
+                    "event_loop_thread",
+                    _prepare_event_loop_thread,
+                    "Failed to prepare the event loop thread for Ghidra",
+                    main_thread=True,
+                ),
+                StartupStep(
+                    "script_runtimes",
+                    functools.partial(_prepare_script_runtime, script_service),
+                    "Failed to prepare script runtimes",
+                ),
+                StartupStep(
+                    "ghidra_server_auth",
+                    functools.partial(configure_ghidra_server_auth, args),
+                    "Failed to configure Ghidra server authentication",
+                ),
+                *session_steps,
+                # The headless core imports Ghidra classes.
+                StartupStep("core", _core, "Failed to load the Ghidra command handlers"),
+            ],
+            startup_gate,
+            on_failure=close_ghidra,
+            on_thread_exit=detach_current_thread,
+        )
         run_kwargs = _run_kwargs_for_transport(transport=transport, args=args, logger=logger)
-        run_mcp_server(app.mcp, transport=transport, log_level=args.log_level, **run_kwargs)
+        logger.info("Ghidra starts in the background; tool calls wait until it is ready")
+        run_mcp_server(app.mcp, transport=transport, log_level=args.log_level, startup=startup, **run_kwargs)
+        return 1 if startup_gate.state == FAILED else 0
     finally:
         try:
-            if jvm_started:
-                registry.close_all()
+            if startup is not None:
+                # Waits for the step in progress: starting the JVM and opening
+                # a program cannot be interrupted, and cleanup must not race them.
+                startup.stop()
+            close_ghidra()
         finally:
             if script_service is not None:
                 try:
@@ -783,7 +969,26 @@ def _run_cli(argv: list[str] | None = None) -> int:
                         from ghidra_headless.scripts import providers
 
                         providers.shutdown()
-    return 0
+
+
+def _load_startup_session(registry, config: Dict[str, str]) -> None:
+    registry.create_session(
+        config["name"],
+        project_location=config["project_location"],
+        project_name=config.get("project_name"),
+        domain_path=config["domain_path"],
+    )
+    logger.info("Loaded session '%s'", config["name"])
+
+
+def _load_default_session(registry, args) -> None:
+    registry.create_session(
+        args.target_name,
+        project_location=args.project_location,
+        project_name=args.project_name,
+        domain_path=args.domain_path,
+    )
+    logger.info("Loaded default target '%s'", args.target_name)
 
 
 def configure_mcp_for_streamable_http(args) -> dict[str, Any]:

@@ -10,7 +10,7 @@ import pyghidra
 import pytest
 from mcp.types import CallToolResult
 
-from cli_support import ToolHarness
+from cli_support import ToolHarness, import_and_wait
 from ghidra_headless.launcher import start_headless_jvm
 
 # Tool callables bound to a swappable registry (see tests/cli_support.py).
@@ -151,7 +151,8 @@ def test_runtime_readonly_commands_all_success(tmp_path):
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli_tools.import_program(
+        imported = import_and_wait(
+            cli_tools,
             target=target,
             binary_path=binary_path,
             analyze_imported=True,

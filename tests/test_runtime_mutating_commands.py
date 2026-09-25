@@ -11,7 +11,7 @@ import pyghidra
 import pytest
 from mcp.types import CallToolResult
 
-from cli_support import ToolHarness
+from cli_support import ToolHarness, analyze_and_wait, import_and_wait
 from ghidra_headless.launcher import start_headless_jvm
 
 # Tool callables bound to a swappable registry (see tests/cli_support.py).
@@ -227,7 +227,8 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli_tools.import_program(
+        imported = import_and_wait(
+            cli_tools,
             target=target,
             binary_path=str(raw_blob),
             import_mode="raw_binary",
@@ -255,8 +256,8 @@ def test_runtime_raw_binary_import_bootstraps_entry(tmp_path):
         range_disassembly = _unwrap_runtime_result(
             cli_tools.disassemble(start_address="0x401000", length=4, limit=5, target=target)
         )["items"]
-        analyze_result = _unwrap_runtime_result(cli_tools.analyze_program(target=target))
-        reanalyze_result = _unwrap_runtime_result(cli_tools.analyze_program(force=True, target=target))
+        analyze_result = analyze_and_wait(cli_tools, target=target)
+        reanalyze_result = analyze_and_wait(cli_tools, force=True, target=target)
         _log_runtime_result("disassemble_range(raw)", range_disassembly)
         _log_runtime_result("analyze_program(raw)", analyze_result)
         _log_runtime_result("analyze_program(force, raw)", reanalyze_result)
@@ -288,7 +289,8 @@ def test_runtime_single_byte_search_stops_at_memory_end(tmp_path):
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli_tools.import_program(
+        imported = import_and_wait(
+            cli_tools,
             target=target,
             binary_path=str(raw_blob),
             import_mode="raw_binary",
@@ -327,7 +329,7 @@ def test_runtime_mutating_commands_all_success(tmp_path):
             project_location=str(project_dir),
             project_name=project_name,
         )
-        imported = cli_tools.import_program(target=target, binary_path=binary_path)
+        imported = import_and_wait(cli_tools, target=target, binary_path=binary_path)
         domain_path = imported["program"]
         cli_tools.load_project_program(target=target, domain_path=domain_path)
 

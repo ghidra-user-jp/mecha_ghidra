@@ -64,6 +64,9 @@ def probe_exception_propagation(probe_dir: Path) -> bool:
             try:
                 script.execute(state, controls)
             except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    # SIGTERM or Ctrl-C during the probe: shut down, not a probe failure.
+                    raise
                 if token not in str(exc):
                     raise RuntimeError(f"unexpected propagation probe exception: {exc}") from exc
             else:

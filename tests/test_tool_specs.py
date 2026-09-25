@@ -178,7 +178,11 @@ def test_typed_input_models_for_function_listing_slice():
         return annotation
 
     def _assert_fields(tool_name: str, expected_fields: dict[str, tuple[type, object]]):
-        model = specs[tool_name].input_model
+        spec = specs[tool_name]
+        if spec.executor_kind is ExecutorKind.CORE_COMMAND and spec.safety_tag is not ToolSafetyTag.READ_ONLY:
+            # Every program write accepts request_id (tool_spec._core_tool).
+            expected_fields = {**expected_fields, "request_id": (str | None, None)}
+        model = spec.input_model
         fields = model.model_fields
         assert set(fields.keys()) == set(expected_fields.keys())
         for key, (expected_type, expected_default) in expected_fields.items():
@@ -225,7 +229,10 @@ def test_typed_input_models_for_function_listing_slice():
             "address": (str, ...),
         },
     )
-    _assert_fields("analyze_program", {"force": (bool, False)})
+    _assert_fields(
+        "analyze_program",
+        {"force": (bool, False), "request_id": (str | None, None), "wait_seconds": (int, 20)},
+    )
     _assert_fields(
         "list_segments",
         {
@@ -437,6 +444,8 @@ def test_typed_input_models_for_function_listing_slice():
         "import_program",
         {
             "binary_path": (str, ...),
+            "request_id": (str | None, None),
+            "wait_seconds": (int, 20),
             "import_mode": (Literal["auto", "raw_binary"], "auto"),
             "language_id": (str | None, None),
             "compiler_spec_id": (str | None, None),
@@ -447,7 +456,7 @@ def test_typed_input_models_for_function_listing_slice():
             "overlay": (bool, False),
             "entry_address": (str | None, None),
             "entry_offset": (int | None, None),
-            "analyze_imported": (bool | None, None),
+            "analyze_imported": (bool, True),
         },
     )
     _assert_fields(
@@ -586,7 +595,7 @@ def test_registry_and_shared_sync_adapters_are_configured():
     specs = get_all_tool_specs()
 
     assert specs["load_project_program"].result_adapter == "status_program_ok"
-    assert specs["import_program"].result_adapter == "status_program_ok"
+    assert specs["import_program"].result_adapter is None
     assert specs["open_program"].result_adapter == "status_target_ok"
     assert specs["open_program"].error_adapter == "create_session_error"
     assert specs["close_session"].result_adapter == "status_target_ok"
@@ -638,6 +647,25 @@ def test_checkout_required_tools_are_declared_on_specs():
     }
 
 
+_OPERATION_RECORD_FIELDS: dict[str, tuple[Any, Any]] = {
+    "operation_id": (str, ...),
+    "kind": (str, ...),
+    "request_id": (str | None, ...),
+    "server_instance_id": (str, ...),
+    "target": (str, ...),
+    "state": (Literal["queued", "running", "succeeded", "failed"], ...),
+    "phase": (Literal["queued", "waiting_for_lock", "executing"], ...),
+    "poll_after_ms": (int, ...),
+    "created_at": (str, ...),
+    "updated_at": (str, ...),
+    "started_at": (str | None, ...),
+    "finished_at": (str | None, ...),
+    "result": (object, ...),
+    "operation_error": (dict[str, object] | None, ...),
+    "result_discarded": (bool, False),
+}
+
+
 def test_all_output_models_are_strict_and_typed():
     specs = get_all_tool_specs()
 
@@ -670,18 +698,20 @@ def test_all_output_models_are_strict_and_typed():
             "reloaded": (bool, False),
             "version": (int | None, None),
             "read_only": (bool, False),
+            "is_analyzed": (bool, ...),
         },
-        "import_program": {
-            "status": (str, ...),
-            "target": (str, ...),
-            "program": (str, ...),
-        },
+        "import_program": {**_OPERATION_RECORD_FIELDS, "replayed": (bool, ...)},
+        "analyze_program": {**_OPERATION_RECORD_FIELDS, "replayed": (bool, ...)},
+        "run_script": {**_OPERATION_RECORD_FIELDS, "replayed": (bool, ...)},
+        "get_operation": _OPERATION_RECORD_FIELDS,
+        "cancel_operation": _OPERATION_RECORD_FIELDS,
         "open_program": {
             "status": (str, ...),
             "target": (str, ...),
             "project_location": (str, ...),
             "project_name": (str | None, None),
             "domain_path": (str | None, None),
+            "is_analyzed": (bool, ...),
         },
         "close_session": {
             "status": (str, ...),
@@ -966,6 +996,7 @@ def test_new_bsim_tool_specs_declare_their_parameters():
             "dry_run": (bool, False),
             "addresses": (list[str] | None, None),
             "function_names": (list[str] | None, None),
+            "request_id": (str | None, None),
         },
     )
     _assert_input_fields("bsim_update_target_signatures", {"bsim_url": (str | None, None)})
@@ -983,3 +1014,20 @@ def test_new_bsim_tool_specs_declare_their_parameters():
     assert specs["bsim_delete_executable"].include_target is False
     assert specs["bsim_apply_matches"].checkout_required is True
     assert specs["bsim_apply_matches"].safety_tag == ToolSafetyTag.WRITE
+
+
+def test_every_tool_answers_the_hints_a_client_would_otherwise_assume_the_worst_for():
+    # MCP's defaults for an unset hint are a destructive, non-idempotent tool that reaches outside systems.
+    specs = get_all_tool_specs()
+    hints = {tool.name: tool.annotations for tool in build_tool_objects(specs=specs)}
+
+    assert all(hint.read_only_hint is not None and hint.open_world_hint is not None for hint in hints.values())
+    writes = {name for name, hint in hints.items() if hint.read_only_hint is False}
+    assert writes and all(hints[name].destructive_hint is not None for name in writes)
+    # Annotation edits are writes; deletions and repository operations are destructive.
+    assert hints["apply_edits"].destructive_hint is False
+    assert hints["delete_shared_project_file"].destructive_hint is True
+    outside = {
+        name for name, spec in specs.items() if spec.category_tag in {ToolCategoryTag.BSIM, ToolCategoryTag.SHARED_SYNC}
+    }
+    assert {name for name, hint in hints.items() if hint.open_world_hint} == outside | {"run_script"}

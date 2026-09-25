@@ -16,6 +16,7 @@ from ghidra_mcp.presentation.doc_resources import tool_docs_detail
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 from ghidra_mcp.presentation.tool_errors import ToolError
+from ghidra_mcp.presentation.tool_registry import spec_wire_output_schema
 
 
 def request(id="a", tool="get_function", arguments=None, **extra):
@@ -301,8 +302,10 @@ def test_documented_batch_schema_matches_actual_response(kind):
     Draft202012Validator(docs["response_text_schema"]).validate(payload)
     Draft202012Validator(docs["large_result_output_schema"]).validate(result.model_dump(mode="json", by_alias=True))
     advertised = next(tool for tool in asyncio.run(runtime.mcp.list_tools()) if tool.name == "batch_read")
-    assert advertised.output_schema == docs["structured_output_schema"]
+    # tools/list carries the short form; the docs resource keeps the full one. Both hold.
+    assert advertised.output_schema == spec_wire_output_schema(get_all_tool_specs()["batch_read"], detailed=False)
     Draft202012Validator(advertised.output_schema).validate(result.structured_content)
+    Draft202012Validator(docs["structured_output_schema"]).validate(result.structured_content)
     assert result.structured_content == {"result": payload}
     assert len(result.content[0].text) <= 2048
 

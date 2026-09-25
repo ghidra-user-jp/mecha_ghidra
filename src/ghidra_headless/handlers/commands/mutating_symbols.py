@@ -465,11 +465,11 @@ def delete_function(params, *, ensure_context, get_address, txn):
     return {"name": name, "entry": str(entry), "deleted": True}
 
 
-def analyze_program(params, *, ensure_context, analyze_program_impl):
+def analyze_program(params, *, ensure_context, analyze_program_impl, current_task_monitor):
     """Run auto-analysis; ``force`` re-runs it on an already analyzed program."""
     ctx = ensure_context()
     force = bool(params.get("force", False))
-    analyzed = analyze_program_impl(ctx, force=force)
+    analyzed = analyze_program_impl(ctx, force=force, monitor=current_task_monitor())
     return {"analyzed": bool(analyzed), "forced": force}
 
 

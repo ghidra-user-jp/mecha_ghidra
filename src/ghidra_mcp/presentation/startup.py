@@ -1,0 +1,294 @@
+"""Serve MCP while Ghidra starts: the background startup and the gate ``tools/call`` waits on.
+
+``initialize``, ``tools/list`` and the resources are built from the tool specs
+and need no JVM, so the transport starts first.  ``BackgroundStartup`` then
+brings up the JVM, Ghidra and the startup sessions on its own thread, and only
+``tools/call`` waits for it, on ``StartupGate``.  Configuration errors that can
+be found without the JVM are still reported before serving (see ``cli``).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+
+import anyio
+from mcp.types import CallToolResult
+
+from ghidra_mcp.domain import DomainError, ErrorCode
+
+from .error_mapper import map_exception
+from .tool_registry import anticipated_error_result
+
+logger = logging.getLogger(__name__)
+
+STARTING = "starting"
+READY = "ready"
+FAILED = "failed"
+STARTUP_THREAD_NAME = "ghidra-startup"
+# How often a waiting tool call re-reads the startup state.
+_POLL_SECONDS = 0.05
+
+
+@dataclass(frozen=True, slots=True)
+class StartupFailure:
+    """Why the startup stopped: the step, and the line the server logged for it."""
+
+    stage: str
+    message: str
+    cause_type: str
+    cause_message: str
+
+
+class StartupGate:
+    """Whether tool calls may run: ``starting`` until the startup ends ``ready`` or ``failed``."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = STARTING
+        self._failure: StartupFailure | None = None
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def failure(self) -> StartupFailure | None:
+        return self._failure
+
+    def mark_ready(self) -> None:
+        with self._lock:
+            if self._state == STARTING:
+                self._state = READY
+
+    def mark_failed(self, failure: StartupFailure) -> None:
+        with self._lock:
+            if self._state == STARTING:
+                self._failure = failure
+                self._state = FAILED
+
+    async def wait(self, timeout: float) -> float:
+        """Wait on the event loop, holding no thread, until the startup ends; return the seconds waited.
+
+        Raises a retryable ``LOCK_TIMEOUT`` while Ghidra is still starting after
+        ``timeout`` seconds, and ``STARTUP_FAILED`` once the startup failed.
+        A call that did not have to wait gets exactly 0.
+        """
+        waited = 0.0
+        if self._state == STARTING:
+            started = time.monotonic()
+            with anyio.move_on_after(timeout):
+                while self._state == STARTING:
+                    await anyio.sleep(_POLL_SECONDS)
+            waited = time.monotonic() - started
+        if self._state == FAILED:
+            raise startup_failed_error(self._failure)
+        if self._state == STARTING:
+            raise DomainError(
+                code=ErrorCode.LOCK_TIMEOUT,
+                message="Ghidra is still starting",
+                hint="The server starts Ghidra in the background after it begins serving; retry in a few seconds",
+                retryable=True,
+                details={"lock": "startup", "timeout": timeout},
+            )
+        return waited
+
+
+def startup_failed_error(failure: StartupFailure) -> DomainError:
+    return DomainError(
+        code=ErrorCode.STARTUP_FAILED,
+        message=failure.message,
+        hint="The server log has the same message; every tool call returns this error until the server restarts",
+        details={"stage": failure.stage, "cause_type": failure.cause_type, "cause_message": failure.cause_message},
+    )
+
+
+def startup_error_result(error: DomainError) -> CallToolResult:
+    """The tool result for a call the gate turned away, in the usual domain-error envelope."""
+    # The generic LOCK_TIMEOUT wording names a lock; this wait is for Ghidra itself.
+    fallback = f"LOCK_TIMEOUT: {error.message}" if error.code is ErrorCode.LOCK_TIMEOUT else None
+    result = anticipated_error_result(map_exception(error, fallback_message=fallback))
+    assert result is not None
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class StartupStep:
+    """One step of the startup; ``failure`` begins the line logged when it raises.
+
+    A ``main_thread`` step runs on the event loop's thread while the startup
+    thread waits for it (without a loop, on the startup thread).
+    """
+
+    name: str
+    run: Callable[[], None]
+    failure: str
+    main_thread: bool = False
+
+
+class _Stopped(Exception):
+    """The transport ended before the startup finished."""
+
+
+def _failure_of(step: StartupStep, exc: BaseException) -> StartupFailure:
+    cause_type = exc.code.value if isinstance(exc, DomainError) else type(exc).__name__
+    return StartupFailure(
+        stage=step.name, message=f"{step.failure}: {exc}", cause_type=cause_type, cause_message=str(exc)
+    )
+
+
+class BackgroundStartup:
+    """Run the startup steps on their own thread and publish the outcome to ``gate``.
+
+    The steps stop at the next boundary once ``stop`` is called.  After a
+    failed step, ``on_failure`` runs on the startup thread to release what the
+    earlier steps opened, before the gate reports the failure.
+    ``on_thread_exit`` runs last on the startup thread, whatever happened: the
+    CLI detaches the thread from the JVM it may have started there.
+    """
+
+    def __init__(
+        self,
+        steps: Sequence[StartupStep],
+        gate: StartupGate,
+        *,
+        on_failure: Callable[[], None] | None = None,
+        on_thread_exit: Callable[[], None] | None = None,
+    ) -> None:
+        self.gate = gate
+        self._steps = tuple(steps)
+        self._on_failure = on_failure
+        self._on_thread_exit = on_thread_exit
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_serving: Callable[[], None] | None = None
+
+    def start(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+        stop_serving: Callable[[], None] | None = None,
+    ) -> None:
+        """Start the steps; ``loop`` runs the main-thread steps, ``stop_serving`` ends the transport on failure."""
+        if self._thread is not None:
+            raise RuntimeError("the startup has already started")
+        self._loop = loop
+        self._stop_serving = stop_serving
+        # Daemon, so a step that never returns cannot hold interpreter exit;
+        # stop() still waits for the step in progress on every normal path.
+        self._thread = threading.Thread(target=self._run, name=STARTUP_THREAD_NAME, daemon=True)
+        self._thread.start()
+
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait for the startup thread without stopping it; True once it has ended or never started."""
+        thread = self._thread
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
+
+    def stop(self) -> None:
+        """Stop at the next step boundary, then wait for the step in progress.
+
+        Starting the JVM and opening a program cannot be interrupted, so the
+        caller's cleanup must not race with them.
+        """
+        self._stop.set()
+        thread = self._thread
+        if thread is None or thread is threading.current_thread() or not thread.is_alive():
+            return
+        logger.info("Waiting for the Ghidra startup step in progress before shutting down")
+        thread.join()
+
+    def _run(self) -> None:
+        began = time.monotonic()
+        timings: list[tuple[str, float]] = []
+        failure: StartupFailure | None = None
+        stopped = False
+        try:
+            try:
+                for step in self._steps:
+                    if self._stop.is_set():
+                        raise _Stopped
+                    step_began = time.monotonic()
+                    try:
+                        if step.main_thread:
+                            self._run_on_loop(step.run)
+                        else:
+                            step.run()
+                    except _Stopped:
+                        raise
+                    except BaseException as exc:
+                        failure = _failure_of(step, exc)
+                        break
+                    timings.append((step.name, time.monotonic() - step_began))
+            except _Stopped:
+                stopped = True
+            if failure is not None:
+                logger.error("%s", failure.message)
+                if self._on_failure is not None:
+                    try:
+                        self._on_failure()
+                    except Exception:
+                        logger.exception("Could not release Ghidra resources after the failed startup")
+        finally:
+            if self._on_thread_exit is not None:
+                try:
+                    self._on_thread_exit()
+                except Exception:
+                    logger.exception("Startup thread cleanup failed")
+        if stopped:
+            logger.info("Ghidra startup stopped: the transport ended first")
+        elif failure is not None:
+            self.gate.mark_failed(failure)
+            if self._stop_serving is not None:
+                self._stop_serving()
+        else:
+            self.gate.mark_ready()
+            slow = ", ".join(f"{name} {seconds:.1f} s" for name, seconds in timings if seconds >= 0.05)
+            logger.info("Ghidra ready in %.1f s%s", time.monotonic() - began, f" ({slow})" if slow else "")
+
+    def _run_on_loop(self, function: Callable[[], None]) -> None:
+        loop = self._loop
+        if loop is None:
+            function()
+            return
+        done = threading.Event()
+        errors: list[BaseException] = []
+
+        def call() -> None:
+            try:
+                function()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+        try:
+            loop.call_soon_threadsafe(call)
+        except RuntimeError as exc:  # closed: the transport has ended
+            raise _Stopped from exc
+        while not done.wait(_POLL_SECONDS):
+            if loop.is_closed() or not loop.is_running():
+                raise _Stopped
+        if errors:
+            raise errors[0]
+
+
+__all__ = [
+    "FAILED",
+    "READY",
+    "STARTING",
+    "STARTUP_THREAD_NAME",
+    "BackgroundStartup",
+    "StartupFailure",
+    "StartupGate",
+    "StartupStep",
+    "startup_error_result",
+    "startup_failed_error",
+]

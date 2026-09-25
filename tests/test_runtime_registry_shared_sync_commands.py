@@ -10,7 +10,7 @@ import pyghidra
 import pytest
 from mcp.types import CallToolResult
 
-from cli_support import ToolHarness
+from cli_support import ToolHarness, import_and_wait
 from ghidra_headless.launcher import start_headless_jvm
 
 # Tool callables bound to a swappable registry (see tests/cli_support.py).
@@ -318,11 +318,11 @@ def test_runtime_registry_and_shared_sync_commands_all_success(tmp_path):
         )
 
         runtime_results["import_program"] = _unwrap_runtime_result(
-            cli_tools.import_program(target=target, binary_path=str(lifecycle_binary))
+            import_and_wait(cli_tools, target=target, binary_path=str(lifecycle_binary))
         )
         lifecycle_domain_path = runtime_results["import_program"]["program"]
         runtime_results["import_program_for_sync"] = _unwrap_runtime_result(
-            cli_tools.import_program(target=target, binary_path=str(work_binary))
+            import_and_wait(cli_tools, target=target, binary_path=str(work_binary))
         )
         generated_domain_path = runtime_results["import_program_for_sync"]["program"]
 

@@ -2140,7 +2140,7 @@ def auto_import(monkeypatch, tmp_path):
 
 def test_import_program_auto_uses_public_program_loader(auto_import):
     state = auto_import
-    domain_file = state.handle.import_program(str(state.path))
+    domain_file = state.handle.import_program(str(state.path), analyze_imported=False)
 
     assert domain_file.getPathname() == "/sample.bin"
     assert state.calls == [
@@ -2153,6 +2153,23 @@ def test_import_program_auto_uses_public_program_loader(auto_import):
     ]
     assert state.saved == state.closed == 1
     assert state.handle.project.closed == []  # LoadResults owns the imported objects.
+
+
+@pytest.mark.parametrize("import_options", [{}, {"analyze_imported": None}])
+def test_import_program_analyzes_by_default(monkeypatch, auto_import, import_options):
+    state = auto_import
+    post_processed = []
+    monkeypatch.setattr(
+        state.handle,
+        "_post_process_imported_program_locked",
+        lambda path, **kwargs: post_processed.append((path, kwargs)),
+    )
+
+    state.handle.import_program(str(state.path), **import_options)
+
+    assert post_processed == [
+        ("/sample.bin", {"entry_address": None, "entry_offset": None, "analyze_imported": True, "monitor": None})
+    ]
 
 
 def test_import_program_rolls_back_when_post_processing_fails(monkeypatch, auto_import):
@@ -2855,6 +2872,66 @@ def test_post_process_imported_program_closes_when_flat_api_init_fails(monkeypat
 
     assert handle.project.saved == []
     assert handle.project.closed == [imported_program]
+
+
+@pytest.mark.parametrize("analyze_imported", [False, True])
+def test_post_process_never_saves_a_cancelled_import(monkeypatch, analyze_imported):
+    from ghidra_headless.errors import HeadlessError
+
+    handle = build_handle(monkeypatch)
+    imported_program = DummyProgram("/shellcode.bin")
+
+    class PostProcessProject(DummyProject):
+        def openProgram(self, domain_dir, domain_name, flag):  # noqa: ARG002
+            return imported_program
+
+    handle.project = PostProcessProject()
+    steps = []
+    monkeypatch.setattr(
+        session.java_bindings, "_flat_program_api_class", lambda: lambda _program, monitor: types.SimpleNamespace()
+    )
+    monkeypatch.setattr(handle, "_resolve_entry_address_locked", lambda *_args, **_kwargs: 0x401000)
+    # Cancelled Ghidra commands stop early without raising, like this bootstrap.
+    monkeypatch.setattr(handle, "_bootstrap_entry_locked", lambda *_args: steps.append("bootstrap"))
+    monkeypatch.setattr(handle, "_analyze_program_locked", lambda *_args: steps.append("analyze"))
+    monitor = types.SimpleNamespace(isCancelled=lambda: True)
+
+    with pytest.raises(HeadlessError, match="IMPORT_CANCELLED"):
+        handle._post_process_imported_program_locked(
+            "/shellcode.bin",
+            entry_address=None,
+            entry_offset=0,
+            analyze_imported=analyze_imported,
+            monitor=monitor,
+        )
+
+    assert steps == ["bootstrap", "analyze"] if analyze_imported else ["bootstrap"]
+    assert handle.project.saved == []
+    assert handle.project.closed == [imported_program]
+
+
+def test_cancelled_analysis_is_never_marked_analyzed(monkeypatch):
+    from ghidra_headless.errors import HeadlessError
+
+    handle = build_handle(monkeypatch)
+    marked = []
+    transactions = []
+    utilities = types.SimpleNamespace(shouldAskToAnalyze=lambda _program: True, markProgramAnalyzed=marked.append)
+    script_util = types.SimpleNamespace(
+        acquireBundleHostReference=lambda: None, releaseBundleHostReference=lambda: None
+    )
+    monkeypatch.setattr(session.java_bindings, "_ghidra_program_utilities", lambda: utilities)
+    monkeypatch.setattr(session.java_bindings, "_ghidra_script_util", lambda: script_util)
+    program = types.SimpleNamespace(
+        startTransaction=lambda _description: 7,
+        endTransaction=lambda tx, commit: transactions.append((tx, commit)),
+    )
+    flat_api = types.SimpleNamespace(analyzeAll=lambda _program: None)
+
+    with pytest.raises(HeadlessError, match="IMPORT_CANCELLED"):
+        handle._analyze_program_locked(program, flat_api, types.SimpleNamespace(isCancelled=lambda: True))
+
+    assert marked == [] and transactions == [(7, False)]
 
 
 def test_release_program_rejects_double_release(monkeypatch):

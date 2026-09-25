@@ -84,6 +84,8 @@ uv run pytest \
 
 With the same runtime flag, `tests/test_runtime_mcp_transport.py` launches the real CLI in separate processes over stdio and localhost Streamable HTTP. It creates disposable projects and a tiny raw binary, so it does not require `GHIDRA_RUNTIME_BINARY_PATH`. It verifies schemas, mutations, rollback, and large-result retrieval, plus direct HTTP calls without initialization, responses without session IDs, and resource retrieval from a fresh connection.
 
+`tests/test_runtime_import_operations.py` imports `WinHelloCPP.exe`, a benign 32-bit PE that Ghidra ships for its class exercises (`docs/GhidraClass/ExerciseFiles/WinhelloCPP/` in the installation), so it needs no sample of your own. Set `GHIDRA_IMPORT_GATE_SECONDS=305` to hold that import's analysis for longer than a 300-second client timeout; the default is 0.
+
 To include Jython, install the Jython extension matching your Ghidra version and set both `GHIDRA_RUNTIME_VALIDATION=1` and `GHIDRA_JYTHON_RUNTIME_VALIDATION=1` when running `tests/test_runtime_script_commands.py` and `tests/test_runtime_mcp_transport.py`. The additional flag fails validation if Jython is unavailable and enables Jython cases over both stdio and HTTP. For isolation, use Java's `-Dapplication.settingsdir=...` setting and install the extension under that settings area's Ghidra extension directory.
 
 | Validation | Additional environment |
@@ -96,6 +98,8 @@ To include Jython, install the Jython extension matching your Ghidra version and
 [`validate_bsim_runtime.sh`](../scripts/validate_bsim_runtime.sh) enables the BSim runtime flag and can prompt on a TTY if neither password variable is supplied. Separate project caches may connect to the same repository, but must have different local `.gpr/.rep` paths.
 
 Run `tests/test_runtime_registry_shared_sync_commands.py` for the shared lifecycle, including checkout, commit, updates from a second client, and deletion of test files. BSim category and metadata writes require `GHIDRA_BSIM_MUTATION_VALIDATION=1`; use a disposable database because category definitions remain after the tests.
+
+To check a built image, set `MECHA_GHIDRA_DOCKER_IMAGE` to its tag and run `tests/test_docker_image.py`; it needs Docker but no local Ghidra. The test copies the same exercise PE out of the image, starts the image's default command, and over HTTP imports, analyzes, decompiles, and edits the program. It then checks that `docker stop`, `SIGINT`, and `SIGHUP` each close the projects before the container exits. The CI job `docker-image` builds the `linux/amd64` image with `./build_docker_image.sh` and runs this test.
 
 <a id="native-builds"></a>
 

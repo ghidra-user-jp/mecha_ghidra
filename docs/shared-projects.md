@@ -74,7 +74,7 @@ These are MCP operations. Use the target `default` unless you registered another
 
 1. Call `list_project_programs`, then `get_project_sync_status(domain_path="/sample.bin")`.
 2. For a versioned file, call `checkout_project_program(domain_path="/sample.bin")`. For a private file in a repository-connected project, use `add_project_program_to_version_control` before the versioned workflow.
-3. Call `load_project_program(domain_path="/sample.bin")`, then edit with `apply_edits` to add names and comments.
+3. Call `load_project_program(domain_path="/sample.bin")`, then edit with `apply_edits` to add names and comments. Loading never analyzes: if the reply has `is_analyzed: false`, first run `analyze_program`, a background job that needs the checkout from step 2. Its results are saved and committed with your edits.
 4. Call `save_project_program` to save the local project, then `commit_project_program` to check changes into the repository. Inspect the returned `committed` value.
 5. From the other local cache, obtain the latest repository state and reload the GUI program to see it. Use `pull_project_program` to follow the latest version from MCP.
 
@@ -92,7 +92,7 @@ Headless Ghidra does not resolve merge conflicts. Default operations stop rather
 | Commit with `on_conflict="keep"` | Park local edits in a `.keep` copy; return `kept_program` and `committed=false`; the loaded target follows the kept copy |
 | Commit with `on_conflict="discard"` | Drop conflicting local edits and follow the latest state; `committed=false` |
 | Pull with `on_local_changes="discard"` | Drop a disposable stale checkout and follow the latest version |
-| Pull requiring a merge without a disposable checkout | `UNSAFE_MERGE_REQUIRED` |
+| Pull requiring a merge without a disposable checkout | `MERGE_REQUIRED` |
 
 `status="ok"` on a keep/discard response does not mean a check-in happened. Check `committed`, `conflict_kept`, and `conflict_discarded`. To combine competing edits, resolve them in a GUI-capable Ghidra workflow.
 

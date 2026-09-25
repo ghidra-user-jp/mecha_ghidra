@@ -7,6 +7,7 @@ import pathlib
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.handlers.commands.pagination import normalize_pagination
 from ghidra_headless.handlers.commands.query_support import program_revision
+from ghidra_headless.session.models import program_is_analyzed
 
 MAX_UNDO_STEPS = 100
 MAX_ENTRY_POINTS = 50
@@ -61,9 +62,9 @@ def get_program_info(params, *, ensure_context, safe_call, iter_items):
         "function_count": int(ctx.function_manager.getFunctionCount()),
         "symbol_count": safe_call(ctx.symbol_table, "getNumSymbols"),
         "entry_points": entry_points,
-        # Read only options that exist: getBoolean/getString on a missing option would
+        "is_analyzed": program_is_analyzed(program),
+        # Read only options that exist: getString on a missing option would
         # register it, which is a write and needs a transaction.
-        "is_analyzed": bool(options.contains("Analyzed") and options.getBoolean("Analyzed", False)),
         "created_with_ghidra_version": (
             _text(options.getString("Created With Ghidra Version", None))
             if options.contains("Created With Ghidra Version")
@@ -227,8 +228,8 @@ def export_program(params, *, ensure_context, safe_call):
     """Write the loaded program to ``output_path`` as a .gzf archive or raw bytes.
 
     The path policy check happens in the application layer before this runs.
-    A .gzf packs the program's saved state, so unsaved edits are reported but
-    not included; call save_project_program first when they matter.
+    A .gzf packs the program as it is now, unsaved changes included (verified
+    with Ghidra 12.1.3); exporting does not save the project.
     """
     ctx = ensure_context()
     # The application layer has already normalized and validated this path.

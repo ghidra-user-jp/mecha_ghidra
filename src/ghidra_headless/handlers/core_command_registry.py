@@ -131,6 +131,8 @@ INTERNAL_COMMAND_NAMES = (
     "bsim_update_target_signatures",
     # run_script is exposed through the registry so the script service gates it first.
     "run_script",
+    # analyze_program is exposed through the registry and runs as a background job.
+    "analyze_program",
 )
 
 COMMAND_TO_IMPL = {
@@ -312,7 +314,7 @@ COMMAND_PROFILE = {
     "delete_bookmark": ("ensure_context", "get_address", "txn", "iter_items"),
     "create_function": ("ensure_context", "get_address", "txn"),
     "delete_function": ("ensure_context", "get_address", "txn"),
-    "analyze_program": ("ensure_context", "analyze_program_impl"),
+    "analyze_program": ("ensure_context", "analyze_program_impl", "current_task_monitor"),
     "set_comment": ("ensure_context", "get_address", "txn", "comment_types"),
     "get_program_info": ("ensure_context", "safe_call", "iter_items"),
     "get_comments": ("ensure_context", "get_address", "comment_types"),
@@ -345,7 +347,7 @@ COMMAND_PROFILE = {
     "bsim_register_target": ("ensure_context", "txn"),
     "bsim_apply_matches": ("ensure_context", "get_address", "find_function_by_name", "txn", "source_type"),
     "bsim_update_target_signatures": ("ensure_context",),
-    "run_script": ("ensure_context", "current_key"),
+    "run_script": ("ensure_context", "current_key", "current_task_monitor", "begin_command"),
 }
 
 

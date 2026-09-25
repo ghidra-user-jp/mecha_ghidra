@@ -84,6 +84,8 @@ uv run pytest \
 
 `tests/test_runtime_mcp_transport.py` は同じ実機フラグで、実際のCLIを別プロセスとして起動し、stdioとlocalhostのStreamable HTTPを検証します。専用プロジェクトと小さなraw binaryを自動生成するため、`GHIDRA_RUNTIME_BINARY_PATH` は不要です。入出力スキーマ、変更とロールバック、大きな結果の取得に加え、HTTPの初期化なしの呼び出し・セッションIDなしの応答・別接続からのリソース取得を確認します。
 
+`tests/test_runtime_import_operations.py` は、Ghidraが演習用に配布している無害な32ビットのPE `WinHelloCPP.exe`（インストール先の `docs/GhidraClass/ExerciseFiles/WinhelloCPP/`）をインポートします。検体を用意する必要はありません。`GHIDRA_IMPORT_GATE_SECONDS=305` を指定すると、クライアントの300秒のタイムアウトより長く、そのインポートの解析を止めておきます。既定値は0です。
+
 Jythonまで検証する場合は、使用するGhidraと同じバージョンのJython拡張を導入し、`GHIDRA_RUNTIME_VALIDATION=1`に加えて`GHIDRA_JYTHON_RUNTIME_VALIDATION=1`を指定して、`tests/test_runtime_script_commands.py`と`tests/test_runtime_mcp_transport.py`を実行します。この追加フラグではJythonが未導入なら失敗にし、MCPのstdio／HTTPにもJythonのケースを追加します。通常のGhidra設定から分離する場合は、Javaの`-Dapplication.settingsdir=...`で専用の設定領域を使い、その領域のGhidra拡張ディレクトリへインストールします。
 
 | 検証対象 | 追加で設定する環境変数 |
@@ -96,6 +98,8 @@ Jythonまで検証する場合は、使用するGhidraと同じバージョン�
 [validate_bsim_runtime.sh](../scripts/validate_bsim_runtime.sh)はBSim実機フラグを有効にし、パスワード変数がなければTTYで入力できます。同じリポジトリへ接続する場合も、キャッシュのローカル `.gpr/.rep` パスは分けてください。
 
 共有側のcheckout、commit、別クライアントからの更新取得、試験ファイル削除は `tests/test_runtime_registry_shared_sync_commands.py` で検証します。BSimのカテゴリ・メタデータ変更には `GHIDRA_BSIM_MUTATION_VALIDATION=1` が必要です。カテゴリ定義は試験後も残るため、使い捨てのDBを指定してください。
+
+ビルドしたイメージを確かめるには、`MECHA_GHIDRA_DOCKER_IMAGE` にそのタグを指定して `tests/test_docker_image.py` を実行します。Dockerが必要ですが、手元のGhidraは要りません。試験は同じ演習用のPEをイメージから取り出し、イメージの既定のコマンドで起動して、HTTPでインポート・解析・逆コンパイル・編集をします。そのあと、`docker stop`、`SIGINT`、`SIGHUP` のそれぞれで、コンテナが終わる前にプロジェクトを閉じることを確かめます。CIの `docker-image` ジョブは、`./build_docker_image.sh` で `linux/amd64` のイメージをビルドし、この試験を実行します。
 
 <a id="native-builds"></a>
 

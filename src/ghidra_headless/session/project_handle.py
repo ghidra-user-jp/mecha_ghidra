@@ -313,6 +313,11 @@ class ProjectHandle:
     def get_project_name(self) -> str:
         return self.project_name
 
+    @staticmethod
+    def create_cancellable_monitor():
+        """A silent task monitor whose ``cancel()`` stops an import's analysis."""
+        return java_bindings._cancellable_monitor()
+
     def get_key(self) -> tuple[str, str]:
         return self.key
 
@@ -558,7 +563,9 @@ class ProjectHandle:
         entry_address: str | None = None,
         entry_offset: int | None = None,
         analyze_imported: bool | None = None,
+        monitor=None,
     ):
+        """Import ``binary_path``; ``monitor`` (see create_cancellable_monitor) can cancel its analysis."""
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is already closed")
@@ -592,7 +599,8 @@ class ProjectHandle:
                 raise ValueError(f"Unsupported import_mode: {import_mode}")
             if domain_file is None:
                 raise RuntimeError(f"Failed to add program: {binary_path}")
-            should_analyze = analyze_imported if analyze_imported is not None else (import_mode == "raw_binary")
+            # Analysis is part of an import unless the caller opts out.
+            should_analyze = True if analyze_imported is None else bool(analyze_imported)
             if should_analyze or entry_address is not None or entry_offset is not None:
                 imported_domain_path = domain_file.getPathname()
                 try:
@@ -601,6 +609,7 @@ class ProjectHandle:
                         entry_address=entry_address,
                         entry_offset=entry_offset,
                         analyze_imported=bool(should_analyze),
+                        monitor=monitor,
                     )
                 except Exception as exc:
                     if isinstance(exc, _ImportedProgramCloseError):
@@ -1425,8 +1434,11 @@ class ProjectHandle:
         entry_address: str | None,
         entry_offset: int | None,
         analyze_imported: bool,
+        monitor=None,
     ) -> None:
-        monitor = java_bindings._console_monitor()
+        # Only a monitor handed in by a background import can be cancelled.
+        cancellable = monitor
+        monitor = java_bindings._console_monitor() if monitor is None else monitor
         domain_dir, domain_name = path_utils._parse_domain_path(self.project, domain_path)
         program = self.project.openProgram(domain_dir, domain_name, False)
         if program is None:
@@ -1442,7 +1454,12 @@ class ProjectHandle:
             if entry is not None:
                 self._bootstrap_entry_locked(program, flat_api, entry)
             if analyze_imported:
-                self._analyze_program_locked(program, flat_api)
+                self._analyze_program_locked(program, flat_api, cancellable)
+            # Ghidra's disassembly and function commands stop early on a
+            # cancelled monitor without failing, so a cancelled bootstrap looks
+            # like a success. Never save it: the caller rolls the program back.
+            if cancellable is not None and bool(cancellable.isCancelled()):
+                raise HeadlessError("IMPORT_CANCELLED: import post-processing was cancelled before it finished")
             self.project.save(program)
         except Exception as exc:
             operation_error = exc
@@ -1492,7 +1509,7 @@ class ProjectHandle:
         finally:
             program.endTransaction(tx, committed)
 
-    def _analyze_program_locked(self, program, flat_api) -> None:
+    def _analyze_program_locked(self, program, flat_api, monitor=None) -> None:
         utilities = java_bindings._ghidra_program_utilities()
         if not bool(utilities.shouldAskToAnalyze(program)):
             return
@@ -1502,6 +1519,11 @@ class ProjectHandle:
 
             def _analyze():
                 flat_api.analyzeAll(program)
+                # A cancelled analysis can return normally; never mark or save
+                # it as analyzed. Raising aborts the transaction, and the
+                # import's post-processing failure path deletes the program.
+                if monitor is not None and bool(monitor.isCancelled()):
+                    raise HeadlessError("IMPORT_CANCELLED: analysis was cancelled before it finished")
                 utilities.markProgramAnalyzed(program)
 
             run_in_transaction(program, "Auto analysis", _analyze)
