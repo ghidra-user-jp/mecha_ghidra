@@ -8,6 +8,7 @@ helpers, so a program write, a job and a project or repository write agree.
 
 from __future__ import annotations
 
+from .error_codes import REFUSED_BEFORE_ANY_CHANGE
 from .errors import DomainError
 
 ABSENT = "absent"
@@ -29,6 +30,11 @@ def retryable_after(retryable: bool, output_state: str | None) -> bool:
     return bool(retryable) and output_state == ABSENT
 
 
+def says_nothing_changed(error: DomainError) -> bool:
+    """Whether a failure's code says it left nothing: a refusal before any change, or a transient (retryable) one."""
+    return error.retryable or error.code in REFUSED_BEFORE_ANY_CHANGE
+
+
 def with_output_state(error: DomainError, output_state: str) -> DomainError:
     return DomainError(
         code=error.code,
@@ -45,5 +51,6 @@ __all__ = [
     "UNCERTAIN",
     "output_state_for_outcome",
     "retryable_after",
+    "says_nothing_changed",
     "with_output_state",
 ]

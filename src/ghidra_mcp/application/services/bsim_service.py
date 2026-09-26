@@ -26,17 +26,18 @@ from .target_service import TargetService
 
 BSIM_MATCHED_REF_VERSION = 1
 _BSIM_CODE_RE = re.compile(r"^BSIM_[A-Z0-9_]+(?::|$)")
+# The database never opened.  The keyword rules may name why; otherwise the
+# code stays, rather than becoming the operation's own failure code, so a write
+# refused here reports that it changed nothing.
+_BSIM_DATABASE_INIT_PREFIX = "BSIM_DATABASE_INIT_FAILED:"
 _BSIM_GENERIC_CODE_PREFIXES = (
+    _BSIM_DATABASE_INIT_PREFIX,
     "BSIM_QUERY_FAILED:",
     "BSIM_CLI_FAILED:",
     # InsertRequest reports "<name> is already ingested" through this wrapper;
     # strip it so the keyword rule below can promote it to BSIM_ALREADY_REGISTERED.
     "BSIM_INSERT_FAILED:",
 )
-# The database never opened.  The keyword rules may name why; otherwise the
-# code stays, rather than becoming the operation's own failure code, so a write
-# refused here reports that it changed nothing.
-_BSIM_DATABASE_INIT_CODE = "BSIM_DATABASE_INIT_FAILED"
 _BSIM_AUTHENTICATION_RE = re.compile(r"\b(?:password|authentication|auth failed)\b")
 _BSIM_UNREACHABLE_RE = re.compile(
     r"\b(?:refused|could not connect|connection to|timed out|timeout|unknown host|no route to host|unreachable)\b"
@@ -102,21 +103,19 @@ def _bsim_message(code: str, message: str) -> str:
 
 def _classify_bsim_message(message: str, *, default_code: str = "BSIM_OPERATION_FAILED") -> str:
     text = str(message).strip() or "unknown error"
-    if text.startswith(f"{_BSIM_DATABASE_INIT_CODE}:"):
-        default_code = _BSIM_DATABASE_INIT_CODE
-        text = text[len(_BSIM_DATABASE_INIT_CODE) + 1 :].strip() or "unknown error"
-    else:
-        has_specific_code = _BSIM_CODE_RE.match(text) and not text.startswith(_BSIM_GENERIC_CODE_PREFIXES)
-        if has_specific_code:
-            return text
-        # Backend/headless errors arrive wrapped in a generic prefix (e.g.
-        # "BSIM_QUERY_FAILED: ..."). Strip that wrapper so the keyword rules below can
-        # promote it to a more specific code; otherwise _bsim_message would see the
-        # existing prefix and return the text unchanged, defeating reclassification.
-        for prefix in _BSIM_GENERIC_CODE_PREFIXES:
-            if text.startswith(prefix):
-                text = text[len(prefix) :].strip() or "unknown error"
-                break
+    has_specific_code = _BSIM_CODE_RE.match(text) and not text.startswith(_BSIM_GENERIC_CODE_PREFIXES)
+    if has_specific_code:
+        return text
+    # Backend/headless errors arrive wrapped in a generic prefix (e.g.
+    # "BSIM_QUERY_FAILED: ..."). Strip that wrapper so the keyword rules below can
+    # promote it to a more specific code; otherwise _bsim_message would see the
+    # existing prefix and return the text unchanged, defeating reclassification.
+    for prefix in _BSIM_GENERIC_CODE_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix) :].strip() or "unknown error"
+            if prefix == _BSIM_DATABASE_INIT_PREFIX:
+                default_code = prefix[:-1]
+            break
     lower = text.lower()
     if "function not found" in lower:
         return _bsim_message("BSIM_FUNCTION_NOT_FOUND", text)

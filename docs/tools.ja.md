@@ -11,7 +11,7 @@
 - プログラムを扱うツールの応答は、結果の出典を `source` に示します。`target`、`program`（domain path）、`revision` の3つで、ツールの実行直後の値です。この `revision` を `expected_revision` に渡すと、古い読み取りに基づく編集を拒否できます。モデルに文字列しか見せないクライアントのため、`source` は最後の文字列ブロックにも入ります。`batch_read` は1つのJSONブロックの中に `program` と `revision` を示し、[先送りした呼び出し](usage.ja.md#long-calls)の記録は `result` の横に `source` を持ちます。
 - 文字列ブロックには結果そのものが入ります。文字列はそのまま、それ以外は詰めたJSONを1つのブロックにします。リストは1行に1項目です。
 - 書き込みが失敗すると、何が残ったかを `error.details.output_state` で示します。`absent`（何も変わっていない。一時的なエラーなら再試行できる）、`created`（変更が未保存で残っている）、`uncertain`（続ける前にプログラムを確かめる）のいずれかです。`retryable` がtrueになるのは `absent` のときだけです。保存、commit、書き出しなど、プロジェクトやリポジトリへの書き込みでは、変更の前に断るエラーなら `absent`、それ以外は `uncertain` です。BSimのデータベースへの書き込みも同じです。読み込んだプログラムに対して動くBSimのツール（`bsim_register_target`、`bsim_update_target_signatures`、`bsim_apply_matches`）は、プログラムのトランザクションがどう終わったかを示し、データベースへの書き込みを始めた後の失敗は `uncertain` です。
-- プログラムへの書き込みは、どれもクライアントが作ったUUIDを `request_id` に受け付けます。同じ `request_id` と引数で送り直すと、書き込みを再び適用せず、`replayed: true` を付けた最初の呼び出しの応答を返します。詳しくは[シンボルとコメント](#symbol-comment-edit)の `apply_edits` を参照してください。結果なら最後の文字列ブロック、エラーならそのJSONの文字列ブロックにも `replayed` が入ります。保存した結果の通知は2つのブロックのままで、`structuredContent` だけに示します。
+- プログラムへの書き込みは、どれもクライアントが作ったUUIDを `request_id` に受け付けます。同じ `request_id` と引数で送り直すと、書き込みを再び適用せず、`replayed: true` を付けた最初の呼び出しの応答を返します（最初の呼び出しが何も変えずに失敗した場合を除く）。詳しくは[シンボルとコメント](#symbol-comment-edit)の `apply_edits` を参照してください。結果なら最後の文字列ブロック、エラーならそのJSONの文字列ブロックにも `replayed` が入ります。保存した結果の通知は2つのブロックのままで、`structuredContent` だけに示します。
 - エラーの `code` は失敗の種類を、`hint` は次に呼ぶツールを（あれば）示します。関数、データ型、変数、ブックマーク、名前空間、リポジトリが見つからなければ `NOT_FOUND`、引数の誤り（入力の形の誤り、解析できないCの宣言、既にある書き出し先、存在しない書き出し先のディレクトリ）は `VALIDATION_ERROR` で、どちらも理由を `message` に示します。Ghidra内部の失敗は無害化した `cause_message` 付きの `OPERATION_FAILED` で、`VALIDATION_ERROR` にはなりません。プログラムを読み込んでいないtargetは `PROGRAM_NOT_OPEN`、存在しないtargetは `TARGET_NOT_REGISTERED` です。
 - すべてのツールが `readOnlyHint`、`destructiveHint`（削除、バイトの上書き、commitやpullなどのリポジトリ操作、スクリプトはtrue）、`openWorldHint`（BSimのデータベース、Ghidra Server、スクリプトはtrue）を宣言します。
 
@@ -187,7 +187,7 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 
 読み取り後に別の編集が入っていないことを確認するには、編集の根拠にした応答の `source.revision`、または `get_program_info` の `revision` を `expected_revision` に渡します。プレビュー後に `dry_run=false` で適用するときは、プレビューが返したrevisionを使えます。
 
-再送を安全にするには、クライアントが作ったUUIDを `request_id` に渡します。応答が失われて同じ `request_id` と引数で送り直すと、サーバーは編集を再び適用せず、最初の呼び出しの応答を返します。その応答には、`structuredContent`と最後の文字列ブロックに`replayed: true`が付きます。最初の呼び出しがまだ実行中なら、再送はその終了を待ち、`deferred: true` で同じ記録を返すことがあります。同じ `request_id` で引数が違うと `REQUEST_ID_CONFLICT` になります。`get_operation(request_id=...)` でもこの呼び出しを探せます。記録はジョブと同じく、サーバーのメモリにだけあります。ほかのプログラムへの書き込みと `bsim_apply_matches` も、同じように `request_id` を受け付けます。
+再送を安全にするには、クライアントが作ったUUIDを `request_id` に渡します。応答が失われて同じ `request_id` と引数で送り直すと、サーバーは編集を再び適用せず、最初の呼び出しの応答を返します。その応答には、`structuredContent`と最後の文字列ブロックに`replayed: true`が付きます。最初の呼び出しがまだ実行中なら、再送はその終了を待ち、`deferred: true` で同じ記録を返すことがあります。同じ `request_id` で引数が違うと `REQUEST_ID_CONFLICT` になります。何も変えずに失敗した呼び出し（`output_state: absent`）は、実行枠を待つ間に取り消したものを除き、その `request_id` を保ちません。次にそのIDで送った呼び出しが実行されます。`get_operation(request_id=...)` でもこの呼び出し（そのIDで最後に送ったもの）を探せます。記録はジョブと同じく、サーバーのメモリにだけあります。ほかのプログラムへの書き込みと `bsim_apply_matches` も、同じように `request_id` を受け付けます。
 
 応答の `status`、`applied_count`、各 `results` を確認してください。全体のstatusは `applied`、`partial`、`rolled_back`、`dry_run`、`dry_run_failed` です。項目別の失敗も通常のツール応答に含まれるため、通信が成功しただけでは編集成功とは限りません。成功した項目には `before` / `after` が付き、取り消した項目と試行だけの項目は区別されます。残した変更は `save_project_program` で保存します。
 

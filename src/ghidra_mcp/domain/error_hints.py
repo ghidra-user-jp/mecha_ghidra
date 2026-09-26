@@ -29,10 +29,8 @@ RECOVERY_HINTS: dict[ErrorCode, str] = {
     ErrorCode.VALIDATION_ERROR: "Correct the argument the message names, then call again",
     ErrorCode.CHECKOUT_REQUIRED: "Check the program out with checkout_project_program, then call again",
     ErrorCode.PROGRAM_NOT_ANALYZED: "Run analyze_program on the target and wait for the job, then call again",
-    ErrorCode.RESULT_DISCARDED: (
-        "get_operation with details.operation_id says whether the call succeeded; inspect the program for "
-        "what it changed instead of sending the call again"
-    ),
+    ErrorCode.RESULT_DISCARDED: "Inspect the program for what the first call changed instead of sending it again",
+    ErrorCode.REQUEST_ID_CONFLICT: "Send these arguments with a new request_id; this one belongs to the earlier call",
     ErrorCode.RAW_LOADER_OPTION_UNAVAILABLE: (
         "Check language_id, compiler_spec_id and the loader options; details.cause_message names what this "
         "Ghidra version's raw binary loader lacks"

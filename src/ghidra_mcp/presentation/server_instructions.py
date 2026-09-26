@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, JOB_TOOLS, ToolCategoryTag, ToolSafetyTag, ToolSpec
+from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, JOB_TOOLS, ToolCategoryTag, ToolSpec
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 
 # Fixed order keeps discovery instructions stable across registration order.
@@ -65,9 +65,9 @@ def build_server_instructions(*, specs: Mapping[str, ToolSpec], config: ToolPres
         category_specs = [
             spec for spec in specs.values() if spec.category_tag == category and spec.name != "bsim_query"
         ]
-        if any(spec.safety_tag == ToolSafetyTag.READ_ONLY for spec in category_specs):
+        if any(not spec.writes for spec in category_specs):
             capabilities.append(read_label)
-        if any(spec.safety_tag != ToolSafetyTag.READ_ONLY for spec in category_specs):
+        if any(spec.writes for spec in category_specs):
             capabilities.append(write_label)
     if "batch_read" in enabled:
         capabilities.append("batched supported reads")

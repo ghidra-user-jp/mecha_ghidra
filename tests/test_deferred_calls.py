@@ -383,6 +383,64 @@ def test_waiting_calls_take_freed_slots_in_arrival_order():
         assert await calls._acquire_slot(0) is False
         assert await earlier is True
         assert not calls._slot_waiters
+        calls._release_slot()
+
+    asyncio.run(scenario())
+
+
+async def _within_loop_turns(done, turns=100):
+    """Let the event loop run until ``done()``: at most ``turns`` passes, none of them waiting on a timer."""
+    for _ in range(turns):
+        if done():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"not done within {turns} event loop turns")
+
+
+def test_freed_slots_go_to_every_waiting_call_at_once():
+    calls = DeferredCalls(defer_after=5, slots=3)
+
+    async def scenario():
+        for _ in range(3):
+            assert await calls._acquire_slot(0) is True
+        order = []
+
+        async def wait(tag):
+            if await calls._acquire_slot(5):
+                order.append(tag)
+
+        waiting = [asyncio.ensure_future(wait(tag)) for tag in "abc"]
+        await _within_loop_turns(lambda: len(calls._slot_waiters) == 3)
+        # The running calls end; their threads give the slots back.
+        releases = [threading.Thread(target=calls._release_slot) for _ in range(3)]
+        for thread in releases:
+            thread.start()
+        for thread in releases:
+            thread.join()
+        # Handed over as they came free, in arrival order, and not one per poll: no
+        # timer has to fire, however slowly the loop turns.
+        await _within_loop_turns(lambda: len(order) == 3)
+        assert order == ["a", "b", "c"] and not calls._slot_waiters
+        await asyncio.gather(*waiting)
+
+    asyncio.run(scenario())
+
+
+def test_a_waiter_that_goes_away_as_it_gets_a_slot_passes_the_slot_on():
+    calls = DeferredCalls(defer_after=5, slots=1)
+
+    async def scenario():
+        assert await calls._acquire_slot(0) is True
+        first = asyncio.ensure_future(calls._acquire_slot(5))
+        second = asyncio.ensure_future(calls._acquire_slot(5))
+        await asyncio.sleep(0.01)
         calls._slots.release()
+        calls._dispatch()
+        # The slot is first's now, but its request goes away before it resumes.
+        first.cancel()
+        assert await asyncio.wait_for(second, 1) is True
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not calls._slot_waiters
 
     asyncio.run(scenario())

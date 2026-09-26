@@ -262,14 +262,20 @@ def test_lock_holder_names_the_job_only_while_it_holds_its_locks(jobs):
 def test_a_cancelled_job_is_no_lock_holder_while_its_worker_still_waits(jobs):
     manager, service = jobs
     waiting, release = threading.Event(), threading.Event()
+    outcome = []
 
     def analyze_program(target, *, force, control):
         control.check_active()
         # Holding the service locks, waiting for a runtime lock nothing interrupts.
         waiting.set()
-        assert release.wait(5)
-        control.begin()
-        pytest.fail("a cancelled job must not begin")
+        release.wait(5)
+        try:
+            control.begin()
+        except DomainError as refused:
+            outcome.append(refused.code)
+            raise
+        outcome.append("began")
+        return {"analyzed": True, "forced": force}
 
     service.analyze_program = analyze_program
     receipt = manager.submit_analysis("default")
@@ -282,6 +288,22 @@ def test_a_cancelled_job_is_no_lock_holder_while_its_worker_still_waits(jobs):
     release.set()
     manager._queue.join()
     assert manager.get(operation_id=receipt["operation_id"])["operation_error"]["code"] == "OPERATION_CANCELLED"
+    # The worker was refused when it tried to begin.
+    assert outcome == [ErrorCode.OPERATION_CANCELLED]
+
+
+def test_what_cannot_be_cancelled_says_what_to_do_instead(jobs):
+    manager, service = jobs
+    service.release.set()
+    finished = wait_terminal(manager, manager.submit_analysis("default"))
+    call = manager.defer_call("decompile_function", "default", started_at="now")
+    for operation_id, next_step in ((finished["operation_id"], "how the job ended"), (call["operation_id"], "waits")):
+        with pytest.raises(DomainError) as refused:
+            manager.cancel(operation_id)
+        # Calling again cannot help, so the generic VALIDATION_ERROR hint would mislead.
+        assert refused.value.code is ErrorCode.VALIDATION_ERROR
+        assert "get_operation" in refused.value.hint and next_step in refused.value.hint
+        assert refused.value.details["operation_id"] == operation_id
 
 
 def test_cancelled_queued_jobs_free_their_queue_slots():

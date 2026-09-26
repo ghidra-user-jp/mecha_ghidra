@@ -13,7 +13,7 @@
 | 段階 | 実装したもの |
 | --- | --- |
 | C1〜C3 | 取り込み・解析・スクリプトのジョブ、`cancel_operation`、40秒で先送りする呼び出し（[長い処理のジョブ化](long-operation-jobs-design.ja.md)） |
-| B（一部） | プログラムへの書き込みすべてと`bsim_apply_matches`の`request_id`。同じ要求の再送には最初の応答を`replayed: true`を付けて返し、適用し直さない。記録はジョブと同じ`OperationManager`に置く |
+| B（一部） | プログラムへの書き込みすべてと`bsim_apply_matches`の`request_id`。同じ要求の再送には最初の応答を`replayed: true`を付けて返し、適用し直さない。何も変えずに失敗した呼び出し（`output_state: absent`、取り消しを除く）はIDを保たず、次にそのIDで来た呼び出しを実行する（2026-09-26。10.3節の注記）。記録はジョブと同じ`OperationManager`に置く |
 | A2（一部） | 同期の書き込みが失敗したときの`details.output_state`（`absent`・`created`・`uncertain`）。コアのコマンドは、開いたトランザクションの結果から決める。プロジェクトやリポジトリへの書き込みは、変更の前に断るエラーか再試行できるエラーなら`absent`、それ以外は`uncertain`とする（2026-09-25） |
 | D（一部） | コアのコマンドの応答の`source`（`target`・`program`・`revision`）。コマンドの直後に、同じロックの中で取る |
 | エラー（2026-09-25） | 見つからないものは`NOT_FOUND`、引数の誤りは`VALIDATION_ERROR`で、どちらもメッセージに理由を残す。プログラム未読み込みは`PROGRAM_NOT_OPEN`、未登録のtargetは`TARGET_NOT_REGISTERED`。コードごとの次の一手を`hint`に入れる（`domain/error_hints.py`） |
@@ -482,6 +482,8 @@ terminalな記録がある場合は、未実行の失敗でもsame_requestにし
 `retryable`は既存クライアント向けに残す。ただし、新しい応答では`mode=same_request`の場合だけtrueにする。現行の分類がtrueでも、実行情報から確認や条件解消が必要ならfalseへ狭める。特にSESSION_CHANGEDの無条件再送を促す文言は、この構造と一致するように見直す。フィールドの型・codeを保ち、値の保守的な変更は互換性テストと変更記録に含める。[現行のコード分類](../src/ghidra_mcp/domain/error_codes.py)。
 
 `hint`は同じ構造から作る短い説明とし、構造化した制約と矛盾する「retry」等を別の固定文から付けない。条件の修復、待機、別ツールの選択をサーバーが自動実行する仕組みは作らない。
+
+2026-09-26注記: `request_id`付きのツール呼び出しでは、この節とは逆に、何も変えずに失敗した記録（`output_state: absent`）はIDを保たないことにした。`recovery`は未実装で、再試行できる失敗の返答は`retryable: true`と「再試行する」ヒントしか示さない。それに従って同じIDで送り直すと、同じ失敗がいつまでも返り、一度も実行されなかった。`absent`なら再実行しても二重には適用されない。実行枠を待つ間に取り消した呼び出しはIDを保つ（遅れて届いた同じ要求に、取り消した処理を実行させない）。ジョブも保つ。スクリプトは、`output_state`が示すプログラムの外にも変更を残しうるためである。
 
 ### 10.4 確認用ツールの選び方
 

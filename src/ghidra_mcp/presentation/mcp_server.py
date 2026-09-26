@@ -48,7 +48,6 @@ from ghidra_mcp.presentation.batch_results import present_batch_result
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.deferred_calls import DeferredCalls, DeferredReply, deferred_reply
 from ghidra_mcp.presentation.doc_resources import tool_docs_detail, tool_docs_index
-from ghidra_mcp.presentation.error_mapper import map_exception
 from ghidra_mcp.presentation.result_compaction import _json_text, _presentation_failure_result
 from ghidra_mcp.presentation.result_errors import present_tool_error
 from ghidra_mcp.presentation.result_resources import (
@@ -59,13 +58,19 @@ from ghidra_mcp.presentation.result_resources import (
 )
 from ghidra_mcp.presentation.server_instructions import build_server_instructions
 from ghidra_mcp.presentation.startup import StartupGate, startup_error_result
-from ghidra_mcp.presentation.tool_binding import ToolBinding, complete_tool_result, error_result, tool_error_result
+from ghidra_mcp.presentation.tool_binding import (
+    ToolBinding,
+    complete_tool_result,
+    error_envelope,
+    error_result,
+    tool_error_result,
+)
 from ghidra_mcp.presentation.tool_dispatcher import _validate_raw_args
 from ghidra_mcp.presentation.tool_errors import ToolError, ToolInputError
 from ghidra_mcp.presentation.tool_registry import (
     ToolRegistry,
-    anticipated_error_result,
     as_anticipated_tool_failure,
+    domain_error_result,
     public_arguments_model,
 )
 from ghidra_mcp.presentation.waiting import wait_until
@@ -179,10 +184,7 @@ class GhidraMCPServer(Server):
                 # Within the deferral budget: a reply must come before client call timers end.
                 waited = await self.startup_gate.wait(min(get_lock_timeout_seconds(), self.deferred_calls.defer_after))
             except DomainError as exc:
-                if writes:
-                    # The call never ran, so a write refused here left nothing behind.
-                    exc = with_output_state(exc, ABSENT)
-                return self.complete_result(name, kwargs, startup_error_result(exc))
+                return self.complete_result(name, kwargs, startup_error_result(self._refused(name, exc)))
             if waited and "wait_seconds" in kwargs:
                 # Time spent waiting for Ghidra counts against the job wait, so a
                 # reply still comes within the usual bound.
@@ -214,7 +216,9 @@ class GhidraMCPServer(Server):
         The record exists before the call runs (``OperationManager.claim_call``),
         and the call's thread stores the reply in it however the call ends.  A
         resend that finds the call still running waits for it like a new call,
-        then replies ``deferred`` with the same record.
+        then replies ``deferred`` with the same record.  A first call that
+        failed without changing anything no longer holds the request_id, so a
+        resend after it runs as a new call.
         """
         request_id = kwargs.pop("request_id")
         target = kwargs.get("target") or ""
@@ -223,7 +227,8 @@ class GhidraMCPServer(Server):
                 name, target, request_id=request_id, fingerprint=_call_fingerprint(name, kwargs)
             )
         except DomainError as exc:
-            return self.complete_result(name, kwargs, anticipated_error_result(map_exception(exc)))
+            # REQUEST_ID_CONFLICT, say: the call did not run.
+            return self.complete_result(name, kwargs, domain_error_result(self._refused(name, exc)))
         if not fresh:
             return await self._replay(name, target, record["operation_id"], operations, waited)
         value = await self.deferred_calls.run(
@@ -248,29 +253,55 @@ class GhidraMCPServer(Server):
         try:
             record = operations.handle(operation_id)
         except DomainError as exc:
-            return self.complete_result(name, {"target": target}, anticipated_error_result(map_exception(exc)))
+            return self._lost_record(name, target, exc)
         if record["state"] in PENDING_STATES:
             reply = deferred_reply(name, target, record, self.deferred_calls.defer_after)
             self._check_output(name, reply)
             return reply
         reply = operations.reply_for(operation_id)
         if reply is None:
-            message = (
-                f"RESULT_DISCARDED: {name} already ran for this request_id, but its reply is no longer kept "
-                "(result_discarded); inspect the program instead of sending the call again"
-            )
-            # The first call ran, so what it left is unknown here.
-            discarded = DomainError(
-                code=ErrorCode.RESULT_DISCARDED,
-                message=message,
-                details={"operation_id": operation_id, "output_state": UNCERTAIN},
-            )
-            return self.complete_result(
-                name, {"target": target}, anticipated_error_result(map_exception(discarded, fallback_message=message))
-            )
+            return self._discarded_reply(name, target, operation_id, operations)
         replayed = _replayed(CallToolResult.model_validate(reply))
         self._check_output(name, replayed)
         return replayed
+
+    def _discarded_reply(self, name: str, target: str, operation_id: str, operations) -> CallToolResult:
+        """What a resend gets once the first reply was dropped to bound memory: what the record still keeps.
+
+        A failed call, including one that never ran, keeps its error (with
+        trimmed details) and gets it back; a call that succeeded gets
+        RESULT_DISCARDED, since only the program shows what it changed.
+        """
+        try:
+            record = operations.get(operation_id=operation_id)
+        except DomainError as exc:
+            return self._lost_record(name, target, exc)
+        error = record.get("operation_error")
+        if error is not None:
+            replayed = _replayed(error_envelope(error))
+            self._check_output(name, replayed)
+            return replayed
+        message = (
+            f"RESULT_DISCARDED: {name} already ran for this request_id and succeeded, but its reply is no longer "
+            "kept (result_discarded)"
+        )
+        discarded = DomainError(
+            code=ErrorCode.RESULT_DISCARDED,
+            message=message,
+            details={"operation_id": operation_id, "output_state": UNCERTAIN},
+        )
+        return self.complete_result(name, {"target": target}, domain_error_result(discarded, message=message))
+
+    def _lost_record(self, name: str, target: str, error: DomainError) -> CallToolResult:
+        """A resend whose record is gone: the first call may have run, so what it left is unknown."""
+        return self.complete_result(
+            name, {"target": target}, domain_error_result(self._refused(name, error, UNCERTAIN))
+        )
+
+    def _refused(self, name: str, error: DomainError, output_state: str = ABSENT) -> DomainError:
+        """A write turned away before it ran says what it left (nothing, unless told otherwise); a read says nothing."""
+        spec = self.specs.get(name)
+        return with_output_state(error, output_state) if spec is not None and spec.writes else error
 
     def complete_result(self, name: str, kwargs: dict[str, Any], value: Any):
         """The CallToolResult a finished call returns; a deferred call's thread records the same."""
@@ -426,7 +457,7 @@ def create_mcp_server(
             for request in raw_args["requests"]:
                 child = effective_specs.get(request["tool"])
                 if child is None or child.writes or child.executor_kind != ExecutorKind.CORE_COMMAND:
-                    raise ValueError("batch_read tool is not enabled for reads: %s" % request["tool"])
+                    raise ToolInputError("batch_read tool is not enabled for reads: %s" % request["tool"])
         dispatcher = dispatcher_provider()
         result = dispatcher(
             spec_name,

@@ -7,10 +7,9 @@ from typing import Any
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolSpec, get_tool_spec
+from ghidra_mcp.contracts.tool_spec import JOB_TOOLS, OPERATION_CONTROL_TOOLS, ExecutorKind, ToolSpec, get_tool_spec
 from ghidra_mcp.domain import DomainError, ErrorCode
-from ghidra_mcp.domain.error_codes import REFUSED_BEFORE_ANY_CHANGE
-from ghidra_mcp.domain.output_state import ABSENT, UNCERTAIN, with_output_state
+from ghidra_mcp.domain.output_state import ABSENT, UNCERTAIN, says_nothing_changed, with_output_state
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.error_mapper import map_exception
 from ghidra_mcp.presentation.result_resources import ResultResourceStore, maybe_compact_tool_result
@@ -118,20 +117,23 @@ def _with_output_state(spec: ToolSpec, exc: Exception) -> Exception:
     Program writes (core_execution) set ``output_state`` themselves, and so
     does a BSim write the core ran.  A job tool fails only when it refused
     the job, which then never ran (its record says what a run left behind),
-    unless an earlier import of the name may have left a program.  Otherwise
-    the code tells: a refusal or a retryable failure left nothing, anything
-    else may have done part of the work.
+    unless an earlier import of the name may have left a program.
+    cancel_operation's refusals name a job that may well have run, so they
+    say nothing about it.  Otherwise the code tells: a refusal or a
+    retryable failure left nothing, anything else may have done part of the
+    work.
     """
     if (
         not isinstance(exc, DomainError)
         or not spec.writes
         or spec.executor_kind == ExecutorKind.CORE_COMMAND
+        or spec.name in OPERATION_CONTROL_TOOLS
         or "output_state" in (exc.details or {})
     ):
         return exc
-    if spec.presenter == "operation":
+    if spec.name in JOB_TOOLS:
         return with_output_state(exc, UNCERTAIN if exc.code is ErrorCode.IMPORT_OUTPUT_UNCERTAIN else ABSENT)
-    return with_output_state(exc, ABSENT if exc.retryable or exc.code in REFUSED_BEFORE_ANY_CHANGE else UNCERTAIN)
+    return with_output_state(exc, ABSENT if says_nothing_changed(exc) else UNCERTAIN)
 
 
 def _validate_raw_args(spec: ToolSpec, raw_args: dict[str, Any] | None) -> dict[str, Any]:

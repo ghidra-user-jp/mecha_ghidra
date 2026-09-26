@@ -6,6 +6,7 @@ from mcp.types import TextContent
 
 from .result_compaction import _bounded_json_string, _json_text, structured_result
 from .result_store import _normalize_json_surrogates
+from .tool_errors import ToolInputError
 
 
 def present_batch_result(result, *, target, max_output_chars, config, store):
@@ -28,7 +29,7 @@ def present_batch_result(result, *, target, max_output_chars, config, store):
     if len(text) <= max_output_chars:
         return response(text)
     if config.large_result_mode != "resource":
-        raise ValueError(
+        raise ToolInputError(
             "batch_read response exceeds max_output_chars; narrow fields/page limits or enable resource mode"
         )
 

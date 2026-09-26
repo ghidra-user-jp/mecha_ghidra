@@ -806,6 +806,9 @@ def test_dispatch_tool_raises_output_validation_error_for_incompatible_result(
         ("analyze_program", DomainError(ErrorCode.ANALYSIS_IN_PROGRESS, "queued"), "absent"),
         # ...unless an earlier import of the name may have left a program.
         ("import_program", DomainError(ErrorCode.IMPORT_OUTPUT_UNCERTAIN, "no cleanup"), "uncertain"),
+        # cancel_operation's refusals name a job that may well have run: they say nothing about it.
+        ("cancel_operation", DomainError(ErrorCode.VALIDATION_ERROR, "The job has already finished"), None),
+        ("cancel_operation", DomainError(ErrorCode.OPERATION_NOT_FOUND, "No record in this server process"), None),
         # Reads write nothing; program writes say it themselves.
         ("list_project_programs", DomainError(ErrorCode.OPERATION_FAILED, "boom"), None),
         ("bsim_query", DomainError(ErrorCode.BSIM_QUERY_FAILED, "boom"), None),

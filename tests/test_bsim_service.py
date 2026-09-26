@@ -1336,7 +1336,8 @@ def test_every_bsim_code_in_the_source_is_an_error_code():
     assert sorted(names - constants - set(ErrorCode.__members__)) == []
 
 
-def test_a_bsim_tool_failure_reaches_the_mcp_client_with_its_code():
+def _client_error_of_add_category(backend_error: Exception) -> dict[str, Any]:
+    """The error an MCP client gets from bsim_add_executable_category when the Java backend raises ``backend_error``."""
     import asyncio
     from types import SimpleNamespace
 
@@ -1345,7 +1346,7 @@ def test_a_bsim_tool_failure_reaches_the_mcp_client_with_its_code():
     from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 
     backend = FakeJavaBackend()
-    backend.errors["add_executable_category"] = RuntimeError("could not connect to server")
+    backend.errors["add_executable_category"] = backend_error
     service, _core, _target = _service(java_backend=backend)
     registry = SimpleNamespace(bsim_add_executable_category=service.bsim_add_executable_category)
     runtime = create_mcp_server(
@@ -1353,11 +1354,13 @@ def test_a_bsim_tool_failure_reaches_the_mcp_client_with_its_code():
         registry_provider=lambda: registry,
         dispatcher_provider=lambda: dispatch_tool,
     )
-
     result = asyncio.run(runtime.mcp.call_tool("bsim_add_executable_category", {"category": "FAMILY"}))
-
     assert result.is_error
-    assert result.structured_content["error"] == {
+    return result.structured_content["error"]
+
+
+def test_a_bsim_tool_failure_reaches_the_mcp_client_with_its_code():
+    assert _client_error_of_add_category(RuntimeError("could not connect to server")) == {
         "message": "BSIM_DATABASE_UNREACHABLE: could not connect to server",
         "code": "BSIM_DATABASE_UNREACHABLE",
         "retryable": True,
@@ -1377,26 +1380,7 @@ def test_a_bsim_tool_failure_reaches_the_mcp_client_with_its_code():
 )
 def test_a_bsim_write_whose_database_never_opened_says_nothing_was_written(report):
     """A database report that names no outage or login keeps the init code: the write never began."""
-    import asyncio
-    from types import SimpleNamespace
-
-    from ghidra_mcp.contracts.tool_spec import get_tool_spec
-    from ghidra_mcp.presentation.mcp_server import create_mcp_server
-    from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
-
-    backend = FakeJavaBackend()
-    backend.errors["add_executable_category"] = RuntimeError(f"BSIM_DATABASE_INIT_FAILED: {report}")
-    service, _core, _target = _service(java_backend=backend)
-    registry = SimpleNamespace(bsim_add_executable_category=service.bsim_add_executable_category)
-    runtime = create_mcp_server(
-        specs={"bsim_add_executable_category": get_tool_spec("bsim_add_executable_category")},
-        registry_provider=lambda: registry,
-        dispatcher_provider=lambda: dispatch_tool,
-    )
-
-    result = asyncio.run(runtime.mcp.call_tool("bsim_add_executable_category", {"category": "FAMILY"}))
-
-    error = result.structured_content["error"]
+    error = _client_error_of_add_category(RuntimeError(f"BSIM_DATABASE_INIT_FAILED: {report}"))
     assert (error["code"], error["retryable"], error["details"]) == (
         "BSIM_DATABASE_INIT_FAILED",
         False,
@@ -1417,16 +1401,16 @@ def test_a_core_bsim_write_whose_database_never_opened_keeps_the_init_code():
     assert raised.value.details == {"output_state": "absent"}
 
 
-def test_a_missing_function_keeps_the_hint_that_finds_it():
+def test_a_missing_function_gets_the_hint_that_finds_it():
+    from ghidra_mcp.domain.error_hints import recovery_hint
+
     service, core, _target = _service()
-    core.errors["bsim_query_function"] = DomainError(
-        code=ErrorCode.NOT_FOUND,
-        message="Function not found: 0xdead",
-        hint="list_functions (filter by name) or search_symbols finds a function's name and entry address",
-    )
+    # As the core reports it (RuntimeBackend maps the handler's LookupError to NOT_FOUND).
+    core.errors["bsim_query_function"] = DomainError(code=ErrorCode.NOT_FOUND, message="Function not found: 0xdead")
     with _raises_bsim_error(ErrorCode.BSIM_FUNCTION_NOT_FOUND, "0xdead") as raised:
         service.bsim_query("fw", scope="functions", addresses=["0xdead"])
-    assert raised.value.hint and "list_functions" in raised.value.hint
+    # The BSim code carries the same next step as the core's NOT_FOUND for a missing function.
+    assert raised.value.hint == recovery_hint(ErrorCode.NOT_FOUND, "Function not found: 0xdead")
 
 
 def test_a_failed_bsim_write_keeps_what_the_runtime_said_it_left_behind():

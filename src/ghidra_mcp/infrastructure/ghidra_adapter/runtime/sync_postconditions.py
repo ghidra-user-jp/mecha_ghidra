@@ -92,7 +92,7 @@ class SyncPostconditionMixin:
         return False
 
     @staticmethod
-    def _partial_success_error(*, operation: str, message: str) -> DomainError:
+    def _partial_success_error(*, operation: str, message: str, operation_completed: bool = True) -> DomainError:
         return DomainError(
             code=ErrorCode.SYNC_OPERATION_FAILED,
             message=f"SYNC_OPERATION_FAILED: {message}",
@@ -100,7 +100,7 @@ class SyncPostconditionMixin:
             retryable=False,
             details={
                 "operation": operation,
-                "operation_completed": True,
+                "operation_completed": operation_completed,
                 "partial_success": True,
             },
         )

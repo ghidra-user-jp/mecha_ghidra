@@ -101,11 +101,15 @@ def to_domain_error(
     """Map ``exc`` to a ``DomainError`` tagged with operation/target/domain_path.
 
     A ``DomainError`` passes through with the context merged into its details.
-    Other exceptions are classified by project-lock and Java class detection,
-    then by structured code (``HeadlessError.code`` or a ``CODE:`` message
-    prefix), and finally by type or ``default_code``.  The text of an uncoded
-    message is never read: one that mentions a missing program is not a
-    refusal, so a failure that names no code is never reported as one.
+    Other exceptions are classified, first match wins, by a project another
+    process has locked (the exception's text: retryable PROJECT_LOCKED), by
+    Java's HeadlessException, by an exclusive checkout held elsewhere (its
+    class or text: retryable CHECKOUT_UNAVAILABLE), then by structured code
+    (``HeadlessError.code`` or a ``CODE:`` message prefix), and finally by
+    type (a ValueError is VALIDATION_ERROR and a LookupError NOT_FOUND, which
+    our own checks raise before changing anything) or ``default_code``.  No
+    other text is read: a message that mentions a missing program is no
+    refusal unless it names the code.
     """
 
     keep_none = set(keep_none_details)

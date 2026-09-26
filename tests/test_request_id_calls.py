@@ -124,7 +124,10 @@ def test_other_arguments_with_a_used_request_id_fail_with_request_id_conflict():
 
 def test_a_failed_call_is_replayed_as_the_same_error_without_running_again():
     registry = Registry()
-    registry.failure = DomainError(code=ErrorCode.PROGRAM_NOT_FOUND, message="no program")
+    # As the core reports a write that stopped once it may have changed the program.
+    registry.failure = DomainError(
+        code=ErrorCode.OPERATION_FAILED, message="the write stopped", details={"output_state": "uncertain"}
+    )
     mcp = _server(registry)
 
     async def scenario():
@@ -133,9 +136,59 @@ def test_a_failed_call_is_replayed_as_the_same_error_without_running_again():
         return first, again
 
     first, again = asyncio.run(scenario())
-    assert first.is_error and first.structured_content["error"]["code"] == "PROGRAM_NOT_FOUND"
+    assert first.is_error and first.structured_content["error"]["code"] == "OPERATION_FAILED"
     _assert_replay_of(again, first)
     assert len(registry.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # As the core reports them: a lock it never got, and a refusal before any change.
+        DomainError(
+            ErrorCode.LOCK_TIMEOUT, "runtime target lock timed out", retryable=True, details={"output_state": "absent"}
+        ),
+        DomainError(ErrorCode.NOT_CHECKED_OUT, "program is not checked out", details={"output_state": "absent"}),
+    ],
+    ids=["lock_timeout", "refusal"],
+)
+def test_a_call_that_failed_leaving_nothing_runs_again_with_its_request_id(failure):
+    registry = Registry()
+    registry.failure = failure
+    mcp = _server(registry)
+
+    async def scenario():
+        first = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+        failed_id = registry.operations.get(request_id=REQUEST_ID)["operation_id"]
+        registry.failure = None
+        again = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+        return first, again, failed_id
+
+    first, again, failed_id = asyncio.run(scenario())
+    assert first.structured_content["error"]["details"]["output_state"] == "absent"
+    # Nothing changed the first time, so the same request_id runs the write instead of replaying that failure.
+    assert not again.is_error and "replayed" not in again.structured_content
+    assert len(registry.calls) == 2
+    latest = registry.operations.get(request_id=REQUEST_ID)
+    assert latest["operation_id"] != failed_id and latest["state"] == "succeeded"
+    assert registry.operations.get(operation_id=failed_id)["state"] == "failed"
+
+
+def test_a_request_id_freed_by_a_failure_takes_other_arguments_too():
+    registry = Registry()
+    registry.failure = DomainError(
+        ErrorCode.NOT_CHECKED_OUT, "program is not checked out", details={"output_state": "absent"}
+    )
+    mcp = _server(registry)
+
+    async def scenario():
+        await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+        registry.failure = None
+        return await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID, atomic=False))
+
+    again = asyncio.run(scenario())
+    assert not again.is_error, "no REQUEST_ID_CONFLICT: the failed call no longer holds the request_id"
+    assert len(registry.calls) == 2
 
 
 def test_a_lock_timeout_does_not_name_its_own_request_as_the_holder():
@@ -145,19 +198,12 @@ def test_a_lock_timeout_does_not_name_its_own_request_as_the_holder():
     )
     mcp = _server(registry)
 
-    async def scenario():
-        reply = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
-        replay = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
-        return reply, replay
-
-    reply, replay = asyncio.run(scenario())
+    reply = asyncio.run(mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID)))
     assert reply.is_error
     error = reply.structured_content["error"]
     assert error["code"] == "LOCK_TIMEOUT" and error["retryable"] is True
     assert "operation_id" not in error["details"]
     assert registry.operations.get(request_id=REQUEST_ID)["state"] == "failed"
-    _assert_replay_of(replay, reply)
-    assert len(registry.calls) == 1
 
 
 def test_a_claimed_request_waiting_to_start_is_not_a_lock_holder():
@@ -479,6 +525,8 @@ def test_a_request_that_finds_every_slot_busy_can_be_sent_again():
         busy = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
         assert busy.structured_content["deferred"] is True
         refused = await mcp.call_tool("apply_edits", _edit(request_id=other))
+        # get_operation finds the refusal until the request_id is used again.
+        assert registry.operations.get(request_id=other)["operation_error"]["code"] == "OPERATION_QUEUE_FULL"
         registry.release.set()
         with anyio.fail_after(5):
             while registry.operations.is_pending(busy.structured_content["operation"]["operation_id"]):
@@ -518,4 +566,78 @@ def test_a_resend_whose_first_reply_was_dropped_gets_a_coded_error():
     assert error["details"]["output_state"] == "uncertain"
     operation = registry.operations.get(operation_id=error["details"]["operation_id"])
     assert (operation["state"], operation["result_discarded"]) == ("succeeded", True)
-    assert "get_operation" in error["hint"]
+    assert "succeeded" in error["message"] and "Inspect the program" in error["hint"]
+    # No other tool is needed to act on it (get_operation may be unpublished).
+    assert "get_operation" not in error["hint"]
+
+
+def test_a_resend_of_a_call_that_never_ran_still_gets_its_cancellation_after_the_drop():
+    registry = Registry()
+    registry.release = threading.Event()
+    registry.operations = OperationManager(Targets(), payload_limit_bytes=1)
+    mcp = _server(registry)
+    mcp.deferred_calls = DeferredCalls(defer_after=0.05, slots=1)
+
+    async def scenario():
+        # The only slot stays busy, so the next call waits for it and is cancelled there.
+        first = await mcp.call_tool("apply_edits", _edit())
+        assert first.structured_content["deferred"] is True
+        waiting = asyncio.ensure_future(mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID)))
+        await asyncio.sleep(0.02)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        registry.release.set()
+        await mcp.call_tool(
+            "get_operation", {"operation_id": first.structured_content["operation"]["operation_id"], "wait_seconds": 2}
+        )
+        return await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+
+    again = asyncio.run(scenario())
+    assert len(registry.calls) == 1, "the cancelled call never ran"
+    assert registry.operations.get(request_id=REQUEST_ID)["result_discarded"] is True
+    # Its record's error, not "it already ran": the documented way to retry is a new request_id.
+    error = again.structured_content["error"]
+    assert (error["code"], error["details"]["output_state"], error["details"]["cancelled"]) == (
+        "OPERATION_CANCELLED",
+        "absent",
+        True,
+    )
+    assert again.structured_content["replayed"] is True
+
+
+def test_a_request_id_refused_for_other_arguments_says_nothing_ran():
+    registry = Registry()
+    mcp = _server(registry)
+
+    async def scenario():
+        await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+        return await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID, atomic=False))
+
+    conflict = asyncio.run(scenario()).structured_content["error"]
+    assert (conflict["code"], conflict["details"]["output_state"]) == ("REQUEST_ID_CONFLICT", "absent")
+    assert len(registry.calls) == 1
+    # A program write is a call, not a job; the hint says how to send the new arguments.
+    assert "earlier call" in conflict["message"] and "job" not in conflict["message"]
+    assert "new request_id" in conflict["hint"]
+
+
+def test_a_resend_whose_record_is_gone_says_the_first_call_may_have_run(monkeypatch):
+    registry = Registry()
+    mcp = _server(registry)
+
+    async def scenario():
+        await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+
+        def evicted(operation_id):
+            raise DomainError(ErrorCode.OPERATION_NOT_FOUND, "No record in this server process")
+
+        monkeypatch.setattr(registry.operations, "handle", evicted)
+        return await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+
+    error = asyncio.run(scenario()).structured_content["error"]
+    assert (error["code"], error["retryable"], error["details"]["output_state"]) == (
+        "OPERATION_NOT_FOUND",
+        False,
+        "uncertain",
+    )

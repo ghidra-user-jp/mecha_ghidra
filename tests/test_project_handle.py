@@ -3001,3 +3001,18 @@ def test_program_session_second_close_raises_already_closed(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Session is already closed"):
         opened.close()
+
+
+def test_a_missing_domain_file_is_a_coded_program_not_found(monkeypatch):
+    """The code is what classifies it: the error mapping no longer reads the message."""
+    from ghidra_headless.errors import HeadlessError
+    from ghidra_mcp.domain import ErrorCode
+    from ghidra_mcp.domain.error_mapping import to_domain_error
+
+    handle = build_handle(monkeypatch)
+    monkeypatch.setattr(DummyProjectData, "getFile", lambda _self, _domain_path: None)
+    for missing in (lambda: handle._get_domain_file_locked("/gone"), lambda: handle.delete_domain_file("/gone")):
+        with pytest.raises(HeadlessError) as raised:
+            missing()
+        assert raised.value.code == "PROGRAM_NOT_FOUND" and "/gone" in str(raised.value)
+        assert to_domain_error(raised.value, operation="delete_shared_project_file").code is ErrorCode.PROGRAM_NOT_FOUND

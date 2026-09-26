@@ -21,7 +21,7 @@ def test_headless_error_extracts_its_code_from_the_message_prefix():
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        # Prefix classification must win over the "DomainFile" substring heuristic.
+        # The code prefix decides, whatever the rest of the message says.
         ("SAVE_FAILED: failed to save program before close: DomainFile is read-only", ErrorCode.SAVE_FAILED),
         ("SESSION_CLOSE_FAILED: failed to close project: DomainFile still in use", ErrorCode.SESSION_CLOSE_FAILED),
         ("PROJECT_ALREADY_EXISTS: /tmp/x.gpr", ErrorCode.PROJECT_ALREADY_EXISTS),
@@ -63,8 +63,8 @@ def test_to_domain_error_reads_no_code_from_the_text_of_an_uncoded_message():
     assert to_domain_error(ValueError("bad"), operation="rename_function").code is ErrorCode.VALIDATION_ERROR
 
 
-def test_structured_code_wins_over_message_text():
-    exc = HeadlessError("Program not found: DomainFile", code="SAVE_FAILED")
+def test_a_structured_code_decides_over_a_message_that_names_another():
+    exc = HeadlessError("PROGRAM_NOT_FOUND: Program not found: /main", code="SAVE_FAILED")
     classification = classify_runtime_error(exc)
     assert classification is not None and classification.code is ErrorCode.SAVE_FAILED
     assert to_domain_error(exc, operation="x").code is ErrorCode.SAVE_FAILED

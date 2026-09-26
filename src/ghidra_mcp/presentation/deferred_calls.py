@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import logging
 import math
 import threading
@@ -28,22 +29,20 @@ from ghidra_mcp.application.locks import CallLocks
 from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, OPERATION_WAIT_MAX_SECONDS
 from ghidra_mcp.domain import DomainError, ErrorCode
 
-from .error_mapper import map_exception
 from .operation_presentation import structured_error, structured_source, structured_value
 from .result_compaction import _json_text
 from .tool_binding import tool_error_result
 from .tool_errors import ToolError
-from .tool_registry import anticipated_error_result
-from .waiting import wait_until
+from .tool_registry import domain_error_result
 
 logger = logging.getLogger(__name__)
 
 # As many tool calls run at once as before, when they shared the default
 # thread limiter; a deferred call keeps its slot until it finishes.  A waiter
-# polls for one without reserving a worker thread: a cancelled waiter must
-# never acquire a slot later, after its request has gone away.  Waiters take
-# freed slots in arrival order, so under a steady overload the one refused
-# after its wait is never one that came before calls that ran.
+# waits on the event loop without reserving a worker thread: a cancelled
+# waiter must never acquire a slot later, after its request has gone away.
+# A freed slot goes at once to the oldest waiter, so under a steady overload
+# the one refused after its wait is never one that came before calls that ran.
 CALL_SLOTS = 40
 
 
@@ -130,9 +129,11 @@ class DeferredCalls:
         # Runs on the worker thread before the call (see GhidraMCPServer).
         self.prepare_thread = prepare_thread
         self._slots = threading.BoundedSemaphore(slots)
-        # Calls waiting for a slot, oldest first; only the first may take one.
-        # The event loop's thread alone touches it.
-        self._slot_waiters: collections.deque[object] = collections.deque()
+        # Calls waiting for a slot, oldest first; _dispatch hands them freed
+        # slots.  Only the event loop's thread touches it.
+        self._slot_waiters: collections.deque[asyncio.Future[None]] = collections.deque()
+        # The loop the waiters wait on, which a slot released on a worker thread wakes.
+        self._loop: asyncio.AbstractEventLoop | None = None
         # The slots bound the calls; this only keeps anyio's default limiter,
         # which the calls no longer share, from bounding them a second time.
         self._threads: anyio.CapacityLimiter | None = None
@@ -182,7 +183,7 @@ class DeferredCalls:
         if not acquired:
             return DeferredReply(_slots_busy(operations, name, claimed))
         already_waited += time.monotonic() - began
-        call = _Call(self._slots.release)
+        call = _Call(self._release_slot)
         call_locks = CallLocks()
         # None for a tool whose target is optional; the record needs a string.
         target = kwargs.get("target") or ""
@@ -234,17 +235,55 @@ class DeferredCalls:
         return DeferredReply(deferred_reply(name, target, record, self.defer_after))
 
     async def _acquire_slot(self, timeout: float) -> bool:
-        """Take an execution slot within ``timeout`` seconds, in arrival order; False if none came free."""
+        """Take an execution slot within ``timeout`` seconds, in arrival order; False if none came free.
+
+        A freed slot goes straight to the oldest waiter (``_release_slot``),
+        so nothing polls, and a slot never sits free while a call waits.
+        """
+        self._loop = asyncio.get_running_loop()
         if not self._slot_waiters and self._slots.acquire(blocking=False):
             return True
-        ticket = object()
-        self._slot_waiters.append(ticket)
+        waiter = self._loop.create_future()
+        self._slot_waiters.append(waiter)
+        granted = False
         try:
-            return await wait_until(
-                lambda: self._slot_waiters[0] is ticket and self._slots.acquire(blocking=False), timeout
-            )
+            # A slot may have come free since the last hand-out.
+            self._dispatch()
+            with anyio.move_on_after(max(0.0, timeout)):
+                await waiter
+                granted = True
+            return granted
         finally:
-            self._slot_waiters.remove(ticket)
+            if not granted:
+                if waiter.done() and not waiter.cancelled():
+                    # Handed a slot just as the wait ended: pass it on.
+                    self._release_slot()
+                else:
+                    waiter.cancel()
+                    with contextlib.suppress(ValueError):
+                        self._slot_waiters.remove(waiter)
+
+    def _release_slot(self) -> None:
+        """Give a slot back and hand it to the oldest waiter; any thread may call it."""
+        self._slots.release()
+        loop = self._loop
+        if loop is None:
+            return
+        with contextlib.suppress(RuntimeError):
+            # RuntimeError: that loop has closed, and nobody waits on it any more.
+            loop.call_soon_threadsafe(self._dispatch)
+
+    def _dispatch(self) -> None:
+        """Hand the free slots to the waiters, oldest first; on the event loop's thread."""
+        while self._slot_waiters:
+            waiter = self._slot_waiters[0]
+            if waiter.done():
+                self._slot_waiters.popleft()
+                continue
+            if not self._slots.acquire(blocking=False):
+                return
+            self._slot_waiters.popleft()
+            waiter.set_result(None)
 
 
 def _slots_busy(operations, name: str, claimed: dict[str, Any] | None) -> CallToolResult:
@@ -253,17 +292,14 @@ def _slots_busy(operations, name: str, claimed: dict[str, Any] | None) -> CallTo
     error = DomainError(
         code=ErrorCode.OPERATION_QUEUE_FULL,
         message=message,
-        hint="Running calls hold the slots (get_operation shows the deferred ones); send the call again later",
+        hint="Running tool calls hold every slot; send the call again later",
         retryable=True,
         details={"output_state": "absent"},
     )
-    result = anticipated_error_result(map_exception(error, fallback_message=message))
-    assert result is not None
+    result = domain_error_result(error, message=message)
     if claimed is not None:
-        # Nothing ran, so a resend with the request_id runs the call instead of getting this reply.
-        operations.finish_call(
-            claimed["operation_id"], error=structured_error(result), reply=_json_reply(result), forget_request=True
-        )
+        # Nothing ran, so a resend with the request_id runs the call instead of getting this reply (claim_call).
+        operations.finish_call(claimed["operation_id"], error=structured_error(result), reply=_json_reply(result))
     return result
 
 
@@ -278,8 +314,7 @@ def _cancel_before_start(operations, operation_id: str, name: str) -> None:
         hint="Nothing was executed. Use a new request_id to retry; resending this request_id returns this cancellation",
         details={"output_state": "absent", "cancelled": True},
     )
-    result = anticipated_error_result(map_exception(error, fallback_message=message))
-    assert result is not None
+    result = domain_error_result(error, message=message)
     operations.finish_call(operation_id, error=structured_error(result), reply=_json_reply(result))
 
 

@@ -21,8 +21,7 @@ from mcp.types import CallToolResult
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_utils import safe_cause_details, sanitize_cause_message
 
-from .error_mapper import map_exception
-from .tool_registry import anticipated_error_result
+from .tool_registry import domain_error_result
 from .waiting import POLL_SECONDS, wait_until
 
 logger = logging.getLogger(__name__)
@@ -107,10 +106,9 @@ def startup_failed_error(failure: StartupFailure) -> DomainError:
 def startup_error_result(error: DomainError) -> CallToolResult:
     """The tool result for a call the gate turned away, in the usual domain-error envelope."""
     # The generic LOCK_TIMEOUT wording names a lock; this wait is for Ghidra itself.
-    fallback = f"LOCK_TIMEOUT: {error.message}" if error.code is ErrorCode.LOCK_TIMEOUT else None
-    result = anticipated_error_result(map_exception(error, fallback_message=fallback))
-    assert result is not None
-    return result
+    return domain_error_result(
+        error, message=f"LOCK_TIMEOUT: {error.message}" if error.code is ErrorCode.LOCK_TIMEOUT else None
+    )
 
 
 @dataclass(frozen=True, slots=True)

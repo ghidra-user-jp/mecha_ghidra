@@ -252,6 +252,19 @@ def _is_lock_timeout(exc: BaseException) -> bool:
     return isinstance(exc, DomainError) and exc.code == ErrorCode.LOCK_TIMEOUT
 
 
+def _failed_leaving_nothing(record: _Operation) -> bool:
+    """Whether a tool call failed without changing anything, so that its request_id no longer holds it.
+
+    A cancellation still does: a late copy of the request must not run what
+    the client cancelled.  So does a job: a script may change more than the
+    program its output_state speaks for.
+    """
+    error = record.snapshot["operation_error"] if record.snapshot["state"] == "failed" else None
+    if not record.deferred or not error or error.get("code") == ErrorCode.OPERATION_CANCELLED.value:
+        return False
+    return (error.get("details") or {}).get("output_state") == ABSENT
+
+
 def _call_quietly(callback: Callable[[], None]) -> None:
     try:
         callback()
@@ -484,11 +497,17 @@ class OperationManager:
                 raise self._error(
                     ErrorCode.VALIDATION_ERROR,
                     "A tool call cannot be cancelled, only a job; wait for it with get_operation",
+                    hint="get_operation with details.operation_id waits for the call to finish",
                     operation_id=operation_id,
                 )
             state = record.snapshot["state"]
             if state not in PENDING_STATES:
-                raise self._error(ErrorCode.VALIDATION_ERROR, "The job has already finished", operation_id=operation_id)
+                raise self._error(
+                    ErrorCode.VALIDATION_ERROR,
+                    "The job has already finished",
+                    hint="Nothing is left to cancel: get_operation with details.operation_id shows how the job ended",
+                    operation_id=operation_id,
+                )
             if not record.cancel_requested:
                 record.cancel_reason = "client"
             if not record.executing:
@@ -580,9 +599,12 @@ class OperationManager:
         A resend with the same request_id and arguments gets the first call's
         record, running or finished, instead of a new one: the caller replies
         with that call's outcome and does not run the tool again.  Other
-        arguments with the request_id fail with REQUEST_ID_CONFLICT.  Like a
-        deferred call, the record is kept in memory only.  The handle is the
-        record without its result (see ``handle``).
+        arguments with the request_id fail with REQUEST_ID_CONFLICT.  A call
+        that failed without changing anything (``output_state`` absent) no
+        longer holds its request_id, unless it was cancelled: the next call
+        with it runs, and ``get_operation`` finds that one.  Like a deferred
+        call, the record is kept in memory only.  The handle is the record
+        without its result (see ``handle``).
         """
         try:
             request_id = canonical_uuid(request_id)
@@ -592,7 +614,7 @@ class OperationManager:
         project_key = self._project_key_of(target)
         with self._lock:
             known = self._requests.get(request_id)
-            if known is not None:
+            if known is not None and not _failed_leaving_nothing(self._records[known]):
                 record = self._records[known]
                 if record.fingerprint != fingerprint:
                     raise self._error(
@@ -640,15 +662,13 @@ class OperationManager:
         error: dict[str, Any] | None = None,
         reply: dict[str, Any] | None = None,
         source: dict[str, Any] | None = None,
-        forget_request: bool = False,
     ) -> None:
         """Store what a tool call returned: its result, or the error the tool reported.
 
         ``reply`` is the whole reply as JSON.  Only a call sent with a
         request_id keeps it, to answer a resend exactly as the first time.
         ``source`` is the program state a core command's reply named; the
-        record keeps it beside the result.  ``forget_request`` frees the
-        request_id for a new call, for a call that never ran.
+        record keeps it beside the result.
         """
         size = _payload_size(result) + _payload_size(error) + _payload_size(source)
         reply_size = _payload_size(reply)
@@ -670,11 +690,6 @@ class OperationManager:
             )
             if source is not None and error is None:
                 record.snapshot["source"] = source
-            if forget_request:
-                # A resend already waiting still gets this reply; later ones run the call.
-                for request_id in record.request_ids:
-                    if self._requests.get(request_id) == operation_id:
-                        del self._requests[request_id]
             self._keep_payload_locked(record, size)
             self._release_locked(record)
             self._changed.notify_all()
@@ -725,9 +740,15 @@ class OperationManager:
 
     # -- admission helpers ------------------------------------------------------
 
-    def _error(self, code: ErrorCode, message: str, *, retryable: bool = False, **details: Any) -> DomainError:
+    def _error(
+        self, code: ErrorCode, message: str, *, retryable: bool = False, hint: str | None = None, **details: Any
+    ) -> DomainError:
         return DomainError(
-            code, message, retryable=retryable, details={"server_instance_id": self.server_instance_id, **details}
+            code,
+            message,
+            hint=hint,
+            retryable=retryable,
+            details={"server_instance_id": self.server_instance_id, **details},
         )
 
     def _payload(self, exc: BaseException, kind: str) -> dict[str, Any]:
@@ -801,7 +822,7 @@ class OperationManager:
             return None
         record = self._records[operation_id]
         if fingerprint != record.fingerprint:
-            raise self._error(ErrorCode.REQUEST_ID_CONFLICT, "request_id already identifies different job arguments")
+            raise self._error(ErrorCode.REQUEST_ID_CONFLICT, "request_id already identifies a job with other arguments")
         return self._response_locked(record, replayed=True)
 
     def _join_holder_locked(self, holder_id: str, request_id: str | None, fingerprint: str) -> dict[str, Any]:

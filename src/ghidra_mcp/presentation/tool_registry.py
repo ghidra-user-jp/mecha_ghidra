@@ -18,7 +18,9 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSafetyTag,
     ToolSpec,
 )
+from ghidra_mcp.domain import DomainError
 from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentationConfig
+from ghidra_mcp.presentation.error_mapper import map_exception
 from ghidra_mcp.presentation.tool_binding import error_envelope
 from ghidra_mcp.presentation.tool_errors import ToolError
 
@@ -308,7 +310,7 @@ def tool_annotations_for_spec(spec: ToolSpec) -> ToolAnnotations:
     MCP's defaults for an unset hint are a destructive, non-idempotent tool
     that reaches outside systems.
     """
-    read_only = spec.safety_tag == ToolSafetyTag.READ_ONLY
+    read_only = not spec.writes
     idempotent_hint = spec.idempotent_hint
     if idempotent_hint is None and read_only:
         # A read-only tool is idempotent by definition; clients treat an
@@ -328,7 +330,7 @@ def _reaches_outside(spec: ToolSpec) -> bool:
     """The BSim database, the Ghidra Server, or whatever a script's code touches; else the local project."""
     if spec.category_tag in {ToolCategoryTag.BSIM, ToolCategoryTag.SHARED_SYNC}:
         return True
-    return spec.category_tag == ToolCategoryTag.SCRIPTS and spec.safety_tag != ToolSafetyTag.READ_ONLY
+    return spec.category_tag == ToolCategoryTag.SCRIPTS and spec.writes
 
 
 def anticipated_error_result(exc: BaseException) -> CallToolResult | None:
@@ -338,6 +340,13 @@ def anticipated_error_result(exc: BaseException) -> CallToolResult | None:
     if payload is None:
         return None
     return error_envelope({"message": str(exc), **payload})
+
+
+def domain_error_result(error: DomainError, *, message: str | None = None) -> CallToolResult:
+    """The reply for a DomainError the server raises itself; ``message`` replaces its code's public text."""
+    result = anticipated_error_result(map_exception(error, fallback_message=message))
+    assert result is not None  # map_exception gives every DomainError its domain_error payload
+    return result
 
 
 def as_anticipated_tool_failure(

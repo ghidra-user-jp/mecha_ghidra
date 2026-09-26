@@ -390,3 +390,32 @@ def test_a_batch_reply_is_one_block_even_where_program_tools_name_their_source()
     result, payload = call(runtime, requests=[request()])
     assert not result.is_error and len(result.content) == 1
     assert "source" not in result.structured_content and payload["status"] == "ok"
+
+
+def test_a_child_tool_the_server_does_not_publish_is_a_validation_error():
+    registry = Registry()
+    specs = {name: spec for name, spec in get_all_tool_specs().items() if name in {"batch_read", "get_function"}}
+    # The input schema lists every batch child; the server publishes only get_function.
+    arguments = {"requests": [request(tool="decompile_function", arguments={"name": "main"})]}
+    result = asyncio.run(
+        server(registry, specs=specs).mcp.handle_call_tool(
+            None, CallToolRequestParams(name="batch_read", arguments=arguments)
+        )
+    )
+    assert result.is_error and not registry.calls
+    error = result.structured_content["error"]
+    assert (error["code"], error["retryable"]) == ("VALIDATION_ERROR", False)
+    assert "decompile_function" in error["message"] and error["hint"]
+
+
+def test_an_inline_batch_over_its_budget_is_a_validation_error():
+    registry = Registry(lambda _tool, _args: {"name": "x" * 5000})
+    arguments = {"requests": [request()], "max_output_chars": 1000}
+    result = asyncio.run(
+        server(registry, config=ToolPresentationConfig(large_result_mode="inline")).mcp.handle_call_tool(
+            None, CallToolRequestParams(name="batch_read", arguments=arguments)
+        )
+    )
+    error = result.structured_content["error"]
+    assert result.is_error and (error["code"], error["retryable"]) == ("VALIDATION_ERROR", False)
+    assert "max_output_chars" in error["message"]
