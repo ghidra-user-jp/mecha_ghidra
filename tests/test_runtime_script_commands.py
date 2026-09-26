@@ -19,6 +19,7 @@ import jpype
 import pyghidra
 import pytest
 
+from binary_fixtures import GHIDRA_EXERCISE_PE
 from cli_support import ToolHarness, import_and_wait, run_script_and_wait
 from ghidra_headless.launcher import start_headless_jvm
 from ghidra_mcp import cli
@@ -34,9 +35,6 @@ pytestmark = pytest.mark.skipif(
     not RUNTIME_VALIDATION_ENABLED,
     reason="Run only when GHIDRA_RUNTIME_VALIDATION=1",
 )
-
-ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_BINARY = ROOT / "samples" / "hello.bin"
 
 
 def _cross_runtime_source(runtime, name, body):
@@ -452,7 +450,7 @@ def _plate(target: str, address: str):
 
 def _load_sample(target: str, project_dir: Path, project_name: str) -> str:
     cli_tools.register_target(target=target, project_location=str(project_dir), project_name=project_name)
-    imported = import_and_wait(cli_tools, target=target, binary_path=str(SAMPLE_BINARY))
+    imported = import_and_wait(cli_tools, target=target, binary_path=str(GHIDRA_EXERCISE_PE))
     domain_path = imported["program"]
     cli_tools.load_project_program(target=target, domain_path=domain_path)
     return domain_path

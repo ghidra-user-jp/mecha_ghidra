@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
+from binary_fixtures import GHIDRA_EXERCISE_PE
 from cli_support import import_and_wait
 from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.contracts.tool_spec import get_all_tool_specs, get_checkout_required_tool_names
@@ -204,11 +204,10 @@ def test_runtime_auto_import_uses_public_loader_and_releases_results(runtime, mo
             return Results(self.delegate.load())
 
     monkeypatch.setattr(pyghidra, "program_loader", Builder)
-    sample = Path(__file__).resolve().parents[1] / "samples" / "hello.bin"
     imported = import_and_wait(
-        runtime, target="resource_safety", binary_path=str(sample), analyze_imported=analyze_imported
+        runtime, target="resource_safety", binary_path=str(GHIDRA_EXERCISE_PE), analyze_imported=analyze_imported
     )
-    assert imported["program"] == "/hello.bin"
+    assert imported["program"] == "/WinHelloCPP.exe"
     assert len(loaded_programs) == len(closed_results) == 1
     assert detected_formats[0] and detected_formats[0] != "Raw Binary"
     assert loaded_programs[0].isClosed(), "the loader must release its program before a subsequent open"
@@ -216,7 +215,7 @@ def test_runtime_auto_import_uses_public_loader_and_releases_results(runtime, mo
     for _ in range(2):
         runtime["load_project_program"](target="resource_safety", domain_path=imported["program"])
         program = core_runtime._CONTEXTS["resource_safety"].program
-        assert str(program.getName()) == "hello.bin"
+        assert str(program.getName()) == "WinHelloCPP.exe"
         assert str(program.getExecutableFormat()) == detected_formats[0]
         assert int(program.getMemory().getSize()) > 0
         assert program.getCurrentTransactionInfo() is None

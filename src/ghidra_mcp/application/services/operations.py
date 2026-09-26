@@ -27,6 +27,7 @@ from typing import Any
 from uuid import uuid4
 
 from ghidra_mcp.application.locks import CallLocks
+from ghidra_mcp.application.services.job_admission import admission_commit
 from ghidra_mcp.application.services.target_service import TargetService
 from ghidra_mcp.domain import DomainError, ErrorCode, get_lock_timeout_seconds
 from ghidra_mcp.domain.error_mapping import to_domain_error
@@ -777,25 +778,25 @@ class OperationManager:
         if request_id is not None:
             # A replay touches neither the filesystem nor the target registry,
             # so it works after the input disappears or the target changes.
-            with self._lock:
+            with self._lock, admission_commit() as accept:
                 replay = self._replay_locked(request_id, fingerprint)
-            if replay is not None:
-                return replay
+                if replay is not None:
+                    return accept(replay)
         if _REPLAY_ONLY.get():
             raise ReplayMissed
         resource, reservation, arguments = resolve(fingerprint)
-        with self._lock:
+        with self._lock, admission_commit() as accept:
             if request_id is not None:
                 replay = self._replay_locked(request_id, fingerprint)
                 if replay is not None:
-                    return replay
+                    return accept(replay)
             if self._stopping or self._broken:
                 raise self._error(ErrorCode.OPERATION_WORKER_UNAVAILABLE, "Job worker is stopping or unavailable")
             holder_id = self._reservations.get(reservation)
             # A job being cancelled takes nobody along: another analysis or
             # script queues behind it, and an import waits (_join_holder_locked).
             if holder_id is not None and (kind == IMPORT or not self._records[holder_id].cancel_requested):
-                return self._join_holder_locked(holder_id, request_id, fingerprint)
+                return accept(self._join_holder_locked(holder_id, request_id, fingerprint))
             record = self._new_record(kind, target, request_id, arguments, fingerprint, resource, reservation)
             operation_id = record.snapshot["operation_id"]
             if self._thread is None:
@@ -814,7 +815,7 @@ class OperationManager:
             if request_id is not None:
                 self._requests[request_id] = operation_id
                 record.request_ids.append(request_id)
-            return self._response_locked(record, replayed=False)
+            return accept(self._response_locked(record, replayed=False))
 
     def _replay_locked(self, request_id: str, fingerprint: str) -> dict[str, Any] | None:
         operation_id = self._requests.get(request_id)

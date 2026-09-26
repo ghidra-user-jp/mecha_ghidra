@@ -223,7 +223,8 @@ DEFER_AFTER_SECONDS = 40.0
 JOB_TOOLS = ("import_program", "analyze_program", "run_script")
 OPERATION_CONTROL_TOOLS = frozenset({"get_operation", "cancel_operation"})
 _OPERATION_WAIT_DESCRIPTION = (
-    "Seconds the server waits for the job to finish before replying (0 replies at once). "
+    "Response wait budget in seconds, including startup and admission. "
+    "0 skips waiting for completion (admission still has a 40-second deadline). "
     "Replies early when the job succeeds or fails."
 )
 _OPERATION_STATE = Literal["queued", "running", "succeeded", "failed"]

@@ -180,7 +180,7 @@ Streamable HTTPの接続先は `http://127.0.0.1:8081/mcp` です。設定方法
 
 どの呼び出しも、クライアントを待たせるのは最大で約50秒です。多くのクライアントやプロキシが呼び出しに設ける60秒の期限（HTTPで接続したClaude Codeなど）の内側で返ります。
 
-- `import_program`・`analyze_program`・`run_script`はバックグラウンドのジョブです。`wait_seconds`以内にジョブの記録を返し、1件ずつ実行されます。
+- `import_program`・`analyze_program`・`run_script`はバックグラウンドのジョブです。起動待ち、受付（受付用スレッドの空き待ちを含む）、完了待ちは、共通の`wait_seconds`の期限内で行います。`wait_seconds=0`では受付の期限を40秒とし、完了は待ちません。受付の期限を超えた場合は`LOCK_TIMEOUT`（`details.lock: admission`、`output_state: absent`）を返し、その要求から後でジョブが始まることはありません。同じ要求を再送できます。期限を迎える前に受付が完了していた場合は、そのジョブの記録を返します。受付済みのジョブは1件ずつ実行されます。
 - それ以外の呼び出しは、40秒たっても終わらなければ、`deferred: true`と`operation`のジョブの記録を返し、サーバー上で処理を続けます。結果は`operation.operation_id`で`get_operation`を呼んで受け取ります。`result`にはそのツールが返すはずだった値がそのまま入り（プログラムを扱うツールなら横に`source`も入ります）、失敗なら`operation_error`にそのツールのエラーが入ります。1件も読めなかった`batch_read`は、各項目のエラーを含む結果全体を`operation_error.result`に残します。同じツールを呼び直すと2回実行されるので、呼び直さないでください。40秒以内に終わる呼び出しの応答は今までどおりです。
 - 同時に実行する呼び出しは40件までで、空いた実行枠は待っている呼び出しに到着順に渡します。その40秒のうちに空きの実行枠を得られなかった呼び出しは実行されず、再試行可能な`OPERATION_QUEUE_FULL`（`output_state: absent`）になります。`request_id`がある場合は、同じIDで送り直せば実行されます。
 - Ghidraの起動中に届いた呼び出しも、起動を待つのは最大40秒で、その後は再試行可能な`LOCK_TIMEOUT`になります。

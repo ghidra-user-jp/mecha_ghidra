@@ -7,12 +7,12 @@ import os
 import threading
 import time
 from dataclasses import replace
-from pathlib import Path
 from uuid import uuid4
 
 import anyio
 import pytest
 
+from binary_fixtures import GHIDRA_EXERCISE_PE
 from cli_support import analyze_and_wait, import_and_wait
 from test_runtime_import_lifecycle import bundle as _bundle
 
@@ -20,22 +20,12 @@ bundle = _bundle
 pytestmark = pytest.mark.skipif(os.environ.get("GHIDRA_RUNTIME_VALIDATION") != "1", reason="requires real Ghidra")
 
 
-def _exercise_pe() -> Path:
-    """The Windows program of Ghidra's own class exercises: benign, and shipped with every release."""
-    from ghidra.framework import Application
-
-    install_dir = Path(str(Application.getInstallationDirectory().getAbsolutePath()))
-    return install_dir / "docs" / "GhidraClass" / "ExerciseFiles" / "WinhelloCPP" / "WinHelloCPP.exe"
-
-
 def test_analyzed_pe_result_survives_lost_receipt_and_long_analysis(bundle, tmp_path, monkeypatch):
     from ghidra.app.util.opinion import PeLoader
 
     from ghidra_headless.session import ProjectHandle
 
-    pe_path = _exercise_pe()
-    if not pe_path.is_file():
-        pytest.skip(f"this Ghidra install has no class exercise files: {pe_path}")
+    pe_path = GHIDRA_EXERCISE_PE
     hold_seconds = float(os.environ.get("GHIDRA_IMPORT_GATE_SECONDS", "0"))
     assert 0 <= hold_seconds <= 600
     entered, release = threading.Event(), threading.Event()

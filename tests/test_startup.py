@@ -294,6 +294,7 @@ def test_the_startup_wait_counts_against_the_deferral_and_job_waits():
 
     async def job_wait(**kwargs):
         seen["wait_seconds"] = kwargs["wait_seconds"]
+        seen["remaining"] = kwargs["_deadline"] - time.monotonic()
         return {"operation_id": "op", "state": "succeeded"}
 
     server.deferred_calls.run = deferred_run
@@ -319,7 +320,8 @@ def test_the_startup_wait_counts_against_the_deferral_and_job_waits():
             _later(1.2, gate.mark_ready)
             await client.call_tool("get_operation", {"operation_id": "op", "wait_seconds": 10})
             # The reply still comes within the 10 seconds the caller asked for.
-            assert seen["wait_seconds"] == 8
+            assert seen["wait_seconds"] == 10
+            assert 0 < seen["remaining"] <= 8.8
 
     asyncio.run(check_job())
 

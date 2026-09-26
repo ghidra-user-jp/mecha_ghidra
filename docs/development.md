@@ -82,9 +82,11 @@ uv run pytest \
 
 `/bin/ls` is a macOS/Linux example; provide a suitable binary on other hosts. Use disposable test projects for mutating validation. A running MCP server or GUI must not have the same local test project open.
 
+`tests/test_runtime_resource_safety.py` and `tests/test_runtime_script_commands.py` use Ghidra's benign exercise PE bundled in [`tests/fixtures/ghidra`](../tests/fixtures/ghidra/README.md). They need neither `GHIDRA_RUNTIME_BINARY_PATH` nor files under the Git-ignored `samples/` directory, so a fresh clone or worktree does not require copying local samples. The ordinary test suite checks the bundled file's SHA-256 even when real-runtime validation is disabled.
+
 With the same runtime flag, `tests/test_runtime_mcp_transport.py` launches the real CLI in separate processes over stdio and localhost Streamable HTTP. It creates disposable projects and a tiny raw binary, so it does not require `GHIDRA_RUNTIME_BINARY_PATH`. It verifies schemas, mutations, rollback, and large-result retrieval, plus direct HTTP calls without initialization, responses without session IDs, and resource retrieval from a fresh connection.
 
-`tests/test_runtime_import_operations.py` imports `WinHelloCPP.exe`, a benign 32-bit PE that Ghidra ships for its class exercises (`docs/GhidraClass/ExerciseFiles/WinhelloCPP/` in the installation), so it needs no sample of your own. Set `GHIDRA_IMPORT_GATE_SECONDS=305` to hold that import's analysis for longer than a 300-second client timeout; the default is 0.
+`tests/test_runtime_import_operations.py` imports the same bundled `WinHelloCPP.exe`, so it needs no sample of your own. Set `GHIDRA_IMPORT_GATE_SECONDS=305` to hold that import's analysis for longer than a 300-second client timeout; the default is 0.
 
 To include Jython, install the Jython extension matching your Ghidra version and set both `GHIDRA_RUNTIME_VALIDATION=1` and `GHIDRA_JYTHON_RUNTIME_VALIDATION=1` when running `tests/test_runtime_script_commands.py` and `tests/test_runtime_mcp_transport.py`. The additional flag fails validation if Jython is unavailable and enables Jython cases over both stdio and HTTP. For isolation, use Java's `-Dapplication.settingsdir=...` setting and install the extension under that settings area's Ghidra extension directory.
 

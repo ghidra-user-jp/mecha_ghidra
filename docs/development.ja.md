@@ -82,9 +82,11 @@ uv run pytest \
 
 `/bin/ls` はmacOS/Linuxの例です。ほかの環境では適切なバイナリを指定してください。変更系の検証にはテスト専用のプロジェクトを使います。起動中のMCPサーバーやGUIと同じローカルプロジェクトを開かないでください。
 
+`tests/test_runtime_resource_safety.py` と `tests/test_runtime_script_commands.py` は、[`tests/fixtures/ghidra`](../tests/fixtures/ghidra/README.md) に同梱したGhidraの無害な演習用PEを使います。`GHIDRA_RUNTIME_BINARY_PATH` やGit管理外の `samples/` は不要で、新しいcloneやworktreeへローカルの検体をコピーする必要はありません。実機検証を無効にした通常のテストでも、同梱ファイルのSHA-256を確認します。
+
 `tests/test_runtime_mcp_transport.py` は同じ実機フラグで、実際のCLIを別プロセスとして起動し、stdioとlocalhostのStreamable HTTPを検証します。専用プロジェクトと小さなraw binaryを自動生成するため、`GHIDRA_RUNTIME_BINARY_PATH` は不要です。入出力スキーマ、変更とロールバック、大きな結果の取得に加え、HTTPの初期化なしの呼び出し・セッションIDなしの応答・別接続からのリソース取得を確認します。
 
-`tests/test_runtime_import_operations.py` は、Ghidraが演習用に配布している無害な32ビットのPE `WinHelloCPP.exe`（インストール先の `docs/GhidraClass/ExerciseFiles/WinhelloCPP/`）をインポートします。検体を用意する必要はありません。`GHIDRA_IMPORT_GATE_SECONDS=305` を指定すると、クライアントの300秒のタイムアウトより長く、そのインポートの解析を止めておきます。既定値は0です。
+`tests/test_runtime_import_operations.py` も同梱した `WinHelloCPP.exe` をインポートします。検体を用意する必要はありません。`GHIDRA_IMPORT_GATE_SECONDS=305` を指定すると、クライアントの300秒のタイムアウトより長く、そのインポートの解析を止めておきます。既定値は0です。
 
 Jythonまで検証する場合は、使用するGhidraと同じバージョンのJython拡張を導入し、`GHIDRA_RUNTIME_VALIDATION=1`に加えて`GHIDRA_JYTHON_RUNTIME_VALIDATION=1`を指定して、`tests/test_runtime_script_commands.py`と`tests/test_runtime_mcp_transport.py`を実行します。この追加フラグではJythonが未導入なら失敗にし、MCPのstdio／HTTPにもJythonのケースを追加します。通常のGhidra設定から分離する場合は、Javaの`-Dapplication.settingsdir=...`で専用の設定領域を使い、その領域のGhidra拡張ディレクトリへインストールします。
 

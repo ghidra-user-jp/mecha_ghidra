@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
 import hashlib
@@ -10,6 +11,7 @@ import inspect
 import json
 import logging
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -35,8 +37,10 @@ from mcp.types import (
 )
 from pydantic import ValidationError
 
+from ghidra_mcp.application.services.job_admission import JobAdmission
 from ghidra_mcp.application.services.operations import PENDING_STATES, ReplayMissed, replay_only
 from ghidra_mcp.contracts.tool_spec import (
+    DEFER_AFTER_SECONDS,
     OPERATION_CONTROL_TOOLS,
     ExecutorKind,
     ToolSpec,
@@ -178,22 +182,28 @@ class GhidraMCPServer(Server):
         except ValidationError as exc:
             raise ToolInputError(f"{name} input validation failed: {exc}", write=writes) from exc
         kwargs = parsed.model_dump()
+        is_operation = spec is not None and spec.presenter == "operation"
+        deadline = (
+            time.monotonic() + (kwargs.get("wait_seconds") or self.deferred_calls.defer_after) if is_operation else None
+        )
         waited = 0.0
         if self.startup_gate is not None:
             try:
                 # Within the deferral budget: a reply must come before client call timers end.
-                waited = await self.startup_gate.wait(min(get_lock_timeout_seconds(), self.deferred_calls.defer_after))
+                startup_wait = min(get_lock_timeout_seconds(), self.deferred_calls.defer_after)
+                if deadline is not None:
+                    startup_wait = min(startup_wait, max(0.0, deadline - time.monotonic()))
+                waited = await self.startup_gate.wait(startup_wait)
             except DomainError as exc:
                 return self.complete_result(name, kwargs, startup_error_result(self._refused(name, exc)))
-            if waited and "wait_seconds" in kwargs:
-                # Time spent waiting for Ghidra counts against the job wait, so a
-                # reply still comes within the usual bound.
-                kwargs["wait_seconds"] = max(0, int(kwargs["wait_seconds"] - waited))
         operations = self.operations_provider() if self.operations_provider is not None else None
         if name in self.replaying and kwargs.get("request_id") is not None and operations is not None:
             return await self._call_once(name, binding, kwargs, operations, waited)
         if inspect.iscoroutinefunction(binding.function):
-            value = await binding.function(**kwargs)
+            if is_operation:
+                value = await binding.function(_deadline=deadline, **kwargs)
+            else:
+                value = await binding.function(**kwargs)
         elif name in self.deferrable and operations is not None:
             value = await self.deferred_calls.run(
                 name,
@@ -622,18 +632,54 @@ def _prepared(prepare: Callable[[], None] | None, function: Callable[..., Any], 
 _ADMIT = object()
 
 
+async def _admit_until(entry, immediate, manager, limiter, prepare_thread, deadline):
+    admission = JobAdmission(deadline)
+
+    def run():
+        # If the request times out while storage is slow, shutdown must still
+        # wait for that thread before releasing the services it is using.
+        with manager.tracked_call() if manager is not None else contextlib.nullcontext():
+            try:
+                return admission.run(partial(_prepared, prepare_thread, entry, immediate))
+            except DomainError as exc:
+                # A worker that gets its thread at the deadline can refuse
+                # before entry's usual domain-error wrapper is entered.
+                return domain_error_result(exc)
+
+    # A timed-out request leaves the running worker owning its limiter token.
+    # Abandoning run_sync itself would free it while the thread still runs.
+    task = asyncio.ensure_future(anyio.to_thread.run_sync(run, limiter=limiter))
+
+    def consume(done):
+        if not done.cancelled():
+            done.exception()
+
+    task.add_done_callback(consume)
+    with anyio.move_on_after(max(0.0, deadline - time.monotonic())):
+        return await asyncio.shield(task)
+    started, receipt = admission.expire()
+    if not started:
+        # Still waiting for an admission thread: do not keep a queued task.
+        task.cancel()
+    if receipt is not None:
+        return receipt
+    error = admission.timeout_error()
+    return domain_error_result(error, message=f"LOCK_TIMEOUT: {error.message}")
+
+
 def _operation_binding(entry, name, registry_provider, admission_limiter, prepare_thread=None) -> Callable[..., Any]:
     """Async entry for the background-job tools.
 
-    New admission may resolve paths on slow storage, so it runs on its own
-    small thread limiter; lookups, cancellations and replays of an accepted
-    request_id run inline. The server-side wait happens here, on the event
-    loop, without holding a thread: the synchronous entry is always called
-    with wait_seconds=0. The job itself is owned by the job worker.
+    Admission, startup and the job wait share one response deadline. New
+    admission may resolve paths on slow storage, so it runs on its own small
+    thread limiter; lookups, cancellations and replays of an accepted request_id
+    run inline. The synchronous entry is always called with wait_seconds=0;
+    the remaining wait happens on the event loop, holding no thread.
     """
 
-    async def control(**kwargs):
+    async def control(*, _deadline=None, **kwargs):
         wait_seconds = kwargs.get("wait_seconds") or 0
+        deadline = _deadline if _deadline is not None else time.monotonic() + (wait_seconds or DEFER_AFTER_SECONDS)
         # cancel_operation takes no wait.
         immediate = {**kwargs, "wait_seconds": 0} if "wait_seconds" in kwargs else dict(kwargs)
         manager = getattr(registry_provider(), "operations", None)
@@ -650,19 +696,13 @@ def _operation_binding(entry, name, registry_provider, admission_limiter, prepar
             with contextlib.suppress(ReplayMissed), replay_only():
                 value = entry(**immediate)
         if value is _ADMIT:
-            # Shielded: once the request arrived, admission finishes even if the
-            # client gives up, so the job is either accepted or refused, never
-            # half-way; a lost reply is recovered by resending or by request_id.
-            with anyio.CancelScope(shield=True):
-                value = await anyio.to_thread.run_sync(
-                    partial(_prepared, prepare_thread, entry, immediate), limiter=admission_limiter
-                )
+            value = await _admit_until(entry, immediate, manager, admission_limiter, prepare_thread, deadline)
         if manager is None or wait_seconds <= 0 or not isinstance(value, dict):
             return value
         if value.get("state") not in PENDING_STATES:
             return value
         operation_id = value["operation_id"]
-        await wait_while_pending(manager, operation_id, wait_seconds)
+        await wait_while_pending(manager, operation_id, max(0.0, deadline - time.monotonic()))
         try:
             latest = manager.wait_for(operation_id, 0)
         except DomainError:
