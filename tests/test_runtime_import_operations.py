@@ -255,3 +255,16 @@ def test_shutdown_cancels_an_analysis_job_and_rolls_the_analysis_back(bundle, tm
     options = program.getOptions("Program Information")
     assert not (options.contains("Analyzed") and options.getBoolean("Analyzed", False))
     assert not bundle.runtime_backend._store.is_dirty_program("cancel", program_path)
+
+
+def test_an_unanalyzed_gzf_is_analyzed_when_imported(bundle, tmp_path):
+    """GzfLoader leaves Ghidra's ask-to-analyze flag off; the Analyzed mark decides, so the import analyzes it."""
+    api = bundle.runtime.tools
+    _load_unanalyzed(api, tmp_path, "gzf_source")
+    archive = tmp_path / "unanalyzed.gzf"
+    api["export_program"](target="gzf_source", output_path=str(archive), format="gzf")
+    api["create_project"](project_location=str(tmp_path), project_name="gzf_target")
+    api["register_target"](target="gzf_target", project_location=str(tmp_path), project_name="gzf_target")
+    imported = import_and_wait(api, target="gzf_target", binary_path=str(archive))
+    loaded = api["load_project_program"](target="gzf_target", domain_path=imported["program"])
+    assert loaded["is_analyzed"] is True

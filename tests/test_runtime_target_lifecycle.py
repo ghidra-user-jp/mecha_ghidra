@@ -12,6 +12,7 @@ from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.target_lifecycle import RuntimeTargetLifecycle
+from job_control import JobControl
 from runtime_fakes import FakeDomainFile as _FakeDomainFile
 from runtime_fakes import FakeProgram as _FakeProgram
 
@@ -133,6 +134,13 @@ class _ClosingFakeSession(_FakeSession):
         self._handle = None
 
 
+class _FakeMonitor:
+    cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
 class _FakeProjectHandle:
     metadata_programs = None
     repository_backed = False
@@ -207,6 +215,10 @@ class _FakeProjectHandle:
     def import_program(self, binary_path: str, **kwargs):
         self.import_calls.append({"binary_path": binary_path, **kwargs})
         return _FakeDomainFile("/imported.bin")
+
+    @staticmethod
+    def create_cancellable_monitor():
+        return _FakeMonitor()
 
     def list_programs(self):
         return list(self._programs)
@@ -498,7 +510,7 @@ def test_create_project_allows_overwrite_with_only_closed_stale_handle(
     assert result["overwritten"] is True
 
 
-def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.MonkeyPatch):
+def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.MonkeyPatch, tmp_path):
     lifecycle, store, core = _build_target_lifecycle(monkeypatch)
 
     registered = lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
@@ -516,23 +528,31 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
     assert handle.analyze_calls == []
     assert handle.save_calls == []
 
+    binary = tmp_path / "binary.exe"
+    binary.write_bytes(b"MZ")
+    control = JobControl()
     imported = lifecycle.import_program(
         "fw",
-        "/tmp/binary.exe",
+        str(binary),
+        control=control,
         import_mode="raw_binary",
         language_id="x86:LE:32:default",
         entry_offset=0,
     )
     assert imported == "/imported.bin"
     assert lifecycle.list_programs("fw") == [{"path": "/main"}]
+    monitor = handle.import_calls[0].pop("monitor")
     assert handle.import_calls == [
         {
-            "binary_path": "/tmp/binary.exe",
+            "binary_path": str(binary),
             "import_mode": "raw_binary",
             "language_id": "x86:LE:32:default",
             "entry_offset": 0,
         }
     ]
+    # The job checked in, began and could cancel through the handle's monitor until the import ended.
+    assert control.checked == 1 and control.begun and control.cancel is None
+    assert isinstance(monitor, _FakeMonitor)
 
     lifecycle.close_session("fw", remove_program=True)
     assert "fw" not in store.sessions
@@ -543,22 +563,25 @@ def test_target_lifecycle_register_create_import_and_close(monkeypatch: pytest.M
 
 def test_target_lifecycle_import_close_failure_exposes_imported_domain_path(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
     lifecycle, _store, _core = _build_target_lifecycle(
         monkeypatch,
         handle_cls=_ImportCloseFailureHandle,
     )
     lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    sample = tmp_path / "sample.bin"
+    sample.write_bytes(b"MZ")
 
     with pytest.raises(DomainError) as exc_info:
-        lifecycle.import_program("fw", "/tmp/sample.bin")
+        lifecycle.import_program("fw", str(sample), control=JobControl())
 
     err = exc_info.value
     assert err.code == ErrorCode.OPERATION_FAILED
     assert err.details == {
         "operation": "import_program",
         "target": "fw",
-        "binary_path": "/tmp/sample.bin",
+        "binary_path": str(sample),
         "partial_import": True,
         "imported_domain_path": "/sample.bin",
     }
@@ -566,22 +589,25 @@ def test_target_lifecycle_import_close_failure_exposes_imported_domain_path(
 
 def test_target_lifecycle_import_failure_cleanup_close_is_not_partial_import(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
     lifecycle, _store, _core = _build_target_lifecycle(
         monkeypatch,
         handle_cls=_ImportFailureCleanupCloseHandle,
     )
     lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    sample = tmp_path / "sample.bin"
+    sample.write_bytes(b"MZ")
 
     with pytest.raises(DomainError) as exc_info:
-        lifecycle.import_program("fw", "/tmp/sample.bin")
+        lifecycle.import_program("fw", str(sample), control=JobControl())
 
     err = exc_info.value
     assert err.code == ErrorCode.OPERATION_FAILED
     assert err.details == {
         "operation": "import_program",
         "target": "fw",
-        "binary_path": "/tmp/sample.bin",
+        "binary_path": str(sample),
         "partial_import": False,
         "cleanup_error": True,
     }
@@ -1652,7 +1678,7 @@ def test_target_lifecycle_duplicate_import_raises_specific_error(monkeypatch: py
     handle.project.getProjectData().files["/binary.exe"] = _FakeDomainFile("/binary.exe")
 
     with pytest.raises(DomainError) as exc_info:
-        lifecycle.import_program("fw", "/tmp/binary.exe")
+        lifecycle.import_program("fw", "/tmp/binary.exe", control=JobControl())
 
     err = exc_info.value
     assert err.code == ErrorCode.PROGRAM_ALREADY_IMPORTED
@@ -1775,3 +1801,27 @@ def test_target_lifecycle_save_project_program_rejects_non_active_domain_path(mo
         lifecycle.save_project_program("fw", domain_path="/other")
 
     assert handle.save_calls == saves_before
+
+
+def test_a_load_whose_analysis_flag_cannot_be_read_is_rolled_back(monkeypatch: pytest.MonkeyPatch):
+    lifecycle, store, _core = _build_target_lifecycle(monkeypatch)
+    lifecycle.register_target("fw", "/tmp/prj", project_name="sample")
+    first = lifecycle.create_session("fw", "/tmp/prj", project_name="sample", domain_path="/main")
+    handle = store.get_target_handle("fw")
+
+    class Unreadable(_FakeSession):
+        def is_analyzed(self) -> bool:
+            raise RuntimeError("program options unavailable")
+
+    opened = []
+
+    def open_program(domain_path=None, *, version=None):  # noqa: ARG001
+        opened.append(Unreadable(handle, domain_path, first.flat_api))
+        return opened[-1]
+
+    monkeypatch.setattr(handle, "open_program", open_program)
+    with pytest.raises(Exception, match="program options unavailable"):
+        lifecycle.load_program("fw", "/next")
+    # Nothing half-done: the target keeps its program and the new one is closed again.
+    assert store.sessions["fw"] is first
+    assert opened[0].closed_with

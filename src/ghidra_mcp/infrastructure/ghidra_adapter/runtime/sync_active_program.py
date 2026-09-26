@@ -245,6 +245,24 @@ class SyncActiveProgramMixin:
             )
         return updated
 
+    def _undo_auto_checkout_after_failure_locked(self, name: str, domain_path: str, *, failure: Exception) -> None:
+        """Undo the automatic checkout of a commit that failed before check-in.
+
+        Returns once the checkout is gone, so the caller re-raises ``failure``
+        as it is; raises a partial-success error when the checkout may remain.
+        """
+        try:
+            self._rollback_auto_checkout_locked(name, domain_path=domain_path)
+        except Exception as exc:
+            logger.warning("failed to undo the automatic checkout of '%s' after a failed commit: %s", name, exc)
+            raise self._partial_success_error(
+                operation="commit_project_program.rollback_auto_checkout",
+                message=(
+                    f"commit failed before check-in ({failure}) and undoing the automatic checkout "
+                    f"failed too, so the program may still be checked out: {exc}"
+                ),
+            ) from exc
+
     @staticmethod
     def _discard_conflict_checkout_operation(handle: ProjectHandle, domain_path: str) -> Dict[str, bool]:
         status = handle.get_sync_status(domain_path)

@@ -459,3 +459,22 @@ def test_small_dictionary_does_not_add_a_custom_serializer_evaluation():
         tool_name="example", target="t", result=payload, config=ToolPresentationConfig(), store=ResultResourceStore()
     )
     assert result is payload and value.calls == 1
+
+
+def test_a_mapping_result_is_serialized_once_for_its_envelope_and_its_text(monkeypatch):
+    calls = []
+    original = result_compaction._json_text
+
+    def counting(value, **kwargs):
+        calls.append(value)
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(result_compaction, "_json_text", counting)
+    result = result_compaction.structured_result({"name": "main", "entry": "00401000"})
+    assert len(calls) == 1
+    assert result.content[0].text == original({"name": "main", "entry": "00401000"})
+    assert result.structured_content == {"result": {"name": "main", "entry": "00401000"}}
+    # A string, a list and nothing keep their own text blocks.
+    assert result_compaction.structured_result("int main(void);").content[0].text == "int main(void);"
+    assert result_compaction.structured_result([{"a": 1}, {"b": 2}]).content[0].text == '[{"a":1},\n{"b":2}]'
+    assert result_compaction.structured_result(None).content == []

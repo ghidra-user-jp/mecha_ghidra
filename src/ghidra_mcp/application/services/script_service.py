@@ -170,13 +170,19 @@ class ScriptService:
             )
         return catalog
 
-    def _refresh_runtime_availability(self, catalog: ScriptCatalog) -> None:
+    def _refresh_runtime_availability(self, catalog: ScriptCatalog, *, wait: bool = True) -> None:
         if self._availability_checked:
             return
         if self._runtime is None:
             return
         try:
-            availability = self._runtime.script_runtime_availability()
+            availability = self._runtime.script_runtime_availability(wait=wait)
+        except DomainError as exc:
+            if not wait and exc.code is ErrorCode.LOCK_TIMEOUT:
+                # A script is running; the job checks again when it runs.
+                return
+            logger.warning("failed to query script runtime availability: %s", exc)
+            return
         except Exception as exc:
             logger.warning("failed to query script runtime availability: %s", exc)
             return
@@ -336,11 +342,13 @@ class ScriptService:
 
         Everything that refuses a request before it could run is checked here,
         without Ghidra locks and without writing the inline source, so a
-        background job is accepted only when it can start.
+        background job is accepted only when it can start.  Which runtimes
+        exist is read without waiting for a running script: until it has been
+        read, the job itself checks it.
         """
         try:
             catalog = self._require_enabled()
-            self._refresh_runtime_availability(catalog)
+            self._refresh_runtime_availability(catalog, wait=False)
             self._request_head(catalog, script_id, source=source, runtime=runtime, script_name=script_name, stage=False)
             self._validate_args(args)
             self._validate_timeout(timeout_seconds)
@@ -361,7 +369,7 @@ class ScriptService:
         args: list[str] | None = None,
         timeout_seconds: int | None = None,
         expected_revision: str | None = None,
-        control: OperationControl | None = None,
+        control: OperationControl,
     ) -> dict[str, Any]:
         inline_dir: Path | None = None
         try:
@@ -383,12 +391,10 @@ class ScriptService:
                 "snapshot_roots": [str(root.snapshot_dir) for root in catalog.roots.values()] + extra_roots,
             }
             # A job keeps the project it was accepted for; the runtime refuses a changed one.
-            project_key = self._project_key(target) if control is None else control.expected_project_key
-            with self._lock_manager.acquire(target=target, project_key=project_key):
-                if control is None:
-                    result = self._runtime.run_script(target, request=request)
-                else:
-                    result = self._runtime.run_script(target, request=request, control=control)
+            with self._lock_manager.acquire(target=target, project_key=control.expected_project_key):
+                # The job holds this target's locks from here (OperationManager.lock_holder).
+                control.check_active()
+                result = self._runtime.run_script(target, request=request, control=control)
             result["inline"] = source is not None
             return result
         except Exception as exc:
@@ -503,9 +509,14 @@ class ScriptService:
             return {"dir": None, "path": None, "name": name, "runtime": wanted, "script_id": f"inline:{name}"}
         run_dir = catalog.snapshot_base / "inline" / uuid.uuid4().hex[:12]
         run_dir.mkdir(parents=True, exist_ok=False)
-        os.chmod(run_dir, 0o700)
         path = run_dir / name
-        path.write_bytes(encoded)
+        try:
+            os.chmod(run_dir, 0o700)
+            path.write_bytes(encoded)
+        except BaseException:
+            # The caller removes the directory only once this returns it.
+            shutil.rmtree(run_dir, ignore_errors=True)
+            raise
         return {
             "dir": run_dir,
             "path": path,

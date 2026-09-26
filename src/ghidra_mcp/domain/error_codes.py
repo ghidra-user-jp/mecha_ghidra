@@ -24,13 +24,14 @@ class ErrorClassification:
 
 _RETRYABLE_SYNC = ErrorClassification(ErrorCode.SYNC_OPERATION_FAILED, retryable=True)
 _SYNC_FAILED = ErrorClassification(ErrorCode.SYNC_OPERATION_FAILED)
+_VALIDATION = ErrorClassification(ErrorCode.VALIDATION_ERROR)
+_NOT_FOUND = ErrorClassification(ErrorCode.NOT_FOUND)
+_FAILED = ErrorClassification(ErrorCode.OPERATION_FAILED)
 
+# A code that names an ErrorCode member classifies as that member (see
+# classify_error_code).  This table holds the rest: the headless codes that
+# share a public code, and the codes a retry can fix.
 _CODE_TABLE: dict[str, ErrorClassification] = {
-    "AMBIGUOUS_FUNCTION": ErrorClassification(ErrorCode.AMBIGUOUS_FUNCTION),
-    "AMBIGUOUS_DATA_TYPE": ErrorClassification(ErrorCode.AMBIGUOUS_DATA_TYPE),
-    "BSIM_MATCH_STALE": ErrorClassification(ErrorCode.BSIM_MATCH_STALE),
-    "OPERATION_FAILED": ErrorClassification(ErrorCode.OPERATION_FAILED),
-    "SYNC_OPERATION_FAILED": _SYNC_FAILED,
     "SYNC_STATUS_UNAVAILABLE": _SYNC_FAILED,
     "VERSION_LOAD_FAILED": _SYNC_FAILED,
     "HIJACK_STATE_CHANGED": _SYNC_FAILED,
@@ -40,77 +41,42 @@ _CODE_TABLE: dict[str, ErrorClassification] = {
     "SYNC_REFRESH_FAILED": _RETRYABLE_SYNC,
     "REPOSITORY_CONNECT_FAILED": _RETRYABLE_SYNC,
     "PROJECT_DATA_REFRESH_FAILED": _RETRYABLE_SYNC,
-    "CHECKOUT_REQUIRED": ErrorClassification(ErrorCode.CHECKOUT_REQUIRED),
-    "CHECKOUT_UNAVAILABLE": ErrorClassification(ErrorCode.CHECKOUT_UNAVAILABLE),
     "AUTO_CHECKOUT_FAILED": ErrorClassification(ErrorCode.CHECKOUT_UNAVAILABLE),
-    "CHECKOUT_NOT_FOUND": ErrorClassification(ErrorCode.CHECKOUT_NOT_FOUND),
-    "HIJACKED_PROGRAM": ErrorClassification(ErrorCode.HIJACKED_PROGRAM),
-    "NOT_SHARED_PROJECT": ErrorClassification(ErrorCode.NOT_SHARED_PROJECT),
-    "SHARED_PROJECT_UNAVAILABLE": ErrorClassification(ErrorCode.SHARED_PROJECT_UNAVAILABLE),
-    "NOT_CHECKED_OUT": ErrorClassification(ErrorCode.NOT_CHECKED_OUT),
-    "LOCAL_CHANGES_EXIST": ErrorClassification(ErrorCode.LOCAL_CHANGES_EXIST),
-    "UNSAFE_ACTIVE_CHECKOUT_TERMINATE": ErrorClassification(ErrorCode.UNSAFE_ACTIVE_CHECKOUT_TERMINATE),
-    "UNSAFE_VERSIONED_DELETE": ErrorClassification(ErrorCode.UNSAFE_VERSIONED_DELETE),
-    "PRIVATE_FILE_DELETE_NOT_ALLOWED": ErrorClassification(ErrorCode.PRIVATE_FILE_DELETE_NOT_ALLOWED),
-    "SHARED_FILE_DELETE_BLOCKED": ErrorClassification(ErrorCode.SHARED_FILE_DELETE_BLOCKED),
-    "LATEST_VERSION_MISMATCH": ErrorClassification(ErrorCode.LATEST_VERSION_MISMATCH),
-    "UNSAFE_PROGRAM_REMOVE": ErrorClassification(ErrorCode.UNSAFE_PROGRAM_REMOVE),
     "UNSAFE_MERGE_REQUIRED": ErrorClassification(ErrorCode.MERGE_REQUIRED),
-    "ADD_TO_VERSION_CONTROL_REQUIRED": ErrorClassification(ErrorCode.ADD_TO_VERSION_CONTROL_REQUIRED),
-    "ADD_TO_VERSION_CONTROL_NOT_ALLOWED": ErrorClassification(ErrorCode.ADD_TO_VERSION_CONTROL_NOT_ALLOWED),
-    "CHECKIN_NOT_ALLOWED": ErrorClassification(ErrorCode.CHECKIN_NOT_ALLOWED),
-    "KEEP_FILE_NOT_FOUND": ErrorClassification(ErrorCode.KEEP_FILE_NOT_FOUND),
-    "VERSION_NOT_FOUND": ErrorClassification(ErrorCode.VERSION_NOT_FOUND),
     "VERSION_DIFF_TIMEOUT": ErrorClassification(ErrorCode.VERSION_DIFF_TIMEOUT, retryable=True),
     "LOCK_TIMEOUT": ErrorClassification(ErrorCode.LOCK_TIMEOUT, retryable=True),
-    "TARGET_ALREADY_LOADED": ErrorClassification(ErrorCode.TARGET_ALREADY_LOADED),
-    "PROGRAM_ALREADY_IMPORTED": ErrorClassification(ErrorCode.PROGRAM_ALREADY_IMPORTED),
-    "PROGRAM_NOT_OPEN": ErrorClassification(ErrorCode.PROGRAM_NOT_OPEN),
-    "TARGET_NOT_REGISTERED": ErrorClassification(ErrorCode.TARGET_NOT_REGISTERED),
-    "NOT_FOUND": ErrorClassification(ErrorCode.NOT_FOUND),
-    "PROGRAM_OPEN_FAILED": ErrorClassification(ErrorCode.PROGRAM_OPEN_FAILED),
+    "SESSION_CHANGED": ErrorClassification(ErrorCode.SESSION_CHANGED, retryable=True),
+    "BSIM_DATABASE_UNREACHABLE": ErrorClassification(ErrorCode.BSIM_DATABASE_UNREACHABLE, retryable=True),
     "IMPORT_CLOSE_FAILED": ErrorClassification(ErrorCode.IMPORT_FAILED),
     "IMPORT_POST_PROCESS_FAILED": ErrorClassification(ErrorCode.IMPORT_FAILED),
-    "RAW_LOADER_OPTION_UNAVAILABLE": ErrorClassification(ErrorCode.RAW_LOADER_OPTION_UNAVAILABLE),
-    "REOPEN_FAILED": ErrorClassification(ErrorCode.REOPEN_FAILED),
-    "SAVE_FAILED": ErrorClassification(ErrorCode.SAVE_FAILED),
-    "SESSION_CLOSE_FAILED": ErrorClassification(ErrorCode.SESSION_CLOSE_FAILED),
-    "PROGRAM_CLOSE_FAILED": ErrorClassification(ErrorCode.PROGRAM_CLOSE_FAILED),
-    "REMOVE_PROGRAM_FAILED": ErrorClassification(ErrorCode.REMOVE_PROGRAM_FAILED),
-    "PROJECT_CLOSE_FAILED": ErrorClassification(ErrorCode.PROJECT_CLOSE_FAILED),
+    "IMPORT_CANCELLED": ErrorClassification(ErrorCode.OPERATION_CANCELLED),
     "PROJECT_CLOSE_REJECTED": ErrorClassification(ErrorCode.PROJECT_CLOSE_FAILED),
     "CLOSE_ALL_FAILED": ErrorClassification(ErrorCode.SESSION_CLOSE_FAILED),
-    "PROJECT_ALREADY_EXISTS": ErrorClassification(ErrorCode.PROJECT_ALREADY_EXISTS),
-    "PROJECT_IN_USE": ErrorClassification(ErrorCode.PROJECT_IN_USE),
-    "SESSION_CHANGED": ErrorClassification(ErrorCode.SESSION_CHANGED, retryable=True),
-    "CORE_EXECUTOR_UNAVAILABLE": ErrorClassification(ErrorCode.CORE_EXECUTOR_UNAVAILABLE),
-    "PATH_NOT_ALLOWED": ErrorClassification(ErrorCode.PATH_NOT_ALLOWED),
-    "JVM_NOT_HEADLESS": ErrorClassification(ErrorCode.JVM_NOT_HEADLESS),
-    "HEADLESS_UNSUPPORTED": ErrorClassification(ErrorCode.HEADLESS_UNSUPPORTED),
-    "READ_ONLY_PROGRAM": ErrorClassification(ErrorCode.READ_ONLY_PROGRAM),
-    "PROGRAM_NOT_ANALYZED": ErrorClassification(ErrorCode.PROGRAM_NOT_ANALYZED),
-    # Ghidra script execution. Timeouts are not retryable: the script may
-    # already have produced external side effects.
-    "SCRIPTS_DISABLED": ErrorClassification(ErrorCode.SCRIPTS_DISABLED),
-    "SCRIPT_NOT_FOUND": ErrorClassification(ErrorCode.SCRIPT_NOT_FOUND),
-    "AMBIGUOUS_SCRIPT": ErrorClassification(ErrorCode.AMBIGUOUS_SCRIPT),
-    "SCRIPT_RUNTIME_AMBIGUOUS": ErrorClassification(ErrorCode.SCRIPT_RUNTIME_AMBIGUOUS),
-    "SCRIPT_RUNTIME_UNAVAILABLE": ErrorClassification(ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE),
-    "SCRIPT_COMPILE_FAILED": ErrorClassification(ErrorCode.SCRIPT_COMPILE_FAILED),
-    "SCRIPT_LOAD_FAILED": ErrorClassification(ErrorCode.SCRIPT_LOAD_FAILED),
-    "SCRIPT_FAILED": ErrorClassification(ErrorCode.SCRIPT_FAILED),
-    "SCRIPT_TIMEOUT": ErrorClassification(ErrorCode.SCRIPT_TIMEOUT),
-    "SCRIPT_CANCELLED": ErrorClassification(ErrorCode.SCRIPT_CANCELLED),
-    "TARGET_EXECUTION_INVALID": ErrorClassification(ErrorCode.TARGET_EXECUTION_INVALID),
-    "TARGET_ORPHAN_UNRELEASED": ErrorClassification(ErrorCode.TARGET_ORPHAN_UNRELEASED),
-    "RUNTIME_DEGRADED": ErrorClassification(ErrorCode.RUNTIME_DEGRADED),
+    # Refusals of the arguments: export_program's output path, a C declaration,
+    # a namespace path that names something else.
+    "EXPORT_TARGET_EXISTS": _VALIDATION,
+    "EXPORT_TARGET_IS_DIRECTORY": _VALIDATION,
+    "EXPORT_DIRECTORY_MISSING": _VALIDATION,
+    "C_PARSE_FAILED": _VALIDATION,
+    "INVALID_NAMESPACE_TYPE": _VALIDATION,
+    "NAMESPACE_NOT_FOUND": _NOT_FOUND,
+    "REPOSITORY_NOT_FOUND": _NOT_FOUND,
+    # Failures inside Ghidra; batch_read reports the decompiler and read
+    # budget ones as item errors under their own codes.
+    "EXPORT_FAILED": _FAILED,
+    "FUNCTION_RENAME_FAILED": _FAILED,
+    "DECOMPILE_FAILED": _FAILED,
+    "DECOMPILE_TIMEOUT": _FAILED,
+    "READ_TIMEOUT": _FAILED,
 }
 
 
 # Codes that refuse a call before it changes anything: a bad argument, a
-# missing item, or a guard on the target, project or repository state.  With a
-# retryable code (raised only before any side effect) they tell a failed write
-# left nothing behind; any other failure may have done part of its work.
+# missing item, or a guard on the target, project or repository state, and
+# for BSim a connection, login or read that failed before the database write.
+# With a retryable code (raised only before any side effect) they tell a
+# failed write left nothing behind; any other failure may have done part of
+# its work.
 REFUSED_BEFORE_ANY_CHANGE: frozenset[ErrorCode] = frozenset(
     {
         ErrorCode.VALIDATION_ERROR,
@@ -144,8 +110,36 @@ REFUSED_BEFORE_ANY_CHANGE: frozenset[ErrorCode] = frozenset(
         ErrorCode.SHARED_FILE_DELETE_BLOCKED,
         ErrorCode.LATEST_VERSION_MISMATCH,
         ErrorCode.VERSION_NOT_FOUND,
+        ErrorCode.BSIM_URL_REQUIRED,
+        ErrorCode.BSIM_URL_INVALID,
+        ErrorCode.BSIM_PARAMETER_INVALID,
+        ErrorCode.BSIM_PASSWORD_CONFIG_INVALID,
+        ErrorCode.BSIM_INVALID_MATCHED_REF,
+        ErrorCode.BSIM_MATCH_STALE,
+        ErrorCode.BSIM_REMOTE_PROJECT_LOAD_UNSUPPORTED,
+        ErrorCode.BSIM_UNSAVED_PROGRAM,
+        ErrorCode.BSIM_NO_FUNCTIONS,
+        ErrorCode.BSIM_FUNCTION_NOT_FOUND,
+        ErrorCode.BSIM_TARGET_METADATA_INVALID,
+        ErrorCode.BSIM_EXECUTABLE_LOOKUP_REQUIRED,
+        ErrorCode.BSIM_EXECUTABLE_LOOKUP_INVALID,
+        ErrorCode.BSIM_EXECUTABLE_LOOKUP_TRUNCATED,
+        ErrorCode.BSIM_EXECUTABLE_AMBIGUOUS,
+        ErrorCode.BSIM_EXECUTABLE_NOT_FOUND,
+        ErrorCode.BSIM_EXECUTABLE_CATEGORY_INVALID,
+        ErrorCode.BSIM_EXECUTABLE_CATEGORY_NOT_CONFIGURED,
+        ErrorCode.BSIM_EXECUTABLE_METADATA_INVALID,
+        ErrorCode.BSIM_EXECUTABLE_UPDATE_UNSUPPORTED,
+        ErrorCode.BSIM_DELETE_CONFIRMATION_MISMATCH,
+        ErrorCode.BSIM_AUTHENTICATION_FAILED,
+        ErrorCode.BSIM_DATABASE_INIT_FAILED,
+        ErrorCode.BSIM_GET_EXECUTABLE_FAILED,
+        ErrorCode.BSIM_LIST_CATEGORIES_FAILED,
     }
 )
+
+
+_MEMBER_VALUES = frozenset(code.value for code in ErrorCode)
 
 
 def error_code_prefix(message: str) -> str | None:
@@ -156,7 +150,10 @@ def error_code_prefix(message: str) -> str | None:
 def classify_error_code(code: str | None) -> ErrorClassification | None:
     if not code:
         return None
-    return _CODE_TABLE.get(code)
+    classification = _CODE_TABLE.get(code)
+    if classification is None and code in _MEMBER_VALUES:
+        classification = ErrorClassification(ErrorCode(code))
+    return classification
 
 
 def classify_runtime_error(exc: BaseException) -> ErrorClassification | None:

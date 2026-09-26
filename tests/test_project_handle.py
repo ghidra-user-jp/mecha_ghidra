@@ -2765,6 +2765,10 @@ def test_post_process_imported_program_bootstraps_entry_and_analysis(monkeypatch
         def getMemory(self):
             return DummyMemory()
 
+        def getOptions(self, _category):
+            # A fresh import is not analyzed yet.
+            return types.SimpleNamespace(contains=lambda _name: False, getBoolean=lambda _name, default: default)
+
         def getAddressFactory(self):
             return DummyAddressFactory()
 
@@ -2925,6 +2929,7 @@ def test_cancelled_analysis_is_never_marked_analyzed(monkeypatch):
     program = types.SimpleNamespace(
         startTransaction=lambda _description: 7,
         endTransaction=lambda tx, commit: transactions.append((tx, commit)),
+        getOptions=lambda _category: types.SimpleNamespace(contains=lambda _name: False),
     )
     flat_api = types.SimpleNamespace(analyzeAll=lambda _program: None)
 

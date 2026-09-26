@@ -141,6 +141,26 @@ def test_item_errors_continue_and_all_failed_sets_mcp_error():
     assert result.is_error and payload["status"] == "error"
 
 
+def test_a_java_exception_in_one_item_is_a_failure_inside_ghidra():
+    """JPype makes NullPointerException a ValueError; it is not the caller's argument."""
+    throwable = type("java.lang.Throwable", (Exception,), {})
+    npe = type("java.lang.NullPointerException", (throwable, ValueError), {})
+
+    def execute(_tool, args):
+        if args["address"] == "broken":
+            raise npe('Cannot invoke "ghidra.program.model.listing.Function.getBody()" because "f" is null')
+        return {"name": "main"}
+
+    result, payload = call(
+        server(Registry(execute)), requests=[request("broken", arguments={"address": "broken"}), request()]
+    )
+    assert not result.is_error and payload["status"] == "partial"
+    assert payload["items"][0]["error"] == {
+        "code": "OPERATION_FAILED",
+        "message": "Ghidra failed on this read (java.lang.NullPointerException)",
+    }
+
+
 def test_unexpected_backend_failure_is_not_silently_an_item_error():
     def execute(_tool, _args):
         raise RuntimeError("backend is broken")
@@ -357,3 +377,16 @@ def test_invalid_global_limits_fail_before_execution(extra):
     with pytest.raises(ToolError):
         call(server(registry), requests=[request()], **extra)
     assert registry.calls == []
+
+
+def test_a_batch_reply_is_one_block_even_where_program_tools_name_their_source():
+    """batch_read names its program and revision itself; a second source block would break its one-block shape."""
+    runtime = create_mcp_server(
+        specs=get_all_tool_specs(),
+        registry_provider=lambda: Registry(),
+        dispatcher_provider=lambda: dispatch_tool,
+        command_source=lambda: {"program": "/tiny.bin", "revision": "r:0"},
+    )
+    result, payload = call(runtime, requests=[request()])
+    assert not result.is_error and len(result.content) == 1
+    assert "source" not in result.structured_content and payload["status"] == "ok"

@@ -171,3 +171,29 @@ def test_an_unnamed_jvm_thread_during_a_script_is_still_reported(loaded, tmp_pat
         assert record["operation_error"]["details"]["output_state"] == "uncertain"
     finally:
         loaded.runtime.tools["close_session"](target=TARGET, discard_changes=True)
+
+
+def test_a_write_that_fails_after_its_commit_reports_it_even_after_a_gc(loaded, monkeypatch):
+    """Ghidra and JPype hold the transaction recorder weakly; the runtime holds it for the command."""
+    import gc
+
+    from ghidra_headless.handlers import core
+
+    original = core._PROFILE_DEPENDENCIES["txn"]
+
+    def commit_then_fail(ctx, description, operation):
+        from java.lang import System
+
+        for _ in range(3):
+            gc.collect()
+            System.gc()
+            time.sleep(0.05)
+        original(ctx, description, operation)
+        raise RuntimeError("failed after the commit")
+
+    monkeypatch.setitem(core._PROFILE_DEPENDENCIES, "txn", commit_then_fail)
+    with pytest.raises(RuntimeError) as failed:
+        loaded.runtime.tools["create_label"](target=TARGET, address="0x1000", name="kept_after_gc")
+    details = failed.value.domain_error["details"]
+    # The label was committed before the failure: the program has it, unsaved.
+    assert details["output_state"] == "created"

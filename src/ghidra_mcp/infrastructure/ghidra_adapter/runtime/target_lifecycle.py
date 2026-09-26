@@ -403,6 +403,9 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                     name=name,
                     session=new_session,
                 )
+                # Read before the session replaces the target's: a failure here
+                # rolls the load back instead of following a completed one.
+                analyzed = new_session.is_analyzed()
             except Exception:
                 self._rollback_failed_load_initialization_locked(
                     name=name,
@@ -442,7 +445,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 "reloaded": False,
                 "version": requested_version,
                 "read_only": requested_version is not None,
-                "is_analyzed": new_session.is_analyzed(),
+                "is_analyzed": analyzed,
             }
 
     def _session_matches_load_locked(self, session: ProgramSession, *, domain_path: str, version: int | None) -> bool:
@@ -468,12 +471,18 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         )
         with self._store.registry_lock.read_lock():
             reopened = self._store.ensure_session(name)
+        try:
+            analyzed = reopened.is_analyzed()
+        except Exception:
+            # The reload completed; a flag that cannot be read now is unknown.
+            logger.warning("Could not read whether the reloaded program %s is analyzed", domain_path, exc_info=True)
+            analyzed = None
         return {
             "program": domain_path,
             "reloaded": True,
             "version": version,
             "read_only": version is not None,
-            "is_analyzed": reopened.is_analyzed(),
+            "is_analyzed": analyzed,
         }
 
     def loaded_program(self, name: str) -> LoadedProgram:
@@ -511,15 +520,13 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         name: str,
         binary_path: str,
         *,
-        control: OperationControl | None = None,
+        control: OperationControl,
         **kwargs,
     ) -> str:
         if not binary_path:
             raise ValueError("binary_path is required")
-        expected_project_key = control.expected_project_key if control is not None else None
-        with self._target_operation(name, expected_project_key=expected_project_key):
-            if control is not None:
-                control.check_active()
+        with self._target_operation(name, expected_project_key=control.expected_project_key):
+            control.check_active()
             binary = pathlib.Path(binary_path)
             handle = self._store.get_target_handle(name)
             existing_domain_path = self._existing_imported_program_path_locked(handle, binary)
@@ -538,19 +545,15 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 )
             # A background import may run long after admission checked the
             # input; re-check it before the job counts as started.
-            if control is not None and not binary.is_file():
+            if not binary.is_file():
                 raise ValueError(f"Binary is not a file: {binary_path}")
-            monitor = None
+            # Cancellation and shutdown stop the analysis through this monitor;
+            # the handle then rolls the half-analyzed program back.
+            monitor = handle.create_cancellable_monitor()
+            control.bind_cancel(monitor.cancel)
             try:
-                if control is None:
-                    domain_file = handle.import_program(binary_path, **kwargs)
-                else:
-                    # Shutdown cancels the analysis through this monitor; the
-                    # handle then rolls the half-analyzed program back.
-                    monitor = handle.create_cancellable_monitor()
-                    control.bind_cancel(monitor.cancel)
-                    control.begin()
-                    domain_file = handle.import_program(binary_path, monitor=monitor, **kwargs)
+                control.begin()
+                domain_file = handle.import_program(binary_path, monitor=monitor, **kwargs)
             except Exception as exc:
                 mapped = self._partial_import_error(
                     exc,
@@ -571,8 +574,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                     raise error from exc
                 raise
             finally:
-                if monitor is not None:
-                    control.bind_cancel(None)
+                control.bind_cancel(None)
             with self._store.registry_lock.write_lock():
                 self._store.target_projects[name] = handle.get_key()
             return domain_file.getPathname()

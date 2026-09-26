@@ -172,8 +172,6 @@ def test_readonly_decompile_does_not_auto_analyze_after_decompile_failure(monkey
             calls.append("analyzeAll")
 
     monkeypatch.setattr(core_helpers, "DecompInterface", FailingDecompInterface)
-    monkeypatch.setattr(core_helpers, "_ghidra_program_utilities", lambda: Utilities())
-    monkeypatch.setattr(core_helpers, "_ghidra_script_util", lambda: ScriptUtil())
 
     ctx = types.SimpleNamespace(
         program=object(),
@@ -223,10 +221,10 @@ def test_high_function_failure_reports_missing_analysis_instead_of_analyzing(mon
             calls.append("analyzeAll")
 
     monkeypatch.setattr(core_helpers, "DecompInterface", FailingDecompInterface)
-    monkeypatch.setattr(core_helpers, "_ghidra_program_utilities", lambda: Utilities())
 
     ctx = types.SimpleNamespace(
-        program=object(),
+        # Not analyzed, whatever Ghidra's "ask to analyze" option says.
+        program=_Program([], {"Should Ask To Analyze": False}),
         flat_api=FlatAPI(),
         monitor=lambda: None,
     )
@@ -237,7 +235,7 @@ def test_high_function_failure_reports_missing_analysis_instead_of_analyzing(mon
         core_helpers._decompile_high_function(ctx, object())
 
     assert "run analyze_program first" in str(exc_info.value)
-    assert calls == ["openProgram", "decompileFunction", "dispose", "shouldAskToAnalyze"]
+    assert calls == ["openProgram", "decompileFunction", "dispose"]
     assert "analyzeAll" not in calls
 
 
@@ -261,13 +259,8 @@ def test_high_function_failure_without_pending_analysis_propagates(monkeypatch: 
         def dispose(self):
             pass
 
-    class Utilities:
-        def shouldAskToAnalyze(self, _program):
-            return False
-
     monkeypatch.setattr(core_helpers, "DecompInterface", FailingDecompInterface)
-    monkeypatch.setattr(core_helpers, "_ghidra_program_utilities", lambda: Utilities())
-    ctx = types.SimpleNamespace(program=object(), flat_api=object(), monitor=lambda: None)
+    ctx = types.SimpleNamespace(program=_Program([], {"Analyzed": True}), flat_api=object(), monitor=lambda: None)
 
     with pytest.raises(RuntimeError, match="Decompilation failed: native crash"):
         core_helpers._decompile_high_function(ctx, object())
@@ -433,6 +426,8 @@ def _stub_analysis_support(monkeypatch, core_helpers, calls):
         def releaseBundleHostReference(self):
             return None
 
-    monkeypatch.setattr(core_helpers, "_ghidra_program_utilities", lambda: Utilities())
-    monkeypatch.setattr(core_helpers, "_ghidra_script_util", lambda: ScriptUtil())
+    from ghidra_headless.session import java_bindings
+
+    monkeypatch.setattr(java_bindings, "_ghidra_program_utilities", lambda: Utilities())
+    monkeypatch.setattr(java_bindings, "_ghidra_script_util", lambda: ScriptUtil())
     monkeypatch.setattr(core_helpers, "_ensure_checkout_for_versioned_program", lambda _ctx: None)

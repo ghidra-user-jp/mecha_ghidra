@@ -1362,7 +1362,71 @@ def test_a_bsim_tool_failure_reaches_the_mcp_client_with_its_code():
         "code": "BSIM_DATABASE_UNREACHABLE",
         "retryable": True,
         "hint": "Check that the BSim database is running and reachable, then retry",
+        # Not connected, so nothing was written.
+        "details": {"output_state": "absent"},
     }
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        "Database does not exist: bsim",
+        'FATAL: database "bsim" does not exist',
+        "Database already in use by another process",
+    ],
+)
+def test_a_bsim_write_whose_database_never_opened_says_nothing_was_written(report):
+    """A database report that names no outage or login keeps the init code: the write never began."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from ghidra_mcp.contracts.tool_spec import get_tool_spec
+    from ghidra_mcp.presentation.mcp_server import create_mcp_server
+    from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
+
+    backend = FakeJavaBackend()
+    backend.errors["add_executable_category"] = RuntimeError(f"BSIM_DATABASE_INIT_FAILED: {report}")
+    service, _core, _target = _service(java_backend=backend)
+    registry = SimpleNamespace(bsim_add_executable_category=service.bsim_add_executable_category)
+    runtime = create_mcp_server(
+        specs={"bsim_add_executable_category": get_tool_spec("bsim_add_executable_category")},
+        registry_provider=lambda: registry,
+        dispatcher_provider=lambda: dispatch_tool,
+    )
+
+    result = asyncio.run(runtime.mcp.call_tool("bsim_add_executable_category", {"category": "FAMILY"}))
+
+    error = result.structured_content["error"]
+    assert (error["code"], error["retryable"], error["details"]) == (
+        "BSIM_DATABASE_INIT_FAILED",
+        False,
+        {"output_state": "absent"},
+    )
+
+
+def test_a_core_bsim_write_whose_database_never_opened_keeps_the_init_code():
+    service, core, _target = _service()
+    service._java_backend = _CategoriesBackend(["Owner"])
+    core.errors["bsim_register_target"] = DomainError(
+        code=ErrorCode.BSIM_DATABASE_INIT_FAILED,
+        message="BSIM_DATABASE_INIT_FAILED: Database does not exist: bsim",
+        details={"operation": "bsim_register_target", "output_state": "absent"},
+    )
+    with _raises_bsim_error(ErrorCode.BSIM_DATABASE_INIT_FAILED, "does not exist") as raised:
+        service.bsim_register_target("fw", categories={"Owner": "team"})
+    assert raised.value.details == {"output_state": "absent"}
+
+
+def test_a_missing_function_keeps_the_hint_that_finds_it():
+    service, core, _target = _service()
+    core.errors["bsim_query_function"] = DomainError(
+        code=ErrorCode.NOT_FOUND,
+        message="Function not found: 0xdead",
+        hint="list_functions (filter by name) or search_symbols finds a function's name and entry address",
+    )
+    with _raises_bsim_error(ErrorCode.BSIM_FUNCTION_NOT_FOUND, "0xdead") as raised:
+        service.bsim_query("fw", scope="functions", addresses=["0xdead"])
+    assert raised.value.hint and "list_functions" in raised.value.hint
 
 
 def test_a_failed_bsim_write_keeps_what_the_runtime_said_it_left_behind():
@@ -1378,3 +1442,33 @@ def test_a_failed_bsim_write_keeps_what_the_runtime_said_it_left_behind():
 
     assert raised.value.details == {"output_state": "created"}
     assert raised.value.retryable is False
+
+
+def test_a_bsim_check_the_core_raised_as_a_value_error_keeps_its_bsim_code():
+    """The code the message names wins whichever layer raised it (it used to arrive as VALIDATION_ERROR)."""
+    from ghidra_mcp.domain.error_mapping import to_domain_error
+
+    service, core, _target = _service()
+    service._java_backend = _CategoriesBackend(["Owner"])
+    core.errors["bsim_register_target"] = to_domain_error(
+        ValueError("BSIM_TARGET_METADATA_INVALID: category values must be scalar"), operation="bsim_register_target"
+    )
+    with _raises_bsim_error(ErrorCode.BSIM_TARGET_METADATA_INVALID, "must be scalar") as raised:
+        service.bsim_register_target("fw", categories={"Owner": ["a", "b"]})
+    assert raised.value.retryable is False
+
+
+def test_an_outage_after_the_categories_were_stored_is_not_retryable():
+    service, core, _target = _service()
+    service._java_backend = _CategoriesBackend(["Owner"])
+    # The core committed the categories, then could not reach the database.
+    core.errors["bsim_register_target"] = DomainError(
+        code=ErrorCode.BSIM_DATABASE_INIT_FAILED,
+        message="BSIM_DATABASE_INIT_FAILED: Database error on initialization: Connection to localhost:5432 refused",
+        details={"operation": "bsim_register_target", "output_state": "created"},
+    )
+    with _raises_bsim_error(ErrorCode.BSIM_DATABASE_UNREACHABLE, "refused") as raised:
+        service.bsim_register_target("fw", categories={"Owner": "team"})
+    assert raised.value.details == {"output_state": "created"}
+    # An outage is worth retrying only when nothing was left behind.
+    assert raised.value.retryable is False and raised.value.hint

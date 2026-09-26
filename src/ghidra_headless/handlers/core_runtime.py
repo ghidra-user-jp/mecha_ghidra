@@ -97,6 +97,7 @@ class HeadlessContext(object):
         if self._transaction_sentinel is not None:
             return
         try:
+            import jpype
             from jpype import JImplements, JOverride
         except Exception:
             return
@@ -134,7 +135,9 @@ class HeadlessContext(object):
             def undoRedoOccurred(self, domain_object):
                 return None
 
-        sentinel = _Sentinel()
+        # Ghidra holds listeners weakly and JPype holds its Java proxy weakly:
+        # keeping the proxy here keeps the sentinel registered across a GC.
+        sentinel = jpype.JObject(_Sentinel(), jpype.JClass("ghidra.framework.model.TransactionListener"))
         try:
             self.program.addTransactionListener(sentinel)
         except Exception:

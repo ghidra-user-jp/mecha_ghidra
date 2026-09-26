@@ -646,3 +646,46 @@ def test_operation_tools_publish_no_stored_result_variants(runtime):
         assert "large_result_output_schema" not in tool_docs_detail(get_tool_spec(name))
     assert notices("list_targets")
     assert "result_id" in json.dumps(tool_docs_detail(get_tool_spec("list_targets"))["structured_output_schema"])
+
+
+def test_a_resend_whose_record_went_away_is_admitted_off_the_event_loop(runtime, monkeypatch):
+    bundle, entered, release, *_ = runtime
+    manager = bundle.registry.operations
+    admitted_on_loop = []
+    original = bundle.target_service.prepare_import
+
+    def prepare(*args):
+        admitted_on_loop.append(threading.current_thread() is threading.main_thread())
+        return original(*args)
+
+    monkeypatch.setattr(bundle.target_service, "prepare_import", prepare)
+    # has_request saw a record that was evicted before admission looked again.
+    monkeypatch.setattr(manager, "has_request", lambda _request_id: True)
+    args = {"target": "default", "binary_path": _input(bundle), "request_id": str(uuid4()), "wait_seconds": 0}
+    accepted = asyncio.run(bundle.runtime.mcp.call_tool("import_program", args))
+    assert not accepted.is_error and accepted.structured_content["result"]["replayed"] is False
+    # Admitted as a new request, on an admission thread, not on the event loop.
+    assert admitted_on_loop == [False]
+    assert entered.wait(1)
+    release.set()
+    assert wait_terminal(manager, accepted.structured_content["result"])["state"] == "succeeded"
+
+
+def test_a_null_analysis_flag_means_the_default_and_names_the_same_job():
+    from ghidra_mcp.contracts.tool_spec import ImportProgramInput
+
+    null = ImportProgramInput.model_validate({"binary_path": "/in/a.bin", "analyze_imported": None})
+    default = ImportProgramInput.model_validate({"binary_path": "/in/a.bin"})
+    assert null.analyze_imported is True and null.model_dump() == default.model_dump()
+
+
+def test_a_rule_only_the_job_model_checks_still_answers_with_its_code(runtime):
+    """The model's own validators run in the dispatcher's pass; the reply keeps VALIDATION_ERROR and its hint."""
+    bundle, *_ = runtime
+    arguments = {"target": "default", "binary_path": _input(bundle), "import_mode": "raw_binary", "wait_seconds": 0}
+    reply = asyncio.run(
+        bundle.runtime.mcp.handle_call_tool(None, SimpleNamespace(name="import_program", arguments=arguments))
+    )
+    error = reply.structured_content["error"]
+    assert reply.is_error and "language_id is required" in error["message"]
+    assert (error["code"], error["retryable"]) == ("VALIDATION_ERROR", False) and error["hint"]

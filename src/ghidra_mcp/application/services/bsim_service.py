@@ -17,6 +17,9 @@ from ghidra_mcp.application.locks import KeyedLockPool
 from ghidra_mcp.application.services.ports import BsimBackendPort
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.bsim_url_masking import mask_bsim_url, mask_bsim_urls_in_text
+from ghidra_mcp.domain.error_codes import classify_error_code
+from ghidra_mcp.domain.error_hints import recovery_hint
+from ghidra_mcp.domain.output_state import retryable_after
 
 from .core_command_service import CoreCommandService
 from .target_service import TargetService
@@ -24,12 +27,19 @@ from .target_service import TargetService
 BSIM_MATCHED_REF_VERSION = 1
 _BSIM_CODE_RE = re.compile(r"^BSIM_[A-Z0-9_]+(?::|$)")
 _BSIM_GENERIC_CODE_PREFIXES = (
-    "BSIM_DATABASE_INIT_FAILED:",
     "BSIM_QUERY_FAILED:",
     "BSIM_CLI_FAILED:",
     # InsertRequest reports "<name> is already ingested" through this wrapper;
     # strip it so the keyword rule below can promote it to BSIM_ALREADY_REGISTERED.
     "BSIM_INSERT_FAILED:",
+)
+# The database never opened.  The keyword rules may name why; otherwise the
+# code stays, rather than becoming the operation's own failure code, so a write
+# refused here reports that it changed nothing.
+_BSIM_DATABASE_INIT_CODE = "BSIM_DATABASE_INIT_FAILED"
+_BSIM_AUTHENTICATION_RE = re.compile(r"\b(?:password|authentication|auth failed)\b")
+_BSIM_UNREACHABLE_RE = re.compile(
+    r"\b(?:refused|could not connect|connection to|timed out|timeout|unknown host|no route to host|unreachable)\b"
 )
 _BSIM_CATEGORY_TYPE_RE = re.compile(r"^[A-Za-z0-9 ._:/()]+$")
 _BSIM_MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -92,34 +102,31 @@ def _bsim_message(code: str, message: str) -> str:
 
 def _classify_bsim_message(message: str, *, default_code: str = "BSIM_OPERATION_FAILED") -> str:
     text = str(message).strip() or "unknown error"
-    has_specific_code = _BSIM_CODE_RE.match(text) and not text.startswith(_BSIM_GENERIC_CODE_PREFIXES)
-    if has_specific_code:
-        return text
-    # Backend/headless errors arrive wrapped in a generic prefix (e.g.
-    # "BSIM_QUERY_FAILED: ..."). Strip that wrapper so the keyword rules below can
-    # promote it to a more specific code; otherwise _bsim_message would see the
-    # existing prefix and return the text unchanged, defeating reclassification.
-    for prefix in _BSIM_GENERIC_CODE_PREFIXES:
-        if text.startswith(prefix):
-            text = text[len(prefix) :].strip() or "unknown error"
-            break
+    if text.startswith(f"{_BSIM_DATABASE_INIT_CODE}:"):
+        default_code = _BSIM_DATABASE_INIT_CODE
+        text = text[len(_BSIM_DATABASE_INIT_CODE) + 1 :].strip() or "unknown error"
+    else:
+        has_specific_code = _BSIM_CODE_RE.match(text) and not text.startswith(_BSIM_GENERIC_CODE_PREFIXES)
+        if has_specific_code:
+            return text
+        # Backend/headless errors arrive wrapped in a generic prefix (e.g.
+        # "BSIM_QUERY_FAILED: ..."). Strip that wrapper so the keyword rules below can
+        # promote it to a more specific code; otherwise _bsim_message would see the
+        # existing prefix and return the text unchanged, defeating reclassification.
+        for prefix in _BSIM_GENERIC_CODE_PREFIXES:
+            if text.startswith(prefix):
+                text = text[len(prefix) :].strip() or "unknown error"
+                break
     lower = text.lower()
     if "function not found" in lower:
         return _bsim_message("BSIM_FUNCTION_NOT_FOUND", text)
     if "already ingested" in lower:
         return _bsim_message("BSIM_ALREADY_REGISTERED", text)
-    if "password" in lower or "authentication" in lower or "auth failed" in lower:
+    # Whole words only: program and function names ("timeout_handler") are
+    # not the database saying why it failed.
+    if _BSIM_AUTHENTICATION_RE.search(lower):
         return _bsim_message("BSIM_AUTHENTICATION_FAILED", text)
-    if (
-        "refused" in lower
-        or "could not connect" in lower
-        or "connection to" in lower
-        or "timed out" in lower
-        or "timeout" in lower
-        or "unknown host" in lower
-        or "no route to host" in lower
-        or "unreachable" in lower
-    ):
+    if _BSIM_UNREACHABLE_RE.search(lower):
         return _bsim_message("BSIM_DATABASE_UNREACHABLE", text)
     return _bsim_message(default_code, text)
 
@@ -142,16 +149,6 @@ def _classified_bsim_error(
     return RuntimeError(message)
 
 
-# How a BSim tool reports a failure (see _reports_bsim_errors): only an
-# unreachable database is worth retrying as is, and a few messages name no next step.
-_RETRYABLE_BSIM_CODES = frozenset({ErrorCode.BSIM_DATABASE_UNREACHABLE})
-_BSIM_HINTS: dict[ErrorCode, str] = {
-    ErrorCode.BSIM_DATABASE_UNREACHABLE: "Check that the BSim database is running and reachable, then retry",
-    ErrorCode.BSIM_AUTHENTICATION_FAILED: "Check the BSim user and password",
-    ErrorCode.BSIM_EXECUTABLE_NOT_FOUND: "list_bsim_executables shows the executables in the database",
-    ErrorCode.BSIM_EXECUTABLE_AMBIGUOUS: "Pass md5 to select one executable",
-    ErrorCode.BSIM_UNSAVED_PROGRAM: "Save the program with save_project_program first",
-}
 _BSIM_CODE_NAME_RE = re.compile(r"^(BSIM_[A-Z0-9_]+)")
 
 
@@ -167,16 +164,21 @@ def _bsim_tool_error(exc: Exception) -> DomainError:
     if _BSIM_CODE_RE.match(message) is None:
         message = _classify_bsim_message(message)
     name = _BSIM_CODE_NAME_RE.match(message)
-    code = ErrorCode.__members__.get(name.group(1)) if name else None
-    if code is None:
-        code = ErrorCode.BSIM_OPERATION_FAILED
-    # Set by _call_bsim for a write that failed after it ran.
+    classification = classify_error_code(name.group(1) if name else None)
+    if classification is None:
+        classification = classify_error_code(ErrorCode.BSIM_OPERATION_FAILED.value)
+    code = classification.code
+    # What the write left behind, when the core says (see _call_bsim).  Without
+    # it the dispatcher tells from the code, as for a project write.
     output_state = getattr(exc, "output_state", None)
+    retryable = classification.retryable
+    if output_state is not None:
+        retryable = retryable_after(retryable, output_state)
     return DomainError(
         code=code,
         message=message,
-        hint=_BSIM_HINTS.get(code),
-        retryable=code in _RETRYABLE_BSIM_CODES and output_state in (None, "absent"),
+        hint=recovery_hint(code, message),
+        retryable=retryable,
         details=None if output_state is None else {"output_state": output_state},
     )
 
@@ -671,8 +673,10 @@ class BsimService:
             # reclassification the same database outage would surface as
             # BSIM_DATABASE_UNREACHABLE via the Java-backend path but as an opaque
             # OPERATION_FAILED via the core-command path.  A missing function or
-            # executable arrives as NOT_FOUND and becomes its BSIM_ code the same way.
-            if exc.code in (ErrorCode.OPERATION_FAILED, ErrorCode.NOT_FOUND):
+            # executable arrives as NOT_FOUND and becomes its BSIM_ code the same way,
+            # and a BSIM_ code the core named goes through the same rules (a
+            # generic wrapper such as BSIM_QUERY_FAILED can name an outage).
+            if exc.code in (ErrorCode.OPERATION_FAILED, ErrorCode.NOT_FOUND) or exc.code.value.startswith("BSIM_"):
                 public_error = _classified_bsim_error(exc, default_code=default_code)
                 # What a failed write left behind survives the reclassification
                 # (see _bsim_tool_error).

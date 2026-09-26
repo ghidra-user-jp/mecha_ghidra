@@ -51,4 +51,6 @@ def decompile_function(
         code = decompile_function_object(ctx, function)
     # Name the function and its entry first: a lookup by name otherwise leaves
     # the caller without the address that edits and cross-references take.
-    return "/* %s @ %s */\n%s" % (function.getName(True), function.getEntryPoint(), code)
+    # Ghidra allows "*/" in names, which would end the comment early.
+    name = str(function.getName(True)).replace("*/", "*\\/")
+    return "/* %s @ %s */\n%s" % (name, function.getEntryPoint(), code)

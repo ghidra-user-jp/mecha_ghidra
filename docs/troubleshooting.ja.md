@@ -26,11 +26,11 @@
 | コード | 意味・次の操作 |
 | --- | --- |
 | `PATH_NOT_ALLOWED` | シンボリックリンク解決後も許可ルート内になるパスを使う |
-| `NOT_FOUND` | `message`に書かれた関数・データ型・変数・データシンボル・ブックマークが存在しない。`hint`が、探すためのツール（`list_functions`や`list_data_types`など）を示す |
-| `VALIDATION_ERROR` | `message`が、どの引数をなぜ受け付けなかったかを示す（ファイルのパスは`<path>`と表示）。直して呼び直す |
+| `NOT_FOUND` | `message`に書かれた関数・データ型・変数・データシンボル・ブックマーク・名前空間・リポジトリが存在しない。`hint`が、探すためのツール（`list_functions`、`list_data_types`、`list_namespaces`（または`create_namespace=true`）など）を示す |
+| `VALIDATION_ERROR` | `message`が、どの引数をなぜ受け付けなかったかを示す（ファイルのパスは`<path>`と表示）。入力の形の誤り、解析できないCの宣言（`C_PARSE_FAILED`）、名前空間以外を通る名前空間のパス（`INVALID_NAMESPACE_TYPE`）、既にあるかディレクトリのない書き出し先（`EXPORT_TARGET_EXISTS`、`EXPORT_DIRECTORY_MISSING`）など。直して呼び直す |
 | `PROGRAM_NOT_OPEN` | targetにプログラムが読み込まれていない。`list_project_programs`で探して`load_project_program`で読み込むか、`import_program`で追加する |
 | `TARGET_NOT_REGISTERED` | その名前のtargetはない。`list_targets`で一覧し、`register_target`で追加する |
-| `STARTUP_FAILED` | 受付を始めた後の起動処理（JVMの起動、スクリプト実行環境の確認、Ghidra Server認証の設定、起動時のプログラムの読み込み）が失敗した。`details.stage` が失敗した段階、`message` が原因で、サーバーログにも同じ行がある。再試行では直らない。設定を直してサーバーを再起動する |
+| `STARTUP_FAILED` | 受付を始めた後の起動処理（JVMの起動、スクリプト実行環境の確認、Ghidra Server認証の設定、起動時のプログラムの読み込み）が失敗した。`details.stage` が失敗した段階、`message` が原因（ホストのパスは`<path>`と表示）で、サーバーログには行の全体がある。再試行では直らない。設定を直してサーバーを再起動する |
 | `LOCK_TIMEOUT` | 別の呼び出しがターゲットを使用中、または `run_script` が実行中。`details.lock` が `startup` なら、Ghidraがまだ起動中なので、少し待ってから再試行する。バックグラウンドのジョブか先送りした呼び出しが使用中なら、`details.operation_id`でそれが分かる。`get_operation`で完了を待ってから再試行する。`create_project`も、バックグラウンドの取り込みなど他の操作の実行中はこれを返す（`details.lock`は`runtime`）。それらが終わってから再試行する。`details.script_state` でスクリプトが `running` か、待機中（`queued`、この場合は `retry_after_seconds` 後に再試行）かが分かる。`run_script`のジョブがこれで失敗することはなく、開始できるまで待ち続ける（`phase`は`waiting_for_lock`） |
 | `SCRIPT_RUNTIME_UNAVAILABLE` | providerの導入と起動時の例外伝播チェックのログを確認。チェック失敗時は全言語を使用不可にするため、[固定したPyGhidra依存](development.ja.md#pyghidraの依存バージョンとスクリプト失敗)を導入して再起動する。標準のPyGhidra 3.1.0はこのチェックに失敗する |
 | `RAW_LOADER_OPTION_UNAVAILABLE` | 指定した言語・compiler・オプションに対するBinaryLoaderの公開メタデータを取得できなかった。指定値と対応Ghidraバージョンを確認する。`details.cause_message`がそのオプションを示す |
@@ -44,12 +44,13 @@
 | `MERGE_REQUIRED` | [競合時の手順](shared-projects.ja.md#conflicts)に従う。ヘッドレスのマージは非対応 |
 | `JVM_NOT_HEADLESS`、`HEADLESS_UNSUPPORTED` | [JVM起動ルール](development.ja.md)を確認。表示が必要なAPIをheadlessで再試行しない |
 | `BSIM_URL_REQUIRED`、`BSIM_URL_INVALID` | 対応するBSim URLを指定する |
-| `BSIM_AUTHENTICATION_FAILED`、`BSIM_DATABASE_UNREACHABLE` | バックエンドの認証情報と到達性を確認する |
-| `IMPORT_IN_PROGRESS` | 別の取り込みが同じ名前のプログラムを書き込み中。`details.operation_id`を`get_operation`で確認する |
+| `BSIM_AUTHENTICATION_FAILED`、`BSIM_DATABASE_UNREACHABLE` | バックエンドの認証情報と到達性を確認する。データベース自身の報告で判定する。ログインを拒否されたなら`BSIM_AUTHENTICATION_FAILED`で、再試行しても直らない。データベースに届かない場合は再試行可能で、読み取り専用のBSimのツールはそのまま呼び直せる。書き込みは`output_state`が`absent`のときに再試行する |
+| `IMPORT_IN_PROGRESS` | 別の取り込みが同じ名前のプログラムを書き込み中。`details.operation_id`を`get_operation`で確認する。`retryable`がtrueなら、その取り込みは取り消し中なので、終わってから送り直す |
 | `ANALYSIS_IN_PROGRESS` | 同じプログラムに、引数の異なる別の解析のジョブが待機中・実行中。`details.operation_id`を`get_operation`で確認する |
 | `IMPORT_OUTPUT_UNCERTAIN` | 同じ名前の以前の取り込みが、後始末を確認できないまま失敗している。`details.operation_id`とプロジェクトを確認する。このサーバープロセスは再起動までその名前を受け付けない |
-| `OPERATION_QUEUE_FULL` | 待機中のジョブが16件あり、何も受け付けていない。時間をおいて再試行する |
+| `OPERATION_QUEUE_FULL` | 待機中のジョブが16件ある、またはツール呼び出しの実行枠40件が40秒間すべて使用中だった。何も受け付けず、実行もしていないので、時間をおいて再試行する（`request_id`付きの呼び出しは同じIDで送り直せる） |
 | `REQUEST_ID_CONFLICT` | その`request_id`は別の引数のジョブを指している。意図した引数で送り直すか、新しいUUIDを使う |
+| `RESULT_DISCARDED` | 再送した呼び出しの最初の実行は済んでいるが、サーバーのメモリを抑えるためにその返答を捨てた（`details.output_state`は`uncertain`）。呼び出しを送り直さず、`details.operation_id`を`get_operation`で読んで成功したかを確かめ、変わった内容はプログラムで確かめる |
 | `OPERATION_NOT_FOUND` | このサーバープロセスにジョブの記録がない（再起動した、または後続のジョブが4,096件を超えて記録が消えた）。プロジェクトを確認してから、ジョブを投入し直す |
 | `TARGET_REBOUND` | 受付後にtargetが別のプロジェクトへ登録し直された。何も書き込んでいないので、取り込み直す |
 | `OPERATION_CANCELLED` | `cancel_operation`がジョブを止めた。何が残ったかは`details.output_state`で分かる（開始前に止めた場合と巻き戻した場合は`absent`） |
@@ -112,9 +113,17 @@ Docker Composeのサービス名は `mecha_ghidra`、既定のイメージ名は
 - BSimのツールは、失敗を`error.code`（メッセージの先頭にある`BSIM_...`の名前）と`retryable`で返します。`retryable`がtrueになるのは`BSIM_DATABASE_UNREACHABLE`だけです。一部のコードには`hint`も付きます。メッセージの文言は変わりません。これまではコードが文言の中にしかありませんでした。
 - すべてのツールが、ヒントをすべて宣言します。書き込みのツールは`readOnlyHint: false`です。`destructiveHint`は削除・バイトの上書き・リポジトリ操作・スクリプトがtrue、`openWorldHint`はBSim・共有プロジェクト・スクリプトのツールだけがtrueです。これらのヒントで確認を出すかを決めるクライアントでは、通常の編集で確認が減ることがあります。
 - プログラムへの書き込みと`bsim_apply_matches`が、どれも`request_id`を受け付けます。同じ`request_id`で送り直すと、再び適用せずに、`replayed: true`を付けた最初の応答を返します（[一括の注釈](tools.ja.md#symbol-comment-edit)）。
-- 失敗した書き込みは`error.details.output_state`（`absent`・`created`・`uncertain`）を返します。`retryable`がtrueになるのは、何も残っていないときだけです。プロジェクトやリポジトリへの書き込みでは、変更の前に断るエラーなら`absent`、それ以外は`uncertain`です。
+- 失敗した書き込みは`error.details.output_state`（`absent`・`created`・`uncertain`）を返します。`retryable`がtrueになるのは、何も残っていないときだけです。プロジェクトやリポジトリへの書き込みでは、変更の前に断るエラーなら`absent`、それ以外は`uncertain`です。Ghidraの起動中や入力スキーマの検査で断った書き込みと、サーバーが受け付けなかったジョブは`absent`です。最初の返答を捨てた後の再送は`RESULT_DISCARDED`で失敗します。これまではエラーに`message`しかありませんでした。
 - エラーが詳しくなりました。関数・データ型・変数・ブックマークが見つからなければ`NOT_FOUND`（これまでは`OPERATION_FAILED`）、プログラムを読み込んでいないtargetは`PROGRAM_NOT_OPEN`、存在しないtargetは`TARGET_NOT_REGISTERED`（どちらもこれまでは`SESSION_NOT_FOUND`）です。`NOT_FOUND`と`VALIDATION_ERROR`のメッセージは理由を残します（これまでは固定の文に置き換わっていました）。`hint`は`Check runtime state`ではなく、次に呼ぶツールを示します。Ghidraの中で起きたJavaの例外（NullPointerExceptionなど）は、`VALIDATION_ERROR`ではなく`OPERATION_FAILED`になります。`PROGRAM_NOT_ANALYZED`と`RAW_LOADER_OPTION_UNAVAILABLE`は、それぞれ独立したコードになりました（これまでは`OPERATION_FAILED`と`IMPORT_FAILED`）。原因は`details.cause_message`にあります。入力スキーマが受け付けない引数のエラーにも、`code`（`VALIDATION_ERROR`）と`hint`が付きます。これまでは`message`だけでした。
 - 応答の文字列ブロックは詰めたJSONになりました。リストは、1項目ずつ字下げした複数のブロックではなく、1行に1項目の1つのブロックです。`structuredContent`は変わりません。
+- BSimの書き込みの失敗も、ほかの書き込みと同じく`error.details.output_state`を示します。`bsim_register_target`と`bsim_update_target_signatures`は、データベースへの書き込みを始めた後の失敗なら`uncertain`です。`BSIM_DATABASE_UNREACHABLE`が再試行可能なのは何も残っていないときだけで、データベースがログインを拒否したなら`BSIM_AUTHENTICATION_FAILED`です。
+- 公開のコードを持つヘッドレス側のコードが増えました。`NAMESPACE_NOT_FOUND`と`REPOSITORY_NOT_FOUND`は`NOT_FOUND`、`C_PARSE_FAILED`・`INVALID_NAMESPACE_TYPE`・`EXPORT_TARGET_EXISTS`・`EXPORT_DIRECTORY_MISSING`は`VALIDATION_ERROR`です（以前はどれも`OPERATION_FAILED`）。`apply_edits`と`batch_read`の項目は、それぞれのコードのままです。Ghidra内部で失敗した`batch_read`の項目は、`VALIDATION_ERROR`ではなく`OPERATION_FAILED`です。
+- 再送で返すエラーは1つの文字列ブロックのままで、そのJSONに`replayed: true`が入ります。保存した結果の通知は2つのブロックのままです。以前はどちらにも文字列ブロックが1つ増えていました。
+- `batch_read`の応答には`source`が付かなくなりました。バッチ自身が`program`と`revision`を示します。先送りした呼び出しの記録は、`result`の横に`source`を持つようになりました。
+- 実行枠40件が40秒間すべて使用中だった呼び出しは、際限なく待たずに再試行可能な`OPERATION_QUEUE_FULL`になります。Ghidraの起動中に届いた呼び出しが待つのも最大40秒です。
+- ジョブのツールを公開すると、明示的に無効にしない限り`cancel_operation`も公開します。以前はタグでの絞り込みで、`cancel_operation`なしに`run_script`を公開することがありました。
+- `open_program`と、ターゲットが既に持つプログラムを読み直した`load_project_program`の`is_analyzed`は、フラグを読めなかった場合に`null`になります。新しく読み込む`load_project_program`でフラグを読めなければ、読み込みを巻き戻して失敗します。`import_program`は`analyze_imported: null`を既定値（`true`）として受け付けます。
+- `STARTUP_FAILED`の原因は、ほかの原因と同じく、ホストのパスを`<path>`と表示します。
 - `decompile_function`の疑似コードの先頭に、関数の名前とエントリーアドレスを書いたコメントの行（例：`/* entry @ 00401e46 */`）が入ります。
 - プログラムを扱うツールの応答は、`structuredContent`の`result`の隣と最後の文字列ブロックに`source`（`target`・`program`・`revision`）を載せます。`structuredContent`を`{"result": ...}`と完全一致で比べているクライアントは、キーが増えることに対応してください。
 - `tools/list`の大きさが約半分になりました。各ツールの出力スキーマは、ツール固有の結果の形は完全に示し、全ツールに共通する応答（保存した大きな結果の通知、先送りの応答、エラー）は短い形だけにしました。それらの完全な形は`ghidra://docs/tools/{tool_name}`にあります。応答そのものは変わらず、どちらの形でも検証を通ります。

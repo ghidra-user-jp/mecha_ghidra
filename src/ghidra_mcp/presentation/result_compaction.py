@@ -674,9 +674,12 @@ def structured_result(value: Any, *, content=None, is_error: bool = False) -> Ca
     The result envelope represents arrays, scalars and null unambiguously, even
     on transports that omit optional fields with None values.
     """
-    data = json.loads(_json_text(value))
+    text = _json_text(value)
+    data = json.loads(text)
     if content is None:
-        content = _inline_content_blocks(value)
+        # A mapping or a scalar's text block is this same JSON (see result_text).
+        plain = value is not None and not isinstance(value, (str, list, tuple, ContentBlock))
+        content = [TextContent(type="text", text=text)] if plain else _inline_content_blocks(value)
     return CallToolResult(content=content, structured_content={"result": data}, is_error=is_error)
 
 

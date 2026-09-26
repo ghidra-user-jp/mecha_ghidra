@@ -15,7 +15,8 @@ import pyghidra
 from ghidra_headless.errors import HeadlessError
 
 from . import java_bindings, path_utils, sync_utils
-from .models import ProgramSession
+from .analysis import run_auto_analysis
+from .models import ProgramSession, program_is_analyzed
 from .transactions import run_in_transaction
 
 logger = logging.getLogger(__name__)
@@ -1018,7 +1019,7 @@ class ProjectHandle:
         data = self.project.getProjectData()
         domain_file = data.getFile(domain_path)
         if domain_file is None:
-            raise RuntimeError(f"Domain file not found: {domain_path}")
+            raise HeadlessError(f"PROGRAM_NOT_FOUND: Domain file not found: {domain_path}")
         content_type = None
         was_hijacked = bool(sync_utils._safe_call(domain_file, "isHijacked"))
         try:
@@ -1274,7 +1275,7 @@ class ProjectHandle:
         data = self.project.getProjectData()
         domain_file = data.getFile(domain_path)
         if domain_file is None:
-            raise RuntimeError(f"Program not found: {domain_path}")
+            raise HeadlessError(f"PROGRAM_NOT_FOUND: Program not found: {domain_path}")
         return domain_file
 
     def _import_program_auto_locked(self, path: pathlib.Path, program_dir: str, program_name: str):
@@ -1510,25 +1511,20 @@ class ProjectHandle:
             program.endTransaction(tx, committed)
 
     def _analyze_program_locked(self, program, flat_api, monitor=None) -> None:
-        utilities = java_bindings._ghidra_program_utilities()
-        if not bool(utilities.shouldAskToAnalyze(program)):
+        # The Analyzed flag, as analyze_program and load responses read it: a
+        # .gzf whose owner declined Ghidra's analyze prompt is not analyzed,
+        # though shouldAskToAnalyze would say there is nothing to do.
+        if program_is_analyzed(program):
             return
-        script_util = java_bindings._ghidra_script_util()
-        script_util.acquireBundleHostReference()
-        try:
-
-            def _analyze():
-                flat_api.analyzeAll(program)
-                # A cancelled analysis can return normally; never mark or save
-                # it as analyzed. Raising aborts the transaction, and the
-                # import's post-processing failure path deletes the program.
-                if monitor is not None and bool(monitor.isCancelled()):
-                    raise HeadlessError("IMPORT_CANCELLED: analysis was cancelled before it finished")
-                utilities.markProgramAnalyzed(program)
-
-            run_in_transaction(program, "Auto analysis", _analyze)
-        finally:
-            script_util.releaseBundleHostReference()
+        # A cancelled run raises inside the transaction, and the import's
+        # post-processing failure path then deletes the program.
+        run_auto_analysis(
+            program,
+            flat_api,
+            monitor=monitor,
+            transaction=lambda description, operation: run_in_transaction(program, description, operation),
+            cancelled_error="IMPORT_CANCELLED: analysis was cancelled before it finished",
+        )
 
     def _get_imported_min_address_locked(self, program):
         memory = program.getMemory()

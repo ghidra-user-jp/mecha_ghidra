@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import importlib.metadata
@@ -34,9 +35,15 @@ from mcp.types import (
 )
 from pydantic import ValidationError
 
-from ghidra_mcp.application.services.operations import PENDING_STATES
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolSafetyTag, ToolSpec, validate_tool_selection
+from ghidra_mcp.application.services.operations import PENDING_STATES, ReplayMissed, replay_only
+from ghidra_mcp.contracts.tool_spec import (
+    OPERATION_CONTROL_TOOLS,
+    ExecutorKind,
+    ToolSpec,
+    validate_tool_selection,
+)
 from ghidra_mcp.domain import DomainError, ErrorCode, get_lock_timeout_seconds
+from ghidra_mcp.domain.output_state import ABSENT, UNCERTAIN, with_output_state
 from ghidra_mcp.presentation.batch_results import present_batch_result
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.deferred_calls import DeferredCalls, DeferredReply, deferred_reply
@@ -52,15 +59,16 @@ from ghidra_mcp.presentation.result_resources import (
 )
 from ghidra_mcp.presentation.server_instructions import build_server_instructions
 from ghidra_mcp.presentation.startup import StartupGate, startup_error_result
-from ghidra_mcp.presentation.tool_binding import ToolBinding, complete_tool_result, error_result
+from ghidra_mcp.presentation.tool_binding import ToolBinding, complete_tool_result, error_result, tool_error_result
 from ghidra_mcp.presentation.tool_dispatcher import _validate_raw_args
-from ghidra_mcp.presentation.tool_errors import ToolError
+from ghidra_mcp.presentation.tool_errors import ToolError, ToolInputError
 from ghidra_mcp.presentation.tool_registry import (
     ToolRegistry,
     anticipated_error_result,
     as_anticipated_tool_failure,
     public_arguments_model,
 )
+from ghidra_mcp.presentation.waiting import wait_until
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +129,6 @@ class GhidraMCPServer(Server):
         instructions,
         operations_provider: Callable[[], Any] | None = None,
         deferrable: frozenset[str] = frozenset(),
-        deferred_calls: DeferredCalls | None = None,
         prepare_thread: Callable[[], None] | None = None,
         startup_gate: StartupGate | None = None,
     ):
@@ -133,7 +140,7 @@ class GhidraMCPServer(Server):
         # Tools whose request_id makes a resend return the first call's reply.
         self.replaying = frozenset(name for name, spec in specs.items() if spec.replays_requests)
         self.prepare_thread = prepare_thread
-        self.deferred_calls = deferred_calls or DeferredCalls(prepare_thread=prepare_thread)
+        self.deferred_calls = DeferredCalls(prepare_thread=prepare_thread)
         self.startup_gate = startup_gate
         self.output_validators = {
             name: Draft202012Validator(binding.definition.output_schema) for name, binding in self.bindings.items()
@@ -159,16 +166,22 @@ class GhidraMCPServer(Server):
         binding = self.bindings.get(name)
         if binding is None:
             raise ToolError(f"Unknown or unpublished tool: {name}")
+        spec = self.specs.get(name)
+        writes = spec is not None and spec.writes
         try:
             parsed = binding.arguments.model_validate(arguments or {})
         except ValidationError as exc:
-            raise ToolError(f"{name} input validation failed: {exc}", code=ErrorCode.VALIDATION_ERROR) from exc
+            raise ToolInputError(f"{name} input validation failed: {exc}", write=writes) from exc
         kwargs = parsed.model_dump()
         waited = 0.0
         if self.startup_gate is not None:
             try:
-                waited = await self.startup_gate.wait(get_lock_timeout_seconds())
+                # Within the deferral budget: a reply must come before client call timers end.
+                waited = await self.startup_gate.wait(min(get_lock_timeout_seconds(), self.deferred_calls.defer_after))
             except DomainError as exc:
+                if writes:
+                    # The call never ran, so a write refused here left nothing behind.
+                    exc = with_output_state(exc, ABSENT)
                 return self.complete_result(name, kwargs, startup_error_result(exc))
             if waited and "wait_seconds" in kwargs:
                 # Time spent waiting for Ghidra counts against the job wait, so a
@@ -231,11 +244,9 @@ class GhidraMCPServer(Server):
     async def _replay(self, name: str, target: str, operation_id: str, operations, waited: float):
         """The reply a resend gets: the first call's, once that call has finished."""
         wait = max(0.0, self.deferred_calls.defer_after - waited) if name in self.deferrable else math.inf
-        with anyio.move_on_after(wait):
-            while operations.is_pending(operation_id):
-                await anyio.sleep(_OPERATION_WAIT_POLL_SECONDS)
+        await wait_while_pending(operations, operation_id, wait)
         try:
-            record = operations.get(operation_id=operation_id)
+            record = operations.handle(operation_id)
         except DomainError as exc:
             return self.complete_result(name, {"target": target}, anticipated_error_result(map_exception(exc)))
         if record["state"] in PENDING_STATES:
@@ -244,9 +255,18 @@ class GhidraMCPServer(Server):
             return reply
         reply = operations.reply_for(operation_id)
         if reply is None:
-            return error_result(
-                f"{name} already ran for this request_id, but its reply is no longer kept "
+            message = (
+                f"RESULT_DISCARDED: {name} already ran for this request_id, but its reply is no longer kept "
                 "(result_discarded); inspect the program instead of sending the call again"
+            )
+            # The first call ran, so what it left is unknown here.
+            discarded = DomainError(
+                code=ErrorCode.RESULT_DISCARDED,
+                message=message,
+                details={"operation_id": operation_id, "output_state": UNCERTAIN},
+            )
+            return self.complete_result(
+                name, {"target": target}, anticipated_error_result(map_exception(discarded, fallback_message=message))
             )
         replayed = _replayed(CallToolResult.model_validate(reply))
         self._check_output(name, replayed)
@@ -281,11 +301,10 @@ class GhidraMCPServer(Server):
     async def handle_call_tool(self, _context, params):
         try:
             return await self.call_tool(params.name, params.arguments)
-        except ToolError as exc:
-            return error_result(str(exc), code=exc.code)
-        except Exception:
-            logger.exception("Unexpected failure in tool %s", params.name)
-            return error_result(f"Error executing tool {params.name}")
+        except Exception as exc:
+            if not isinstance(exc, ToolError):
+                logger.exception("Unexpected failure in tool %s", params.name)
+            return tool_error_result(exc, params.name)
 
     async def list_resource_templates(self):
         templates = [
@@ -403,14 +422,10 @@ def create_mcp_server(
     ) -> Any:
         spec = effective_specs[spec_name]
         if spec.presenter == "batch":
-            raw_args = _validate_raw_args(spec_name, spec.input_model, raw_args)
+            raw_args = _validate_raw_args(spec, raw_args)
             for request in raw_args["requests"]:
                 child = effective_specs.get(request["tool"])
-                if (
-                    child is None
-                    or child.safety_tag != ToolSafetyTag.READ_ONLY
-                    or child.executor_kind != ExecutorKind.CORE_COMMAND
-                ):
+                if child is None or child.writes or child.executor_kind != ExecutorKind.CORE_COMMAND:
                     raise ValueError("batch_read tool is not enabled for reads: %s" % request["tool"])
         dispatcher = dispatcher_provider()
         result = dispatcher(
@@ -491,12 +506,9 @@ def create_mcp_server(
 
 
 # How often a waiting call re-reads the in-memory job record.
-_OPERATION_WAIT_POLL_SECONDS = 0.1
-# Job record tools that answer from memory, on the event loop. cancel_operation
-# may cancel a Java monitor: the CLI attaches the loop's thread to the JVM while
-# Ghidra starts, before any script can run, so the call attaches no new JVM
-# thread that a running script would take for its own.
-_INLINE_OPERATION_TOOLS = frozenset({"get_operation", "cancel_operation"})
+async def wait_while_pending(operations, operation_id: str, timeout: float) -> None:
+    """Return once the record is no longer pending, or after ``timeout`` seconds, without holding a thread."""
+    await wait_until(lambda: not operations.is_pending(operation_id), timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -538,15 +550,30 @@ def _with_source(result: CallToolResult, source: dict[str, Any]) -> CallToolResu
 
 
 def _replayed(result: CallToolResult) -> CallToolResult:
-    """The first call's reply, marked ``replayed`` (also as text) so the caller knows nothing ran again."""
-    if not isinstance(result.structured_content, dict):
+    """The first call's reply, marked ``replayed`` so the caller knows nothing ran again.
+
+    A result says so in a text block of its own too, for clients that show
+    only text.  An error or a stored-result notice keeps its documented
+    blocks: a JSON text block holding its structured content says it there,
+    and a notice's text stays as it is.
+    """
+    content = result.structured_content
+    if not isinstance(content, dict):
         return result
-    return result.model_copy(
-        update={
-            "structured_content": {**result.structured_content, "replayed": True},
-            "content": [*result.content, TextContent(type="text", text=_json_text({"replayed": True}))],
-        }
-    )
+    marked = {**content, "replayed": True}
+    blocks = list(result.content)
+    if not result.is_error and "result" in content and set(content) <= {"result", "source"}:
+        blocks.append(TextContent(type="text", text=_json_text({"replayed": True})))
+    elif blocks and isinstance(blocks[0], TextContent) and _json_of(blocks[0].text) == content:
+        blocks[0] = TextContent(type="text", text=_json_text(marked))
+    return result.model_copy(update={"structured_content": marked, "content": blocks})
+
+
+def _json_of(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
 
 
 def _call_fingerprint(name: str, kwargs: Mapping[str, Any]) -> str:
@@ -559,6 +586,9 @@ def _prepared(prepare: Callable[[], None] | None, function: Callable[..., Any], 
     if prepare is not None:
         prepare()
     return function(**kwargs)
+
+
+_ADMIT = object()
 
 
 def _operation_binding(entry, name, registry_provider, admission_limiter, prepare_thread=None) -> Callable[..., Any]:
@@ -576,9 +606,19 @@ def _operation_binding(entry, name, registry_provider, admission_limiter, prepar
         # cancel_operation takes no wait.
         immediate = {**kwargs, "wait_seconds": 0} if "wait_seconds" in kwargs else dict(kwargs)
         manager = getattr(registry_provider(), "operations", None)
-        if name not in _INLINE_OPERATION_TOOLS and (
-            manager is None or not manager.has_request(kwargs.get("request_id"))
-        ):
+        value = _ADMIT
+        if name in OPERATION_CONTROL_TOOLS:
+            # The job-record tools answer from memory, on the event loop. cancel_operation
+            # may cancel a Java monitor: the CLI attaches the loop's thread to the JVM while
+            # Ghidra starts, before any script can run, so the call attaches no new JVM
+            # thread that a running script would take for its own.
+            value = entry(**immediate)
+        elif manager is not None and manager.has_request(kwargs.get("request_id")):
+            # A resend's record answers it from memory too.  One evicted since
+            # has_request is admitted as a new request below, not here.
+            with contextlib.suppress(ReplayMissed), replay_only():
+                value = entry(**immediate)
+        if value is _ADMIT:
             # Shielded: once the request arrived, admission finishes even if the
             # client gives up, so the job is either accepted or refused, never
             # half-way; a lost reply is recovered by resending or by request_id.
@@ -586,16 +626,12 @@ def _operation_binding(entry, name, registry_provider, admission_limiter, prepar
                 value = await anyio.to_thread.run_sync(
                     partial(_prepared, prepare_thread, entry, immediate), limiter=admission_limiter
                 )
-        else:
-            value = entry(**immediate)
         if manager is None or wait_seconds <= 0 or not isinstance(value, dict):
             return value
         if value.get("state") not in PENDING_STATES:
             return value
         operation_id = value["operation_id"]
-        with anyio.move_on_after(wait_seconds):
-            while manager.is_pending(operation_id):
-                await anyio.sleep(_OPERATION_WAIT_POLL_SECONDS)
+        await wait_while_pending(manager, operation_id, wait_seconds)
         try:
             latest = manager.wait_for(operation_id, 0)
         except DomainError:

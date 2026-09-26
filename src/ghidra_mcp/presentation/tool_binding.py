@@ -14,6 +14,7 @@ from ghidra_mcp.domain.error_hints import recovery_hint
 
 from .response_schemas import wire_output_schema
 from .result_compaction import _is_normalized_empty_list_result, _json_text, structured_result
+from .tool_errors import ToolError
 
 
 @dataclass(frozen=True)
@@ -55,16 +56,32 @@ def complete_tool_result(value: Any, *, compact_json: bool = False) -> CallToolR
     return structured_result(value, content=content)
 
 
-def error_result(message: str, *, code: ErrorCode | None = None) -> CallToolResult:
+def error_envelope(error: dict[str, Any]) -> CallToolResult:
+    """The reply for a failed call: ``{"error": ...}``, as structured content and as its compact JSON text."""
+    envelope = {"error": error}
+    return CallToolResult(
+        is_error=True,
+        content=[TextContent(type="text", text=_json_text(envelope))],
+        structured_content=envelope,
+    )
+
+
+def error_result(
+    message: str, *, code: ErrorCode | None = None, details: dict[str, Any] | None = None
+) -> CallToolResult:
     detail: dict[str, Any] = {"message": message}
     if code is not None:
         detail.update(code=code.value, retryable=False)
         hint = recovery_hint(code, message)
         if hint is not None:
             detail["hint"] = hint
-    error = {"error": detail}
-    return CallToolResult(
-        is_error=True,
-        content=[TextContent(type="text", text=_json_text(error))],
-        structured_content=error,
-    )
+    if details:
+        detail["details"] = details
+    return error_envelope(detail)
+
+
+def tool_error_result(exc: BaseException, tool: str) -> CallToolResult:
+    """The reply for an exception a call raised: a ToolError's message, code and details, else a generic failure."""
+    if isinstance(exc, ToolError):
+        return error_result(str(exc), code=exc.code, details=exc.details)
+    return error_result(f"Error executing tool {tool}")

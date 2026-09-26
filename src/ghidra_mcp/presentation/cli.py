@@ -68,6 +68,7 @@ from ghidra_mcp.presentation.cli_runtime import (
     CLIRuntimeBundle,
     ServiceRegistryAdapter,
     create_cli_runtime,
+    defer_shutdown_signals,
 )
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.startup import FAILED, BackgroundStartup, StartupGate, StartupStep
@@ -421,9 +422,10 @@ def parse_args(argv: list[str]):
         type=float,
         default=DEFAULT_SCRIPT_QUEUE_TIMEOUT_SECONDS,
         help=(
-            "How long run_script waits for in-flight operations to finish before the script starts. "
-            "Other calls are held for at most about one second per queued script; a run that cannot "
-            "start in time returns a retryable LOCK_TIMEOUT without executing."
+            "How long one attempt of a run_script job waits for in-flight operations to finish before the "
+            "script starts. Other calls are held for at most about one second per queued script. A job that "
+            "cannot start in time tries again and stays waiting_for_lock until it starts, cancel_operation "
+            "stops it, or the server stops; jobs run one at a time, so later jobs wait behind it."
         ),
     )
     parser.add_argument(
@@ -955,11 +957,14 @@ def _run_cli(argv: list[str] | None = None) -> int:
         return 1 if startup_gate.state == FAILED else 0
     finally:
         try:
-            if startup is not None:
-                # Waits for the step in progress: starting the JVM and opening
-                # a program cannot be interrupted, and cleanup must not race them.
-                startup.stop()
-            close_ghidra()
+            # A signal now would skip closing the projects; it is delivered
+            # once they are closed (see defer_shutdown_signals).
+            with defer_shutdown_signals():
+                if startup is not None:
+                    # Waits for the step in progress: starting the JVM and opening
+                    # a program cannot be interrupted, and cleanup must not race them.
+                    startup.stop()
+                close_ghidra()
         finally:
             if script_service is not None:
                 try:

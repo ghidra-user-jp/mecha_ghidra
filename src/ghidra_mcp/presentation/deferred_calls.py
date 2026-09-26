@@ -10,9 +10,11 @@ a call that cannot get its lock still fails with ``LOCK_TIMEOUT`` as before.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,29 +25,31 @@ import anyio
 from mcp.types import CallToolResult, TextContent
 
 from ghidra_mcp.application.locks import CallLocks
+from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, OPERATION_WAIT_MAX_SECONDS
 from ghidra_mcp.domain import DomainError, ErrorCode
 
 from .error_mapper import map_exception
-from .operation_presentation import structured_error, structured_value
+from .operation_presentation import structured_error, structured_source, structured_value
 from .result_compaction import _json_text
-from .tool_binding import error_result
+from .tool_binding import tool_error_result
 from .tool_errors import ToolError
 from .tool_registry import anticipated_error_result
+from .waiting import wait_until
 
 logger = logging.getLogger(__name__)
 
-DEFER_AFTER_SECONDS = 40.0
 # As many tool calls run at once as before, when they shared the default
-# thread limiter; a deferred call keeps its slot until it finishes.
+# thread limiter; a deferred call keeps its slot until it finishes.  A waiter
+# polls for one without reserving a worker thread: a cancelled waiter must
+# never acquire a slot later, after its request has gone away.  Waiters take
+# freed slots in arrival order, so under a steady overload the one refused
+# after its wait is never one that came before calls that ran.
 CALL_SLOTS = 40
-# Poll without reserving a worker thread: a cancelled waiter must never acquire
-# a slot later, after its request has gone away.
-_SLOT_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
 class DeferredReply:
-    """The reply for a call that is still running; ``result`` carries the job record."""
+    """A reply ready to send: a still-running call's job record, or a call's reply its record already holds."""
 
     result: CallToolResult
 
@@ -61,7 +65,9 @@ class _Call:
         self._lock = threading.Lock()
         self._finished = False
         self._outcome: tuple[Any, BaseException | None] | None = None
-        self._on_finish: Callable[[Any, BaseException | None], None] | None = None
+        self._on_finish: Callable[[Any, BaseException | None], CallToolResult | None] | None = None
+        # The reply the record stored, once the call finished into its record.
+        self.recorded: CallToolResult | None = None
         self._release_slot = release_slot
 
     def run(self, function: Callable[..., Any], kwargs: dict[str, Any], tracked, prepare=None) -> Any:
@@ -86,9 +92,9 @@ class _Call:
             if on_finish is None:
                 self._outcome = (value, error)
         if on_finish is not None:
-            on_finish(value, error)
+            self.recorded = on_finish(value, error)
 
-    def defer(self, create_record: Callable[[], Callable[[Any, BaseException | None], None]]) -> bool:
+    def defer(self, create_record: Callable[[], Callable[[Any, BaseException | None], CallToolResult | None]]) -> bool:
         """Hand the outcome to a job record; False if the call has just finished."""
         with self._lock:
             if self._finished:
@@ -124,6 +130,9 @@ class DeferredCalls:
         # Runs on the worker thread before the call (see GhidraMCPServer).
         self.prepare_thread = prepare_thread
         self._slots = threading.BoundedSemaphore(slots)
+        # Calls waiting for a slot, oldest first; only the first may take one.
+        # The event loop's thread alone touches it.
+        self._slot_waiters: collections.deque[object] = collections.deque()
         # The slots bound the calls; this only keeps anyio's default limiter,
         # which the calls no longer share, from bounding them a second time.
         self._threads: anyio.CapacityLimiter | None = None
@@ -151,20 +160,28 @@ class DeferredCalls:
         ``claimed`` is the record a call sent with a request_id already has
         (``OperationManager.claim_call``).  The call's thread records its
         outcome there however the call ends, even in time for this reply or
-        after the request was cancelled, and a deferred reply names it.
+        after the request was cancelled, and a deferred reply names it; a
+        call that finishes in time replies with the recorded reply.
         Cancellation while waiting for a slot instead finishes the record as
         cancelled without running the tool. A resend gets that failure too.
         ``defer=False`` waits for the call however long it runs.
+
+        Waiting for a slot counts against the wait as well: with every slot
+        still busy after it, the call does not run and the reply is a
+        retryable ``OPERATION_QUEUE_FULL``.
         """
+        began = time.monotonic()
         try:
-            while not self._slots.acquire(blocking=False):
-                # This wait is not part of the deferral. Once acquired there
-                # is no await until the shielded execution task owns the slot.
-                await anyio.sleep(_SLOT_POLL_SECONDS)
+            # Once acquired there is no await until the shielded execution
+            # task owns the slot.
+            acquired = await self._acquire_slot(self.defer_after - already_waited)
         except anyio.get_cancelled_exc_class():
             if claimed is not None:
                 _cancel_before_start(operations, claimed["operation_id"], name)
             raise
+        if not acquired:
+            return DeferredReply(_slots_busy(operations, name, claimed))
+        already_waited += time.monotonic() - began
         call = _Call(self._slots.release)
         call_locks = CallLocks()
         # None for a tool whose target is optional; the record needs a string.
@@ -192,15 +209,22 @@ class DeferredCalls:
         )
         task.add_done_callback(_consume)
         with anyio.move_on_after(max(0.0, self.defer_after - already_waited) if defer else math.inf):
-            return await asyncio.shield(task)
+            try:
+                value = await asyncio.shield(task)
+            except Exception:
+                if call.recorded is None:
+                    raise
+                value = None
+            # A claimed call's record already holds the reply, completed on the call's thread.
+            return value if call.recorded is None else DeferredReply(call.recorded)
         if claimed is not None:
             if task.done():
                 # It finished just as the wait ended; its record has the outcome too.
-                return task.result()
+                return DeferredReply(call.recorded) if call.recorded is not None else task.result()
             return DeferredReply(deferred_reply(name, target, claimed, self.defer_after))
         record: dict[str, Any] = {}
 
-        def create_record() -> Callable[[Any, BaseException | None], None]:
+        def create_record() -> Callable[[Any, BaseException | None], CallToolResult]:
             record.update(operations.defer_call(name, target, started_at=started_at, call_locks=call_locks))
             operation_id = record["operation_id"]
             return lambda value, error: _record_outcome(operations, operation_id, name, value, error, complete)
@@ -208,6 +232,39 @@ class DeferredCalls:
         if not call.defer(create_record):
             return call.outcome()
         return DeferredReply(deferred_reply(name, target, record, self.defer_after))
+
+    async def _acquire_slot(self, timeout: float) -> bool:
+        """Take an execution slot within ``timeout`` seconds, in arrival order; False if none came free."""
+        if not self._slot_waiters and self._slots.acquire(blocking=False):
+            return True
+        ticket = object()
+        self._slot_waiters.append(ticket)
+        try:
+            return await wait_until(
+                lambda: self._slot_waiters[0] is ticket and self._slots.acquire(blocking=False), timeout
+            )
+        finally:
+            self._slot_waiters.remove(ticket)
+
+
+def _slots_busy(operations, name: str, claimed: dict[str, Any] | None) -> CallToolResult:
+    """The reply for a call that got no execution slot in time; no runtime work began."""
+    message = f"OPERATION_QUEUE_FULL: every tool call slot is busy, so {name} did not run; retry later"
+    error = DomainError(
+        code=ErrorCode.OPERATION_QUEUE_FULL,
+        message=message,
+        hint="Running calls hold the slots (get_operation shows the deferred ones); send the call again later",
+        retryable=True,
+        details={"output_state": "absent"},
+    )
+    result = anticipated_error_result(map_exception(error, fallback_message=message))
+    assert result is not None
+    if claimed is not None:
+        # Nothing ran, so a resend with the request_id runs the call instead of getting this reply.
+        operations.finish_call(
+            claimed["operation_id"], error=structured_error(result), reply=_json_reply(result), forget_request=True
+        )
+    return result
 
 
 def _cancel_before_start(operations, operation_id: str, name: str) -> None:
@@ -226,25 +283,33 @@ def _cancel_before_start(operations, operation_id: str, name: str) -> None:
     operations.finish_call(operation_id, error=structured_error(result), reply=_json_reply(result))
 
 
-def _record_outcome(operations, operation_id: str, name: str, value: Any, error: BaseException | None, complete):
-    """Store a call's outcome the way its reply carried it, or would have: the result, the error, the reply."""
+def _record_outcome(
+    operations, operation_id: str, name: str, value: Any, error: BaseException | None, complete
+) -> CallToolResult:
+    """Store a call's outcome the way its reply carries it, or would have; return that reply."""
     try:
-        if error is not None:
+        if error is None:
+            result = complete(value)
+        else:
             if not isinstance(error, ToolError):
                 logger.error("Unexpected failure in tool %s", name, exc_info=error)
             # The reply handle_call_tool gives for the same exception.
-            message = str(error) if isinstance(error, ToolError) else f"Error executing tool {name}"
-            operations.finish_call(operation_id, error={"message": message}, reply=_json_reply(error_result(message)))
-            return
-        result = complete(value)
+            result = tool_error_result(error, name)
         if result.is_error:
             operations.finish_call(operation_id, error=structured_error(result), reply=_json_reply(result))
         else:
-            operations.finish_call(operation_id, result=structured_value(result), reply=_json_reply(result))
-    except Exception:
+            operations.finish_call(
+                operation_id,
+                result=structured_value(result),
+                source=structured_source(result),
+                reply=_json_reply(result),
+            )
+        return result
+    except Exception as exc:
         logger.exception("Could not record the outcome of tool %s", name)
-        message = f"Error executing tool {name}"
-        operations.finish_call(operation_id, error={"message": message}, reply=_json_reply(error_result(message)))
+        result = tool_error_result(exc, name)
+        operations.finish_call(operation_id, error=structured_error(result), reply=_json_reply(result))
+        return result
 
 
 def _json_reply(result: CallToolResult) -> dict[str, Any]:
@@ -261,7 +326,8 @@ def deferred_reply(name: str, target: str, operation: dict[str, Any], waited: fl
         },
         "message": (
             f"{name} is still running after {waited:g} seconds and continues on the server. Call get_operation "
-            f"with this operation_id (wait_seconds up to 50) for its result instead of calling {name} again."
+            f"with this operation_id (wait_seconds up to {OPERATION_WAIT_MAX_SECONDS}) for its result instead of "
+            f"calling {name} again."
         ),
     }
     return CallToolResult(content=[TextContent(type="text", text=_json_text(payload))], structured_content=payload)

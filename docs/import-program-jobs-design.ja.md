@@ -149,7 +149,7 @@ SQLite、履歴ファイル、staging用のコピー機構、再起動復旧、h
 ## 6. 更新とロック
 
 1. 受付は入力schema・アクセス権を検査し、`request_id`があれば先に検索する。新規の場合だけ、パスを絶対パスにしてパス制限と入力ファイルの存在を検査し、登録済みproject keyを取得する。この段階の失敗も既存のDomainErrorへ写し、`code`付きで返す。`TargetService.import_program`、script barrier、target/projectロック、project openは通らない。
-2. 管理用ロック内でIDを再確認し、出力先・容量を確認する。workerの起動と`put_nowait`が成功した場合だけ記録と予約を登録する。queue満杯は`OPERATION_QUEUE_FULL`（`retryable=true`、IDを消費しない）。終了中・worker故障中は新規受付を拒否する。
+2. 管理用ロック内でIDを再確認し、出力先・容量を確認する。workerの起動と`put_nowait`が成功した場合だけ記録と予約を登録する。待機中のジョブ（取り消したものは数えない）が上限に達していれば`OPERATION_QUEUE_FULL`（`retryable=true`、IDを消費しない）。終了中・worker故障中は新規受付を拒否する。
 3. workerは`OperationControl`（`expected_project_key`、`check_active`、`begin`、`bind_cancel`。当初の名前は`ImportControl`）をportの明示的な引数として渡す。ローダーのオプションとは別の引数であり、ProjectHandleへは流れない。実行ロック内の`_target_operation`で、targetロック・登録先・取得したprojectロックが受付時のkeyと一致することを1か所で確認し、不一致なら`TARGET_REBOUND`でimport未実行のまま失敗させる。
 4. project open前に`check_active`、loader直前に`begin`でshutdown中でないことを確認する。runtimeはキャンセル可能なTaskMonitorを作って`bind_cancel`で登録し、その後に`begin`する。
 5. 実処理の開始前（`begin`前）のロック取得タイムアウトでは、jobを失敗させない。`waiting_for_lock`のまま0.5秒ごとに再試行し、止めるのはshutdown時だけとする。単一workerのため、その間は後続のjobも待つ。

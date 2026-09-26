@@ -88,6 +88,10 @@ def _resolve_timeout(timeout: float | _UsePolicy | None) -> float | None:
     return timeout
 
 
+class LockWaitInterrupted(Exception):
+    """A lock wait given up because its caller was cancelled (``ScriptBarrier.interrupt``)."""
+
+
 class _WriterTicket:
     """A queued writer's place in line plus the readers it is currently waiting out."""
 
@@ -111,7 +115,8 @@ class ScriptBarrier:
     active, ``read_lock`` waits at most ``timeout`` seconds (the runtime lock
     policy by default) and then raises a retryable ``LOCK_TIMEOUT``.
     ``write_lock(timeout=...)`` bounds a writer the same way (``run_script``
-    uses the separate script queue budget).  Acquisition and ownership changes
+    uses the separate script queue budget), and ``interrupt`` ends a writer's
+    wait early, for a job that was cancelled.  Acquisition and ownership changes
     use one condition: no unbounded lock acquisition follows the timed wait.
     Waiting writers run in FIFO order; existing owners re-enter without
     waiting for themselves.
@@ -217,6 +222,12 @@ class ScriptBarrier:
             return False
         return now - head.since > READER_GRACE_SECONDS
 
+    def _writer_wait_over_locked(self, ticket: _WriterTicket, stop: threading.Event | None) -> bool:
+        """Whether a queued writer's turn has come, or it was told to give up (``interrupt``)."""
+        if stop is not None and stop.is_set():
+            return True
+        return self._writer is None and not self._readers and self._pending_writers[0] is ticket
+
     def _reader_may_enter_locked(self, current: threading.Thread, now: float) -> bool:
         if self._writer is current:
             return True
@@ -261,9 +272,21 @@ class ScriptBarrier:
                     del self._readers[current]
                 self._condition.notify_all()
 
+    def interrupt(self, stop: threading.Event) -> None:
+        """Set ``stop`` and wake the waiters, so a ``write_lock`` waiting with it gives up."""
+        stop.set()
+        with self._condition:
+            self._condition.notify_all()
+
     @contextlib.contextmanager
-    def write_lock(self, timeout: float | _UsePolicy | None = None) -> Iterator[None]:
-        """Exclusive section.  ``timeout=None`` (the default) queues behind a running writer."""
+    def write_lock(
+        self, timeout: float | _UsePolicy | None = None, *, stop: threading.Event | None = None
+    ) -> Iterator[None]:
+        """Exclusive section.  ``timeout=None`` (the default) queues behind a running writer.
+
+        Once ``stop`` is set (see ``interrupt``), a writer still waiting raises
+        ``LockWaitInterrupted`` instead of acquiring.
+        """
 
         current = threading.current_thread()
         timeout = _resolve_timeout(timeout)
@@ -276,11 +299,9 @@ class ScriptBarrier:
                 ticket = _WriterTicket(self._readers, time.monotonic())
                 self._pending_writers.append(ticket)
                 try:
-                    self._wait_until(
-                        lambda: self._writer is None and not self._readers and self._pending_writers[0] is ticket,
-                        timeout,
-                        role="writer",
-                    )
+                    self._wait_until(lambda: self._writer_wait_over_locked(ticket, stop), timeout, role="writer")
+                    if stop is not None and stop.is_set():
+                        raise LockWaitInterrupted("Stopped waiting for the script barrier")
                     self._writer = current
                     self._writer_depth = 1
                 finally:
@@ -492,6 +513,7 @@ __all__ = [
     "USE_SCRIPT_QUEUE_TIMEOUT",
     "KeyedLockPool",
     "LockManager",
+    "LockWaitInterrupted",
     "OperationLock",
     "ScriptBarrier",
     "acquire_ordered_locks",

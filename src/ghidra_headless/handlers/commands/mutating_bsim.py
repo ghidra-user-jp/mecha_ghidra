@@ -4,7 +4,9 @@ from __future__ import absolute_import, print_function
 
 import re
 
+from ghidra_headless.bsim_errors import database_error
 from ghidra_headless.errors import HeadlessError
+from ghidra_headless.session import transactions
 
 from .read_only_bsim import (
     _all_function_symbols,
@@ -101,11 +103,6 @@ def _sort_callgraph(manager):
         iterator.next().sortCallgraph()
 
 
-def _last_error_message(database):
-    last_error = database.getLastError()
-    return "unknown error" if last_error is None else str(last_error.message)
-
-
 def _apply_program_categories(ctx, categories, *, txn):
     """Store executable-category values in Program Information (inside a transaction)."""
     Program = _program_class()
@@ -150,7 +147,7 @@ class _SignatureSession(object):
         self.gensig = None
         try:
             if not bool(self.database.initialize()):
-                raise HeadlessError("BSIM_DATABASE_INIT_FAILED: %s" % _last_error_message(self.database))
+                raise database_error("BSIM_DATABASE_INIT_FAILED", self.database.getLastError())
             db_info = self.database.getInfo()
             self.gensig = GenSignatures(bool(db_info.trackcallgraph))
             self.gensig.setVectorFactory(self.database.getLSHVectorFactory())
@@ -190,9 +187,10 @@ def bsim_register_target(params, *, ensure_context, txn):
         _sort_callgraph(manager)
         insert_request = InsertRequest()
         insert_request.manage = manager
+        transactions.note_external_write()
         response = insert_request.execute(session.database)
         if response is None:
-            raise HeadlessError("BSIM_INSERT_FAILED: %s" % _last_error_message(session.database))
+            raise database_error("BSIM_INSERT_FAILED", session.database.getLastError())
         count_query = QueryExeCount()
         count_response = count_query.execute(session.database)
         executable_count = None if count_response is None else int(count_response.recordCount)
@@ -264,7 +262,7 @@ def _stored_executable_categories(database, md5):
     query.fillinCategories = True
     response = database.query(query)
     if response is None:
-        raise HeadlessError("BSIM_GET_EXECUTABLE_FAILED: %s" % _last_error_message(database))
+        raise database_error("BSIM_GET_EXECUTABLE_FAILED", database.getLastError())
     for record in _iter_items(response.records):
         if str(record.getMd5()).lower() == md5:
             return _record_categories(record)
@@ -323,9 +321,10 @@ def bsim_update_target_signatures(params, *, ensure_context):
                 )
         update = QueryUpdate()
         update.manage = manager
+        transactions.note_external_write()
         response = update.execute(session.database)
         if response is None:
-            raise HeadlessError("BSIM_UPDATE_FAILED: %s" % _last_error_message(session.database))
+            raise database_error("BSIM_UPDATE_FAILED", session.database.getLastError())
         bad_executables = _bad_executables(response)
         if program_md5 is not None and any(item["executable_md5"].lower() == program_md5 for item in bad_executables):
             raise LookupError(

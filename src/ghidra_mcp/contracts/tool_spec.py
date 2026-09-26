@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any, Iterable, Literal
 
@@ -92,6 +92,11 @@ class ToolSpec:
     presenter: str | None = None
 
     @property
+    def writes(self) -> bool:
+        """Whether a call may change something, so its failure says what it left behind (``output_state``)."""
+        return self.safety_tag != ToolSafetyTag.READ_ONLY
+
+    @property
     def deferrable(self) -> bool:
         """Whether a call still running after the deferral wait replies with a job record instead.
 
@@ -107,7 +112,8 @@ class ToolSpec:
         A core command reads or changes one target's program under its locks;
         the revision is the one ``expected_revision`` takes.
         """
-        return self.executor_kind == ExecutorKind.CORE_COMMAND and self.include_target
+        # batch_read names the program and revision in its one JSON block already.
+        return self.executor_kind == ExecutorKind.CORE_COMMAND and self.include_target and self.presenter != "batch"
 
     @property
     def replays_requests(self) -> bool:
@@ -177,7 +183,8 @@ _LOAD_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("version", int | None, None),
     ("read_only", bool, False),
     # Loading never analyzes; false means analyze_program should run first.
-    ("is_analyzed", bool, ...),
+    # null: the program was reopened but its flag could not be read.
+    ("is_analyzed", bool | None, ...),
 )
 _SAVE_PROJECT_PROGRAM_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("status", str, ...),
@@ -191,7 +198,8 @@ _CREATE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("project_location", str, ...),
     ("project_name", str | None, None),
     ("domain_path", str | None, None),
-    ("is_analyzed", bool, ...),
+    # null: the program opened but its flag could not be read (get_program_info reports it).
+    ("is_analyzed", bool | None, ...),
 )
 _CLOSE_SESSION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("status", str, ...),
@@ -207,7 +215,13 @@ ScriptOrigin = Literal["operator", "bundled"]
 # client call budgets (60 s is a frequent default) so a waiting call never times out.
 OPERATION_WAIT_DEFAULT_SECONDS = 20
 OPERATION_WAIT_MAX_SECONDS = 50
-_OPERATION_WAIT_SECONDS = Annotated[int, Field(ge=0, le=OPERATION_WAIT_MAX_SECONDS)]
+# A tool call still running after this many seconds replies deferred=true with
+# a job record and goes on (presentation.deferred_calls): well inside that
+# 60-second budget, and above the default lock wait.
+DEFER_AFTER_SECONDS = 40.0
+# The background-job tools, and the tools that read and cancel their records.
+JOB_TOOLS = ("import_program", "analyze_program", "run_script")
+OPERATION_CONTROL_TOOLS = frozenset({"get_operation", "cancel_operation"})
 _OPERATION_WAIT_DESCRIPTION = (
     "Seconds the server waits for the job to finish before replying (0 replies at once). "
     "Replies early when the job succeeds or fails."
@@ -230,6 +244,8 @@ _OPERATION_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
     ("finished_at", str | None, ...),
     # What the tool returned: any JSON value, or a stored-result reference when large.
     ("result", object, ...),
+    # For a deferred program tool: the program state its result came from, as its reply names it.
+    ("source", dict[str, object] | None, None),
     ("operation_error", dict[str, object] | None, ...),
     # Present (true) only when the server dropped a large result to bound its memory.
     ("result_discarded", bool, False),
@@ -247,6 +263,13 @@ _REQUEST_ID_DESCRIPTION = (
 
 def _canonical_request_id(value: str | None) -> str | None:
     return None if value is None else canonical_uuid(value)
+
+
+# The request_id and the server-side wait every background-job tool takes.
+_JOB_REQUEST_ID = Annotated[
+    str | None, AfterValidator(_canonical_request_id), Field(description=_REQUEST_ID_DESCRIPTION)
+]
+_JOB_WAIT_SECONDS = Annotated[int, Field(ge=0, le=OPERATION_WAIT_MAX_SECONDS, description=_OPERATION_WAIT_DESCRIPTION)]
 
 
 # A write that must not apply twice when its reply is lost and the call is sent
@@ -435,10 +458,8 @@ _BSIM_LOAD_MATCH_OUTPUT_FIELDS: tuple[ToolFieldSpec, ...] = (
 
 class ImportProgramInput(ToolInputModel):
     binary_path: str
-    request_id: str | None = Field(default=None, description=_REQUEST_ID_DESCRIPTION)
-    wait_seconds: _OPERATION_WAIT_SECONDS = Field(
-        default=OPERATION_WAIT_DEFAULT_SECONDS, description=_OPERATION_WAIT_DESCRIPTION
-    )
+    request_id: _JOB_REQUEST_ID = None
+    wait_seconds: _JOB_WAIT_SECONDS = OPERATION_WAIT_DEFAULT_SECONDS
     import_mode: Literal["auto", "raw_binary"] = "auto"
     language_id: str | None = None
     compiler_spec_id: str | None = None
@@ -449,18 +470,19 @@ class ImportProgramInput(ToolInputModel):
     overlay: bool = False
     entry_address: str | None = None
     entry_offset: int | None = None
-    analyze_imported: bool = Field(
+    analyze_imported: bool | None = Field(
         default=True,
         description=(
-            "Run Ghidra auto-analysis inside the job. false leaves the program unanalyzed; "
+            "Run Ghidra auto-analysis inside the job (null means true). false leaves the program unanalyzed; "
             "loading does not analyze it, so run analyze_program later."
         ),
     )
 
-    @field_validator("request_id")
+    @field_validator("analyze_imported")
     @classmethod
-    def _validate_request_id(cls, value: str | None) -> str | None:
-        return None if value is None else canonical_uuid(value)
+    def _analysis_by_default(cls, value: bool | None) -> bool:
+        # One spelling per request, so a resend with null matches the job it repeats.
+        return True if value is None else value
 
     @field_validator("binary_path", "language_id", "compiler_spec_id", "block_name")
     @classmethod
@@ -513,15 +535,8 @@ class ImportProgramInput(ToolInputModel):
 
 class AnalyzeProgramInput(ToolInputModel):
     force: bool = Field(default=False, description="Analyze again even when the program is already analyzed.")
-    request_id: str | None = Field(default=None, description=_REQUEST_ID_DESCRIPTION)
-    wait_seconds: _OPERATION_WAIT_SECONDS = Field(
-        default=OPERATION_WAIT_DEFAULT_SECONDS, description=_OPERATION_WAIT_DESCRIPTION
-    )
-
-    @field_validator("request_id")
-    @classmethod
-    def _validate_request_id(cls, value: str | None) -> str | None:
-        return None if value is None else canonical_uuid(value)
+    request_id: _JOB_REQUEST_ID = None
+    wait_seconds: _JOB_WAIT_SECONDS = OPERATION_WAIT_DEFAULT_SECONDS
 
 
 class RunScriptInput(ToolInputModel):
@@ -532,15 +547,8 @@ class RunScriptInput(ToolInputModel):
     args: list[str] | None = None
     timeout_seconds: _SCRIPT_TIMEOUT_SECONDS | None = None
     expected_revision: str | None = None
-    request_id: str | None = Field(default=None, description=_REQUEST_ID_DESCRIPTION)
-    wait_seconds: _OPERATION_WAIT_SECONDS = Field(
-        default=OPERATION_WAIT_DEFAULT_SECONDS, description=_OPERATION_WAIT_DESCRIPTION
-    )
-
-    @field_validator("request_id")
-    @classmethod
-    def _validate_request_id(cls, value: str | None) -> str | None:
-        return None if value is None else canonical_uuid(value)
+    request_id: _JOB_REQUEST_ID = None
+    wait_seconds: _JOB_WAIT_SECONDS = OPERATION_WAIT_DEFAULT_SECONDS
 
 
 class CancelOperationInput(ToolInputModel):
@@ -555,9 +563,7 @@ class CancelOperationInput(ToolInputModel):
 class GetOperationInput(ToolInputModel):
     operation_id: str | None = None
     request_id: str | None = None
-    wait_seconds: _OPERATION_WAIT_SECONDS = Field(
-        default=OPERATION_WAIT_DEFAULT_SECONDS, description=_OPERATION_WAIT_DESCRIPTION
-    )
+    wait_seconds: _JOB_WAIT_SECONDS = OPERATION_WAIT_DEFAULT_SECONDS
 
     @field_validator("operation_id", "request_id")
     @classmethod
@@ -622,6 +628,8 @@ def _tool(
     short_description: str | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
+    input_model: type[BaseModel] | None = None,
+    presenter: str | None = None,
 ) -> ToolSpec:
     return ToolSpec(
         name=name,
@@ -630,7 +638,8 @@ def _tool(
         operation_level=operation_level,
         executor_kind=executor_kind,
         command_or_method=command_or_method,
-        input_model=_build_input_model(name, input_fields),
+        # A model of its own (a job's, with its validators) instead of one from input_fields.
+        input_model=input_model or _build_input_model(name, input_fields),
         output_model=_build_output_model(
             name,
             list_output=list_output,
@@ -647,6 +656,7 @@ def _tool(
         short_description=short_description or SHORT_TOOL_DESCRIPTIONS.get(name),
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
+        presenter=presenter,
     )
 
 
@@ -666,6 +676,8 @@ def _core_tool(
     short_description: str | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
+    input_model: type[BaseModel] | None = None,
+    presenter: str | None = None,
 ) -> ToolSpec:
     if safety_tag != ToolSafetyTag.READ_ONLY and all(field[0] != "request_id" for field in input_fields):
         # Every program write can be resent after a lost reply without applying twice.
@@ -687,6 +699,8 @@ def _core_tool(
         short_description=short_description or SHORT_TOOL_DESCRIPTIONS.get(name),
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
+        input_model=input_model,
+        presenter=presenter,
     )
 
 
@@ -711,6 +725,8 @@ def _registry_tool(
     short_description: str | None = None,
     idempotent_hint: bool | None = None,
     checkout_required: bool = False,
+    input_model: type[BaseModel] | None = None,
+    presenter: str | None = None,
 ) -> ToolSpec:
     return _tool(
         name=name,
@@ -733,6 +749,8 @@ def _registry_tool(
         short_description=short_description or SHORT_TOOL_DESCRIPTIONS.get(name),
         idempotent_hint=idempotent_hint,
         checkout_required=checkout_required,
+        input_model=input_model,
+        presenter=presenter,
     )
 
 
@@ -878,68 +896,63 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "List the programs in the target's project with their domain paths and shared-project sync summary."
         ),
     ),
-    replace(
-        _registry_tool(
-            "import_program",
-            method_name="import_program",
-            category_tag=ToolCategoryTag.CORE,
-            safety_tag=ToolSafetyTag.WRITE,
-            operation_level=ToolOperationLevel.ADVANCED,
-            output_fields=_SUBMIT_OPERATION_OUTPUT_FIELDS,
-            description=(
-                "Import a binary, Ghidra archive (.gzf), or raw binary as a background job and return the job "
-                "record. The server waits up to wait_seconds for the job; while state is queued or running, call "
-                "get_operation with operation_id. On success pass result.program to load_project_program. "
-                "Resending the same arguments while the job runs returns the same job. A failure reports "
-                "operation_error.details.output_state: absent (nothing was written; fix the cause and import "
-                "again), created (the program exists; load it) or uncertain (inspect the project first). "
-                "Keep the input file unchanged until the job finishes. The job also runs Ghidra auto-analysis "
-                "unless analyze_imported=false. Raw imports support language_id, base_address and entry bootstrap."
-            ),
+    _registry_tool(
+        "import_program",
+        method_name="import_program",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        output_fields=_SUBMIT_OPERATION_OUTPUT_FIELDS,
+        description=(
+            "Import a binary, Ghidra archive (.gzf), or raw binary as a background job and return the job "
+            "record. The server waits up to wait_seconds for the job; while state is queued or running, call "
+            "get_operation with operation_id. On success pass result.program to load_project_program. "
+            "Resending the same arguments while the job runs returns the same job. A failure reports "
+            "operation_error.details.output_state: absent (nothing was written; fix the cause and import "
+            "again), created (the program exists; load it) or uncertain (inspect the project first). "
+            "Keep the input file unchanged until the job finishes. The job also runs Ghidra auto-analysis "
+            "unless analyze_imported=false. Raw imports support language_id, base_address and entry bootstrap."
         ),
         input_model=ImportProgramInput,
         presenter="operation",
     ),
-    replace(
-        _registry_tool(
-            "get_operation",
-            method_name="get_operation",
-            category_tag=ToolCategoryTag.CORE,
-            safety_tag=ToolSafetyTag.READ_ONLY,
-            operation_level=ToolOperationLevel.BASIC,
-            include_target=False,
-            output_fields=_OPERATION_OUTPUT_FIELDS,
-            description=(
-                "Read a job by operation_id, or by the request_id given when it was submitted, without taking "
-                "Ghidra locks: an import, analysis or script job, a write sent with a request_id, or any tool call "
-                "that replied deferred=true because it was still running after 40 seconds. Waits up to "
-                "wait_seconds for it to finish, so "
-                "call it again at once while state is queued or running. succeeded includes result, exactly what "
-                "the tool returns (for an import, result.program is the project path); failed includes "
-                "operation_error. Job records live in server memory only: OPERATION_NOT_FOUND after a restart "
-                "does not mean the job never ran, so inspect the project before submitting it again."
-            ),
+    _registry_tool(
+        "get_operation",
+        method_name="get_operation",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.READ_ONLY,
+        operation_level=ToolOperationLevel.BASIC,
+        include_target=False,
+        output_fields=_OPERATION_OUTPUT_FIELDS,
+        description=(
+            "Read a job by operation_id, or by the request_id given when it was submitted, without taking "
+            "Ghidra locks: an import, analysis or script job, a write sent with a request_id, or any tool call "
+            f"that replied deferred=true because it was still running after {DEFER_AFTER_SECONDS:g} seconds. "
+            "Waits up to wait_seconds for it to finish, so "
+            "call it again at once while state is queued or running. succeeded includes result, exactly what "
+            "the tool returns (for an import, result.program is the project path; a deferred program tool's "
+            "record also has source); failed includes "
+            "operation_error. Job records live in server memory only: OPERATION_NOT_FOUND after a restart "
+            "does not mean the job never ran, so inspect the project before submitting it again."
         ),
         input_model=GetOperationInput,
         presenter="operation",
     ),
-    replace(
-        _registry_tool(
-            "cancel_operation",
-            method_name="cancel_operation",
-            category_tag=ToolCategoryTag.CORE,
-            safety_tag=ToolSafetyTag.WRITE,
-            operation_level=ToolOperationLevel.STANDARD,
-            include_target=False,
-            output_fields=_OPERATION_OUTPUT_FIELDS,
-            description=(
-                "Cancel a queued or running import, analysis or script job and return its record. A job that has "
-                "not started changing the program ends at once (OPERATION_CANCELLED, output_state=absent). A "
-                "running one stops at its next cancellation check and rolls back its transaction; poll "
-                "get_operation until it ends. A script that never checks its monitor cannot be stopped. Finished "
-                "jobs and the records of tool calls (deferred, or sent with a request_id) cannot be cancelled "
-                "(VALIDATION_ERROR)."
-            ),
+    _registry_tool(
+        "cancel_operation",
+        method_name="cancel_operation",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        include_target=False,
+        output_fields=_OPERATION_OUTPUT_FIELDS,
+        description=(
+            "Cancel a queued or running import, analysis or script job and return its record. A job that has "
+            "not started changing the program ends at once (OPERATION_CANCELLED, output_state=absent). A "
+            "running one stops at its next cancellation check and rolls back its transaction; poll "
+            "get_operation until it ends. A script that never checks its monitor cannot be stopped. Finished "
+            "jobs and the records of tool calls (deferred, or sent with a request_id) cannot be cancelled "
+            "(VALIDATION_ERROR)."
         ),
         input_model=CancelOperationInput,
         presenter="operation",
@@ -1075,31 +1088,29 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
         ),
         idempotent_hint=True,
     ),
-    replace(
-        _registry_tool(
-            "run_script",
-            method_name="run_script",
-            category_tag=ToolCategoryTag.SCRIPTS,
-            safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
-            operation_level=ToolOperationLevel.ADVANCED,
-            output_fields=_SUBMIT_OPERATION_OUTPUT_FIELDS,
-            checkout_required=True,
-            description=(
-                "Run a Ghidra script against the loaded program, like the Script Manager does, as a background job "
-                "and return the job record. The server waits up to wait_seconds; while state is queued or running, "
-                "call get_operation with operation_id. Pass `source` with the script text (Java: 'public class X "
-                "extends GhidraScript'; Python: start with '# @runtime PyGhidra' or '# @runtime Jython', or pass "
-                "`runtime`), or `script_id` for a catalog script (list_scripts). `args` are the script's positional "
-                "string arguments. The run is wrapped in a transaction: on success result.transaction_outcome is "
-                "committed or unchanged; on an exception, timeout or cancel_operation the changes roll back. "
-                "timeout_seconds (default 300, max 3600) and cancellation reach the script through its monitor, so "
-                "a loop that never checks monitor.checkCancelled() cannot be interrupted. result or "
-                "operation_error.details carry stdout, stderr and, for Java, compiler diagnostics, so a failing "
-                "script can be corrected and re-run. output_state covers program changes only, not files or "
-                "network effects. Resending the same arguments while the job is pending returns the same job."
-            ),
-            idempotent_hint=False,
+    _registry_tool(
+        "run_script",
+        method_name="run_script",
+        category_tag=ToolCategoryTag.SCRIPTS,
+        safety_tag=ToolSafetyTag.DESTRUCTIVE_WRITE,
+        operation_level=ToolOperationLevel.ADVANCED,
+        output_fields=_SUBMIT_OPERATION_OUTPUT_FIELDS,
+        checkout_required=True,
+        description=(
+            "Run a Ghidra script against the loaded program, like the Script Manager does, as a background job "
+            "and return the job record. The server waits up to wait_seconds; while state is queued or running, "
+            "call get_operation with operation_id. Pass `source` with the script text (Java: 'public class X "
+            "extends GhidraScript'; Python: start with '# @runtime PyGhidra' or '# @runtime Jython', or pass "
+            "`runtime`), or `script_id` for a catalog script (list_scripts). `args` are the script's positional "
+            "string arguments. The run is wrapped in a transaction: on success result.transaction_outcome is "
+            "committed or unchanged; on an exception, timeout or cancel_operation the changes roll back. "
+            "timeout_seconds (default 300, max 3600) and cancellation reach the script through its monitor, so "
+            "a loop that never checks monitor.checkCancelled() cannot be interrupted. result or "
+            "operation_error.details carry stdout, stderr and, for Java, compiler diagnostics, so a failing "
+            "script can be corrected and re-run. output_state covers program changes only, not files or "
+            "network effects. Resending the same arguments while the job is pending returns the same job."
         ),
+        idempotent_hint=False,
         input_model=RunScriptInput,
         presenter="operation",
     ),
@@ -1374,25 +1385,23 @@ _TOOL_SPEC_LIST: tuple[ToolSpec, ...] = (
             "Delete the function at or containing the address. The instructions stay; only the function definition is removed."
         ),
     ),
-    replace(
-        _registry_tool(
-            "analyze_program",
-            method_name="analyze_program",
-            category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
-            safety_tag=ToolSafetyTag.WRITE,
-            operation_level=ToolOperationLevel.STANDARD,
-            output_fields=_SUBMIT_OPERATION_OUTPUT_FIELDS,
-            # The job runs the analyze_program core command, so checkout and quarantine checks apply to it.
-            checkout_required=True,
-            description=(
-                "Run Ghidra auto-analysis on the target's program as a background job and return the job record. "
-                "The server waits up to wait_seconds for the job; while state is queued or running, call "
-                "get_operation with operation_id. An analyzed program is left as is (result.analyzed=false) "
-                "unless force=true. Loading never analyzes, so run this when load_project_program or open_program "
-                "reports is_analyzed=false. The analysis stays unsaved until save_project_program. While the job "
-                "runs, other calls on its project fail with LOCK_TIMEOUT naming details.operation_id. "
-                "Takes minutes on large binaries."
-            ),
+    _registry_tool(
+        "analyze_program",
+        method_name="analyze_program",
+        category_tag=ToolCategoryTag.FUNCTION_ANALYSIS,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        output_fields=_SUBMIT_OPERATION_OUTPUT_FIELDS,
+        # The job runs the analyze_program core command, so checkout and quarantine checks apply to it.
+        checkout_required=True,
+        description=(
+            "Run Ghidra auto-analysis on the target's program as a background job and return the job record. "
+            "The server waits up to wait_seconds for the job; while state is queued or running, call "
+            "get_operation with operation_id. An analyzed program is left as is (result.analyzed=false) "
+            "unless force=true. Loading never analyzes, so run this when load_project_program or open_program "
+            "reports is_analyzed=false. The analysis stays unsaved until save_project_program. While the job "
+            "runs, other calls on its project fail with LOCK_TIMEOUT naming details.operation_id. "
+            "Takes minutes on large binaries."
         ),
         input_model=AnalyzeProgramInput,
         presenter="operation",
@@ -2071,39 +2080,37 @@ _TOOL_SPECS["bsim_query"] = _registry_tool(
     description="Search BSim for the loaded program or selected functions. scope=functions requires addresses/function_names (up to 1,000 combined); scope=program excludes selectors. min_function_size applies only to program scope. Results retain query provenance and matched_ref for bsim_load_matched_executable.",
 )
 
-_TOOL_SPECS["batch_read"] = replace(
-    _core_tool(
-        "batch_read",
-        category_tag=ToolCategoryTag.CORE,
-        safety_tag=ToolSafetyTag.READ_ONLY,
-        operation_level=ToolOperationLevel.STANDARD,
-        input_fields=(),
-        output_fields=(
-            ("program", str | None, ...),
-            ("revision", str, ...),
-            ("status", Literal["ok", "partial", "error"], ...),
-            ("succeeded_count", int, ...),
-            ("failed_count", int, ...),
-            ("not_run_count", int, ...),
-            ("items", list[dict], ...),
-        ),
-        description=(
-            "Read 1-20 independent requests on one target under one lock. Supported tools: get_function, "
-            "get_comments, get_data_type, get_xrefs, get_call_edges, decompile_function, disassemble; "
-            "each must also be enabled individually. "
-            "Use unique short ids and each tool's usual arguments without target. Optional fields select top-level "
-            "data keys, or row keys for paged tools (page metadata is preserved); no fields for C strings. "
-            "All inputs are validated first; "
-            "item query failures continue, revision changes fail the entire batch. Inspect status and all item statuses. "
-            "Page limits total at most 2000 rows; at most 5 decompiles, with batch-only item_timeout_seconds "
-            "(default 15, 1-60). timeout_seconds (default 10, max 60) starts after locking; heavy reads "
-            "cooperatively stop within the remaining time. This is not a hard interrupt. Retained payloads "
-            "are limited to 8 MiB; unstarted items report time_budget_exhausted or result_budget_exhausted. "
-            "max_output_chars bounds response JSON text "
-            "(not the MCP envelope). Large batches use one result_id: read_result(mode='json', path='/items', "
-            "offset_items=N) retrieves item N. read_result(mode='text', path='/items/N/data') and search_result "
-            "with the same path retrieve/search decoded C text. Inline mode rejects oversized responses."
-        ),
+_TOOL_SPECS["batch_read"] = _core_tool(
+    "batch_read",
+    category_tag=ToolCategoryTag.CORE,
+    safety_tag=ToolSafetyTag.READ_ONLY,
+    operation_level=ToolOperationLevel.STANDARD,
+    input_fields=(),
+    output_fields=(
+        ("program", str | None, ...),
+        ("revision", str, ...),
+        ("status", Literal["ok", "partial", "error"], ...),
+        ("succeeded_count", int, ...),
+        ("failed_count", int, ...),
+        ("not_run_count", int, ...),
+        ("items", list[dict], ...),
+    ),
+    description=(
+        "Read 1-20 independent requests on one target under one lock. Supported tools: get_function, "
+        "get_comments, get_data_type, get_xrefs, get_call_edges, decompile_function, disassemble; "
+        "each must also be enabled individually. "
+        "Use unique short ids and each tool's usual arguments without target. Optional fields select top-level "
+        "data keys, or row keys for paged tools (page metadata is preserved); no fields for C strings. "
+        "All inputs are validated first; "
+        "item query failures continue, revision changes fail the entire batch. Inspect status and all item statuses. "
+        "Page limits total at most 2000 rows; at most 5 decompiles, with batch-only item_timeout_seconds "
+        "(default 15, 1-60). timeout_seconds (default 10, max 60) starts after locking; heavy reads "
+        "cooperatively stop within the remaining time. This is not a hard interrupt. Retained payloads "
+        "are limited to 8 MiB; unstarted items report time_budget_exhausted or result_budget_exhausted. "
+        "max_output_chars bounds response JSON text "
+        "(not the MCP envelope). Large batches use one result_id: read_result(mode='json', path='/items', "
+        "offset_items=N) retrieves item N. read_result(mode='text', path='/items/N/data') and search_result "
+        "with the same path retrieve/search decoded C text. Inline mode rejects oversized responses."
     ),
     input_model=batch_input_model(_TOOL_SPECS),
     presenter="batch",
@@ -2259,6 +2266,9 @@ def filter_tool_specs(
         if "get_operation" in disabled:
             raise ValueError(_operation_lookup_message(selected))
         selected_names.add("get_operation")
+    # Their replies point to cancel_operation as well; it stays out only when disabled.
+    if _job_tools(selected) and "cancel_operation" in available_specs and "cancel_operation" not in disabled:
+        selected_names.add("cancel_operation")
     if "get_operation" not in selected_names:
         # Cancelling is only useful to a client that can read the job record.
         selected_names.discard("cancel_operation")
@@ -2266,17 +2276,15 @@ def filter_tool_specs(
     return {name: spec for name, spec in available_specs.items() if name in selected_names}
 
 
-# Tools that act on job records rather than submit jobs: they follow
-# get_operation instead of requiring it.
-_OPERATION_CONTROLS = frozenset({"get_operation", "cancel_operation"})
+def _job_tools(specs: Mapping[str, ToolSpec]) -> list[str]:
+    # The job-record tools follow get_operation instead of requiring it.
+    return sorted(
+        name for name, spec in specs.items() if spec.presenter == "operation" and name not in OPERATION_CONTROL_TOOLS
+    )
 
 
 def _operation_tools_without_lookup(specs: Mapping[str, ToolSpec]) -> list[str]:
-    if "get_operation" in specs:
-        return []
-    return sorted(
-        name for name, spec in specs.items() if spec.presenter == "operation" and name not in _OPERATION_CONTROLS
-    )
+    return [] if "get_operation" in specs else _job_tools(specs)
 
 
 def _operation_lookup_message(specs: Mapping[str, ToolSpec]) -> str:
@@ -2311,4 +2319,7 @@ __all__ = [
     "get_public_tool_names",
     "get_tool_spec",
     "validate_tool_selection",
+    "DEFER_AFTER_SECONDS",
+    "JOB_TOOLS",
+    "OPERATION_CONTROL_TOOLS",
 ]

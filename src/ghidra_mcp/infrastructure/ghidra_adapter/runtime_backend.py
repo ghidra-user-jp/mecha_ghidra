@@ -117,9 +117,7 @@ class RuntimeBackend:
     ) -> Dict[str, Any]: ...
 
     @_delegate("_target_lifecycle")
-    def import_program(
-        self, name: str, binary_path: str, *, control: OperationControl | None = None, **kwargs
-    ) -> str: ...
+    def import_program(self, name: str, binary_path: str, *, control: OperationControl, **kwargs) -> str: ...
 
     @_delegate("_target_lifecycle")
     def loaded_program(self, name: str) -> LoadedProgram: ...
@@ -135,16 +133,14 @@ class RuntimeBackend:
 
     # ---- scripts ----------------------------------------------------------
 
-    def script_runtime_availability(self) -> Dict[str, bool]:
+    def script_runtime_availability(self, *, wait: bool = True) -> Dict[str, bool]:
         try:
-            return self._script_execution.script_runtime_availability()
+            return self._script_execution.script_runtime_availability(wait=wait)
         except Exception as exc:
             raise to_domain_error(exc, operation="script_runtime_availability") from exc
 
     @_delegate("_script_execution")
-    def run_script(
-        self, name: str, *, request: Dict[str, Any], control: OperationControl | None = None
-    ) -> Dict[str, Any]: ...
+    def run_script(self, name: str, *, request: Dict[str, Any], control: OperationControl) -> Dict[str, Any]: ...
 
     @_delegate("_target_lifecycle")
     def close_all(self) -> None: ...

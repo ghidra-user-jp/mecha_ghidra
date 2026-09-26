@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ghidra_mcp.contracts.tool_spec import ToolCategoryTag, ToolSafetyTag, ToolSpec
+from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, JOB_TOOLS, ToolCategoryTag, ToolSafetyTag, ToolSpec
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 
 # Fixed order keeps discovery instructions stable across registration order.
@@ -79,7 +79,7 @@ def build_server_instructions(*, specs: Mapping[str, ToolSpec], config: ToolPres
         parts.append("No analysis capabilities are advertised for this tool selection; consult the tool catalog.")
     if "list_targets" in enabled:
         parts.append("Start with list_targets to identify the program context.")
-    jobs = [name for name in ("import_program", "analyze_program", "run_script") if name in enabled]
+    jobs = [name for name in JOB_TOOLS if name in enabled]
     if jobs:
         names = jobs[0] if len(jobs) == 1 else ", ".join(jobs[:-1]) + " and " + jobs[-1]
         parts.append(
@@ -89,8 +89,8 @@ def build_server_instructions(*, specs: Mapping[str, ToolSpec], config: ToolPres
         )
     if "get_operation" in enabled:
         parts.append(
-            "A call still running after 40 s replies deferred=true: get its result with get_operation, "
-            "never by repeating the call."
+            f"A call still running after {DEFER_AFTER_SECONDS:g} s replies deferred=true: get its result with "
+            "get_operation, never by repeating the call."
         )
     if "analyze_program" in enabled:
         parts.append(

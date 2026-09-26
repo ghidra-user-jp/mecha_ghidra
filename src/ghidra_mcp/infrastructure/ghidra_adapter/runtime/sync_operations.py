@@ -280,38 +280,44 @@ class RuntimeSyncOperations(
             if conflict_result is not None:
                 return conflict_result
 
-            saved_active_program = False
-            if active_target is not None:
-                saved_active_program = self._save_active_program_if_needed_locked(
-                    active_target,
+            # This refresh still precedes check-in.  Do not label a failure here
+            # as a completed/partial commit: callers may safely retry after the
+            # repository connection recovers because commit_program() has not run,
+            # once an automatic checkout made above is undone.
+            try:
+                saved_active_program = False
+                if active_target is not None:
+                    saved_active_program = self._save_active_program_if_needed_locked(
+                        active_target,
+                        resolved_domain_path,
+                        handle=handle,
+                    )
+                    if self._refresh_active_versioned_program_state_locked(
+                        active_target,
+                        resolved_domain_path,
+                        status=status,
+                        save_before_close=False,
+                        force=saved_active_program,
+                    ):
+                        handle = self._store.get_target_handle(name)
+                handle, resolved_domain_path = self._resolve_sync_target_locked(
+                    name,
                     resolved_domain_path,
-                    handle=handle,
                 )
-                if self._refresh_active_versioned_program_state_locked(
+                status = self._get_refreshed_sync_status_locked(
+                    handle,
+                    resolved_domain_path,
+                    require_refresh=True,
+                )
+                status = self._overlay_active_program_sync_status_locked(
                     active_target,
                     resolved_domain_path,
                     status=status,
-                    save_before_close=False,
-                    force=saved_active_program,
-                ):
-                    handle = self._store.get_target_handle(name)
-            # This refresh still precedes check-in.  Do not label a failure here
-            # as a completed/partial commit: callers may safely retry after the
-            # repository connection recovers because commit_program() has not run.
-            handle, resolved_domain_path = self._resolve_sync_target_locked(
-                name,
-                resolved_domain_path,
-            )
-            status = self._get_refreshed_sync_status_locked(
-                handle,
-                resolved_domain_path,
-                require_refresh=True,
-            )
-            status = self._overlay_active_program_sync_status_locked(
-                active_target,
-                resolved_domain_path,
-                status=status,
-            )
+                )
+            except Exception as exc:
+                if auto_checkout_created:
+                    self._undo_auto_checkout_after_failure_locked(name, resolved_domain_path, failure=exc)
+                raise
             conflict_result = self._handle_commit_conflict_locked(
                 name,
                 resolved_domain_path,

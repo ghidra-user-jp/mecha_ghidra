@@ -40,6 +40,9 @@ def _manual_selected_names(
     }
     selected.update(enable_tools or set())
     selected.difference_update(disable_tools or set())
+    # A job tool brings its record tools along (filter_tool_specs).
+    if any(ALL_SPECS[name].presenter == "operation" for name in selected - {"get_operation", "cancel_operation"}):
+        selected.update({"get_operation", "cancel_operation"} - (disable_tools or set()))
     return selected
 
 

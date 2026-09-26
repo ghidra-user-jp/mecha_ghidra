@@ -61,7 +61,8 @@ Defaults:
 EOF
   # The pinned version lives in the release metadata, not in this text.
   local ghidra_version
-  ghidra_version="$(/usr/bin/sed -n 's/^MECHA_GHIDRA_GHIDRA_VERSION=//p' "${RELEASE_ENV_FILE}" 2>/dev/null)"
+  # "|| true": under set -e a missing file would end the help here, before the fallback.
+  ghidra_version="$(/usr/bin/sed -n 's/^MECHA_GHIDRA_GHIDRA_VERSION=//p' "${RELEASE_ENV_FILE}" 2>/dev/null || true)"
   ghidra_version="${ghidra_version:-pinned}"
   cat <<EOF
   linux/amd64           Uses the upstream official Ghidra ${ghidra_version} ZIP.

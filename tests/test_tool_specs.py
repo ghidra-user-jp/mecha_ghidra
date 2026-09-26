@@ -456,7 +456,7 @@ def test_typed_input_models_for_function_listing_slice():
             "overlay": (bool, False),
             "entry_address": (str | None, None),
             "entry_offset": (int | None, None),
-            "analyze_imported": (bool, True),
+            "analyze_imported": (bool | None, True),
         },
     )
     _assert_fields(
@@ -661,6 +661,7 @@ _OPERATION_RECORD_FIELDS: dict[str, tuple[Any, Any]] = {
     "started_at": (str | None, ...),
     "finished_at": (str | None, ...),
     "result": (object, ...),
+    "source": (dict[str, object] | None, None),
     "operation_error": (dict[str, object] | None, ...),
     "result_discarded": (bool, False),
 }
@@ -698,7 +699,7 @@ def test_all_output_models_are_strict_and_typed():
             "reloaded": (bool, False),
             "version": (int | None, None),
             "read_only": (bool, False),
-            "is_analyzed": (bool, ...),
+            "is_analyzed": (bool | None, ...),
         },
         "import_program": {**_OPERATION_RECORD_FIELDS, "replayed": (bool, ...)},
         "analyze_program": {**_OPERATION_RECORD_FIELDS, "replayed": (bool, ...)},
@@ -711,7 +712,7 @@ def test_all_output_models_are_strict_and_typed():
             "project_location": (str, ...),
             "project_name": (str | None, None),
             "domain_path": (str | None, None),
-            "is_analyzed": (bool, ...),
+            "is_analyzed": (bool | None, ...),
         },
         "close_session": {
             "status": (str, ...),

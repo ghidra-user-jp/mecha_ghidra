@@ -66,8 +66,9 @@ class OperationControl(Protocol):
     job's locks and before it opens or changes anything. ``begin`` is called
     immediately before the loader or the analysis writes anything: from then on
     a failure may have left changes. ``bind_cancel`` registers (or with ``None``
-    clears) the callable that cancels the running analysis; it runs at once if
-    cancellation was already requested.
+    clears) the callable that cancels the running analysis, or that ends a wait
+    for a lock before ``begin``; it runs at once if cancellation was already
+    requested.
     """
 
     expected_project_key: str
@@ -132,7 +133,7 @@ class TargetRuntimePort(Protocol):
         name: str,
         binary_path: str,
         *,
-        control: OperationControl | None = None,
+        control: OperationControl,
         **options: Any,
     ) -> str: ...
 
@@ -239,11 +240,11 @@ class SyncRuntimePort(Protocol):
 class ScriptRuntimePort(Protocol):
     """Runtime side of Ghidra script execution (JVM-bound)."""
 
-    def script_runtime_availability(self) -> dict[str, bool]: ...
+    def script_runtime_availability(self, *, wait: bool = True) -> dict[str, bool]:
+        """Which script runtimes this Ghidra has; ``wait=False`` fails with LOCK_TIMEOUT while a script runs."""
+        ...
 
-    def run_script(
-        self, name: str, *, request: dict[str, Any], control: OperationControl | None = None
-    ) -> dict[str, Any]: ...
+    def run_script(self, name: str, *, request: dict[str, Any], control: OperationControl) -> dict[str, Any]: ...
 
     def project_lock_key(self, name: str) -> str | None: ...
 

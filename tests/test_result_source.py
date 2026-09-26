@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
+import anyio
 from mcp.types import CallToolResult, TextContent
 
+from ghidra_mcp.application.services.operations import OperationManager
 from ghidra_mcp.contracts.tool_spec import get_all_tool_specs, get_tool_spec
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
@@ -85,3 +88,38 @@ def test_a_job_record_keeps_the_value_without_the_source():
         structured_content={"result": {"ok": True}, "source": {"target": "t", **SOURCE}},
     )
     assert structured_value(reply) == {"ok": True}
+
+
+def test_a_deferred_program_read_keeps_its_source_in_the_record():
+    release = threading.Event()
+
+    class Slow(Registry):
+        def call(self, command, params, target):
+            assert release.wait(5)
+            return super().call(command, params, target)
+
+    registry = Slow()
+
+    class Targets:
+        def project_key(self, target):
+            return "/project::test"
+
+    registry.operations = OperationManager(Targets())
+    registry.get_operation = lambda *, operation_id=None, request_id=None, wait_seconds=0: registry.operations.get(
+        operation_id=operation_id, request_id=request_id
+    )
+    mcp = _server(registry)
+    mcp.deferred_calls.defer_after = 0.2
+
+    async def scenario():
+        deferred = await mcp.call_tool("decompile_function", {"target": "t", "address": "0x1000"})
+        operation_id = deferred.structured_content["operation"]["operation_id"]
+        release.set()
+        with anyio.fail_after(5):
+            reply = await mcp.call_tool("get_operation", {"operation_id": operation_id, "wait_seconds": 3})
+        return reply.structured_content["result"]
+
+    record = asyncio.run(scenario())
+    assert record["state"] == "succeeded" and record["result"] == "int main(void) { return 0; }"
+    # The program state it came from, as the reply would have named it.
+    assert record["source"] == {"target": "t", **SOURCE}

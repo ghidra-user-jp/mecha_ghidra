@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -10,6 +11,24 @@ from ghidra_mcp.application.services.path_policy import UNRESTRICTED_PATH_POLICY
 from ghidra_mcp.application.services.ports import LoadedProgram, OperationControl, TargetRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_mapping import to_domain_error
+
+logger = logging.getLogger(__name__)
+
+
+def _analyzed_after_open(session, info: dict) -> bool | None:
+    """Whether the program just opened is analyzed; None when that cannot be read.
+
+    The program is open by now (the runtime released its locks), so a failed
+    read must not turn the open into a failure the caller would retry.
+    """
+    is_analyzed = getattr(session, "is_analyzed", None)
+    if not callable(is_analyzed):
+        return bool(info.get("is_analyzed", False))
+    try:
+        return bool(is_analyzed())
+    except Exception:
+        logger.warning("Could not read whether the opened program is analyzed", exc_info=True)
+        return None
 
 
 class TargetService:
@@ -90,14 +109,13 @@ class TargetService:
                     info = session.to_dict()
                 elif isinstance(session, dict):
                     info = dict(session)
-                is_analyzed = getattr(session, "is_analyzed", None)
                 return {
                     "target": name,
                     "project_location": info.get("project_location", project_location),
                     "project_name": info.get("project_name", project_name),
                     "domain_path": info.get("domain_path", domain_path),
                     # Opening never analyzes; false tells the caller to run analyze_program.
-                    "is_analyzed": bool(is_analyzed() if callable(is_analyzed) else info.get("is_analyzed", False)),
+                    "is_analyzed": _analyzed_after_open(session, info),
                 }
         except Exception as exc:
             self._raise_domain_error(exc, operation="create_session", target=name)
@@ -178,13 +196,13 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="import_program", target=name)
 
-    def import_program(self, name: str, binary_path: str, *, control: OperationControl | None = None, **options):
+    def import_program(self, name: str, binary_path: str, *, control: OperationControl, **options):
         try:
             self._path_policy.validate_import_path(binary_path)
-            project_key = self._project_key(name) if control is None else control.expected_project_key
-            with self._lock_manager.acquire(target=name, project_key=project_key):
-                if control is None:
-                    return self._runtime.import_program(name, binary_path, **options)
+            # A job keeps the project it was accepted for; the runtime refuses a changed one.
+            with self._lock_manager.acquire(target=name, project_key=control.expected_project_key):
+                # The job holds this target's locks from here (OperationManager.lock_holder).
+                control.check_active()
                 return self._runtime.import_program(name, binary_path, control=control, **options)
         except Exception as exc:
             self._raise_domain_error(exc, operation="import_program", target=name)

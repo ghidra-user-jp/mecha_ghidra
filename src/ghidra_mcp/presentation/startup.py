@@ -16,13 +16,14 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-import anyio
 from mcp.types import CallToolResult
 
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_utils import safe_cause_details, sanitize_cause_message
 
 from .error_mapper import map_exception
 from .tool_registry import anticipated_error_result
+from .waiting import POLL_SECONDS, wait_until
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,6 @@ STARTING = "starting"
 READY = "ready"
 FAILED = "failed"
 STARTUP_THREAD_NAME = "ghidra-startup"
-# How often a waiting tool call re-reads the startup state.
-_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +80,7 @@ class StartupGate:
         waited = 0.0
         if self._state == STARTING:
             started = time.monotonic()
-            with anyio.move_on_after(timeout):
-                while self._state == STARTING:
-                    await anyio.sleep(_POLL_SECONDS)
+            await wait_until(lambda: self._state != STARTING, timeout)
             waited = time.monotonic() - started
         if self._state == FAILED:
             raise startup_failed_error(self._failure)
@@ -135,10 +132,13 @@ class _Stopped(Exception):
 
 
 def _failure_of(step: StartupStep, exc: BaseException) -> StartupFailure:
-    cause_type = exc.code.value if isinstance(exc, DomainError) else type(exc).__name__
-    return StartupFailure(
-        stage=step.name, message=f"{step.failure}: {exc}", cause_type=cause_type, cause_message=str(exc)
-    )
+    # The message is the line the server logs.  Every tool call returns the
+    # cause, so it gets the treatment of any public cause: no host paths, capped.
+    if isinstance(exc, DomainError):
+        cause = {"cause_type": exc.code.value, "cause_message": sanitize_cause_message(exc.message)}
+    else:
+        cause = safe_cause_details(exc)
+    return StartupFailure(stage=step.name, message=f"{step.failure}: {exc}", **cause)
 
 
 class BackgroundStartup:
@@ -273,7 +273,7 @@ class BackgroundStartup:
             loop.call_soon_threadsafe(call)
         except RuntimeError as exc:  # closed: the transport has ended
             raise _Stopped from exc
-        while not done.wait(_POLL_SECONDS):
+        while not done.wait(POLL_SECONDS):
             if loop.is_closed() or not loop.is_running():
                 raise _Stopped
         if errors:

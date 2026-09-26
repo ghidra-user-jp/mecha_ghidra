@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import functools
 import inspect
-import json
 import re
 from copy import deepcopy
 from typing import Any, Callable
 
-from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
+from mcp.types import CallToolResult, Tool, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, create_model
 
 from ghidra_mcp.contracts.tool_models import PayloadToolOutputModel
@@ -20,6 +19,7 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolSpec,
 )
 from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentationConfig
+from ghidra_mcp.presentation.tool_binding import error_envelope
 from ghidra_mcp.presentation.tool_errors import ToolError
 
 _SHORT_DESCRIPTION_MAX_CHARS = 180
@@ -337,12 +337,7 @@ def anticipated_error_result(exc: BaseException) -> CallToolResult | None:
     payload = getattr(exc, "domain_error", None)
     if payload is None:
         return None
-    error = {"message": str(exc), **payload}
-    return CallToolResult(
-        is_error=True,
-        structured_content={"error": error},
-        content=[TextContent(type="text", text=json.dumps({"error": error}, ensure_ascii=False))],
-    )
+    return error_envelope({"message": str(exc), **payload})
 
 
 def as_anticipated_tool_failure(

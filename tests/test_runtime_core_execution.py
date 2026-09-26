@@ -21,8 +21,9 @@ class _Core:
         # What the real core reports after a command (ghidra_headless.handlers.core).
         self.outcome: str | None = None
 
-    def execute(self, command: str, params: dict, *, key: str):
+    def execute(self, command: str, params: dict, *, key: str, record_transactions: bool = False):
         self.calls.append((command, params, key))
+        self.recorded = record_transactions
         if self.on_execute is not None:
             self.on_execute(key)
         if self.failure is not None:
@@ -31,6 +32,9 @@ class _Core:
 
     def transaction_outcome(self) -> str | None:
         return self.outcome
+
+    def begins_itself(self, command: str) -> bool:
+        return command == "run_script"
 
     def initialize(self, program, key: str):  # noqa: ANN001
         self.initialized.append((program, key))

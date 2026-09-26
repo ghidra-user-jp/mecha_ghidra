@@ -4,7 +4,8 @@ A call site that converts an unexpected exception passes a generic hint
 ("Check runtime state"); when the failure's code says more, the hint here
 replaces it.  A hint written for one failure (``DomainError(hint=...)``) is
 kept.  For ``NOT_FOUND`` the hint also depends on what was missing, which the
-core names at the start of its message ("Function not found: ...").
+core names at the start of its message ("Function not found: ...", or a code
+such as "NAMESPACE_NOT_FOUND: ...").
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ _LOAD_A_PROGRAM = (
     "Load a program with load_project_program; list_project_programs shows the project's programs, "
     "and import_program adds a binary"
 )
+_FIND_A_FUNCTION = "list_functions (filter by name) or search_symbols finds a function's name and entry address"
 
 RECOVERY_HINTS: dict[ErrorCode, str] = {
     ErrorCode.TARGET_NOT_REGISTERED: "list_targets shows the registered targets; register_target adds one for a project",
@@ -27,6 +29,10 @@ RECOVERY_HINTS: dict[ErrorCode, str] = {
     ErrorCode.VALIDATION_ERROR: "Correct the argument the message names, then call again",
     ErrorCode.CHECKOUT_REQUIRED: "Check the program out with checkout_project_program, then call again",
     ErrorCode.PROGRAM_NOT_ANALYZED: "Run analyze_program on the target and wait for the job, then call again",
+    ErrorCode.RESULT_DISCARDED: (
+        "get_operation with details.operation_id says whether the call succeeded; inspect the program for "
+        "what it changed instead of sending the call again"
+    ),
     ErrorCode.RAW_LOADER_OPTION_UNAVAILABLE: (
         "Check language_id, compiler_spec_id and the loader options; details.cause_message names what this "
         "Ghidra version's raw binary loader lacks"
@@ -34,13 +40,16 @@ RECOVERY_HINTS: dict[ErrorCode, str] = {
     ErrorCode.PROJECT_LOCKED: (
         "Another process, such as a Ghidra GUI or another server, has the project open; close it there, then retry"
     ),
+    ErrorCode.BSIM_DATABASE_UNREACHABLE: "Check that the BSim database is running and reachable, then retry",
+    ErrorCode.BSIM_AUTHENTICATION_FAILED: "Check the BSim user and password",
+    ErrorCode.BSIM_FUNCTION_NOT_FOUND: _FIND_A_FUNCTION,
+    ErrorCode.BSIM_EXECUTABLE_NOT_FOUND: "list_bsim_executables shows the executables in the database",
+    ErrorCode.BSIM_EXECUTABLE_AMBIGUOUS: "Pass md5 to select one executable",
+    ErrorCode.BSIM_UNSAVED_PROGRAM: "Save the program with save_project_program first",
 }
 
 _NOT_FOUND_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (
-        ("Function not found", "No function found"),
-        "list_functions (filter by name) or search_symbols finds a function's name and entry address",
-    ),
+    (("Function not found", "No function found"), _FIND_A_FUNCTION),
     (
         ("Data type not found", "Struct not found", "Enum not found"),
         "list_data_types (filter by name) finds a data type's full path",
@@ -51,6 +60,14 @@ _NOT_FOUND_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
     (("No data symbol",), "list_data_items shows the defined data and its labels"),
     (("Bookmark not found",), "list_bookmarks shows the bookmarks and their addresses"),
+    (
+        ("NAMESPACE_NOT_FOUND",),
+        "list_namespaces shows the namespaces; create_namespace=true creates the missing parents",
+    ),
+    (
+        ("REPOSITORY_NOT_FOUND",),
+        "Check the repository name: the Ghidra Server the message names has no such repository",
+    ),
 )
 
 

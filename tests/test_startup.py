@@ -250,6 +250,24 @@ def test_a_call_that_outwaits_the_startup_gets_a_retryable_lock_timeout(lock_tim
     asyncio.run(check())
 
 
+def test_a_write_turned_away_while_starting_says_it_left_nothing(lock_timeout):
+    lock_timeout(0.1)
+    server = _server(StartupGate(), "list_targets", "save_project_program")
+
+    async def check():
+        async with Client(server) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            write = await client.call_tool("save_project_program", {"target": "sample"})
+            read = await client.call_tool("list_targets", {})
+            _validate(tools, "save_project_program", write)
+            return write.structured_content["error"], read.structured_content["error"]
+
+    write, read = asyncio.run(check())
+    # retryable only with absent: nothing ran.
+    assert (write["code"], write["retryable"], write["details"]["output_state"]) == ("LOCK_TIMEOUT", True, "absent")
+    assert "output_state" not in read["details"]
+
+
 def test_a_failed_startup_answers_in_the_published_error_shape():
     gate = StartupGate()
     gate.mark_failed(FAILURE)
@@ -304,3 +322,22 @@ def test_the_startup_wait_counts_against_the_deferral_and_job_waits():
             assert seen["wait_seconds"] == 8
 
     asyncio.run(check_job())
+
+
+def test_a_failed_step_names_its_cause_without_host_paths():
+    gate = StartupGate()
+    secret = "/Users/analyst/cases/acme/project.gpr"
+    startup = BackgroundStartup(
+        [
+            _step([], "jvm"),
+            _step([], "session", error=RuntimeError(f"cannot open {secret}")),
+        ],
+        gate,
+    )
+    startup.start()
+    assert startup.join(timeout=5)
+    # The server log keeps the whole line for the operator.
+    assert gate.failure.message == f"session failed: cannot open {secret}"
+    assert (gate.failure.cause_type, gate.failure.cause_message) == ("RuntimeError", "cannot open <path>")
+    error = startup_error_result(startup_failed_error(gate.failure)).structured_content["error"]
+    assert secret not in str(error) and "cannot open <path>" in error["message"]

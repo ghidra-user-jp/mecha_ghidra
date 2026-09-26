@@ -10,6 +10,9 @@ from ghidra_mcp.domain.error_utils import sanitize_cause_message
 
 _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.REQUEST_ID_CONFLICT: "REQUEST_ID_CONFLICT: request_id already identifies a job with different arguments",
+    ErrorCode.RESULT_DISCARDED: (
+        "RESULT_DISCARDED: the call already ran for this request_id, but its reply is no longer kept"
+    ),
     ErrorCode.IMPORT_IN_PROGRESS: (
         "IMPORT_IN_PROGRESS: another import job is writing this program; see details.operation_id"
     ),

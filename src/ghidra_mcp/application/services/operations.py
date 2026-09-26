@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import contextvars
 import copy
 import hashlib
 import json
@@ -30,6 +31,13 @@ from ghidra_mcp.application.services.target_service import TargetService
 from ghidra_mcp.domain import DomainError, ErrorCode, get_lock_timeout_seconds
 from ghidra_mcp.domain.error_mapping import to_domain_error
 from ghidra_mcp.domain.identifiers import canonical_uuid
+from ghidra_mcp.domain.output_state import (
+    ABSENT,
+    CREATED,
+    UNCERTAIN,
+    output_state_for_outcome,
+    retryable_after,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +78,8 @@ _CLEANUP_KEYS = frozenset(
 )
 _NOT_STARTED = "Server is shutting down; the job was not started"
 _CANCELLED_BEFORE_START = "cancel_operation stopped the job before it started"
+# Set by replay_only.
+_REPLAY_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar("replay_only", default=False)
 
 # What a job returns and what a failed job reports, after the presentation
 # layer moved oversized values to the result store.
@@ -79,12 +89,43 @@ Presenter = Callable[
 ]
 
 
+class ReplayMissed(BaseException):
+    """A request submitted under ``replay_only`` whose request_id names no record now; nothing was admitted.
+
+    A BaseException, so the tool layers between the caller and the manager
+    pass it through unchanged.
+    """
+
+
+@contextlib.contextmanager
+def replay_only() -> Iterator[None]:
+    """Answer only resends in this block: a request whose record is gone raises ReplayMissed instead of being admitted.
+
+    Admission resolves paths and takes registry locks, which the MCP event
+    loop must not wait for; a resend's answer is in memory.
+    """
+    token = _REPLAY_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _REPLAY_ONLY.reset(token)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _truncate(text: str, limit: int) -> str:
     return text.encode("utf-8", errors="replace")[:limit].decode("utf-8", errors="ignore")
+
+
+def _detached(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """A record snapshot the caller may change, copied after the manager lock is released.
+
+    A record's result, error and other nested values are replaced when they
+    change, never changed in place, so this copy needs no lock.
+    """
+    return copy.deepcopy(snapshot)
 
 
 def _json_safe(value: Any, depth: int = 0) -> Any:
@@ -173,39 +214,36 @@ def _error_payload(
 def _output_state(kind: str, executing: bool, details: dict[str, Any]) -> str:
     """What a failed job left in the project: absent, created or uncertain."""
     if not executing:
-        return "absent"
+        return ABSENT
+    if details.get("cleanup_error"):
+        # The failure could not be converted or cleaned up after.
+        return UNCERTAIN
     if kind == ANALYSIS:
         # The analysis runs in one transaction, and a failure inside it aborts
         # the transaction: only a failure after the commit leaves changes.
-        return "created" if details.get("output_created") is True else "absent"
+        return CREATED if details.get("output_created") is True else ABSENT
     if kind == SCRIPT:
         # A script starts executing only when its transaction starts, and every
         # failure after that reports how the transaction ended. An invalid
         # execution left work running (stray threads, analysis) that may still
         # change the program after the rollback.
-        outcome = details.get("transaction_outcome")
         if details.get("execution_state") == "invalid":
-            return "uncertain"
-        if outcome in {"rolled_back", "unchanged"} and details.get("output_created") is not True:
-            return "absent"
-        if outcome == "committed" or details.get("output_created") is True:
-            return "created"
-        return "uncertain"
-    if details.get("cleanup_error"):
-        return "uncertain"
+            return UNCERTAIN
+        if details.get("output_created") is True:
+            return CREATED
+        return output_state_for_outcome(details.get("transaction_outcome"))
     if details.get("rollback_deleted") is True or details.get("output_created") is False:
-        return "absent"
+        return ABSENT
     if details.get("partial_import") is True:
-        return "created"
-    return "uncertain"
+        return CREATED
+    return UNCERTAIN
 
 
 def _terminal_error(error: dict[str, Any], output_state: str) -> dict[str, Any]:
     """Keep the original code, message and hint; state what the failure left behind."""
     return {
         **error,
-        # A transient cause is only worth retrying when nothing was written.
-        "retryable": bool(error.get("retryable")) and output_state == "absent",
+        "retryable": retryable_after(bool(error.get("retryable")), output_state),
         "details": {**(error.get("details") or {}), "output_state": output_state},
     }
 
@@ -236,15 +274,13 @@ class _Operation:
     # never block each other; the single worker already runs one at a time.
     reservation: tuple[Any, ...]
     request_ids: list[str] = field(default_factory=list)
-    executing: bool = False
-    # True while the runtime holds the job's target/project locks.
+    # True while the job holds its target/project locks.
     holds_locks: bool = False
     # Ordinary calls observe their actual acquisitions, including time before
     # a slow call gets a record. Queued jobs use control.check_active instead.
     call_locks: CallLocks | None = None
     cancel: Callable[[], None] | None = None
-    cancel_requested: bool = False
-    # "client" (cancel_operation) or "shutdown".
+    # Set once the job is to stop: "client" (cancel_operation) or "shutdown".
     cancel_reason: str | None = None
     # A tool call running on its own thread, not a queued job: one that
     # outlived its reply, or one sent with a request_id (see claim_call).
@@ -257,6 +293,15 @@ class _Operation:
     @property
     def kind(self) -> str:
         return self.snapshot["kind"]
+
+    @property
+    def executing(self) -> bool:
+        """Whether the job began changing the program (control.begin), or the call is running."""
+        return self.snapshot["phase"] == "executing"
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self.cancel_reason is not None
 
 
 class _Control:
@@ -303,12 +348,17 @@ class OperationManager:
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
         self._stop = threading.Event()
-        self._queue: queue.Queue[str | None] = queue.Queue(queue_limit)
+        # Unbounded: a cancelled job's id stays until the worker skips it, so
+        # the limit counts the jobs still queued instead.
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._queue_limit = queue_limit
+        self._queued = 0
         self._records: dict[str, _Operation] = {}
         self._requests: dict[str, str] = {}
         self._reservations: dict[tuple[Any, ...], str] = {}
         self._released: collections.deque[str] = collections.deque()
-        self._payload_order: collections.deque[str] = collections.deque()
+        # Records that keep a payload, oldest first (a dict used as an ordered set).
+        self._payload_order: dict[str, None] = {}
         self._payload_bytes = 0
         # Deferred calls still running, oldest first.
         self._running_calls: dict[str, _Operation] = {}
@@ -344,7 +394,7 @@ class OperationManager:
             resource = (project_key, "/" + Path(path).name)
             return resource, (IMPORT, *resource), {"binary_path": path, **options}
 
-        return self._submit(IMPORT, target, request_id, {"binary_path": binary_path, **options}, resolve)
+        return _detached(self._submit(IMPORT, target, request_id, {"binary_path": binary_path, **options}, resolve))
 
     def submit_analysis(self, target: str, *, force: bool = False, request_id: str | None = None) -> dict[str, Any]:
         def resolve(_fingerprint: str) -> tuple[tuple[str, str], tuple[Any, ...], dict[str, Any]]:
@@ -356,7 +406,7 @@ class OperationManager:
             reservation = (ANALYSIS, *resource, program.generation)
             return resource, reservation, {"force": force, "generation": program.generation}
 
-        return self._submit(ANALYSIS, target, request_id, {"force": force}, resolve)
+        return _detached(self._submit(ANALYSIS, target, request_id, {"force": force}, resolve))
 
     def submit_script(self, target: str, *, request_id: str | None = None, **arguments: Any) -> dict[str, Any]:
         if self._scripts is None:
@@ -371,17 +421,27 @@ class OperationManager:
             reservation = (SCRIPT, *resource, program.generation, fingerprint)
             return resource, reservation, {**arguments, "generation": program.generation}
 
-        return self._submit(SCRIPT, target, request_id, dict(arguments), resolve)
+        return _detached(self._submit(SCRIPT, target, request_id, dict(arguments), resolve))
 
     def get(self, *, operation_id: str | None = None, request_id: str | None = None) -> dict[str, Any]:
         with self._lock:
-            return self._snapshot_locked(self._lookup_locked(operation_id=operation_id, request_id=request_id))
+            snapshot = self._snapshot_locked(self._lookup_locked(operation_id=operation_id, request_id=request_id))
+        return _detached(snapshot)
+
+    def handle(self, operation_id: str) -> dict[str, Any]:
+        """The record's operation_id, kind, state and poll_after_ms, without its result."""
+        with self._lock:
+            return self._handle_locked(self._lookup_locked(operation_id=operation_id, request_id=None))
 
     def reply_for(self, operation_id: str) -> dict[str, Any] | None:
-        """The reply a finished call sent with a request_id gave, as JSON; None once it is dropped."""
+        """The reply a finished call sent with a request_id gave, as JSON; None once it is dropped.
+
+        The record's own copy: it is never changed once stored, and the
+        caller must not change it either.
+        """
         with self._lock:
             record = self._records.get(operation_id)
-            return None if record is None or record.reply is None else copy.deepcopy(record.reply)
+            return None if record is None else record.reply
 
     def is_pending(self, operation_id: str) -> bool:
         try:
@@ -406,17 +466,17 @@ class OperationManager:
             snapshot = self._snapshot_locked(self._lookup_locked(operation_id=operation_id, request_id=None))
         if snapshot["state"] in PENDING_STATES:
             snapshot["poll_after_ms"] = 0
-        return snapshot
+        return _detached(snapshot)
 
     def cancel(self, operation_id: str) -> dict[str, Any]:
         """Stop a queued or running job; return its record.
 
         A job that has not started changing the program ends at once, even
-        while its worker still waits for a lock: it will not run. A job that
-        has started is cancelled through its monitor and ends at the command's
-        next checkpoint, so its record may still say running.
+        while its worker still waits for a lock: it will not run, and a wait
+        the runtime bound a cancel to (the script barrier) ends now. A job
+        that has started is cancelled through its monitor and ends at the
+        command's next checkpoint, so its record may still say running.
         """
-        cancel = None
         with self._lock:
             record = self._lookup_locked(operation_id=operation_id, request_id=None)
             operation_id = record.snapshot["operation_id"]
@@ -430,24 +490,24 @@ class OperationManager:
             if state not in PENDING_STATES:
                 raise self._error(ErrorCode.VALIDATION_ERROR, "The job has already finished", operation_id=operation_id)
             if not record.cancel_requested:
-                record.cancel_requested = True
                 record.cancel_reason = "client"
             if not record.executing:
                 # Its worker refuses to begin once it gets the locks.
                 self._fail_one_locked(record, self._error(ErrorCode.OPERATION_CANCELLED, _CANCELLED_BEFORE_START))
-            else:
-                cancel = record.cancel
+            cancel = record.cancel
             snapshot = self._snapshot_locked(record)
         if cancel is not None:
             _call_quietly(cancel)
-        return snapshot
+        return _detached(snapshot)
 
     def lock_holder(self, target: str | None, *, any_target: bool = False) -> str | None:
         """The job or deferred call holding the locks a ``LOCK_TIMEOUT`` on ``target`` waited for.
 
-        A call still waiting for its locks is not a holder. A project lock
-        blocks the project's other targets too. ``any_target`` matches across
-        targets, for the runtime-wide locks everything shares.
+        A call still waiting for its locks is not a holder, and neither is a
+        job that has already ended (cancelled while its worker still waits):
+        waiting for it would return at once. A project lock blocks the
+        project's other targets too. ``any_target`` matches across targets,
+        for the runtime-wide locks everything shares.
         """
         project_key = None
         if target is not None and not any_target:
@@ -457,7 +517,7 @@ class OperationManager:
                 project_key = None
 
         def holds(record: _Operation | None) -> bool:
-            if record is None:
+            if record is None or record.snapshot["state"] not in PENDING_STATES:
                 return False
             if record.deferred:
                 held = record.call_locks.held_by_other_thread() if record.call_locks is not None else frozenset()
@@ -505,7 +565,7 @@ class OperationManager:
         with self._lock:
             record = self._start_call_locked(tool, target, project_key, started_at)
             record.call_locks = call_locks
-            return self._snapshot_locked(record)
+            return self._handle_locked(record)
 
     def bind_call_locks(self, operation_id: str, call_locks: CallLocks) -> None:
         """Connect a claimed request to its worker's lock observations before it starts."""
@@ -515,13 +575,14 @@ class OperationManager:
     def claim_call(
         self, tool: str, target: str, *, request_id: str, fingerprint: str, started_at: str | None = None
     ) -> tuple[dict[str, Any], bool]:
-        """Record a call sent with a ``request_id`` before it runs; return the record and whether it is new.
+        """Record a call sent with a ``request_id`` before it runs; return its handle and whether it is new.
 
         A resend with the same request_id and arguments gets the first call's
         record, running or finished, instead of a new one: the caller replies
         with that call's outcome and does not run the tool again.  Other
         arguments with the request_id fail with REQUEST_ID_CONFLICT.  Like a
-        deferred call, the record is kept in memory only.
+        deferred call, the record is kept in memory only.  The handle is the
+        record without its result (see ``handle``).
         """
         try:
             request_id = canonical_uuid(request_id)
@@ -537,11 +598,11 @@ class OperationManager:
                     raise self._error(
                         ErrorCode.REQUEST_ID_CONFLICT, "request_id already identifies a call with different arguments"
                     )
-                return self._snapshot_locked(record), False
+                return self._handle_locked(record), False
             record = self._start_call_locked(
                 tool, target, project_key, started_at or _now(), request_id=request_id, fingerprint=fingerprint
             )
-            return self._snapshot_locked(record), True
+            return self._handle_locked(record), True
 
     def _project_key_of(self, target: str) -> str:
         try:
@@ -561,8 +622,7 @@ class OperationManager:
     ) -> _Operation:
         record = self._new_record(tool, target, request_id, {}, fingerprint, (project_key, ""), ())
         operation_id = record.snapshot["operation_id"]
-        record.reservation = ("deferred", operation_id)
-        record.deferred = record.executing = True
+        record.deferred = True
         record.snapshot.update(state="running", phase="executing", started_at=started_at)
         self._records[operation_id] = record
         self._running_calls[operation_id] = record
@@ -579,13 +639,18 @@ class OperationManager:
         result: Any = None,
         error: dict[str, Any] | None = None,
         reply: dict[str, Any] | None = None,
+        source: dict[str, Any] | None = None,
+        forget_request: bool = False,
     ) -> None:
         """Store what a tool call returned: its result, or the error the tool reported.
 
         ``reply`` is the whole reply as JSON.  Only a call sent with a
         request_id keeps it, to answer a resend exactly as the first time.
+        ``source`` is the program state a core command's reply named; the
+        record keeps it beside the result.  ``forget_request`` frees the
+        request_id for a new call, for a call that never ran.
         """
-        size = _payload_size(result) + _payload_size(error)
+        size = _payload_size(result) + _payload_size(error) + _payload_size(source)
         reply_size = _payload_size(reply)
         with self._lock:
             record = self._running_calls.pop(operation_id, None)
@@ -595,7 +660,6 @@ class OperationManager:
                 record.reply = reply
                 size += reply_size
             now = _now()
-            record.holds_locks = False
             record.call_locks = None
             record.snapshot.update(
                 state="succeeded" if error is None else "failed",
@@ -604,6 +668,13 @@ class OperationManager:
                 updated_at=now,
                 finished_at=now,
             )
+            if source is not None and error is None:
+                record.snapshot["source"] = source
+            if forget_request:
+                # A resend already waiting still gets this reply; later ones run the call.
+                for request_id in record.request_ids:
+                    if self._requests.get(request_id) == operation_id:
+                        del self._requests[request_id]
             self._keep_payload_locked(record, size)
             self._release_locked(record)
             self._changed.notify_all()
@@ -620,7 +691,6 @@ class OperationManager:
                 )
                 for record in self._records.values():
                     if record.snapshot["state"] == "running" and not record.deferred:
-                        record.cancel_requested = True
                         record.cancel_reason = record.cancel_reason or "shutdown"
                         if record.cancel is not None:
                             cancels.append(record.cancel)
@@ -690,6 +760,8 @@ class OperationManager:
                 replay = self._replay_locked(request_id, fingerprint)
             if replay is not None:
                 return replay
+        if _REPLAY_ONLY.get():
+            raise ReplayMissed
         resource, reservation, arguments = resolve(fingerprint)
         with self._lock:
             if request_id is not None:
@@ -699,7 +771,9 @@ class OperationManager:
             if self._stopping or self._broken:
                 raise self._error(ErrorCode.OPERATION_WORKER_UNAVAILABLE, "Job worker is stopping or unavailable")
             holder_id = self._reservations.get(reservation)
-            if holder_id is not None:
+            # A job being cancelled takes nobody along: another analysis or
+            # script queues behind it, and an import waits (_join_holder_locked).
+            if holder_id is not None and (kind == IMPORT or not self._records[holder_id].cancel_requested):
                 return self._join_holder_locked(holder_id, request_id, fingerprint)
             record = self._new_record(kind, target, request_id, arguments, fingerprint, resource, reservation)
             operation_id = record.snapshot["operation_id"]
@@ -707,12 +781,12 @@ class OperationManager:
                 thread = threading.Thread(target=self._work, name="ghidra-jobs", daemon=False)
                 thread.start()
                 self._thread = thread
-            try:
-                self._queue.put_nowait(operation_id)
-            except queue.Full:
+            if self._queued >= self._queue_limit:
                 raise self._error(
                     ErrorCode.OPERATION_QUEUE_FULL, "Job queue is full; nothing was accepted", retryable=True
-                ) from None
+                )
+            self._queue.put_nowait(operation_id)
+            self._queued += 1
             # Registered only once queued, so a failed admission leaves nothing behind.
             self._records[operation_id] = record
             self._reservations[reservation] = operation_id
@@ -738,6 +812,14 @@ class OperationManager:
             raise self._error(
                 ErrorCode.IMPORT_OUTPUT_UNCERTAIN,
                 "An earlier import of this program did not clean up",
+                operation_id=holder_id,
+            )
+        if holder.cancel_requested:
+            # It may still leave a program behind, which the name must then keep.
+            raise self._error(
+                ErrorCode.IMPORT_IN_PROGRESS,
+                "The import of this program is being cancelled; retry once it ends",
+                retryable=True,
                 operation_id=holder_id,
             )
         if holder.fingerprint != fingerprint:
@@ -815,9 +897,19 @@ class OperationManager:
         return record is not None and record.snapshot["state"] in PENDING_STATES
 
     def _snapshot_locked(self, record: _Operation) -> dict[str, Any]:
-        snapshot = copy.deepcopy(record.snapshot)
+        """The record's fields; its nested values stay shared until ``_detached`` copies them."""
+        snapshot = dict(record.snapshot)
         snapshot["poll_after_ms"] = _POLL_AFTER_MS if snapshot["state"] in PENDING_STATES else 0
         return snapshot
+
+    def _handle_locked(self, record: _Operation) -> dict[str, Any]:
+        state = record.snapshot["state"]
+        return {
+            "operation_id": record.snapshot["operation_id"],
+            "kind": record.kind,
+            "state": state,
+            "poll_after_ms": _POLL_AFTER_MS if state in PENDING_STATES else 0,
+        }
 
     def _response_locked(self, record: _Operation, *, replayed: bool) -> dict[str, Any]:
         return {**self._snapshot_locked(record), "replayed": replayed}
@@ -844,7 +936,6 @@ class OperationManager:
             refusal = self._refusal_locked(record)
             if refusal is not None:
                 raise refusal
-            record.executing = True
             record.snapshot.update(phase="executing", updated_at=_now())
             self._changed.notify_all()
 
@@ -882,6 +973,7 @@ class OperationManager:
                             # shutdown() or cancel_operation() has already ended it.
                             record = None
                             continue
+                        self._queued -= 1
                         now = _now()
                         record.snapshot.update(
                             state="running", phase="waiting_for_lock", started_at=now, updated_at=now
@@ -901,7 +993,7 @@ class OperationManager:
                 self._broken = True
                 if record is not None and record.snapshot["state"] in PENDING_STATES:
                     # A job the runtime had started may have left changes behind.
-                    output_state = "uncertain" if record.executing else "absent"
+                    output_state = UNCERTAIN if record.executing else ABSENT
                     now = _now()
                     record.snapshot.update(
                         state="failed",
@@ -911,7 +1003,7 @@ class OperationManager:
                         finished_at=now,
                     )
                     record.arguments = None
-                    if output_state == "absent" or record.kind != IMPORT:
+                    if output_state == ABSENT or record.kind != IMPORT:
                         self._release_locked(record)
                 self._fail_queued_locked(
                     self._error(ErrorCode.OPERATION_WORKER_FAILED, "Job worker stopped; the job was not started")
@@ -954,6 +1046,10 @@ class OperationManager:
         result, error = self._presented(kind, target, result, error)
         size = _payload_size(result) + _payload_size(error)
         with self._lock:
+            if record.snapshot["state"] not in PENDING_STATES:
+                # cancel_operation ended it while the outcome was presented; it
+                # had not begun, and the client was told it was cancelled.
+                return
             self._finish_locked(record, result, error, output_state, size)
         if error is None:
             logger.info("Job %s (%s) finished: %s", operation_id, kind, record.resource[1])
@@ -1014,7 +1110,7 @@ class OperationManager:
         record.snapshot.update(
             state="failed" if error else "succeeded",
             result=None if error else result,
-            operation_error=None if error is None else _terminal_error(error, output_state or "uncertain"),
+            operation_error=None if error is None else _terminal_error(error, output_state or UNCERTAIN),
             updated_at=now,
             finished_at=now,
         )
@@ -1024,7 +1120,7 @@ class OperationManager:
         # Success releases an import's name too: a later import of it fails in
         # the runtime with PROGRAM_ALREADY_IMPORTED instead. Analyses and
         # scripts never create a program, so they never keep it reserved.
-        if error is None or output_state == "absent" or record.kind != IMPORT:
+        if error is None or output_state == ABSENT or record.kind != IMPORT:
             self._release_locked(record)
         self._changed.notify_all()
 
@@ -1034,21 +1130,26 @@ class OperationManager:
         if not size:
             return
         self._payload_bytes += size
-        self._payload_order.append(record.snapshot["operation_id"])
+        self._payload_order[record.snapshot["operation_id"]] = None
+        if size > self._payload_limit:
+            # Dropping the others would not make room for this one.
+            self._drop_payload_locked(record)
+            return
         while self._payload_bytes > self._payload_limit and self._payload_order:
-            oldest = self._records.get(self._payload_order.popleft())
-            if oldest is not None and oldest.payload_bytes:
-                self._drop_payload_locked(oldest)
+            self._drop_payload_locked(self._records[next(iter(self._payload_order))])
 
     def _drop_payload_locked(self, record: _Operation) -> None:
         self._payload_bytes -= record.payload_bytes
         record.payload_bytes = 0
+        self._payload_order.pop(record.snapshot["operation_id"], None)
         record.reply = None
         snapshot = record.snapshot
         snapshot["result"] = None
         error = snapshot["operation_error"]
         if error is not None:
-            snapshot["operation_error"] = {**error, "details": _kept_details(error.get("details"))}
+            # A failed batch_read's error holds its result too (structured_error).
+            kept = {key: value for key, value in error.items() if key != "result"}
+            snapshot["operation_error"] = {**kept, "details": _kept_details(error.get("details"))}
         snapshot["result_discarded"] = True
 
     def _release_locked(self, record: _Operation) -> None:
@@ -1062,17 +1163,18 @@ class OperationManager:
                 continue
             self._payload_bytes -= evicted.payload_bytes
             evicted.payload_bytes = 0
+            self._payload_order.pop(evicted.snapshot["operation_id"], None)
             for request_id in evicted.request_ids:
                 if self._requests.get(request_id) == evicted.snapshot["operation_id"]:
                     del self._requests[request_id]
-        while self._payload_order and self._payload_order[0] not in self._records:
-            self._payload_order.popleft()
 
     def _fail_one_locked(self, record: _Operation, error: DomainError) -> None:
+        if record.snapshot["state"] == "queued":
+            self._queued -= 1
         now = _now()
         record.snapshot.update(
             state="failed",
-            operation_error=_terminal_error(self._payload(error, record.kind), "absent"),
+            operation_error=_terminal_error(self._payload(error, record.kind), ABSENT),
             updated_at=now,
             finished_at=now,
         )
@@ -1093,4 +1195,4 @@ class OperationManager:
         self._changed.notify_all()
 
 
-__all__ = ["ANALYSIS", "IMPORT", "PENDING_STATES", "SCRIPT", "OperationManager"]
+__all__ = ["ANALYSIS", "IMPORT", "PENDING_STATES", "SCRIPT", "OperationManager", "ReplayMissed", "replay_only"]

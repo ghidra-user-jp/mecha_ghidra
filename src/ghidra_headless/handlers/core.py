@@ -147,16 +147,19 @@ if tuple(SUPPORTED_COMMANDS.keys()) != COMMAND_NAMES:
     raise RuntimeError("SUPPORTED_COMMANDS and COMMAND_NAMES order/membership mismatch")
 
 
-def execute(command, params, key="default", *, task_monitor=None, on_begin=None):
+def execute(command, params, key="default", *, task_monitor=None, on_begin=None, record_transactions=False):
     """Run ``command`` against the context for ``key``.
 
     ``task_monitor`` lets a background job cancel the command; handlers that
     can be cancelled receive it through the ``current_task_monitor`` profile key.
     ``on_begin`` is the job's hook for the moment the command starts changing
     the program, which the handler signals through ``begin_command``.
+    ``record_transactions`` notes the transactions the command starts, for
+    ``transaction_outcome``; the runtime asks for it for program writes.
     """
     # A command refused below changed nothing, and produced no result.
     _THREAD_STATE.transaction_outcome = UNCHANGED
+    _THREAD_STATE.transaction_record = None
     _THREAD_STATE.command_source = None
     handler = SUPPORTED_COMMANDS.get(command)
     if handler is None:
@@ -169,11 +172,14 @@ def execute(command, params, key="default", *, task_monitor=None, on_begin=None)
     _THREAD_STATE.task_monitor = task_monitor
     _THREAD_STATE.on_begin = on_begin
     try:
-        with recorded_transactions(context.program) as record:
-            try:
+        if record_transactions:
+            with recorded_transactions(context.program) as record:
+                # Read only if the command fails: the outcome costs Java calls.
+                _THREAD_STATE.transaction_record = record
                 result = _json_safe(handler(params or {}))
-            finally:
-                _THREAD_STATE.transaction_outcome = record.outcome()
+        else:
+            _THREAD_STATE.transaction_outcome = None
+            result = _json_safe(handler(params or {}))
         # Read while the runtime still holds the target's locks, so no other
         # command can come between the result and the revision it names.
         _THREAD_STATE.command_source = _source_of(context)
@@ -208,17 +214,28 @@ def command_source():
 def transaction_outcome():
     """How the transactions of the last command ``execute`` ran on this thread ended.
 
-    ``unchanged``, ``committed``, ``rolled_back`` or ``uncertain`` (see
-    ``ghidra_headless.session.transactions``); None before any command.  The
-    runtime reads it when a write fails, to say what the failure left behind.
+    ``unchanged``, ``committed``, ``rolled_back`` or ``unknown`` (see
+    ``ghidra_headless.session.transactions``); None before any command, and
+    for a command run without ``record_transactions``.  The runtime reads it
+    when a write fails, to say what the failure left behind.
     """
+    record = getattr(_THREAD_STATE, "transaction_record", None)
+    if record is not None:
+        _THREAD_STATE.transaction_outcome = record.outcome()
+        _THREAD_STATE.transaction_record = None
     return getattr(_THREAD_STATE, "transaction_outcome", None)
+
+
+def begins_itself(command):
+    """Whether ``command`` marks the moment it starts changing the program (``begin_command``) itself."""
+    return "begin_command" in COMMAND_PROFILE.get(command, ())
 
 
 HANDLERS = {
     "initialize": initialize,
     "execute": execute,
     "transaction_outcome": transaction_outcome,
+    "begins_itself": begins_itself,
     "command_source": command_source,
     "describe_state": describe_state,
     "execution_state": execution_state,
@@ -235,6 +252,7 @@ __all__ = [
     "clear_contexts",
     "execute",
     "transaction_outcome",
+    "begins_itself",
     "command_source",
     "describe_state",
     "execution_state",

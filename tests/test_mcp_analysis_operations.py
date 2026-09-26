@@ -53,7 +53,7 @@ class Core:
         self.program = None
         self.stopped_by_cancel = False
 
-    def execute(self, command, params, key="default", *, task_monitor=None):
+    def execute(self, command, params, key="default", *, task_monitor=None, record_transactions=False):
         self.calls.append((command, dict(params), key, task_monitor))
         if command != "analyze_program":
             return {"name": "sample.bin"}
@@ -67,6 +67,9 @@ class Core:
             time.sleep(0.002)
         self.program._changed = True
         return {"analyzed": True, "forced": bool(params.get("force"))}
+
+    def begins_itself(self, command):
+        return False
 
     def execution_state(self, key):
         return self.quarantine

@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import pytest
+from jsonschema import Draft202012Validator
 from mcp.types import CallToolRequestParams
 
 from ghidra_mcp.contracts.tool_spec import get_all_tool_specs
@@ -151,4 +152,37 @@ def test_an_argument_the_schema_refuses_is_a_validation_error_with_its_reason():
     assert error["code"] == "VALIDATION_ERROR" and error["retryable"] is False
     assert error["message"].startswith("list_functions input validation failed:") and "limit" in error["message"]
     assert error["hint"] == "Correct the argument the message names, then call again"
+    # A read changes nothing either way, so it says nothing about what it left.
+    assert "details" not in error
     assert json.loads(result.content[0].text) == result.structured_content
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        # A job tool: raw_binary needs language_id (a model validator of the input schema).
+        ("import_program", {"target": "t", "binary_path": "/samples/a.bin", "import_mode": "raw_binary"}),
+        ("apply_edits", {"target": "t", "edits": []}),
+        ("save_project_program", {"target": "t", "unknown": 1}),
+    ],
+)
+def test_a_write_the_schema_refuses_says_it_left_nothing(name, arguments):
+    class Registry:
+        operations = None
+
+        def call(self, *_args):
+            pytest.fail("invalid request reached executor")
+
+        def __getattr__(self, method):
+            pytest.fail(f"invalid request reached {method}")
+
+    mcp = server(Registry())
+    result = asyncio.run(mcp.handle_call_tool(None, CallToolRequestParams(name=name, arguments=arguments)))
+    assert result.is_error
+    error = result.structured_content["error"]
+    assert (error["code"], error["retryable"]) == ("VALIDATION_ERROR", False)
+    assert error["details"] == {"output_state": "absent"}
+    assert json.loads(result.content[0].text) == result.structured_content
+    # The reply stays inside the output schema the client was given.
+    published = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    Draft202012Validator(published[name].output_schema).validate(result.structured_content)

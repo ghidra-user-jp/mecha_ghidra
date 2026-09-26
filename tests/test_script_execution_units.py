@@ -475,6 +475,7 @@ def fake_execution_env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(execution, "BoundedCapture", _FakeCapture)
     monitor = SimpleNamespace(finished=lambda: None, didTimeout=lambda: False, isCancelled=lambda: False)
+    env["monitor"] = monitor
 
     class ResourceFile:
         def __init__(self, path):
@@ -540,6 +541,34 @@ def test_execute_script_observes_loading_threads_and_cleans_up_on_failure(fake_e
     finally:
         release.set()
         worker.join(5)
+
+
+def test_execute_script_ignores_a_timeout_that_fires_after_the_script_returned(fake_execution_env):
+    from ghidra_headless.scripts import execution
+
+    env = fake_execution_env
+    script = env["root"] / "Quick.py"
+    script.write_text("# @runtime PyGhidra\n", encoding="utf-8")
+    monitor = env["monitor"]
+    fired = []
+
+    def finished():
+        # TimeoutTaskMonitor.finished() does not stop its timer: it can fire
+        # while the run winds down, after the script already returned.
+        fired.append(True)
+        monitor.didTimeout = lambda: True
+        monitor.isCancelled = lambda: True
+
+    monitor.finished = finished
+    result = execution.execute_script(
+        program=object(),
+        project=object(),
+        script_path=str(script),
+        runtime="PyGhidra",
+        snapshot_roots=[str(env["root"])],
+    )
+    assert fired
+    assert (result["status"], result["timed_out"], result["cancelled"]) == ("ok", False, False)
 
 
 def test_execute_script_treats_server_workers_spawned_mid_run_as_ok(fake_execution_env):

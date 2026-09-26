@@ -20,10 +20,12 @@ from typing import Callable, Iterator, TypeVar
 
 _T = TypeVar("_T")
 
+# How a command's or script's transactions ended; scripts.execution reports
+# the same values as details.transaction_outcome.
 UNCHANGED = "unchanged"
 COMMITTED = "committed"
 ROLLED_BACK = "rolled_back"
-UNCERTAIN = "uncertain"
+UNKNOWN = "unknown"
 
 
 def run_in_transaction(program, description: str, operation: Callable[[], _T]) -> _T:
@@ -79,47 +81,97 @@ class TransactionRecord:
 
     def __init__(self, recorder=None) -> None:
         self._recorder = recorder
+        # Set by note_external_write: the block wrote outside the program too.
+        self.external_write = False
 
     def outcome(self) -> str:
-        """``committed`` includes applied undo/redo steps; ``unchanged`` means neither kind of change ran."""
-        if self._recorder is None:
-            return UNCERTAIN
+        """``committed`` includes applied undo/redo steps; ``unchanged`` means neither kind of change ran.
+
+        After a write outside the program, which transactions do not show,
+        the outcome is ``unknown``.
+        """
+        if self._recorder is None or self.external_write:
+            return UNKNOWN
+        changed = self._recorder.history_changed
         if not self._recorder.started:
-            return COMMITTED if self._recorder.history_changed else UNCHANGED
+            return COMMITTED if changed else UNCHANGED
         try:
-            statuses = {str(transaction.getStatus()) for transaction in self._recorder.started}
+            ended = [
+                (str(transaction.getStatus()), bool(transaction.hasCommittedDBTransaction()))
+                for transaction in self._recorder.started
+            ]
         except Exception:
-            return UNCERTAIN
-        if statuses == {"ABORTED"}:
-            return COMMITTED if self._recorder.history_changed else ROLLED_BACK
-        if statuses <= {"COMMITTED", "ABORTED"}:
+            return UNKNOWN
+        if any(status not in ("COMMITTED", "ABORTED") for status, _ in ended):
+            # NOT_DONE or NOT_DONE_BUT_ABORTED: a transaction is still open.
+            return UNKNOWN
+        # A committed transaction that wrote nothing to the database changed
+        # nothing, as scripts.execution.classify_transaction also counts it.
+        if changed or any(status == "COMMITTED" and wrote for status, wrote in ended):
             return COMMITTED
-        # NOT_DONE or NOT_DONE_BUT_ABORTED: a transaction is still open.
-        return UNCERTAIN
+        return ROLLED_BACK if any(status == "ABORTED" for status, _ in ended) else UNCHANGED
+
+
+_CURRENT = threading.local()
+
+
+def note_external_write() -> None:
+    """Say the running block starts writing outside the program, such as to a BSim database.
+
+    A failure after this may have left part of that write, so the block's
+    outcome becomes ``unknown``.  Outside ``recorded_transactions`` it does
+    nothing.
+    """
+    record = getattr(_CURRENT, "record", None)
+    if record is not None:
+        record.external_write = True
+
+
+@contextlib.contextmanager
+def _current(record: TransactionRecord) -> Iterator[TransactionRecord]:
+    previous = getattr(_CURRENT, "record", None)
+    _CURRENT.record = record
+    try:
+        yield record
+    finally:
+        _CURRENT.record = previous
 
 
 @contextlib.contextmanager
 def recorded_transactions(program) -> Iterator[TransactionRecord]:
     """Note the transactions this thread starts on ``program`` while the block runs."""
+    import jpype
+
     recorder = _recorder_class()(threading.current_thread())
+    # Ghidra keeps transaction listeners in a weak set and JPype keeps its Java
+    # proxy only weakly: without this reference a GC during the block drops
+    # the listener and a committed write would look unchanged.
+    listener = jpype.JObject(recorder, jpype.JClass("ghidra.framework.model.TransactionListener"))
     try:
-        program.addTransactionListener(recorder)
+        program.addTransactionListener(listener)
     except Exception:
-        yield TransactionRecord()
+        registered = False
+    else:
+        registered = True
+    if not registered:
+        with _current(TransactionRecord()) as record:
+            yield record
         return
     try:
-        yield TransactionRecord(recorder)
+        with _current(TransactionRecord(recorder)) as record:
+            yield record
     finally:
         with contextlib.suppress(Exception):
-            program.removeTransactionListener(recorder)
+            program.removeTransactionListener(listener)
 
 
 __all__ = [
     "COMMITTED",
     "ROLLED_BACK",
-    "UNCERTAIN",
     "UNCHANGED",
+    "UNKNOWN",
     "TransactionRecord",
+    "note_external_write",
     "recorded_transactions",
     "run_in_transaction",
 ]

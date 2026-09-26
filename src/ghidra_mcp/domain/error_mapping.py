@@ -53,26 +53,13 @@ DETAIL_PRESERVING_CODES: frozenset[ErrorCode] = frozenset(
 )
 
 
-def _classify_by_message_shape(message: str) -> ErrorCode | None:
-    """Last-resort heuristics for messages without a ``CODE:`` prefix."""
-
-    if "Session '" in message and ("does not exist" in message or "is not initialized" in message):
-        return ErrorCode.SESSION_NOT_FOUND
-    if "Target '" in message and "is not initialized" in message:
-        return ErrorCode.TARGET_NOT_REGISTERED
-    if (
-        "DomainFile" in message
-        or "failed to resolve domain path" in message
-        or message.startswith(("Program not found:", "Domain file not found:"))
-    ):
-        return ErrorCode.PROGRAM_NOT_FOUND
-    if "CORE_EXECUTOR_UNAVAILABLE" in message:
-        return ErrorCode.CORE_EXECUTOR_UNAVAILABLE
-    return None
+def _has_class(exc: BaseException, simple_name: str) -> bool:
+    # JPype names a Java class in full ("java.awt.HeadlessException").
+    return any(type_.__name__.rsplit(".", 1)[-1] == simple_name for type_ in type(exc).__mro__)
 
 
 def _is_headless_exception(exc: BaseException) -> bool:
-    return any(type_.__name__ == "HeadlessException" for type_ in type(exc).__mro__)
+    return _has_class(exc, "HeadlessException")
 
 
 def _is_java_exception(exc: BaseException) -> bool:
@@ -97,9 +84,7 @@ def _code_by_type(exc: BaseException, default_code: ErrorCode) -> ErrorCode:
 def _is_exclusive_checkout_exception(exc: BaseException) -> bool:
     # ghidra.framework.store.ExclusiveCheckoutException: another project holds an
     # exclusive checkout, so the requested checkout cannot be granted right now.
-    return any(type_.__name__ == "ExclusiveCheckoutException" for type_ in type(exc).__mro__) or (
-        "ExclusiveCheckoutException" in str(exc)
-    )
+    return _has_class(exc, "ExclusiveCheckoutException") or "ExclusiveCheckoutException" in str(exc)
 
 
 def to_domain_error(
@@ -116,9 +101,11 @@ def to_domain_error(
     """Map ``exc`` to a ``DomainError`` tagged with operation/target/domain_path.
 
     A ``DomainError`` passes through with the context merged into its details.
-    Other exceptions are classified by structured code (``HeadlessError.code``
-    or a ``CODE:`` message prefix), then by project-lock detection, then by a
-    few message heuristics, and finally fall back to ``default_code``.
+    Other exceptions are classified by project-lock and Java class detection,
+    then by structured code (``HeadlessError.code`` or a ``CODE:`` message
+    prefix), and finally by type or ``default_code``.  The text of an uncoded
+    message is never read: one that mentions a missing program is not a
+    refusal, so a failure that names no code is never reported as one.
     """
 
     keep_none = set(keep_none_details)
@@ -156,10 +143,6 @@ def to_domain_error(
         if classification is not None:
             code = classification.code
             retryable = classification.retryable
-        else:
-            heuristic = _classify_by_message_shape(message)
-            if heuristic is not None:
-                code = heuristic
 
     details: dict[str, Any] = {"operation": operation}
     if code in DETAIL_PRESERVING_CODES:

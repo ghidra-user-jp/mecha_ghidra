@@ -114,7 +114,7 @@ workerは今の経路（`ScriptService` → runtime → `RuntimeCoreExecution.ca
 
 同じ引数の再送は、今と同じく、もう一度実行される。先送りの応答には`operation_id`があるので、応答を受け取ったクライアントは`get_operation`で追える。同じ呼び出しを1つにまとめると、`undo_program_change`を2つのクライアントがそれぞれ1回ずつ呼んだ場合に、1回しか戻らなくなる。そのため、まとめることはしない。
 
-同時に走る呼び出しの数は、今のthread数の上限（40）で抑える。先送りした後も処理を続けている呼び出しは、その枠を使い続ける。枠が埋まっていると、新しい呼び出しは今と同じく空くまで待つ。この待ちは40秒に数えない。40件の長い呼び出しが同時に走るのはまれなので、ここは今の動きを保つ。
+同時に走る呼び出しの数は、今のthread数の上限（40）で抑える。先送りした後も処理を続けている呼び出しは、その枠を使い続ける。枠が埋まっていると、新しい呼び出しは空くまで待ち、空いた枠は到着順に渡す。この待ちも40秒に数え、40秒のうちに枠を得られなければ実行せずに再試行可能な`OPERATION_QUEUE_FULL`（`output_state: absent`）を返す（2026-09-25の修正。当初は待ちを数えず、止まった呼び出しが40件あると新しい呼び出しがクライアントの期限まで待ち続けた）。`request_id`付きなら記録を閉じたうえでIDを解放し、同じIDの再送で実行できるようにする。
 
 先送りした呼び出しがtargetやprojectのロックを持っている間に、別の呼び出しが同じtargetかprojectのロックを待って`LOCK_TIMEOUT`になったら、キューのジョブと同じく`details.operation_id`にその呼び出しの記録を示す。AIが再送したり別のツールを呼んだりしても、実行中の処理へ案内される。
 
@@ -259,12 +259,12 @@ CodexかClaude Codeが対応したら、拡張への対応を示したクライ�
 | 記録の結果 | 先送りした呼び出しのthreadが、要求が返すはずだった`CallToolResult`を作り（出力スキーマの検証も同じ）、その`structuredContent`から`result`か`operation_error`を記録する。大きな結果は、通常の呼び出しと同じく結果の保存先への案内になる |
 | 対象 | `ToolSpec.deferrable`（ジョブのツールと`list_targets`以外）。`get_operation`が公開されていなければ先送りしない。出力スキーマの別案は約400文字で、全ツールを公開したtools/listが約2.9万文字（9.7%）増えた |
 | 停止時 | `OperationManager.tracked_call`が、threadで動く呼び出しを数える。`shutdown`は、ジョブのworkerの後に、この数が0になるまで待つ |
-| ロック待ちの案内 | `lock_holder`が、実行中のジョブに加えて、実行中の先送りの呼び出しも対象にする |
+| ロック待ちの案内 | `lock_holder`が、実行中のジョブに加えて、実行中の先送りの呼び出しも対象にする。取り消しで終わったジョブは、workerがまだロックを持っていても示さない（`get_operation`がすぐに返り、再試行がまた`LOCK_TIMEOUT`になるため） |
 | run_scriptの受付 | `ScriptService.prepare_run`。カタログ・runtime・引数・タイムアウトを確かめ、インラインの`source`は書き出さずに検査だけする。予約は（種類、project、domain path、世代、引数の指紋）で、同じ引数の再送だけが合流する |
 | run_scriptの開始 | ジョブの`begin`は、スクリプトのtransactionが始まる直前に呼ぶ。core commandに`on_begin`を渡し、ハンドラが`begin_command`の依存を通して呼ぶ。隔離・`expected_revision`・開いたままのtransaction・解析中の確認で断った失敗は、`output_state`が`absent`になる |
 | run_scriptの失敗 | `output_state`は`transaction_outcome`から決める。transactionが始まった後で終わり方が分からない失敗は`uncertain`。詳細は4 KiBで切らず、`OperationManager.present`（`presentation/operation_presentation.py`）が大きな結果・エラーを結果の保存先へ移す |
 | 記録の大きさ | 記録が持つ結果とエラーの合計を数え、128 MiBを超えたら古い記録から捨てて`result_discarded: true`を付ける |
-| cancel_operation | まだ`begin`していないジョブは、workerがロックを待っていても、その場で`OPERATION_CANCELLED`（`absent`）で終える。workerはロックを得た後に`check_active`・`begin`で断る。`begin`後はmonitorをキャンセルする。`get_operation`がなければ公開しない |
+| cancel_operation | まだ`begin`していないジョブは、workerがロックを待っていても、その場で`OPERATION_CANCELLED`（`absent`）で終える。スクリプトがバリアを待つ間（1回最大300秒）は、その待ちもその場で打ち切り、workerは次のジョブへ進む。ほかのロック待ちでは、workerはロックを得た後に`check_active`・`begin`で断る。`begin`後はmonitorをキャンセルする。`get_operation`がなければ公開しない |
 | 停止時のスクリプト | 実行中のスクリプトは、monitorをキャンセルした後、`--lock-timeout-seconds`だけ待つ。monitorを見ないスクリプトは待たずに進む |
 | list_targets | `ProgramSession`が開いた時点のproject名・場所・domain pathを控え、`to_dict()`はGhidraを呼ばない。`list_targets`はregistryのロックだけで答える。スクリプトの実行後は、名前の変更に備えてdomain pathを読み直す |
 | thread監視 | ジョブのworker（`ghidra-jobs`）を許可の一覧に加えた。先送りの呼び出しはanyioのworker threadで動くので、元から許可されている |

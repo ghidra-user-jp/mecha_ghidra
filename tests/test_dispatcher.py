@@ -794,16 +794,108 @@ def test_dispatch_tool_raises_output_validation_error_for_incompatible_result(
         ("export_program", DomainError(ErrorCode.PATH_NOT_ALLOWED, "outside"), "absent"),
         ("pull_project_program", DomainError(ErrorCode.SYNC_OPERATION_FAILED, "refresh", retryable=True), "absent"),
         ("commit_project_program", DomainError(ErrorCode.SYNC_OPERATION_FAILED, "boom"), "uncertain"),
-        # Reads write nothing; jobs, BSim tools and program writes say it themselves.
+        # A BSim write the core did not run: its code tells, as for a project write.
+        ("bsim_register_target", DomainError(ErrorCode.BSIM_REGISTER_FAILED, "boom"), "uncertain"),
+        ("bsim_delete_executable", DomainError(ErrorCode.BSIM_EXECUTABLE_AMBIGUOUS, "two"), "absent"),
+        ("bsim_update_executable_metadata", DomainError(ErrorCode.BSIM_DATABASE_INIT_FAILED, "no db"), "absent"),
+        ("bsim_load_matched_executable", DomainError(ErrorCode.BSIM_MATCH_STALE, "md5 differs"), "absent"),
+        # A job tool fails only when it refused the job, which never ran.
+        ("import_program", DomainError(ErrorCode.VALIDATION_ERROR, "missing"), "absent"),
+        ("run_script", DomainError(ErrorCode.OPERATION_QUEUE_FULL, "full", retryable=True), "absent"),
+        ("import_program", DomainError(ErrorCode.IMPORT_IN_PROGRESS, "cancelling", retryable=True), "absent"),
+        ("analyze_program", DomainError(ErrorCode.ANALYSIS_IN_PROGRESS, "queued"), "absent"),
+        # ...unless an earlier import of the name may have left a program.
+        ("import_program", DomainError(ErrorCode.IMPORT_OUTPUT_UNCERTAIN, "no cleanup"), "uncertain"),
+        # Reads write nothing; program writes say it themselves.
         ("list_project_programs", DomainError(ErrorCode.OPERATION_FAILED, "boom"), None),
-        ("import_program", DomainError(ErrorCode.VALIDATION_ERROR, "missing"), None),
-        ("bsim_register_target", DomainError(ErrorCode.BSIM_REGISTER_FAILED, "boom"), None),
+        ("bsim_query", DomainError(ErrorCode.BSIM_QUERY_FAILED, "boom"), None),
+        ("get_operation", DomainError(ErrorCode.OPERATION_NOT_FOUND, "gone"), None),
         ("rename_data_type", DomainError(ErrorCode.OPERATION_FAILED, "boom"), None),
     ],
 )
 def test_a_failed_project_or_repository_write_says_what_it_left(tool, error, expected):
     spec = tool_dispatcher_module.get_tool_spec
     with_state = tool_dispatcher_module._with_output_state
-    assert (with_state(spec(tool), error).details or {}).get("output_state") == expected
+    stated = with_state(spec(tool), error)
+    assert (stated.details or {}).get("output_state") == expected
+    # retryable stays true only with absent.
+    assert stated.retryable is (error.retryable and expected in (None, "absent"))
     written = DomainError(ErrorCode.SAVE_FAILED, "x", details={"output_state": "created"})
     assert with_state(spec("save_project_program"), written).details["output_state"] == "created"
+
+
+@pytest.mark.parametrize(
+    ("tool", "expected"), [("save_project_program", {"output_state": "absent"}), ("get_function", None)]
+)
+def test_the_second_input_check_says_a_refused_write_left_nothing(tool, expected):
+    from ghidra_mcp.presentation.tool_errors import ToolInputError
+
+    class Registry:
+        def call(self, *_args):
+            pytest.fail("invalid request reached executor")
+
+    with pytest.raises(ToolInputError) as raised:
+        dispatch_tool(tool, {"no_such_argument": 1}, "t", registry=Registry())
+    assert raised.value.details == expected
+
+
+def test_every_core_write_tool_reports_what_its_failure_left():
+    """core_execution stamps output_state only for PROGRAM_WRITE_COMMANDS, and the dispatcher skips core tools."""
+    from ghidra_mcp.application.commands import PROGRAM_WRITE_COMMANDS
+    from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolSafetyTag, get_all_tool_specs
+
+    unstamped = [
+        name
+        for name, spec in get_all_tool_specs().items()
+        if spec.executor_kind == ExecutorKind.CORE_COMMAND
+        and spec.safety_tag != ToolSafetyTag.READ_ONLY
+        and spec.presenter != "operation"
+        and spec.command_or_method not in PROGRAM_WRITE_COMMANDS
+    ]
+    assert unstamped == []
+
+
+def test_every_bsim_tool_reports_its_failures_as_domain_errors():
+    """Without _reports_bsim_errors a BSim failure would reach the client as 'Error executing tool'."""
+    from ghidra_mcp.application.services.bsim_service import BsimService
+    from ghidra_mcp.contracts.tool_spec import ToolCategoryTag, get_all_tool_specs
+
+    methods = [
+        spec.command_or_method for spec in get_all_tool_specs().values() if spec.category_tag == ToolCategoryTag.BSIM
+    ]
+    assert methods
+    assert [name for name in methods if not hasattr(getattr(BsimService, name), "__wrapped__")] == []
+
+
+@pytest.mark.parametrize(
+    ("tool", "lock", "asked"),
+    [
+        ("save_project_program", "target", ("fw", False)),
+        ("save_project_program", "project", ("fw", False)),
+        ("save_project_program", "runtime", ("fw", True)),
+        # No job or deferred call holds these.
+        ("save_project_program", "bsim_load", None),
+        ("save_project_program", None, None),
+        # A tool without a target gets the placeholder "default": its target locks name nothing.
+        ("bsim_load_matched_executable", "target", None),
+        ("bsim_load_matched_executable", "script_barrier", ("fw", True)),
+    ],
+)
+def test_a_lock_timeout_names_a_holder_only_for_locks_a_job_holds(tool, lock, asked):
+    from types import SimpleNamespace
+
+    questions = []
+
+    def lock_holder(target, *, any_target=False):
+        questions.append((target, any_target))
+        return "job-1"
+
+    registry = SimpleNamespace(operations=SimpleNamespace(lock_holder=lock_holder))
+    timeout = DomainError(
+        ErrorCode.LOCK_TIMEOUT, "busy", retryable=True, details={} if lock is None else {"lock": lock}
+    )
+    named = tool_dispatcher_module._name_lock_holder(
+        timeout, registry, tool_dispatcher_module.get_tool_spec(tool), "fw"
+    )
+    assert questions == ([] if asked is None else [asked])
+    assert (named.details.get("operation_id") == "job-1") is (asked is not None)

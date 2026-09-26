@@ -189,7 +189,7 @@ def test_a_lock_timeout_behind_a_deferred_call_names_it(registry, monkeypatch):
 def test_a_deferred_call_without_a_target_is_readable_and_holds_no_lock(registry):
     # bsim_load_matched_executable takes an optional target: None reaches the record.
     snapshot = registry.operations.defer_call("bsim_load_matched_executable", None, started_at="now")
-    assert snapshot["target"] == ""
+    assert registry.operations.get(operation_id=snapshot["operation_id"])["target"] == ""
     assert registry.operations.lock_holder("t", any_target=True) is None
     registry.operations.finish_call(snapshot["operation_id"], result={"target": "loaded"})
     reply = asyncio.run(
@@ -226,13 +226,17 @@ def test_a_deferred_call_keeps_its_slot_until_it_finishes(registry):
     async def scenario():
         reply = await decompile(mcp)
         assert reply.structured_content["deferred"] is True
-        second = asyncio.ensure_future(decompile(mcp, "u"))
-        await asyncio.sleep(WAIT * 2)
-        # The only slot is still busy: the second call has not even started.
-        assert not second.done() and registry.calls == 1
+        # The only slot is still busy after the wait: the second call does not run, and says so in time.
+        with anyio.fail_after(WAIT * 5):
+            refused = await decompile(mcp, "u")
+        error = refused.structured_content["error"]
+        assert refused.is_error and (error["code"], error["retryable"]) == ("OPERATION_QUEUE_FULL", True)
+        assert error["details"]["output_state"] == "absent" and registry.calls == 1
         registry.gate.set()
+        # Once the deferred call ends, its slot takes the next call.
         with anyio.fail_after(3):
-            assert (await second).structured_content == {"result": registry.value}
+            assert (await decompile(mcp, "v")).structured_content == {"result": registry.value}
+        assert registry.calls == 2
 
     asyncio.run(scenario())
 
@@ -310,3 +314,75 @@ def test_every_deferrable_tool_publishes_the_deferred_reply():
         assert ('"deferred"' in variants) is spec.deferrable, name
     assert not get_tool_spec("list_targets").deferrable
     assert not get_tool_spec("run_script").deferrable and not get_tool_spec("get_operation").deferrable
+
+
+def test_a_deferred_failure_keeps_the_code_its_reply_had(registry):
+    from ghidra_mcp.presentation.deferred_calls import _record_outcome
+    from ghidra_mcp.presentation.tool_errors import ToolInputError
+
+    record = registry.operations.defer_call("import_program", "t", started_at="now")
+    reply = _record_outcome(
+        registry.operations,
+        record["operation_id"],
+        "import_program",
+        None,
+        ToolInputError("language_id is required"),
+        None,
+    )
+    stored = registry.operations.get(operation_id=record["operation_id"])["operation_error"]
+    assert reply.structured_content["error"] == stored
+    assert (stored["code"], stored["retryable"]) == ("VALIDATION_ERROR", False) and stored["hint"]
+
+
+def test_a_failed_batch_keeps_its_items_in_the_record():
+    from mcp.types import CallToolResult, TextContent
+
+    from ghidra_mcp.presentation.operation_presentation import structured_error
+
+    batch = {"status": "error", "items": [{"id": "a", "status": "error", "error": {"code": "NOT_FOUND"}}]}
+    failed = CallToolResult(
+        is_error=True, content=[TextContent(type="text", text=json.dumps(batch))], structured_content={"result": batch}
+    )
+    assert structured_error(failed)["result"] == batch
+
+
+def test_a_deferred_program_tool_whose_result_was_stored_keeps_source_beside_it(registry):
+    registry.value = "x" * 5000
+    runtime = create_mcp_server(
+        specs={name: get_tool_spec(name) for name in TOOLS},
+        registry_provider=lambda: registry,
+        dispatcher_provider=lambda: dispatch_tool,
+        presentation_config=ToolPresentationConfig(large_result_threshold_chars=200, large_result_preview_chars=50),
+        command_source=lambda: {"program": "/p.bin", "revision": "r1"},
+    )
+    mcp = runtime.mcp
+    mcp.deferred_calls.defer_after = WAIT
+
+    async def scenario():
+        reply = await decompile(mcp)
+        assert reply.structured_content["deferred"] is True
+        registry.gate.set()
+        return await settle(mcp, reply.structured_content["operation"]["operation_id"])
+
+    record = asyncio.run(scenario())
+    # A slow call's result is the large one: the record still names its revision beside it.
+    assert record["source"] == {"target": "t", "program": "/p.bin", "revision": "r1"}
+    assert record["result"]["truncated"] is True and "source" not in record["result"]
+
+
+def test_waiting_calls_take_freed_slots_in_arrival_order():
+    calls = DeferredCalls(defer_after=5, slots=1)
+
+    async def scenario():
+        # A running call holds the only slot; one call is already waiting for it.
+        assert await calls._acquire_slot(0) is True
+        earlier = asyncio.ensure_future(calls._acquire_slot(5))
+        await asyncio.sleep(0.01)
+        calls._slots.release()
+        # A call that comes later does not take the freed slot from the one before it.
+        assert await calls._acquire_slot(0) is False
+        assert await earlier is True
+        assert not calls._slot_waiters
+        calls._slots.release()
+
+    asyncio.run(scenario())

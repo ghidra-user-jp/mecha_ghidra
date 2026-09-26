@@ -6,6 +6,7 @@ import pytest
 
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_mapping import to_domain_error
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.core_execution import RuntimeCoreExecution
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.sync_operations import RuntimeSyncOperations
@@ -20,7 +21,7 @@ class _DummyCore:
         self.removed: list[str] = []
         self.executed: list[tuple[str, dict, str]] = []
 
-    def execute(self, command: str, params: dict, *, key: str):
+    def execute(self, command: str, params: dict, *, key: str, record_transactions: bool = False):
         self.executed.append((command, params, key))
         return {"status": "ok", "command": command}
 
@@ -1074,6 +1075,55 @@ def test_auto_checkout_rollback_postcondition_mismatch_is_partial_success(
         "operation_completed": True,
         "partial_success": True,
     }
+
+
+class _DisconnectAfterCheckoutHandle(_FakeHandle):
+    """The repository connection drops once the automatic checkout was confirmed, before check-in."""
+
+    failures = 1
+
+    def checkout_program(self, domain_path: str, *, exclusive: bool = False):
+        # The refresh that confirms the checkout still works; the ones after it fail.
+        self.confirmed_at = self.refresh_project_data_calls + 1
+        return super().checkout_program(domain_path, exclusive=exclusive)
+
+    def refresh_project_data(self, *, force: bool = True):
+        super().refresh_project_data(force=force)
+        confirmed_at = getattr(self, "confirmed_at", None)
+        if confirmed_at is not None and self.refresh_project_data_calls > confirmed_at and self.failures:
+            self.failures -= 1
+            raise RuntimeError("java.io.IOException: connection reset")
+
+
+def test_commit_undoes_its_automatic_checkout_when_the_refresh_before_checkin_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_DisconnectAfterCheckoutHandle)
+
+    with pytest.raises(RuntimeError, match="SYNC_REFRESH_FAILED") as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    # The checkout is gone again, so the retryable refresh failure is true: nothing was left behind.
+    assert (handle.checkout_calls, handle.undo_checkout_calls) == (1, 1)
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
+    assert to_domain_error(exc_info.value, operation="commit_project_program").retryable is True
+
+
+def test_commit_that_cannot_undo_its_automatic_checkout_is_not_retryable(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_DisconnectAfterCheckoutHandle)
+    handle.failures = 100
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    err = exc_info.value
+    assert (err.code, err.retryable) == (ErrorCode.SYNC_OPERATION_FAILED, False)
+    assert err.details == {
+        "operation": "commit_project_program.rollback_auto_checkout",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert "SYNC_REFRESH_FAILED" in err.message and "may still be checked out" in err.message
 
 
 def test_add_postcondition_rejects_success_without_versioned_state(monkeypatch: pytest.MonkeyPatch):
@@ -3122,7 +3172,7 @@ def test_command_dirty_state_is_reflected_in_sync_status(
     )
     original_execute = core.execute
 
-    def execute(command, params, *, key):
+    def execute(command, params, *, key, record_transactions=False):
         handle.program_reports_changed = changed_after
         return original_execute(command, params, key=key)
 

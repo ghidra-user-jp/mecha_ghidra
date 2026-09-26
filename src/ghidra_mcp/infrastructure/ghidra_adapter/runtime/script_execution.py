@@ -27,15 +27,13 @@ class RuntimeScriptExecution:
         self._store = store
         self._core_execution = core_execution
 
-    def script_runtime_availability(self) -> Dict[str, bool]:
+    def script_runtime_availability(self, *, wait: bool = True) -> Dict[str, bool]:
         from ghidra_headless.scripts import providers
 
-        with SCRIPT_BARRIER.read_lock():
+        with SCRIPT_BARRIER.read_lock() if wait else SCRIPT_BARRIER.read_lock(timeout=0):
             return providers.runtime_availability()
 
-    def run_script(
-        self, name: str, *, request: Dict[str, Any], control: OperationControl | None = None
-    ) -> Dict[str, Any]:
+    def run_script(self, name: str, *, request: Dict[str, Any], control: OperationControl) -> Dict[str, Any]:
         return self._core_execution.call("run_script", dict(request), target=name, exclusive=True, control=control)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import signal
 import threading
 from contextlib import contextmanager
@@ -27,6 +28,8 @@ from ghidra_mcp.presentation.operation_presentation import present_operation_out
 from ghidra_mcp.presentation.startup import StartupGate
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool, normalize_empty_list_result
 
+logger = logging.getLogger(__name__)
+
 # The signals that stop the server with the same cleanup: SIGHUP comes when the
 # terminal or ssh session closes.  Windows has no SIGHUP.
 SHUTDOWN_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, name))
@@ -40,29 +43,46 @@ def _attach_server_thread() -> None:
 
 
 @contextmanager
-def _defer_shutdown_signals():
-    """Finish worker/project cleanup before delivering a main-thread exit signal."""
+def defer_shutdown_signals():
+    """Finish worker/project cleanup before delivering a main-thread exit signal.
+
+    A signal that arrives meanwhile is delivered once the block ends.  Its
+    handler's exception then replaces one the block raised, so that failure
+    is logged here first.
+    """
     if threading.current_thread() is not threading.main_thread():
         yield
         return
     handlers = {}
     pending = None
+    failure: BaseException | None = None
 
     def defer(signum, _frame):
         nonlocal pending
         if pending is None:
             pending = signum
 
+    # An enclosing block's handler defers too; that block logs instead.
+    defer.defers_shutdown = True  # type: ignore[attr-defined]
     try:
         for signum in SHUTDOWN_SIGNALS:
             previous = signal.getsignal(signum)
             if previous != signal.SIG_IGN:
                 handlers[signum] = signal.signal(signum, defer)
         yield
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
         for signum, handler in handlers.items():
             signal.signal(signum, handler)
         if pending is not None:
+            if failure is not None and not getattr(handlers.get(pending), "defers_shutdown", False):
+                logger.error(
+                    "Cleanup failed before the deferred %s was delivered",
+                    signal.Signals(pending).name,
+                    exc_info=failure,
+                )
             signal.raise_signal(pending)
 
 
@@ -179,7 +199,7 @@ class ServiceRegistryAdapter:
     def close_all(self) -> None:
         # Join before any project/provider teardown, including stdio EOF.
         # Deferring signals also avoids interrupting Thread.join's bookkeeping.
-        with _defer_shutdown_signals():
+        with defer_shutdown_signals():
             self.operations.shutdown()
             self._target_service.close_all()
 

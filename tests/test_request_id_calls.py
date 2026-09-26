@@ -72,11 +72,18 @@ def _edit(**extra):
 
 
 def _assert_replay_of(again, first):
-    """A resend gets the first reply, marked replayed in structuredContent and in a last text block."""
+    """A resend gets the first reply, marked replayed in structuredContent and in its text.
+
+    A result gets a last text block for it; an error keeps its one block, whose JSON says it.
+    """
     assert again.is_error == first.is_error
     assert again.structured_content == {**first.structured_content, "replayed": True}
-    assert again.content[:-1] == first.content
-    assert json.loads(again.content[-1].text) == {"replayed": True}
+    if first.is_error:
+        assert len(again.content) == len(first.content)
+        assert json.loads(again.content[0].text) == again.structured_content
+    else:
+        assert again.content[:-1] == first.content
+        assert json.loads(again.content[-1].text) == {"replayed": True}
 
 
 def test_a_resend_with_the_request_id_gets_the_first_reply_without_running_again():
@@ -355,7 +362,8 @@ def test_a_dropped_reply_is_reported_instead_of_running_the_call_again():
     # Over the payload budget the record keeps neither the result nor the reply.
     assert manager.reply_for(record["operation_id"]) is None
     again, fresh = manager.claim_call("apply_edits", "t", request_id=REQUEST_ID, fingerprint="f")
-    assert not fresh and again["result_discarded"] is True
+    assert not fresh and again["operation_id"] == record["operation_id"]
+    assert manager.get(operation_id=again["operation_id"])["result_discarded"] is True
     with pytest.raises(DomainError) as raised:
         manager.claim_call("apply_edits", "t", request_id=REQUEST_ID, fingerprint="other")
     assert raised.value.code is ErrorCode.REQUEST_ID_CONFLICT
@@ -415,3 +423,99 @@ def test_a_replayed_reply_matches_the_published_output_schema():
     assert replies[3].is_error
     for reply in replies:
         mcp.output_validators["apply_edits"].validate(reply.structured_content)
+
+
+def test_a_replayed_stored_result_keeps_its_two_blocks():
+    from ghidra_mcp.presentation.config import ToolPresentationConfig
+
+    class Large(Registry):
+        def _run(self, command, params):
+            return {**super()._run(command, params), "notes": ["x" * 80] * 200}
+
+    registry = Large()
+    mcp = create_mcp_server(
+        specs={name: get_tool_spec(name) for name in ("apply_edits", "get_operation")},
+        registry_provider=lambda: registry,
+        dispatcher_provider=lambda: dispatch_tool,
+        presentation_config=ToolPresentationConfig(large_result_threshold_chars=1000, large_result_preview_chars=100),
+    ).mcp
+
+    async def scenario():
+        return [await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID)) for _ in range(2)]
+
+    first, again = asyncio.run(scenario())
+    assert [block.type for block in first.content] == ["text", "resource_link"]
+    # The documented notice shape: its structured content says replayed, its blocks stay two.
+    assert [block.type for block in again.content] == ["text", "resource_link"]
+    assert again.structured_content == {**first.structured_content, "replayed": True}
+    assert len(registry.calls) == 1
+
+
+def test_a_call_that_finishes_in_time_is_completed_once():
+    registry = Registry()
+    mcp = _server(registry)
+    completed = []
+    original = mcp.complete_result
+
+    def complete_result(name, kwargs, value):
+        completed.append(name)
+        return original(name, kwargs, value)
+
+    mcp.complete_result = complete_result
+    reply = asyncio.run(mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID)))
+    assert not reply.is_error
+    # The record's reply is the one sent: no second compaction or result-store entry.
+    assert completed == ["apply_edits"]
+
+
+def test_a_request_that_finds_every_slot_busy_can_be_sent_again():
+    registry = Registry()
+    registry.release = threading.Event()
+    mcp = _server(registry, defer_after=0.2)
+    mcp.deferred_calls = DeferredCalls(defer_after=0.2, slots=1)
+    other = "1e6f1b2a-3c4d-4e5f-8a9b-0c1d2e3f4a5b"
+
+    async def scenario():
+        busy = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+        assert busy.structured_content["deferred"] is True
+        refused = await mcp.call_tool("apply_edits", _edit(request_id=other))
+        registry.release.set()
+        with anyio.fail_after(5):
+            while registry.operations.is_pending(busy.structured_content["operation"]["operation_id"]):
+                await asyncio.sleep(0.01)
+            again = await mcp.call_tool("apply_edits", _edit(request_id=other))
+        return refused, again
+
+    refused, again = asyncio.run(scenario())
+    error = refused.structured_content["error"]
+    assert (error["code"], error["retryable"], error["details"]["output_state"]) == (
+        "OPERATION_QUEUE_FULL",
+        True,
+        "absent",
+    )
+    # Nothing ran for it, so the same request_id runs the call once a slot is free.
+    assert not again.is_error and "replayed" not in again.structured_content
+    assert len(registry.calls) == 2
+
+
+def test_a_resend_whose_first_reply_was_dropped_gets_a_coded_error():
+    registry = Registry()
+    # Too small to keep any reply.
+    registry.operations = OperationManager(Targets(), payload_limit_bytes=1)
+    mcp = _server(registry)
+
+    async def scenario():
+        first = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+        again = await mcp.call_tool("apply_edits", _edit(request_id=REQUEST_ID))
+        return first, again
+
+    first, again = asyncio.run(scenario())
+    assert not first.is_error and len(registry.calls) == 1
+    assert again.is_error
+    error = again.structured_content["error"]
+    assert (error["code"], error["retryable"]) == ("RESULT_DISCARDED", False)
+    # The first call ran: what it left is for the program to show, not for a resend to redo.
+    assert error["details"]["output_state"] == "uncertain"
+    operation = registry.operations.get(operation_id=error["details"]["operation_id"])
+    assert (operation["state"], operation["result_discarded"]) == ("succeeded", True)
+    assert "get_operation" in error["hint"]

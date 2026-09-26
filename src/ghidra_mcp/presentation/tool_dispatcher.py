@@ -7,12 +7,14 @@ from typing import Any
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
-from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolCategoryTag, ToolSafetyTag, ToolSpec, get_tool_spec
+from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolSpec, get_tool_spec
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_codes import REFUSED_BEFORE_ANY_CHANGE
+from ghidra_mcp.domain.output_state import ABSENT, UNCERTAIN, with_output_state
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.error_mapper import map_exception
 from ghidra_mcp.presentation.result_resources import ResultResourceStore, maybe_compact_tool_result
+from ghidra_mcp.presentation.tool_errors import ToolInputError
 
 
 def _status_target_ok(result: Any, target: str) -> dict[str, Any]:
@@ -77,18 +79,26 @@ def _empty_list_payload_from_call_tool_result(result: Any) -> list[Any] | None:
 
 # Locks every background job holds, wherever it runs; the others are per target and project.
 _SHARED_LOCKS = frozenset({"runtime", "script_barrier"})
+_TARGET_LOCKS = frozenset({"target", "project"})
 
 
-def _name_lock_holder(exc: Exception, registry, target: str) -> Exception:
-    """Point a LOCK_TIMEOUT at the background job holding the lock, so the caller knows what to wait for."""
+def _name_lock_holder(exc: Exception, registry, spec: ToolSpec, target: str) -> Exception:
+    """Point a LOCK_TIMEOUT at the background job holding the lock, so the caller knows what to wait for.
+
+    Only the locks a job or a deferred call holds have one, and a target
+    lock only for a tool that takes a target: the others get "default".
+    """
     if not isinstance(exc, DomainError) or exc.code != ErrorCode.LOCK_TIMEOUT:
         return exc
     details = dict(exc.details or {})
     lock_holder = getattr(getattr(registry, "operations", None), "lock_holder", None)
     if lock_holder is None or "operation_id" in details:
         return exc
+    shared = details.get("lock") in _SHARED_LOCKS
+    if not shared and (details.get("lock") not in _TARGET_LOCKS or not spec.include_target):
+        return exc
     try:
-        operation_id = lock_holder(target, any_target=details.get("lock") in _SHARED_LOCKS)
+        operation_id = lock_holder(target, any_target=shared)
     except Exception:
         return exc
     if operation_id is None:
@@ -103,36 +113,33 @@ def _name_lock_holder(exc: Exception, registry, target: str) -> Exception:
 
 
 def _with_output_state(spec: ToolSpec, exc: Exception) -> Exception:
-    """Say what a failed project or repository write left behind, as a program write and a job do.
+    """Say what a failed project, repository or BSim write left behind, as a program write and a job do.
 
-    Program writes (core_execution), jobs and BSim tools set ``output_state``
-    themselves.  Here the code tells: a refusal or a retryable failure left
-    nothing, anything else may have done part of the work.
+    Program writes (core_execution) set ``output_state`` themselves, and so
+    does a BSim write the core ran.  A job tool fails only when it refused
+    the job, which then never ran (its record says what a run left behind),
+    unless an earlier import of the name may have left a program.  Otherwise
+    the code tells: a refusal or a retryable failure left nothing, anything
+    else may have done part of the work.
     """
     if (
         not isinstance(exc, DomainError)
-        or spec.safety_tag == ToolSafetyTag.READ_ONLY
+        or not spec.writes
         or spec.executor_kind == ExecutorKind.CORE_COMMAND
-        or spec.presenter == "operation"
-        or spec.category_tag == ToolCategoryTag.BSIM
         or "output_state" in (exc.details or {})
     ):
         return exc
-    state = "absent" if exc.retryable or exc.code in REFUSED_BEFORE_ANY_CHANGE else "uncertain"
-    return DomainError(
-        code=exc.code,
-        message=exc.message,
-        hint=exc.hint,
-        retryable=exc.retryable,
-        details={**(exc.details or {}), "output_state": state},
-    )
+    if spec.presenter == "operation":
+        return with_output_state(exc, UNCERTAIN if exc.code is ErrorCode.IMPORT_OUTPUT_UNCERTAIN else ABSENT)
+    return with_output_state(exc, ABSENT if exc.retryable or exc.code in REFUSED_BEFORE_ANY_CHANGE else UNCERTAIN)
 
 
-def _validate_raw_args(spec_name: str, model_cls, raw_args: dict[str, Any] | None) -> dict[str, Any]:
+def _validate_raw_args(spec: ToolSpec, raw_args: dict[str, Any] | None) -> dict[str, Any]:
     try:
-        parsed = model_cls.model_validate(raw_args or {})
+        parsed = spec.input_model.model_validate(raw_args or {})
     except ValidationError as exc:
-        raise ValueError(f"{spec_name} input validation failed: {exc}") from exc
+        # Model validators run again here, after the MCP boundary's first pass.
+        raise ToolInputError(f"{spec.name} input validation failed: {exc}", write=spec.writes) from exc
     return parsed.model_dump(exclude_none=True)
 
 
@@ -166,7 +173,7 @@ def dispatch_tool(
     result_store: ResultResourceStore | None = None,
 ) -> Any:
     spec = get_tool_spec(spec_name)
-    params = _validate_raw_args(spec_name, spec.input_model, raw_args)
+    params = _validate_raw_args(spec, raw_args)
     if spec.replays_requests:
         # The MCP server answers resends by it (GhidraMCPServer); the handler never sees it.
         params.pop("request_id", None)
@@ -195,7 +202,7 @@ def dispatch_tool(
             else:
                 result = method(**kwargs)
     except Exception as exc:
-        named = _with_output_state(spec, _name_lock_holder(exc, registry, target))
+        named = _with_output_state(spec, _name_lock_holder(exc, registry, spec, target))
         if error_adapter is not None:
             raise error_adapter(named, target) from exc
         mapped = map_exception(named)

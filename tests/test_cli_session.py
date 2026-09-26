@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import types
 
 import pytest
@@ -1355,3 +1356,91 @@ def test_the_startup_log_counts_every_published_tool(monkeypatch, tmp_path, capl
     # The result-retrieval tools come beside the profile's.
     assert {"read_result", "search_result"} <= tools
     assert f"Starting PyGhidra MCP server with {len(tools)} tools" in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_signal_while_shutdown_waits_for_the_startup_still_closes_the_projects(monkeypatch, tmp_path):
+    import threading
+
+    from ghidra_mcp.application.services.script_service import ScriptConfig, ScriptService
+
+    events = []
+    release = threading.Event()
+
+    def step(name):
+        return lambda *args, **kwargs: events.append(name)
+
+    def slow_session(*args, **kwargs):
+        events.append("project")
+        assert release.wait(10)
+
+    def transport(server, *, transport, log_level, startup, **kwargs):
+        # The client goes away while Ghidra is still opening the startup session.
+        startup.start()
+        while "project" not in events:
+            time.sleep(0.01)
+
+    original_stop = cli.BackgroundStartup.stop
+    timers = []
+
+    def stop(self):
+        # SIGTERM arrives while shutdown waits for the step in progress.
+        timers.extend([threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGTERM)), threading.Timer(0.5, release.set)])
+        for timer in timers:
+            timer.start()
+        original_stop(self)
+        events.append("startup stopped")
+
+    registry = types.SimpleNamespace(create_session=slow_session, has_targets=lambda: True, close_all=step("close"))
+    service = ScriptService(None, config=ScriptConfig())
+    application = types.SimpleNamespace(registry=registry, script_service=service, mcp=_NO_TOOLS)
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
+    monkeypatch.setattr(cli, "_ensure_supported_ghidra_installation", step("installation"))
+    monkeypatch.setattr(cli, "_prepare_pyghidra_headless", step("prepare"))
+    monkeypatch.setattr(cli, "_start_pyghidra_headless", step("jvm"))
+    _no_jvm_thread_calls(monkeypatch)
+    monkeypatch.setattr(cli, "configure_ghidra_server_auth", step("auth"))
+    monkeypatch.setattr(cli, "_core", lambda: object())
+    monkeypatch.setattr(cli, "run_mcp_server", transport)
+    monkeypatch.setattr(cli.BackgroundStartup, "stop", stop)
+    monkeypatch.setattr(cli.jpype, "isJVMStarted", lambda: "jvm" in events)
+    monkeypatch.setattr(cli, "_exit_without_joining_threads", lambda code: events.append(("exit", code)))
+    monkeypatch.setenv("GHIDRA_INSTALL_DIR", str(tmp_path / "installation"))
+    argv = ["--ghidra-path", str(tmp_path / "installation"), "--project-location", str(tmp_path)]
+    # A program opens in the background, so the session is a startup step.
+    argv += ["--project-name", "test", "--domain-path", "/main"]
+    # main() puts this handler back when it returns: a SIGTERM that comes after that
+    # (stop() no longer waiting for the step) fails this test instead of ending pytest.
+    stray = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, _frame: stray.append(signum))
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main(argv)
+    finally:
+        for timer in timers:
+            timer.cancel()
+            timer.join(5)
+        release.set()
+        signal.signal(signal.SIGTERM, previous)
+    assert exc_info.value.code == 128 + signal.SIGTERM and not stray
+    # The signal waited for the projects to close.
+    assert events[-3:] == ["startup stopped", "close", ("exit", 128 + signal.SIGTERM)]
+
+
+def test_a_cleanup_failure_is_logged_before_a_deferred_signal_replaces_it(caplog):
+    from ghidra_mcp.presentation.cli_runtime import defer_shutdown_signals
+
+    delivered = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, _frame: delivered.append(signum))
+    try:
+        with pytest.raises(RuntimeError, match="close failed"):
+            with defer_shutdown_signals():
+                # Nested, as close_all inside the CLI's cleanup: the outer block logs once.
+                with defer_shutdown_signals():
+                    signal.raise_signal(signal.SIGTERM)
+                    assert delivered == []
+                    raise RuntimeError("close failed")
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert delivered == [signal.SIGTERM]
+    assert caplog.text.count("Cleanup failed before the deferred SIGTERM was delivered") == 1

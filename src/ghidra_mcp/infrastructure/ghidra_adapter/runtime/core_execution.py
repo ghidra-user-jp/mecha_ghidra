@@ -2,31 +2,61 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import threading
+from collections.abc import Iterator
+from functools import partial
 from typing import Any, Dict
 
 from ghidra_headless.errors import HeadlessError
-from ghidra_mcp.application.locks import SCRIPT_BARRIER, USE_SCRIPT_QUEUE_TIMEOUT, acquire_ordered_locks
+from ghidra_mcp.application.commands import PROGRAM_WRITE_COMMANDS
+from ghidra_mcp.application.locks import (
+    SCRIPT_BARRIER,
+    USE_SCRIPT_QUEUE_TIMEOUT,
+    LockWaitInterrupted,
+    acquire_ordered_locks,
+)
 from ghidra_mcp.application.services.ports import OperationControl
 from ghidra_mcp.domain import DomainError
+from ghidra_mcp.domain.output_state import ABSENT, output_state_for_outcome, with_output_state
 
 from .errors import to_domain_error
 from .session_store import RuntimeSessionStore, bind_session_project, format_project_key
 
 logger = logging.getLogger(__name__)
 
-# Job commands that run their own checks before changing the program and mark
-# that moment themselves (begin_command), so a refusal there leaves nothing.
-_BEGINS_ITSELF = frozenset({"run_script"})
-# A failed write's output_state, from how the core says its transactions ended
-# (ghidra_headless.session.transactions); anything else is uncertain.
-_OUTPUT_STATES = {"unchanged": "absent", "rolled_back": "absent", "committed": "created"}
-
 
 class _Progress:
     """Whether a write got past the checks and ran."""
 
     ran = False
+
+
+@contextlib.contextmanager
+def _script_writer(control: OperationControl | None) -> Iterator[None]:
+    """Hold the script barrier as writer; cancelling the job ends its wait.
+
+    The wait lasts up to the script queue budget (300 s by default): without
+    this, a cancelled job would keep the only job worker waiting that long.
+    """
+    if control is None:
+        with SCRIPT_BARRIER.write_lock(timeout=USE_SCRIPT_QUEUE_TIMEOUT):
+            yield
+        return
+    stop = threading.Event()
+    with contextlib.ExitStack() as held:
+        # Runs at once if the job was cancelled already.
+        control.bind_cancel(partial(SCRIPT_BARRIER.interrupt, stop))
+        try:
+            held.enter_context(SCRIPT_BARRIER.write_lock(timeout=USE_SCRIPT_QUEUE_TIMEOUT, stop=stop))
+        except LockWaitInterrupted:
+            # The cancellation or shutdown that stopped the wait.
+            control.check_active()
+            raise
+        finally:
+            control.bind_cancel(None)
+        yield
 
 
 class RuntimeCoreExecution:
@@ -50,7 +80,7 @@ class RuntimeCoreExecution:
         exclusive: bool = False,
         control: OperationControl | None = None,
     ) -> Any:
-        if control is not None or command not in self._checkout_required_commands:
+        if control is not None or command not in PROGRAM_WRITE_COMMANDS:
             return self._call(command, params, target, exclusive=exclusive, control=control)
         # A write run as a tool call says what its failure left behind, as a
         # job's record does: nothing before it ran, else what its transactions did.
@@ -61,16 +91,8 @@ class RuntimeCoreExecution:
             raise self._with_output_state(exc, command, target, ran=progress.ran) from exc
 
     def _with_output_state(self, exc: Exception, command: str, target: str, *, ran: bool) -> DomainError:
-        state = _OUTPUT_STATES.get(self._transaction_outcome(), "uncertain") if ran else "absent"
-        error = to_domain_error(exc, operation=command, target=target)
-        return DomainError(
-            code=error.code,
-            message=error.message,
-            hint=error.hint,
-            # A transient cause is only worth retrying when nothing was written.
-            retryable=error.retryable and state == "absent",
-            details={**(error.details or {}), "output_state": state},
-        )
+        state = output_state_for_outcome(self._transaction_outcome()) if ran else ABSENT
+        return with_output_state(to_domain_error(exc, operation=command, target=target), state)
 
     def _transaction_outcome(self) -> str | None:
         """How the last command on this thread ended its transactions, if the core can say."""
@@ -94,9 +116,7 @@ class RuntimeCoreExecution:
         # the Jython runtime) that per-target locks do not cover.  The writer
         # waits on the script queue budget, not the general lock timeout: a
         # requested script run should outwait a running analysis, not fail.
-        process_barrier = (
-            SCRIPT_BARRIER.write_lock(timeout=USE_SCRIPT_QUEUE_TIMEOUT) if exclusive else SCRIPT_BARRIER.read_lock()
-        )
+        process_barrier = _script_writer(control) if exclusive else SCRIPT_BARRIER.read_lock()
         runtime_barrier = (
             self._store.operation_lock.write_lock() if exclusive else self._store.operation_lock.read_lock()
         )
@@ -153,7 +173,7 @@ class RuntimeCoreExecution:
                 if progress is not None:
                     progress.ran = True
                 try:
-                    result = self._execute_locked(command, params or {}, target, control)
+                    result = self._execute_locked(command, params or {}, target, control, record=progress is not None)
                 finally:
                     if command == "run_script":
                         self._refresh_domain_path_locked(target)
@@ -179,10 +199,19 @@ class RuntimeCoreExecution:
         )
 
     def _execute_locked(
-        self, command: str, params: Dict[str, Any], target: str, control: OperationControl | None
+        self,
+        command: str,
+        params: Dict[str, Any],
+        target: str,
+        control: OperationControl | None,
+        *,
+        record: bool = False,
     ) -> Any:
+        core = self._store.core_accessor()
         if control is None:
-            return self._store.core_accessor().execute(command, params, key=target)
+            if record:
+                return core.execute(command, params, key=target, record_transactions=True)
+            return core.execute(command, params, key=target)
         # The checkout guard may have reopened the session: use the current one.
         with self._store.registry_lock.read_lock():
             session = self._store.ensure_session(target)
@@ -191,12 +220,12 @@ class RuntimeCoreExecution:
         monitor = session.get_project_handle().create_cancellable_monitor()
         control.bind_cancel(monitor.cancel)
         try:
-            if command in _BEGINS_ITSELF:
-                return self._store.core_accessor().execute(
-                    command, params, key=target, task_monitor=monitor, on_begin=control.begin
-                )
+            # A command that runs its own checks before changing the program
+            # marks that moment itself (begin_command), so a refusal leaves nothing.
+            if core.begins_itself(command):
+                return core.execute(command, params, key=target, task_monitor=monitor, on_begin=control.begin)
             control.begin()
-            return self._store.core_accessor().execute(command, params, key=target, task_monitor=monitor)
+            return core.execute(command, params, key=target, task_monitor=monitor)
         finally:
             control.bind_cancel(None)
 

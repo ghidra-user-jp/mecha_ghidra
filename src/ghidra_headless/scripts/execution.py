@@ -36,6 +36,7 @@ import jpype
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.scripts import providers, runtime_check
 from ghidra_headless.scripts.capture import BoundedCapture
+from ghidra_headless.session import transactions
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +59,11 @@ class _SharedInterpreter:
 
 _jython = _SharedInterpreter()
 
-OUTCOME_COMMITTED = "committed"
-OUTCOME_UNCHANGED = "unchanged"
-OUTCOME_ROLLED_BACK = "rolled_back"
-OUTCOME_UNKNOWN = "unknown"
+# One vocabulary with the core's own transaction recorder.
+OUTCOME_COMMITTED = transactions.COMMITTED
+OUTCOME_UNCHANGED = transactions.UNCHANGED
+OUTCOME_ROLLED_BACK = transactions.ROLLED_BACK
+OUTCOME_UNKNOWN = transactions.UNKNOWN
 
 
 def _jclass(name: str):
@@ -558,6 +560,7 @@ def execute_script(
     setup_error: BaseException | None = None
     monitor = None
     load_ms = duration_ms = 0
+    timed_out = cancelled = False
     # Runtime initialization is complete, but user constructors/static initializers
     # run inside getScriptInstance. Observe them as well as the script body;
     # describe_new_threads filters the known OSGi/compiler housekeeping threads.
@@ -589,6 +592,12 @@ def execute_script(
                     error = _python_exception_details(exc)
             finally:
                 duration_ms = int((time.monotonic() - started) * 1000)
+                # Read as the script ends: the timer keeps running after it and can
+                # still fire, and cancel the monitor, while the run winds down.
+                with contextlib.suppress(Exception):
+                    timed_out = bool(monitor.didTimeout())
+                with contextlib.suppress(Exception):
+                    cancelled = bool(monitor.isCancelled()) and not timed_out
     except BaseException as exc:
         setup_error = exc
     finally:
@@ -625,13 +634,6 @@ def execute_script(
     # The startup probe verifies that PyGhidra exceptions propagate. Only an
     # exception escaping this execute() is a failure: a parent script may have
     # caught a child's exception and legitimately completed its work.
-    timed_out = False
-    with contextlib.suppress(Exception):
-        timed_out = bool(monitor.didTimeout())
-    cancelled = False
-    with contextlib.suppress(Exception):
-        cancelled = bool(monitor.isCancelled()) and not timed_out
-
     if error is not None and error.get("system_exit") and _exit_code_is_success(error.get("exit_code")):
         error = None
     status = "ok"
