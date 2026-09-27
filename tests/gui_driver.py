@@ -26,6 +26,9 @@ from pathlib import Path
 SCENARIO, RESULTS, PORT = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
 SERVER_ARGS = sys.argv[sys.argv.index("--") + 1 :]
 URL = f"http://127.0.0.1:{PORT}/mcp"
+# A slow machine (an emulated Windows VM needs minutes to bring the GUI up) stretches the harness's
+# own waits; what a check accepts stays as it is, except where noted.
+TIME_SCALE = float(os.environ.get("GHIDRA_GUI_TEST_TIME_SCALE") or "1")
 _write_lock = threading.Lock()
 _startup_failed = threading.Event()
 
@@ -39,17 +42,34 @@ class Driver:
     def __init__(self, client) -> None:
         self.client = client
         self.human_names: set[str] = set()  # the undo names the simulated human's commands leave
+        self.deferred: list[str] = []  # the calls a slow machine deferred (40 s) and the driver followed
 
     # ---- MCP ----------------------------------------------------------------
 
     async def call(self, name: str, arguments: dict | None = None):
         response = await self.client.call_tool(name, arguments or {})
         content = response.structured_content or {}
+        if isinstance(content, dict) and content.get("deferred") is True:
+            self.deferred.append(name)
+            return await self._follow(content["operation"]["operation_id"])
         error = content.get("error") if isinstance(content, dict) else None
         return (None if error else content.get("result", content)), error
 
+    async def _follow(self, operation_id: str):
+        """A deferred call's outcome, fetched with get_operation as a client does (docs/usage.md#long-calls)."""
+        deadline = time.monotonic() + 600 * TIME_SCALE
+        while True:
+            reply = await self.client.call_tool("get_operation", {"operation_id": operation_id, "wait_seconds": 30})
+            job = (reply.structured_content or {}).get("result") or {}
+            if job.get("state") == "succeeded":
+                return job.get("result"), None
+            if job.get("state") == "failed":
+                return None, job.get("operation_error")
+            if time.monotonic() > deadline:
+                raise AssertionError(f"the deferred call {operation_id} did not end: {job}")
+
     async def until_ready(self, timeout: float = 180.0) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout * TIME_SCALE
         while True:
             _result, error = await self.call("list_targets")
             if error is None:
@@ -73,9 +93,10 @@ class Driver:
 
     @staticmethod
     def on_edt(function):
-        from ghidra_headless.gui.edt import run_on_edt
+        from ghidra_headless.gui.edt import EDT_START_TIMEOUT_SECONDS, run_on_edt
 
-        return run_on_edt(function)
+        # The simulated human waits for a slow machine's EDT as long as it takes.
+        return run_on_edt(function, start_timeout=EDT_START_TIMEOUT_SECONDS * TIME_SCALE)
 
     @staticmethod
     def post(function):
@@ -88,6 +109,12 @@ class Driver:
         from ghidra.framework.main import AppInfo
 
         return AppInfo.getActiveProject()
+
+    def project_location(self) -> str:
+        """The project's directory as a path of this OS (Ghidra writes a Windows one as /C:/...)."""
+        from ghidra_headless.gui.project_handle import native_project_location
+
+        return str(Path(native_project_location(str(self.project().getProjectLocator().getLocation()))))
 
     def tools(self):
         from ghidra_headless.gui.programs import running_program_tools
@@ -127,9 +154,21 @@ class Driver:
 
     @staticmethod
     def settle(program, timeout: float = 5.0) -> None:
-        """Wait until the program has no open transaction (a GUI command's background task ends)."""
-        deadline = time.monotonic() + timeout
-        while program.getCurrentTransactionInfo() is not None and time.monotonic() < deadline:
+        """Wait until the program has no open transaction (a GUI command's background task ends).
+
+        The task can start its transaction a moment after the command returns, later on a slow
+        machine: no transaction must be seen for a while.
+        """
+        deadline = time.monotonic() + timeout * TIME_SCALE
+        quiet_needed = 0.2 * TIME_SCALE
+        quiet_since = None
+        while time.monotonic() < deadline:
+            if program.getCurrentTransactionInfo() is None:
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since >= quiet_needed:
+                    return
+            else:
+                quiet_since = None
             time.sleep(0.02)
 
     def human(self, command, program) -> bool:
@@ -388,7 +427,7 @@ async def main_scenario(driver: Driver, started: float) -> None:
     )
 
     # G14: an AI load opens a visible tab without changing the human's current program.
-    project_location = str(Path(driver.project().getProjectLocator().getLocation()))
+    project_location = driver.project_location()
     before_current = driver.current_path()
     before_tabs = len(driver.open_programs())
     _opened, open_error = await driver.call(
@@ -413,7 +452,7 @@ async def main_scenario(driver: Driver, started: float) -> None:
     from ghidra.framework.model import DomainFile
 
     driver.post(lambda: manager.openProgram(third_file, DomainFile.DEFAULT_VERSION, ProgramManager.OPEN_VISIBLE))
-    for _ in range(100):
+    for _ in range(int(100 * TIME_SCALE)):
         if driver.gui_program("/Third.exe") is not None:
             break
         time.sleep(0.05)
@@ -552,11 +591,11 @@ async def main_scenario(driver: Driver, started: float) -> None:
     def holder():
         transaction = program.startTransaction("Holder (test)")
         held.set()
-        release.wait(10)
+        release.wait(10 * TIME_SCALE)
         program.endTransaction(transaction, True)
 
     threading.Thread(target=holder, daemon=True).start()
-    held.wait(5)
+    held.wait(5 * TIME_SCALE)
     waited_from = time.monotonic()
     _blocked, blocked = await driver.call(
         "apply_edits",
@@ -589,7 +628,7 @@ async def main_scenario(driver: Driver, started: float) -> None:
     during: dict[str, object] = {}
 
     def human_during_mecha() -> None:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 30 * TIME_SCALE
         while time.monotonic() < deadline:
             info = program.getCurrentTransactionInfo()
             if info is not None and str(info.getDescription()).startswith("Mecha: "):
@@ -602,7 +641,7 @@ async def main_scenario(driver: Driver, started: float) -> None:
     watcher.start()
     failed, failed_error = await driver.call("apply_edits", {"edits": batch})
     failed = await driver.full(failed)
-    watcher.join(35)
+    watcher.join(35 * TIME_SCALE)
     driver.settle(program)
     _until(lambda: driver.comment(program, entry.getEntryPoint(), "EOL") == "human G24")
     record(
@@ -622,6 +661,7 @@ async def main_scenario(driver: Driver, started: float) -> None:
     from ghidra_headless.session.write_boundary import write_boundary
 
     probe_record = TransactionRecord()
+    driver.settle(program, timeout=60)  # the edits above may have started auto-analysis
     with use_record(probe_record):
         write_boundary().write(
             program,
@@ -777,7 +817,7 @@ async def main_scenario(driver: Driver, started: float) -> None:
     hold: dict[str, object] = {}
 
     def close_while_held() -> None:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 30 * TIME_SCALE
         while time.monotonic() < deadline:
             consumers = list(third_again.getConsumerList())
             if len(consumers) > tools_consumers:
@@ -792,7 +832,7 @@ async def main_scenario(driver: Driver, started: float) -> None:
     _code, during_error = await driver.call(
         "decompile_function", {"target": "third", "address": str(third_biggest.getEntryPoint())}
     )
-    closer.join(35)
+    closer.join(35 * TIME_SCALE)
     record(
         "G31",
         gone is not None
@@ -831,7 +871,7 @@ def _address(program, text: str):
 
 
 def _until(condition, timeout: float = 5.0) -> bool:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout * TIME_SCALE
     while time.monotonic() < deadline:
         if condition():
             return True
@@ -855,7 +895,7 @@ def _eol_command(address, text):
 async def prompt_scenario(driver: Driver, _started: float) -> None:
     """G37: the first program of an empty CodeBrowser is current, and Ghidra asks to analyze it."""
     await driver.until_ready()
-    project_location = str(Path(driver.project().getProjectLocator().getLocation()))
+    project_location = driver.project_location()
     began = time.perf_counter()
     loaded, error = await driver.call(
         "open_program",
@@ -867,7 +907,7 @@ async def prompt_scenario(driver: Driver, _started: float) -> None:
         },
     )
     seconds = time.perf_counter() - began
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 10 * TIME_SCALE
     from ghidra_headless.gui.edt import modal_dialog_titles
 
     while "Analyze?" not in modal_dialog_titles() and time.monotonic() < deadline:
@@ -875,9 +915,11 @@ async def prompt_scenario(driver: Driver, _started: float) -> None:
     dialogs = modal_dialog_titles()
     info, info_error = await driver.call("get_program_info")
     context, _ = await driver.call("get_gui_context")
+    # The prompt waits until this scenario answers it below, so any bound tells a load that waits for it
+    # from one that does not: scaled for a slow machine.
     record(
         "G37",
-        error is None and seconds < 15 and "Analyze?" in dialogs and info_error is None
+        error is None and seconds < 15 * TIME_SCALE and "Analyze?" in dialogs and info_error is None
         and (loaded or {}).get("modal_dialog") == "Analyze?"
         and (context or {}).get("modal_dialog") == "Analyze?",
         load_seconds=round(seconds, 2),
@@ -948,7 +990,7 @@ def _save_dialog_texts() -> list[str]:
 def _wait_dialog(title_part: str, timeout: float = 10.0) -> list[str]:
     from ghidra_headless.gui.edt import modal_dialog_titles
 
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout * TIME_SCALE
     while time.monotonic() < deadline:
         titles = modal_dialog_titles()
         if any(title_part in title for title in titles):
@@ -957,8 +999,29 @@ def _wait_dialog(title_part: str, timeout: float = 10.0) -> list[str]:
     return modal_dialog_titles()
 
 
+def _interrupt() -> None:
+    """SIGINT; on Windows Ctrl+C, a console event (the scenario has a console of its own)."""
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.kernel32.GenerateConsoleCtrlEvent(0, 0)  # CTRL_C_EVENT, every process of this console
+    else:
+        os.kill(os.getpid(), signal.SIGINT)
+
+
+def _terminate() -> None:
+    """SIGTERM; on Windows, which sends no SIGTERM, Ctrl+Break."""
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.kernel32.GenerateConsoleCtrlEvent(1, 0)  # CTRL_BREAK_EVENT
+    else:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
 async def exit_scenario(driver: Driver, _started: float) -> None:
-    """G32 and G34: Ghidra's own exit, with its save prompt, on SIGINT and SIGTERM; SIGHUP leaves it running."""
+    """G32 and G34: Ghidra's own exit, with its save prompt, on SIGINT and SIGTERM (on Windows, Ctrl+C and
+    Ctrl+Break); SIGHUP, which Windows does not have, leaves it running."""
     await driver.until_ready()
     entry, _ = entry_and_biggest(driver.gui_program("/WinHelloCPP.exe"))
     _edit, edit_error = await driver.call(
@@ -979,12 +1042,12 @@ async def exit_scenario(driver: Driver, _started: float) -> None:
     def saving(titles) -> bool:
         return any("Save" in title for title in titles)
 
-    os.kill(os.getpid(), signal.SIGINT)
+    _interrupt()
     sigint_titles = _wait_dialog("Save")
-    time.sleep(0.5)
+    time.sleep(0.5 * TIME_SCALE)
     shown = _save_dialog_texts()
     sigint_cancel = _click("Cancel")
-    time.sleep(1.0)
+    time.sleep(1.0 * TIME_SCALE)
     after_sigint = modal_dialog_titles()
     _up, up_error = await driver.call("get_program_info")
     record(
@@ -993,14 +1056,17 @@ async def exit_scenario(driver: Driver, _started: float) -> None:
         dialogs=sigint_titles,
         texts=shown[:20],
     )
-    os.kill(os.getpid(), signal.SIGHUP)
-    time.sleep(2.0)
-    after_sighup = modal_dialog_titles()
-    _hup, hup_error = await driver.call("get_program_info")
-    os.kill(os.getpid(), signal.SIGTERM)
+    after_sighup: list[str] = []
+    hup_error = None
+    if hasattr(signal, "SIGHUP"):
+        os.kill(os.getpid(), signal.SIGHUP)
+        time.sleep(2.0 * TIME_SCALE)
+        after_sighup = modal_dialog_titles()
+        _hup, hup_error = await driver.call("get_program_info")
+    _terminate()
     sigterm_titles = _wait_dialog("Save")
     sigterm_cancel = _click("Cancel")
-    time.sleep(1.0)
+    time.sleep(1.0 * TIME_SCALE)
     after_sigterm = modal_dialog_titles()
     _term, term_error = await driver.call("get_program_info")
     record(
@@ -1009,12 +1075,12 @@ async def exit_scenario(driver: Driver, _started: float) -> None:
         and not saving(after_sighup) and hup_error is None
         and saving(sigterm_titles) and sigterm_cancel is not None and not saving(after_sigterm) and term_error is None,
         sigint=sigint_titles,
-        after_sighup=after_sighup,
+        after_sighup=after_sighup if hasattr(signal, "SIGHUP") else "no SIGHUP on this OS",
         sigterm=sigterm_titles,
         cancelled=[sigint_cancel, sigterm_cancel],
     )  # fmt: skip
     record("exiting", True)
-    os.kill(os.getpid(), signal.SIGTERM)
+    _terminate()
     if not saving(_wait_dialog("Save")):
         # The exit did not ask: end now instead of waiting for the test's timeout.
         record("exit_prompt_missing", False)
@@ -1035,7 +1101,7 @@ async def restore_scenario(driver: Driver, _started: float) -> None:
 
     read_only = driver.project().getProjectData().getFile("/Second.exe")
     driver.on_edt(lambda: read_only.setReadOnly(True))
-    project_location = str(Path(driver.project().getProjectLocator().getLocation()))
+    project_location = driver.project_location()
     _opened, open_error = await driver.call(
         "open_program",
         {"target": "ro", "project_location": project_location, "project_name": "GUI", "domain_path": "/Second.exe"},
@@ -1101,13 +1167,27 @@ def _wait_for_port(timeout: float = 120.0) -> None:
 
 def drive() -> None:
     async def run() -> None:
+        import httpx2
         from mcp import Client
+        from mcp.client.streamable_http import streamable_http_client
 
         _wait_for_port()
         began = time.perf_counter()
-        async with Client(URL, read_timeout_seconds=120) as client:
+        # One connection per request, as the relays do: on a slow machine calls come seconds apart, and a
+        # kept-alive connection that uvicorn closes after 5 s idle can break the next call halfway.
+        http = httpx2.AsyncClient(
+            timeout=httpx2.Timeout(150.0, connect=10.0),
+            limits=httpx2.Limits(max_keepalive_connections=0),
+            trust_env=False,
+        )
+        async with http, Client(streamable_http_client(URL, http_client=http), read_timeout_seconds=120) as client:
             initialized = time.perf_counter() - began
-            await SCENARIOS[SCENARIO](Driver(client), initialized)
+            driver = Driver(client)
+            try:
+                await SCENARIOS[SCENARIO](driver, initialized)
+            finally:
+                if driver.deferred:
+                    record("deferred_calls", True, calls=driver.deferred)
 
     try:
         asyncio.run(run())

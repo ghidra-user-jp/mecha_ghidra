@@ -24,7 +24,7 @@ def prepared(tmp_path_factory):
         env={**os.environ, "PYTHONPATH": os.pathsep.join([str(TESTS), str(ROOT / "src")])},
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=600 * float(os.environ.get("GHIDRA_GUI_TEST_TIME_SCALE") or "1"),
     )
     assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr[-4000:]
     return project, settings

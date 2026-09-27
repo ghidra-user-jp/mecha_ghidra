@@ -32,8 +32,11 @@ JVM_START_TIMEOUT_SECONDS = 300.0
 PROJECT_OPEN_GRACE_SECONDS = 60.0
 # How long the EDT may take to finish opening the project (restoring its tools).
 OPEN_STEP_TIMEOUT_SECONDS = 300.0
-# How long GhidraRun may show neither its FrontEnd nor a dialog before it is taken to have failed.
+# How long GhidraRun may show neither its FrontEnd nor a dialog, once its own startup thread has ended,
+# before it is taken to have failed.
 FRONT_END_GRACE_SECONDS = 180.0
+# How often the FrontEnd wait looks for GhidraRun's startup thread before it has found it.
+_STARTUP_THREAD_LOOK_SECONDS = 1.0
 
 
 class StartupStopped(Exception):
@@ -92,14 +95,45 @@ def wait_for_check(launch: GuiLaunch, status: GuiStartupStatus, stage: str) -> N
         _check_stop(status)
 
 
+class _GhidraStartupThread:
+    """GhidraRun's own "Ghidra" thread, which initializes the application before it posts the FrontEnd.
+
+    ``GhidraRun.launch`` starts it in a ``GhidraThreadGroup``; while it runs,
+    Ghidra is still starting (the class search alone takes seconds, minutes on
+    a slow machine), so the FrontEnd wait counts it as progress.
+    """
+
+    def __init__(self) -> None:
+        self._thread = None
+        self._looked = 0.0
+
+    def running(self) -> bool:
+        if self._thread is None and time.monotonic() - self._looked >= _STARTUP_THREAD_LOOK_SECONDS:
+            self._looked = time.monotonic()
+            self._thread = _find_ghidra_startup_thread()
+        return self._thread is not None and bool(self._thread.isAlive())
+
+
+def _find_ghidra_startup_thread():
+    from java.lang import Thread
+
+    for thread in Thread.getAllStackTraces().keySet():
+        group = thread.getThreadGroup()
+        if str(thread.getName()) == "Ghidra" and group is not None and "GhidraThreadGroup" in str(group.getClass()):
+            return thread
+    return None
+
+
 def wait_for_front_end(status: GuiStartupStatus, launch: GuiLaunch):
     """Ghidra's FrontEnd (the project window) exists; dialogs before it, such as the user agreement, may wait.
 
     GhidraRun runs on a Java thread whose failure never reaches the launcher,
-    so a long stretch with neither the FrontEnd nor a dialog is a failure too.
+    so a long stretch with neither the FrontEnd, a dialog, nor GhidraRun's
+    startup thread at work is a failure too.
     """
     from ghidra.framework.main import AppInfo
 
+    startup_thread = _GhidraStartupThread()
     quiet_since = time.monotonic()
     while True:
         _check_stop(status)
@@ -114,12 +148,12 @@ def wait_for_front_end(status: GuiStartupStatus, launch: GuiLaunch):
             front_end = None
         if front_end is not None:
             return front_end
-        if status.update():
+        if status.update() or startup_thread.running():
             quiet_since = time.monotonic()
         elif time.monotonic() - quiet_since > FRONT_END_GRACE_SECONDS:
             raise HeadlessError(
-                f"STARTUP_FAILED: the Ghidra GUI showed no project window within {FRONT_END_GRACE_SECONDS:g} s; "
-                "the server log has GhidraRun's error"
+                f"STARTUP_FAILED: the Ghidra GUI showed no project window within {FRONT_END_GRACE_SECONDS:g} s "
+                "after its startup thread ended; the server log has GhidraRun's error"
             )
         time.sleep(_POLL_SECONDS)
 

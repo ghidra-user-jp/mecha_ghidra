@@ -177,37 +177,234 @@ def _failed_to_start(record: RuntimeRecord | None, *, log_line: str = "") -> Dom
     )
 
 
-def launch_runtime(argv: list[str], registry: ProjectRegistry) -> subprocess.Popen:
+def _runtime_python(*, windows: bool = os.name == "nt") -> tuple[str, dict[str, str] | None]:
+    """The interpreter the runtime starts with, and its environment (None: this process's).
+
+    On Windows a venv's python.exe is a redirector that runs the base
+    interpreter as its child: the runtime would not be the process started
+    here (whose pid the relay waits for in the record), and a detached
+    redirector gives that child a console window of its own, whose closing
+    ends the runtime.  So the base interpreter starts directly, told which venv
+    it runs for, as multiprocessing does (bpo-35797).
+    """
+    executable = sys.executable
+    base = getattr(sys, "_base_executable", None) or executable
+    if windows and os.path.normcase(base) != os.path.normcase(executable):
+        return base, {**os.environ, "__PYVENV_LAUNCHER__": executable}
+    return executable, None
+
+
+# OpenProcess access right enough for IsProcessInJob.
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+# The detached runtime's exit code when a job of its client's kept it and would end it with the client.
+EXIT_KEPT_BY_CLIENT_JOB = 3
+
+
+def _in_a_job(pid: int) -> bool:
+    """Whether the Windows process ``pid`` belongs to any job object; OSError when that cannot be read."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        result = wintypes.BOOL()
+        if not kernel32.IsProcessInJob(handle, None, ctypes.byref(result)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return bool(result.value)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _own_job_limit_flags() -> int:
+    """The limit flags of the job this Windows process is directly in; OSError outside every job."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]  # fmt: skip
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION; LimitFlags follows its two LARGE_INTEGERs.
+    info = (ctypes.c_ubyte * (144 if ctypes.sizeof(ctypes.c_void_p) == 8 else 112))()
+    returned = wintypes.DWORD()
+    # A NULL handle is the calling process's own job (the nearest one when jobs nest).
+    if not kernel32.QueryInformationJobObject(
+        None, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, info, ctypes.sizeof(info), ctypes.byref(returned)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return ctypes.c_uint32.from_buffer(info, 16).value
+
+
+def kept_by_a_client_job(*, in_a_job=_in_a_job, job_limit_flags=_own_job_limit_flags) -> bool:
+    """Whether this runtime, just started detached, stayed in a job that would end it with the client (spec §10.6).
+
+    When the relay's own job forbids breaking away, starting the runtime fails
+    (OSError in ``locate_runtime``).  When it allows it but a job around it
+    does not, Windows starts the runtime in that outer job without an error.
+    Only the runtime can read that job's limits (a process reads its nearest
+    job's).  A job that ends its processes when its last handle closes
+    (KILL_ON_JOB_CLOSE, as the MCP Python SDK's) would end the GUI with the
+    client; one that only groups processes lets the runtime outlive the client.
+    """
+    if not in_a_job(os.getpid()):
+        return False
+    return bool(job_limit_flags() & _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+
+
+def _cannot_detach(cause: str) -> DomainError:
+    return _unavailable(
+        "the Ghidra GUI runtime cannot be detached from this client's job object; start it first in "
+        "a terminal with --backend gui --transport http",
+        cause_message=cause,
+    )
+
+
+# Windows: the runtime starts through this starter, which then ends, so that the runtime's parent is a
+# process that is gone.  A client that ends its server's process tree by parent pid (Claude Code does, when
+# the server still runs a few seconds after its stdin closed) then cannot reach the runtime (spec §10.6).
+# The starter keeps the runtime's handle, and with it the pid and the exit code, until the relay holds one of
+# its own: it reads its stdin to the end first.  The base interpreter takes __PYVENV_LAUNCHER__ out of its
+# environment (bpo-35873), so the starter hands it on.  Where the job the starter stayed in does not let it
+# leave (a job around the client's), it starts the runtime in that job, which the runtime then reads itself
+# (``kept_by_a_client_job``).
+_STARTER = """\
+import os, subprocess, sys
+flags, log, launcher, *command = sys.argv[1:]
+env = dict(os.environ)
+if launcher:
+    env["__PYVENV_LAUNCHER__"] = launcher
+
+def start(creationflags):
+    with open(log, "ab") as out:
+        return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                close_fds=True, creationflags=creationflags, env=env)
+
+try:
+    runtime = start(int(flags))
+except PermissionError:
+    runtime = start(int(flags) & ~subprocess.CREATE_BREAKAWAY_FROM_JOB)
+print(runtime.pid, flush=True)
+sys.stdin.read()
+"""
+_SYNCHRONIZE = 0x00100000
+_STILL_ACTIVE = 259
+
+
+class _DetachedRuntime:
+    """Windows: the runtime a starter started, watched through the relay's own handle as ``Popen`` watches a child."""
+
+    def __init__(self, pid: int, handle: int | None, returncode: int | None = None) -> None:
+        self.pid = pid
+        self.returncode = returncode
+        self._handle = handle  # None: nothing to watch (the runtime never started, or could not be opened)
+
+    def poll(self) -> int | None:
+        if self.returncode is None and self._handle:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(self._handle, ctypes.byref(code)) and code.value != _STILL_ACTIVE:
+                self.returncode = code.value
+                kernel32.CloseHandle(self._handle)
+                self._handle = None
+        return self.returncode
+
+
+def _handle_to_watch(pid: int) -> int | None:
+    """A handle to the Windows process ``pid`` that reads its exit code; None where it cannot be opened."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    return kernel32.OpenProcess(_SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid) or None
+
+
+def _start_detached(command: list[str], env: dict[str, str] | None, log_path, log) -> _DetachedRuntime:
+    """Windows: start ``command`` outside the relay's console, process group, job object and process tree.
+
+    ``OSError`` when the relay's job does not let the starter leave it; nothing
+    starts then.  A starter that could not start the runtime leaves its
+    traceback in ``log`` and counts as a runtime that ended at once.
+    """
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_BREAKAWAY_FROM_JOB
+    launcher = (env or {}).get("__PYVENV_LAUNCHER__", "")
+    starter = subprocess.Popen(  # noqa: S603 - this Python, the operator's arguments
+        [command[0], "-I", "-S", "-c", _STARTER, str(flags), str(log_path), launcher, *command],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=log,
+        close_fds=True,
+        creationflags=flags,
+        env=env,
+    )
+    with starter:  # leaving closes the starter's stdin (it ends then) and waits for it
+        line = starter.stdout.readline().strip()
+        pid = int(line) if line.isdigit() else None
+        handle = _handle_to_watch(pid) if pid is not None else None
+    if pid is None:
+        return _DetachedRuntime(starter.pid, None, returncode=starter.returncode or 1)
+    return _DetachedRuntime(pid, handle)
+
+
+def launch_runtime(argv: list[str], registry: ProjectRegistry) -> subprocess.Popen | _DetachedRuntime:
     """Start the runtime detached from this relay (spec §10.6); it outlives the relay and its client.
 
     It runs with this Python and package, reads nothing from stdin, and writes
-    to the registry's log file.  On Windows it leaves the client's job object;
-    where the job does not allow that, ``OSError`` says so and nothing starts.
+    to the registry's log file.  On Windows it leaves the client's job object
+    and process tree (``_start_detached``); where the job does not allow that,
+    ``OSError`` says so and nothing starts.  A job around it that keeps the
+    runtime makes the runtime end itself at once (``kept_by_a_client_job``,
+    EXIT_KEPT_BY_CLIENT_JOB).
     """
-    command = [sys.executable, "-m", RUNTIME_MODULE, *argv]
-    options: dict[str, Any] = {"stdin": subprocess.DEVNULL, "stderr": subprocess.STDOUT, "close_fds": True}
-    if os.name == "nt":
-        options["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_BREAKAWAY_FROM_JOB
-        )
-    else:
-        # A new session: a client that ends the relay's process group does not end the runtime.
-        options["start_new_session"] = True
+    python, env = _runtime_python()
+    command = [python, "-m", RUNTIME_MODULE, *argv]
     # The log may name the user's paths: for its owner only, as the rest of the registry.
     fd = os.open(registry.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     if os.name != "nt":
         os.fchmod(fd, 0o600)  # a log an older launch left keeps its mode otherwise
     with open(fd, "wb") as log:
-        return subprocess.Popen(command, stdout=log, **options)  # noqa: S603 - this Python, the operator's arguments
+        if os.name == "nt":
+            return _start_detached(command, env, registry.log_path, log)
+        # A new session: a client that ends the relay's process group does not end the runtime.
+        return subprocess.Popen(  # noqa: S603 - this Python, the operator's arguments
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            env=env,
+            start_new_session=True,
+        )
 
 
-def _wait_for_registration(registry: ProjectRegistry, process: subprocess.Popen) -> RuntimeRecord | DomainError:
+def _wait_for_registration(
+    registry: ProjectRegistry, process: subprocess.Popen | _DetachedRuntime
+) -> RuntimeRecord | DomainError:
     deadline = time.monotonic() + LAUNCH_WAIT_SECONDS
     while True:
         record = registry.read()
         if record is not None and record.pid == process.pid and registry.runtime_alive():
             return record
         if process.poll() is not None:
+            if os.name == "nt" and process.returncode == EXIT_KEPT_BY_CLIENT_JOB:
+                return _cannot_detach(
+                    "a job object of this client would end the Ghidra GUI runtime when the client exits"
+                )
             return _failed_to_start(registry.read(), log_line=_log_tail(registry.log_path))
         if time.monotonic() >= deadline:
             return _unavailable(
@@ -234,11 +431,7 @@ def locate_runtime(argv: list[str], registry: ProjectRegistry) -> RuntimeRecord 
             process = launch_runtime(argv, registry)
         except OSError as exc:
             if os.name == "nt":
-                return _unavailable(
-                    "the Ghidra GUI runtime cannot be detached from this client's job object; start it first in "
-                    "a terminal with --backend gui --transport http",
-                    cause_message=str(exc),
-                )
+                return _cannot_detach(str(exc))
             return _unavailable(f"the Ghidra GUI runtime did not start: {exc}")
         logger.info("Started the Ghidra GUI runtime (pid %d); its log is %s", process.pid, registry.log_path)
         return _wait_for_registration(registry, process)
@@ -718,6 +911,7 @@ def free_loopback_socket() -> socket.socket:
 
 
 __all__ = [
+    "EXIT_KEPT_BY_CLIENT_JOB",
     "LAUNCH_WAIT_SECONDS",
     "Fallback",
     "Relay",
@@ -729,6 +923,7 @@ __all__ = [
     "claim_runtime",
     "config_mismatch",
     "free_loopback_socket",
+    "kept_by_a_client_job",
     "launch_runtime",
     "locate_runtime",
     "release_launch",

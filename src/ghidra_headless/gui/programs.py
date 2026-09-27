@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from ghidra_headless.errors import HeadlessError
 
-from .edt import modal_dialog_titles, post_to_edt, run_on_edt
+from .edt import is_edt_busy, modal_dialog_titles, post_to_edt, run_on_edt
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 OPEN_REGISTRATION_TIMEOUT_SECONDS = 30.0
 # How long a load waits for a CodeBrowser it had to start.
 TOOL_LAUNCH_TIMEOUT_SECONDS = 30.0
+# How long a wait goes on, dialogs aside, while the work it posted keeps the EDT
+# busy: a slow machine takes the EDT for tens of seconds to open a program or a
+# tool, and posted work cannot be taken back once it runs.
+POSTED_WORK_LIMIT_SECONDS = 300.0
 # How long a load that registered its program waits for the open to end or for its prompt.
 PROMPT_SETTLE_SECONDS = 2.0
 # How long a save waits for the program to show no unsaved changes.
@@ -22,23 +27,68 @@ SAVE_TIMEOUT_SECONDS = 120.0
 _POLL_SECONDS = 0.05
 
 
+class PostedWork:
+    """Work posted to the EDT that its caller waits for: begun, ended, or given up before it began.
+
+    Once the work runs it cannot be taken back, so a caller that stops waiting
+    gives it up only if it has not begun (``abandon``); it then does nothing
+    when its turn comes, and no program or tool opens after the caller's error.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self.started = False
+        self.done = False
+
+    def begin(self) -> bool:
+        """The work's first step, on the EDT: False if the caller gave it up (do nothing then)."""
+        with self._lock:
+            if self._abandoned:
+                return False
+            self.started = True
+            return True
+
+    def end(self) -> None:
+        self.done = True
+
+    def abandon(self) -> bool:
+        """Give up the work if it has not begun; False if it runs or ran."""
+        with self._lock:
+            if not self.started:
+                self._abandoned = True
+            return self._abandoned
+
+    @property
+    def running(self) -> bool:
+        return self.started and not self.done
+
+
 class DialogAwareDeadline:
-    """A deadline that stops counting while Ghidra shows a modal dialog: a human is answering it.
+    """A deadline that stops counting while a human answers a modal dialog, or while the caller's work runs.
 
     Opening a program or a tool can ask first (a checkout, crash recovery, an
     upgrade, new plugins); the wait resumes counting once no dialog is up.
+    While ``work`` keeps the EDT busy with no dialog up, the wait goes on for
+    up to POSTED_WORK_LIMIT_SECONDS instead: ending it then would leave the
+    work to finish unobserved.
     """
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, *, work: PostedWork | None = None) -> None:
         self._left = float(seconds)
+        self._busy_left = POSTED_WORK_LIMIT_SECONDS
         self._last = time.monotonic()
+        self._work = work
 
     def expired(self) -> bool:
         now = time.monotonic()
+        elapsed, self._last = now - self._last, now
         if not modal_dialog_titles():
-            self._left -= now - self._last
-        self._last = now
-        return self._left <= 0
+            if self._work is not None and self._work.running:
+                self._busy_left -= elapsed
+            else:
+                self._left -= elapsed
+        return self._left <= 0 or self._busy_left <= 0
 
 
 def running_program_tools(project) -> list:
@@ -108,22 +158,27 @@ def ensure_code_browser(
     from java.util import List as JList
 
     launched: dict[str, object] = {}
+    work = PostedWork()
 
     def launch(launched: dict[str, object] = launched) -> None:
+        if not work.begin():
+            return
         try:
             launched["tool"] = project.getToolServices().launchTool("CodeBrowser", JList.of())
         finally:
             launched.setdefault("tool", None)
+            work.end()
 
     post_to_edt(launch, label="Starting a CodeBrowser in the Ghidra GUI")
-    deadline = DialogAwareDeadline(timeout)
+    deadline = DialogAwareDeadline(timeout, work=work)
     while not deadline.expired():
         tools = running_program_tools(project)
         if tools:
             return tools[0]
-        if "tool" in launched and launched["tool"] is None:
+        if work.done and launched.get("tool") is None:
             break  # the launch ended without a tool
         time.sleep(_POLL_SECONDS)
+    work.abandon()  # a launch that has not begun never will
     dialogs = modal_dialog_titles()
     raise HeadlessError(
         f"{failure_code}: the Ghidra GUI did not start a CodeBrowser"
@@ -139,7 +194,9 @@ def open_in_gui(project, domain_file, *, timeout: float = OPEN_REGISTRATION_TIME
     (a tool's first program becomes current anyway).  The open is posted to
     the EDT and not waited for: opening an unanalyzed program shows the
     auto-analysis prompt inside the open call.  The load returns once the
-    ProgramManager has registered the program.
+    ProgramManager has registered the program.  While the open itself keeps
+    the EDT busy, a look at the ProgramManager may not get its turn: the wait
+    goes on (see ``DialogAwareDeadline``).
     """
     program, _tool = find_open_program(project, domain_file)
     if program is not None:
@@ -150,40 +207,58 @@ def open_in_gui(project, domain_file, *, timeout: float = OPEN_REGISTRATION_TIME
     tool = ensure_code_browser(project)
     manager = tool.getService(ProgramManager)
     path = str(domain_file.getPathname())
-    opened: dict[str, object] = {}
+    work = PostedWork()
 
-    def open_tab(opened: dict[str, object] = opened) -> None:
+    def open_tab() -> None:
+        if not work.begin():
+            return
         try:
             manager.openProgram(domain_file, DomainFile.DEFAULT_VERSION, ProgramManager.OPEN_VISIBLE)
         finally:
-            opened["done"] = True
+            work.end()
 
     post_to_edt(open_tab, label=f"Opening {path} in the Ghidra GUI")
-    deadline = DialogAwareDeadline(timeout)
+    deadline = DialogAwareDeadline(timeout, work=work)
+    unseen = False  # the last look did not get the EDT's turn
     while not deadline.expired():
-        done = "done" in opened  # read before looking, so a registration just before it is not missed
-        for candidate in _open_programs(tool):
+        done = work.done  # read before looking, so a registration just before it is not missed
+        try:
+            candidates = _open_programs(tool)
+        except HeadlessError as exc:
+            if not is_edt_busy(exc):
+                raise
+            unseen = True
+            continue  # the EDT did not get to the look (the open, most likely, keeps it busy)
+        unseen = False
+        for candidate in candidates:
             if _same_file(candidate, domain_file):
                 if not done:
-                    _await_prompt_or_end(opened)
+                    _await_prompt_or_end(work)
                 return candidate
         if done:
             break  # the open ended without registering the program (failed or cancelled)
         time.sleep(_POLL_SECONDS)
+    abandoned = work.abandon()
     dialogs = modal_dialog_titles()
+    if work.done:
+        why = " (the GUI stayed too busy to show it)" if unseen else " (the open ended without it)"
+    elif abandoned:
+        why = f" within {timeout:g} s"  # it had not begun, and now never will
+    else:
+        why = f" while the GUI stayed busy opening it for {POSTED_WORK_LIMIT_SECONDS:g} s (it may still open)"
     raise HeadlessError(
         f"PROGRAM_OPEN_FAILED: the Ghidra GUI did not open {path}"
-        + (" (the open ended without it)" if "done" in opened else f" within {timeout:g} s")
+        + why
         + (f" (modal dialogs: {', '.join(dialogs)})" if dialogs else ""),
         details={"modal_dialogs": dialogs},
     )
 
 
-def _await_prompt_or_end(opened: dict[str, object], seconds: float = PROMPT_SETTLE_SECONDS) -> None:
+def _await_prompt_or_end(work: PostedWork, seconds: float = PROMPT_SETTLE_SECONDS) -> None:
     """Registered, but the open is still running: a tool's first program becomes current and Ghidra may be
     about to ask whether to analyze it.  Wait a moment for that dialog or the end, so the load can name it."""
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline and "done" not in opened and not modal_dialog_titles():
+    while time.monotonic() < deadline and not work.done and not modal_dialog_titles():
         time.sleep(_POLL_SECONDS)
 
 

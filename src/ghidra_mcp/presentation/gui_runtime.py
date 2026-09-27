@@ -9,6 +9,8 @@ Threads:
 - **ghidra-startup**: the startup steps, which wait for the GUI to come up;
 - **gui-signals**: turns SIGINT and SIGTERM into Ghidra's own exit, which asks
   about unsaved changes and can be cancelled; SIGHUP leaves the GUI running.
+  On Windows, Ctrl+C is SIGINT and Ctrl+Break is SIGBREAK, which is handled
+  like SIGTERM; closing the console ends the process at once (Windows does).
 
 Once the GUI runs, Ghidra ends the process with ``System.exit`` when the human
 exits it; no Python cleanup is relied on after that.
@@ -21,6 +23,7 @@ import functools
 import logging
 import os
 import signal
+import socket
 import sys
 import threading
 from collections.abc import Callable
@@ -43,7 +46,12 @@ from .startup import StartupStep, _Stopped
 
 logger = logging.getLogger(__name__)
 
-_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+# Windows has no SIGHUP, and only Windows has SIGBREAK (Ctrl+Break, the console event another program can send).
+_SIGHUP = getattr(signal, "SIGHUP", None)
+_SIGBREAK = getattr(signal, "SIGBREAK", None)
+_SIGNALS = tuple(signum for signum in (signal.SIGINT, signal.SIGTERM, _SIGHUP, _SIGBREAK) if signum is not None)
+# The signals that ask Ghidra to exit the way File > Exit does.
+_EXIT_SIGNALS = tuple(signum for signum in (signal.SIGINT, signal.SIGTERM, _SIGBREAK) if signum is not None)
 # How long the main thread waits for the MCP server to stop after the GUI was not started.
 _SERVER_STOP_SECONDS = 30.0
 # How long the main thread waits for the exiting JVM to end the process.
@@ -67,6 +75,22 @@ def _detach_from_terminal() -> None:
 
 def _ignore_signal(_signum, _frame) -> None:
     """Registered so Python's C-level handler writes the signal to the wakeup fd; the watcher acts on it."""
+
+
+def _wakeup_channel() -> tuple[Callable[[], bytes], tuple[Any, ...]]:
+    """Point Python's signal wakeup fd at a new channel: the watcher's blocking read, and what must stay open.
+
+    Windows gets a socket pair: its pipes can be made non-blocking only from Python 3.12.
+    """
+    if os.name == "nt":
+        reader, writer = socket.socketpair()
+        writer.setblocking(False)
+        signal.set_wakeup_fd(writer.fileno(), warn_on_full_buffer=False)
+        return (lambda: reader.recv(64)), (reader, writer)
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(write_fd, False)
+    signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
+    return (lambda: os.read(read_fd, 64)), (read_fd, write_fd)
 
 
 def _stoppable(function: Callable[[], Any]) -> Callable[[], None]:
@@ -96,6 +120,7 @@ class GuiRuntime:
         self._server_thread: threading.Thread | None = None
         self._project = None
         self._server_stopped = threading.Event()
+        self._wakeup_ends: tuple[Any, ...] = ()  # the signal wakeup channel, kept open for the process's life
 
     def prepare(self) -> None:
         """Check the Ghidra installation's version without a JVM (raises on a misconfiguration)."""
@@ -239,26 +264,26 @@ class GuiRuntime:
                 logger.error("The MCP server stopped; the Ghidra GUI stays open without it")
 
     def _watch_signals(self) -> None:
-        """Route SIGINT, SIGTERM and SIGHUP to a watcher thread (spec §4.5).
+        """Route SIGINT, SIGTERM and SIGHUP (SIGBREAK on Windows) to a watcher thread (spec §4.5).
 
         Python runs signal handlers on the main thread only, which the GUI
         holds (on macOS for good).  Python's C-level handler still writes each
         signal to the wakeup fd; the handlers themselves do nothing, so a
         signal is acted on once, by the watcher, on every OS.
         """
-        read_fd, write_fd = os.pipe()
-        os.set_blocking(write_fd, False)
         for signum in _SIGNALS:
             if signal.getsignal(signum) is not signal.SIG_IGN:
                 signal.signal(signum, _ignore_signal)
-        signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
-        threading.Thread(target=self._signal_watcher, args=(read_fd,), name="gui-signals", daemon=True).start()
+        receive, self._wakeup_ends = _wakeup_channel()
+        threading.Thread(target=self._signal_watcher, args=(receive,), name="gui-signals", daemon=True).start()
 
-    def _signal_watcher(self, read_fd: int) -> None:
+    def _signal_watcher(self, receive: Callable[[], bytes]) -> None:
         while True:
             try:
-                received = os.read(read_fd, 64)
+                received = receive()
             except OSError:
+                return
+            if not received:
                 return
             for number in received:
                 self._on_signal(number)
@@ -268,13 +293,13 @@ class GuiRuntime:
             name = signal.Signals(number).name
         except ValueError:
             return
-        if number == signal.SIGHUP:
+        if number == _SIGHUP:
             # The terminal is gone: the GUI keeps running, and nothing is written to the terminal any more
             # (spec §4.5).  This version keeps no log file, so later log lines are dropped.
             logger.info("Received SIGHUP: the Ghidra GUI keeps running; terminal output stops")
             _detach_from_terminal()
             return
-        if number not in (signal.SIGINT, signal.SIGTERM):
+        if number not in _EXIT_SIGNALS:
             return
         if self.launch.ghidra_run_started.is_set():
             try:
@@ -288,8 +313,26 @@ class GuiRuntime:
         os._exit(128 + number)
 
 
+def _exit_if_kept_by_a_client_job() -> None:
+    """Windows: end at once, before touching the project, if a job of the client's keeps this runtime (spec §10.6)."""
+    from ghidra_mcp.presentation.gui_relay import EXIT_KEPT_BY_CLIENT_JOB, kept_by_a_client_job
+
+    try:
+        kept = kept_by_a_client_job()
+    except OSError as exc:  # the job cannot be read: go on, as outside one
+        sys.stderr.write(f"Could not read this process's job object: {exc}\n")
+        return
+    if kept:
+        sys.stderr.write(
+            "A job object of the client would end the Ghidra GUI runtime when the client exits: not starting\n"
+        )
+        sys.exit(EXIT_KEPT_BY_CLIENT_JOB)
+
+
 if __name__ == "__main__":
     # The Ghidra GUI runtime a relay starts detached (spec §4.1, §10.6): not a public entry point.
+    if os.name == "nt":
+        _exit_if_kept_by_a_client_job()
     from ghidra_mcp.presentation.cli import main
 
     sys.exit(main(sys.argv[1:], detached=True))

@@ -83,6 +83,12 @@ claude mcp add mecha_ghidra_gui -e GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra -
 
 Clients that share one GUI must start it with the same options that apply to the whole runtime (path roots, `--domain-path`, targets); see [stdio clients](gui-live.md#stdio).
 
+On Windows:
+
+- Codex runs its stdio servers in a job object that ends them when Codex exits, and the GUI cannot leave it. Its relay therefore does not start the GUI: tool calls return `RUNTIME_UNAVAILABLE` with the advice to start the runtime first. Start the runtime in a terminal with the same options and `--transport http` (add `--mcp-port` if 8081 is taken), keep the terminal open, then use Codex: its relay connects to the running runtime. The terminal's process ends when the human exits Ghidra.
+- With Claude Code, the relay starts the GUI, which stays when Claude Code exits.
+- In Codex's TOML, write Windows paths as literal strings (`'C:\path\to\ghidra'`) or double the backslashes.
+
 ## Kilo Code and JSON-based clients
 
 For Kilo Code's VS Code extension, add an enabled server entry to its MCP settings:

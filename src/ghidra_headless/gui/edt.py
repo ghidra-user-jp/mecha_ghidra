@@ -28,10 +28,12 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-# How long a caller waits for the EDT to start its work.  A GUI that does not
-# start it this soon is busy with something long, such as a modal dialog's
-# own work; the caller reports that instead of queueing behind it.
-EDT_START_TIMEOUT_SECONDS = 5.0
+# How long a caller waits for the EDT to start its work: Ghidra's own bound
+# for it (ghidra.util.Swing, 20 s).  A GUI that does not start it this soon is
+# busy with something long; the caller reports that instead of queueing behind
+# it.  A slow machine keeps the EDT busy for seconds at a time while Ghidra
+# opens a program or a tool (up to 34 s on an emulated Windows VM).
+EDT_START_TIMEOUT_SECONDS = 20.0
 
 _HTML_TAG = re.compile(r"<[^>]+>")
 _WHITESPACE = re.compile(r"\s+")
@@ -103,6 +105,15 @@ def run_on_edt(function: Callable[[], _T], *, start_timeout: float = EDT_START_T
     if "error" in outcome:
         raise outcome["error"]  # type: ignore[misc]
     return outcome.get("value")  # type: ignore[return-value]
+
+
+def is_edt_busy(exc: BaseException) -> bool:
+    """Whether ``exc`` is ``run_on_edt``'s: the EDT did not start the request in time."""
+    return (
+        isinstance(exc, HeadlessError)
+        and exc.code == "LOCK_TIMEOUT"
+        and (exc.details or {}).get("lock") == "gui_event_thread"
+    )
 
 
 def post_to_edt(function: Callable[[], object], *, label: str = "GUI request") -> None:

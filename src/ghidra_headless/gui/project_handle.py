@@ -18,6 +18,7 @@ file IDs).  What differs is ownership:
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import threading
 from collections.abc import Iterator
@@ -72,9 +73,20 @@ def project_closed_error() -> HeadlessError:
     )
 
 
+def native_project_location(location: str, *, windows: bool = os.name == "nt") -> str:
+    """``ProjectLocator.getLocation()`` as a path of this OS.
+
+    Ghidra always writes the location with ``/``, and a Windows drive path as
+    ``/C:/a/b``; pathlib would read that leading slash as the current drive's root.
+    """
+    if windows and len(location) >= 3 and location[0] == "/" and location[1].isalpha() and location[2] == ":":
+        return location[1:]
+    return location
+
+
 def is_same_project(java_project, project_location: str, project_name: str) -> bool:
     locator = java_project.getProjectLocator()
-    location = pathlib.Path(str(locator.getLocation())).expanduser().resolve()
+    location = pathlib.Path(native_project_location(str(locator.getLocation()))).expanduser().resolve()
     return str(locator.getName()) == project_name and location == pathlib.Path(project_location).resolve()
 
 

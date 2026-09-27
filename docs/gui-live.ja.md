@@ -10,7 +10,7 @@
 
 ## 起動
 
-GUIのバックエンドは、画面を表示できる環境（macOSのログイン中のデスクトップ、LinuxのXのディスプレイ）で、stdioとHTTPのどちらの接続方式でも動きます。どちらの場合も、Projectごとに一つのプロセス（runtime）がGhidraのGUIとMCPサーバーを動かし、クライアントが起動するプロセスはそのruntimeへの中継になります。
+GUIのバックエンドは、画面を表示できる環境（macOSとWindowsのログイン中のデスクトップ、LinuxのXのディスプレイ）で、stdioとHTTPのどちらの接続方式でも動きます。どちらの場合も、Projectごとに一つのプロセス（runtime）がGhidraのGUIとMCPサーバーを動かし、クライアントが起動するプロセスはそのruntimeへの中継になります。
 
 <a id="stdio"></a>
 
@@ -31,6 +31,8 @@ uv run mecha_ghidra --backend gui \
 - MCPクライアントがstdioのサーバーに渡す環境変数は限られています。クライアントのサーバーの設定で `GHIDRA_INSTALL_DIR` を渡し、Linuxでは `DISPLAY`（Xのサーバーが求めるなら `XAUTHORITY` も）を渡してください（[MCPクライアント](clients.ja.md)）。
 - 動いているruntimeに接続するクライアントは、そのruntimeの設定に合わせる必要があります。`--allowed-*-root` のディレクトリ、`--domain-path`、`--target-name`、`--session`、Mechaの版、Ghidraのインストール先が同じでなければ、ツールの呼び出しはすべて `RUNTIME_CONFIG_MISMATCH` になり、違う点が `details` に入ります。ツールが少ないクライアント（別の `--tool-profile` など）は、自分のツールだけを見て使えます。`--lock-timeout-seconds` や大きな結果の設定など、runtime全体に効く設定はruntimeのものが使われ、クライアントの設定が違えば中継が警告をログに出します。
 - runtimeが消えたとき（プロセスが強制終了されたときなど）、中継の呼び出しは `RUNTIME_UNAVAILABLE` を返します。そのとき実行中だった呼び出しは `details.outcome` が `unknown` になるので、変更を送り直す前にProgramを確かめてください。中継はruntimeを起動し直しません。クライアントを起動し直すと、新しいruntimeが起動します。
+- Windowsでは、クライアントがサーバーをJob Object（Windowsがプロセスをまとめて扱う仕組み）の中で起動することがあります。中継はruntimeをJobから切り離して起動します。Jobが切り離しを許さず、クライアントが終わるときにJobの中のプロセスも終える設定なら（MCPのPython SDKで作ったクライアントや、Codexがこれに当たります）、Ghidraがクライアントと一緒に終わってしまうので、中継はGUIを起動しません。ツールの呼び出しは `RUNTIME_UNAVAILABLE` と、端末で先にruntimeを起動するよう案内を返します。そのときは、端末で `--backend gui --transport http` を起動してから、クライアントを使います。動いているruntimeには、どのクライアントの中継もつながります。プロセスをまとめるだけのJob（終えるときにプロセスを終えないもの）なら、runtimeはそのJobに残ったまま、クライアントより長く動きます。
+- クライアントによっては、終わるときにサーバーのプロセスの木（サーバーと、その子のプロセス）を丸ごと終わらせます。Claude Codeは、標準入力を閉じてから数秒たってもサーバーが終わっていないと、そうします。Windowsでは、中継はruntimeを、すぐ終わる小さな起動役のプロセスを通して起動するので、runtimeはその木に含まれず、GUIは残ります。
 
 ### HTTPで使う
 
@@ -52,6 +54,7 @@ uv run mecha_ghidra --backend gui --transport http \
 - 起動は、headlessと同じく、Ghidraの準備を待たずに受付を始めます。GUIの準備ができるまでのツールの呼び出しは、`LOCK_TIMEOUT`（`details.lock="startup"`）と現在の段階（`details.stage`）を返します。使用許諾などの確認の画面が人間の操作を待っていれば、その題名も `details.modal_dialogs` に入ります。
 - 画面を表示できないとき（macOSでログイン中のデスクトップがない、Linuxで `DISPLAY` がないか接続できない）と、ProjectのlockをほかのプロセスがもっているときはGUIを起動しません。ツールの呼び出しに `STARTUP_FAILED`（`details.stage` が `display` または `project_lock`）を返し、runtimeは終了します。GUIが立ち上がった後の段階の失敗（`--domain-path` のProgramがない、など）では、GUIは人間のために開いたままで、ツールの呼び出しには `STARTUP_FAILED`（`details.stage` がその段階）を返し続けます。Ghidraを終えるとruntimeも終わります。
 - macOSでは、アプリケーションの名前を「Ghidra (Mecha)」にします（`-Dapple.awt.application.name`）。
+- Windowsでは、中継が起動したruntimeはコンソールのウィンドウを持ちません。
 
 GhidraのGUIは、利用者の通常のGhidraの設定（前回のウィンドウの位置、ツールの構成、使用許諾）を使います。前回終了したときに開いていたツールとProgramは、Ghidraが通常どおり復元します。
 
@@ -113,6 +116,8 @@ Ghidraのtransactionは、どのスレッドから開始しても、開いてい
 
 Ghidraの終了は、人間がGUIのFile > Exitで行います。Ghidraとruntimeは同じプロセスなので、Ghidraを終えるとruntimeも終わります。stdioのクライアントを終えても、runtimeは終わりません。Ghidraを終えた後、つながったままの中継の呼び出しは `RUNTIME_UNAVAILABLE` を返します。AIが開いて変更したProgramも、Ghidraの標準の保存の確認に含まれます。端末からSIGINT（Ctrl+C）かSIGTERMを送ると、同じ終了の手順が始まり、未保存の変更があれば確認の画面が出ます。取り消せばGhidraは動き続けます。確認の画面が出ている間のSIGINTとSIGTERMは、画面を重ねて出しません。起動した時点で無視する設定になっていたシグナル（スクリプトから `&` で起動したときのSIGINTや、`nohup` で起動したときのSIGHUP）は、無視したままにします。その場合はSIGTERMを使います。SIGHUPではGUIは閉じず、端末への出力を止めます（この版はログのファイルを書かないので、以後のログは残りません）。
 
+Windowsの端末では、Ctrl+CとCtrl+Breakが、SIGINTとSIGTERMと同じくGhidraの終了を始めます。未保存の変更があれば確認の画面が出て、取り消せます。端末のウィンドウやタブを閉じると、Windowsはその端末で動いているプロセスを確認なしに終えるので、HTTPで前面に起動したGhidraも、未保存の変更を残したまま終わります。端末を閉じる前に、GhidraをFile > ExitかCtrl+Cで終えてください。端末より長くGhidraを残したいときは、stdioのクライアントから使います。中継が起動したruntimeは、端末から切り離して動きます。
+
 <a id="limits"></a>
 
 ## 使えない機能
@@ -129,7 +134,7 @@ Ghidraの終了は、人間がGUIのFile > Exitで行います。Ghidraとruntim
 
 `load_project_program` の `version` の指定と、`open_program` や `register_target` で別のProjectを指定することは、`GUI_UNSUPPORTED` になります。
 
-GUIのバックエンドは、macOSと、XvfbのLinuxで試験しています。Windows（クライアントのJob Objectからruntimeを起動すること、コンソールでのCtrl+Cを含む）は、まだ確かめていません。
+GUIのバックエンドは、macOS、XvfbのLinux、Windows 11で試験しています。Windowsでは、ARM64の上のx64のエミュレーション（Ghidraが配布するWindows用のネイティブはx64だけ）で確かめました。
 
 <a id="risks"></a>
 
@@ -140,3 +145,5 @@ AIのtransactionが開いている間も、Swingのスレッド以外で動く�
 AIの書き込みの区間はSwingのスレッドで動くので、その間GUIは人間の操作に応答しません。多くの書き込みは短く、100件の `apply_edits`（コメント、関数名、関数のprototype）はどれも0.1秒未満でした。`parse_c_declarations` は入力の大きさに応じて長くなり、上限の100万文字（構造体14,029個）では約1秒かかりました（2026-09-26、macOSでの測定）。大きなヘッダーは分けて渡すと、GUIの止まる時間が短くなります。
 
 revisionは人間の編集や自動解析でも進むので、`expected_revision` の不一致はheadlessより起きやすくなります。
+
+遅い環境（エミュレーションで動くWindowsなど）では、GhidraのGUIのスレッドが数十秒ふさがることがあります。Mechaは、自分が送ったProgramを開く処理やツールの起動がそのスレッドで動いている間は、終わるまで待ちます（最大300秒）。40秒を過ぎた呼び出しは、先送り（`deferred: true`）の応答になります。GUIの状態を読む呼び出しは、そのスレッドが20秒以内に処理を始めなければ、何も変えずに `LOCK_TIMEOUT`（`details.lock` が `gui_event_thread`、再試行できる）を返します。

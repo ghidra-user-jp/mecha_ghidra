@@ -26,6 +26,10 @@ Tool failures set MCP `isError: true`. Domain errors retain `code`, `message`, `
 | `--backend gui` returns `STARTUP_FAILED` with `details.stage` `project_lock` | Another Ghidra or server has the project open (`details.cause_type` is `PROJECT_LOCKED`). Close the project there, then start again. Do not delete an active lock file |
 | `--backend gui` does not finish starting | A dialog in `details.modal_dialogs` of the `LOCK_TIMEOUT` (the user agreement, for example) waits for the human. Answer it in the GUI; Mecha does not answer it for them |
 | `--backend gui` keeps returning `STARTUP_FAILED` while the GUI is open | A step after the GUI came up failed (`details.stage` is `project_open`, `code_browser`, `default_session` and so on). The GUI stays up for the human. Check `message`, exit Ghidra, fix the configuration and start again |
+| On Windows, a stdio client's `--backend gui` returns `RUNTIME_UNAVAILABLE` (`message` says `cannot be detached from this client's job object`) | The client started the server in a job object that ends its processes when the client exits (Codex and clients built on the MCP Python SDK do), so the relay did not start Ghidra (it would end with the client). Start `--backend gui --transport http` in a terminal first, then use the client (see [from a stdio client](gui-live.md#stdio)) |
+| On Windows, Ghidra ended without the save prompt when the terminal was closed | Windows ends the processes of a closed terminal without asking. Exit Ghidra before closing the terminal, or use it from a stdio client, whose runtime runs apart from any terminal (see [saving and exiting](gui-live.md#save-and-exit)) |
+| On a slow machine, a `--backend gui` call returns `LOCK_TIMEOUT` with `details.lock` `gui_event_thread` | The Ghidra GUI's thread stayed busy for more than 20 s. Nothing changed; wait a moment and call again |
+| On Windows, `uv sync` fails building JPype (it needs Microsoft C++ Build Tools) | JPype 1.5.2 has no wheel for Python 3.14. Make the environment with Python 3.13 or older (`uv sync --python 3.13`) |
 
 ## Tool errors
 

@@ -10,7 +10,7 @@ This page covers [startup](#startup) (from [stdio clients](#stdio), over HTTP, a
 
 ## Startup
 
-The GUI backend needs a display (a logged-in macOS desktop, or an X display on Linux) and serves MCP over stdio or HTTP. Either way, one process per project, the runtime, runs the Ghidra GUI and the MCP server; the processes that clients start only relay to it.
+The GUI backend needs a display (a logged-in macOS or Windows desktop, or an X display on Linux) and serves MCP over stdio or HTTP. Either way, one process per project, the runtime, runs the Ghidra GUI and the MCP server; the processes that clients start only relay to it.
 
 <a id="stdio"></a>
 
@@ -31,6 +31,8 @@ This process is a relay. It looks for the project's runtime, starts one in the b
 - MCP clients give a stdio server only a few environment variables. Set `GHIDRA_INSTALL_DIR` in the client's configuration of the server, and on Linux `DISPLAY` (and `XAUTHORITY` where the X server needs it); see [MCP clients](clients.md).
 - A client that connects to a running runtime must use its configuration: the same `--allowed-*-root` directories, `--domain-path`, `--target-name` and `--session`, and the same Mecha version and Ghidra installation. Otherwise every tool call returns `RUNTIME_CONFIG_MISMATCH`, with what differs in `details`. A client with fewer tools (another `--tool-profile`, for example) sees and runs only its own. Settings of the whole runtime, such as `--lock-timeout-seconds` and the large-result settings, stay the runtime's; the relay logs a warning when the client's differ.
 - If the runtime goes away (its process was killed, say), the relay's calls return `RUNTIME_UNAVAILABLE`. A call that was running then has `details.outcome` `unknown`: check the program before sending a change again. The relay does not start the runtime again; start the client again, which starts a new one.
+- On Windows a client may start its servers inside a job object (Windows' way of handling processes as a group). The relay starts the runtime out of the job. When the job does not allow that and ends its processes when the client exits (clients built on the MCP Python SDK, and Codex, do this), Ghidra would end with the client, so the relay does not start the GUI: tool calls return `RUNTIME_UNAVAILABLE` with the advice to start the runtime in a terminal first. Then start `--backend gui --transport http` in a terminal before using the client; the relays of any client connect to a running runtime. A job that only groups processes (one that ends none of them) keeps the runtime, which then outlives the client.
+- Some clients end their server's whole process tree (the server and its children) when they exit; Claude Code does when the server is still running a few seconds after its stdin closed. On Windows the relay starts the runtime through a small starter process that ends at once, so the runtime is not part of that tree and the GUI stays.
 
 ### Over HTTP
 
@@ -52,6 +54,7 @@ When no runtime runs for the project, this process becomes the runtime, in the f
 - The server serves before Ghidra is up, as the headless backend does. Until the GUI is ready, a tool call returns `LOCK_TIMEOUT` with `details.lock="startup"` and the current step in `details.stage`. A dialog waiting for the human (the user agreement, for example) is listed in `details.modal_dialogs`.
 - Without a usable display (no logged-in desktop on macOS; no `DISPLAY`, or one no X server answers, on Linux), or when another process holds the project's lock, the GUI does not start: tool calls return `STARTUP_FAILED` with `details.stage` set to `display` or `project_lock`, and the runtime exits. When a step after the GUI came up fails (the `--domain-path` program is missing, say), the GUI stays up for the human and every tool call keeps returning `STARTUP_FAILED` with that step in `details.stage`; exiting Ghidra ends the runtime.
 - On macOS the application is named "Ghidra (Mecha)" (`-Dapple.awt.application.name`).
+- On Windows a runtime that a relay started has no console window.
 
 The GUI uses the person's normal Ghidra settings (window positions, tool layouts, the user agreement). Ghidra restores the tools and programs that were open at its last exit, as usual.
 
@@ -113,6 +116,8 @@ Live sharing needs no saves. `save_project_program` saves the whole program as t
 
 The human exits with File > Exit in the GUI. Ghidra and the runtime are one process, so exiting Ghidra ends the runtime too; ending a stdio client does not. After the exit, calls of relays still connected return `RUNTIME_UNAVAILABLE`. Programs the AI opened or changed are in Ghidra's usual save prompt. SIGINT (Ctrl+C) or SIGTERM from a terminal starts the same exit, with the prompt if anything is unsaved; Cancel keeps Ghidra running. A SIGINT or SIGTERM while that prompt is up does not stack a second one. A signal that was already ignored when the server started stays ignored (SIGINT for a job a script started with `&`, SIGHUP under `nohup`); use SIGTERM then. SIGHUP does not close the GUI; it stops output to the terminal (this version writes no log file, so later log lines are not kept).
 
+In a Windows terminal, Ctrl+C and Ctrl+Break start Ghidra's exit as SIGINT and SIGTERM do, with the prompt if anything is unsaved, which can be cancelled. Closing the terminal window or tab makes Windows end the processes running in it without asking, so a Ghidra started in the foreground over HTTP ends with its unsaved changes. Exit Ghidra with File > Exit or Ctrl+C before closing the terminal. To keep Ghidra running after the terminal, use it from a stdio client: the runtime a relay starts runs apart from any terminal.
+
 <a id="limits"></a>
 
 ## What is not available
@@ -129,7 +134,7 @@ The first GUI backend does not offer these tools.
 
 `version` on `load_project_program`, and another project on `open_program` or `register_target`, return `GUI_UNSUPPORTED`.
 
-The GUI backend has been tested on macOS and on Linux under Xvfb. Windows, including starting the runtime from a client's job object and Ctrl+C in a console, has not been verified yet.
+The GUI backend has been tested on macOS, on Linux under Xvfb, and on Windows 11, there as x64 emulated on ARM64 (Ghidra's Windows natives are x64 only).
 
 <a id="risks"></a>
 
@@ -140,3 +145,5 @@ While an AI transaction is open, work that runs off the event thread (auto-analy
 The GUI does not respond to the human while an AI write section runs on the event thread. Most writes are short: 100-edit `apply_edits` batches (comments, function names, prototypes) each took under 0.1 s. `parse_c_declarations` grows with its input and took about 1 s at the 1,000,000-character limit (14,029 structures; measured on macOS, 2026-09-26). Passing a large header in parts shortens each pause.
 
 Revisions also move with human edits and auto-analysis, so `expected_revision` mismatches are more frequent than with the headless backend.
+
+On a slow machine (Windows under emulation, say) the Ghidra GUI's thread can stay busy for tens of seconds. Mecha waits while the program open or tool start it posted runs on that thread, until it ends (up to 300 s); a call past 40 s answers as deferred (`deferred: true`). A call that reads GUI state returns `LOCK_TIMEOUT` (`details.lock` `gui_event_thread`, retryable) with nothing changed when that thread does not start it within 20 s.

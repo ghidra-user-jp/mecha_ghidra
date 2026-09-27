@@ -26,15 +26,36 @@ import os
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 REGISTRY_FORMAT = 1
 
 STARTING = "starting"
 READY = "ready"
 FAILED = "failed"
+
+# Windows refuses to replace or delete a file while another process has it
+# open (a relay reading the record), and to open one that a replace is taking
+# away: PermissionError, for as long as the other handle stays open.
+_SHARING_RETRY_SECONDS = 2.0
+_SHARING_RETRY_INTERVAL = 0.01
+
+_T = TypeVar("_T")
+
+
+def _retry_sharing(operation: Callable[[], _T], *, windows: bool = os.name == "nt") -> _T:
+    """``operation()``, tried again for a moment where Windows refuses it for another process's open handle."""
+    deadline = time.monotonic() + _SHARING_RETRY_SECONDS
+    while True:
+        try:
+            return operation()
+        except PermissionError:
+            if not windows or time.monotonic() >= deadline:
+                raise
+            time.sleep(_SHARING_RETRY_INTERVAL)
 
 
 def registry_dir() -> Path:
@@ -203,7 +224,7 @@ class ProjectRegistry:
 
     def read(self) -> RuntimeRecord | None:
         try:
-            return RuntimeRecord.from_json(self.record_path.read_text(encoding="utf-8"))
+            return RuntimeRecord.from_json(_retry_sharing(lambda: self.record_path.read_text(encoding="utf-8")))
         except (OSError, ValueError, TypeError):
             return None
 
@@ -218,7 +239,7 @@ class ProjectRegistry:
                 handle.write(record.to_json())
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.record_path)
+            _retry_sharing(lambda: os.replace(temporary, self.record_path))
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(temporary)
@@ -226,7 +247,7 @@ class ProjectRegistry:
 
     def remove(self) -> None:
         with contextlib.suppress(FileNotFoundError):
-            self.record_path.unlink()
+            _retry_sharing(self.record_path.unlink)
 
 
 __all__ = [

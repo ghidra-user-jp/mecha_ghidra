@@ -14,7 +14,7 @@ from typing import Any
 
 from ghidra_headless.errors import HeadlessError
 
-from .edt import modal_dialog_titles, post_to_edt, run_on_edt
+from .edt import is_edt_busy, modal_dialog_titles, post_to_edt, run_on_edt
 from .programs import running_program_tools
 
 # How long show_in_gui waits for the GUI to show what it asked for.
@@ -245,15 +245,22 @@ def show_program(project, program, *, address=None, requested: dict[str, Any], t
     actual = None
     while True:
         finished = "done" in moved  # read before looking at the view
-        state = run_on_edt(lambda: _view_state(tool, program))
-        shown, actual = state["shown"], state["address"]
-        navigated = wanted is None or actual in wanted
-        if (finished and shown and navigated) or time.monotonic() >= deadline:
+        try:
+            state = run_on_edt(lambda: _view_state(tool, program))
+        except HeadlessError as exc:
+            if not is_edt_busy(exc):
+                raise
+            state = None  # the EDT did not get to the look: nothing confirmed yet
+        if state is not None:
+            shown, actual = state["shown"], state["address"]
+            navigated = wanted is None or actual in wanted
+        if (finished and state is not None and shown and navigated) or time.monotonic() >= deadline:
             break
         time.sleep(_POLL_SECONDS)
     # Still pending: a dialog opened by showing the program (the analysis prompt) waits for the human,
-    # and the move follows once it is answered (spec §8.2, step 7): unconfirmed, not failed.
-    pending = not finished
+    # and the move follows once it is answered (spec §8.2, step 7): unconfirmed, not failed.  So is a
+    # view the EDT was too busy to show us.
+    pending = not finished or state is None
     result = {
         "target": target,
         "program": path,
@@ -266,7 +273,7 @@ def show_program(project, program, *, address=None, requested: dict[str, Any], t
         "requested": requested,
         "actual_address": actual,
         "focus_requested": True,
-        "focus_confirmed": None if pending else run_on_edt(lambda: _frame_active(tool)),
+        "focus_confirmed": None if pending else _focus_confirmed(tool),
         "modal_dialog": _first_dialog(),
     }
     if not pending and shown and address is not None and not navigated:
@@ -288,6 +295,16 @@ def _view_state(tool, program) -> dict[str, Any]:
     shown = current is not None and current == program
     location = _location_of(tool, program) if shown else None
     return {"shown": shown, "address": None if location is None else location["address"]}
+
+
+def _focus_confirmed(tool) -> bool | None:
+    """Whether the tool's window is active, or None when the EDT is too busy to say (spec §8.3)."""
+    try:
+        return run_on_edt(lambda: _frame_active(tool))
+    except HeadlessError as exc:
+        if not is_edt_busy(exc):
+            raise
+        return None
 
 
 def _frame_active(tool) -> bool | None:

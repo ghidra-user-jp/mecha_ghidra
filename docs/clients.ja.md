@@ -83,6 +83,12 @@ claude mcp add mecha_ghidra_gui -e GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra -
 
 一つのGUIを共有するクライアントは、runtime全体に効く設定（パスの制限、`--domain-path`、target）をそろえて起動します（[stdioのクライアントから使う](gui-live.ja.md#stdio)）。
 
+Windowsでは：
+
+- Codexは、stdioのサーバーを、Codexが終わるときにその中のプロセスも終えるJob Objectの中で動かし、GUIもそこから出られません。そのため中継はGUIを起動せず、ツールの呼び出しは `RUNTIME_UNAVAILABLE` と、先にruntimeを起動するよう案内を返します。同じオプションに `--transport http` を付けて（8081が使われているなら `--mcp-port` も）端末でruntimeを起動し、その端末を開いたままCodexを使ってください。Codexの中継は、動いているruntimeにつながります。端末のプロセスは、人間がGhidraを終えたときに終わります。
+- Claude Codeでは、中継がGUIを起動し、Claude Codeが終わってもGUIは残ります。
+- CodexのTOMLでは、Windowsのパスをリテラル文字列（`'C:\path\to\ghidra'`）で書くか、バックスラッシュを二重にします。
+
 ## Kilo CodeとJSON形式のクライアント
 
 Kilo CodeのVS Code拡張では、MCP設定に有効なサーバーエントリを追加します。

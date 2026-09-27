@@ -1,12 +1,14 @@
 """GUI backend acceptance tests (spec §14.3, G03 to G38 of Phase 1) against a real Ghidra GUI.
 
-Run only with GHIDRA_GUI_VALIDATION=1, a display (macOS, or Linux with Xvfb) and
-GHIDRA_INSTALL_DIR; they open Ghidra windows.  Run them in their own pytest
-invocation: each scenario starts ``tests/gui_driver.py`` in a subprocess, where
-the real CLI runs the GUI on the main thread and a driver thread checks it from
-inside (see that module).  Every run uses a copy of one prepared project and a
-throwaway Ghidra settings directory, so the user's projects and settings are
-never touched.
+Run only with GHIDRA_GUI_VALIDATION=1, a display (macOS, Windows, or Linux with
+Xvfb) and GHIDRA_INSTALL_DIR; they open Ghidra windows.  Run them in their own
+pytest invocation: each scenario starts ``tests/gui_driver.py`` in a subprocess,
+where the real CLI runs the GUI on the main thread and a driver thread checks it
+from inside (see that module).  Every run uses a copy of one prepared project and
+a throwaway Ghidra settings directory, so the user's projects and settings are
+never touched.  On Windows each scenario gets a hidden console of its own, so
+the Ctrl+C and Ctrl+Break it sends itself reach nothing else.
+GHIDRA_GUI_TEST_TIME_SCALE stretches the harness's waits on a slow machine.
 """
 
 from __future__ import annotations
@@ -32,7 +34,8 @@ pytestmark = pytest.mark.skipif(
     reason="Run only when GHIDRA_GUI_VALIDATION=1 and GHIDRA_INSTALL_DIR are set (opens Ghidra GUI windows)",
 )
 
-SCENARIO_TIMEOUT_SECONDS = 420
+TIME_SCALE = float(os.environ.get("GHIDRA_GUI_TEST_TIME_SCALE") or "1")
+SCENARIO_TIMEOUT_SECONDS = 420 * TIME_SCALE
 
 
 def _free_port() -> int:
@@ -113,23 +116,39 @@ def run_scenario(
         # The runtime registers for relays (spec §10.1): in this run's directory, not the user's.
         "HOME": str(registry_home),
         "XDG_STATE_HOME": str(registry_home / "state"),
+        "LOCALAPPDATA": str(registry_home / "localappdata"),
     }
+    if os.name == "nt":  # Ghidra's temporary files too, apart from the user's Ghidra
+        (workdir / "temp").mkdir(exist_ok=True)
+        process_env.update(TEMP=str(workdir / "temp"), TMP=str(workdir / "temp"))
     for key, value in (env or {}).items():  # None removes the variable
         if value is None:
             process_env.pop(key, None)
         else:
             process_env[key] = value
     with (workdir / "server.log").open("w") as log, _sigint_not_ignored():
-        process = subprocess.Popen(command, cwd=ROOT, env=process_env, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(
+            command, cwd=ROOT, env=process_env, stdout=log, stderr=subprocess.STDOUT, **_own_console()
+        )
         try:
             returncode = process.wait(SCENARIO_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            process.send_signal(signal.SIGKILL)
+            process.kill()
             returncode = process.wait(30)
     lines = []
     if results.exists():
         lines = [json.loads(line) for line in results.read_text().splitlines() if line.strip()]
     return Run(workdir, returncode, lines, (workdir / "server.log").read_text(errors="replace"))
+
+
+def _own_console() -> dict:
+    """On Windows, a hidden console of the scenario's own: the console events it sends reach it alone."""
+    if os.name != "nt":
+        return {}
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0  # SW_HIDE
+    return {"creationflags": subprocess.CREATE_NEW_CONSOLE, "startupinfo": startup}
 
 
 @contextlib.contextmanager
@@ -149,7 +168,12 @@ def _sigint_not_ignored():
 
 def test_live_sharing_in_one_gui_session(tmp_path, prepared):
     """G03, G05, G09 to G31 (G28's first half), G33, G36, G38: one GUI session, the human simulated on the EDT."""
-    run = run_scenario("main", tmp_path, prepared, "--domain-path", "/WinHelloCPP.exe", "--lock-timeout-seconds", "1")
+    # A short lock timeout for G23; a slow machine's background transactions (a GUI command's trailing
+    # task, auto-analysis) need longer to end before the AI's next write.
+    lock_timeout = f"{1 * TIME_SCALE:g}"
+    run = run_scenario(
+        "main", tmp_path, prepared, "--domain-path", "/WinHelloCPP.exe", "--lock-timeout-seconds", lock_timeout
+    )
     run.assert_ok(
         "G03", "G05", "G09", "G10", "G11", "G12", "G13", "G14", "G15", "G16", "G17", "G18", "G19", "G20",
         "G21", "G22", "G23", "G24", "G25", "G26", "G27", "G28", "G29", "G30", "G31", "G33", "G36", "G38",
@@ -237,7 +261,7 @@ def test_a_project_another_process_holds_is_not_opened(tmp_path, prepared):
             process.wait(60)
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="Linux: DISPLAY decides whether there is a display")
+@pytest.mark.skipif(sys.platform in ("darwin", "win32"), reason="Linux: DISPLAY decides whether there is a display")
 @pytest.mark.parametrize("display", [None, ":987"])
 def test_no_usable_display_fails_before_ghidrarun(tmp_path, prepared, display):
     """G06: no DISPLAY, or one no X server answers: STARTUP_FAILED(display), and no stuck GhidraRun."""

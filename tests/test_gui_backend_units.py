@@ -1,16 +1,23 @@
 """GUI backend units that need no JVM: the startup gate's stage details, the GUI project handle's ownership,
-and a transaction record fed by the write boundary (spec §4.4, §5.3, §6.2 rule 6)."""
+a transaction record fed by the write boundary, and the waits for work posted to the EDT
+(spec §4.4, §4.5, §5.2, §5.3, §6.2 rule 6)."""
 
 from __future__ import annotations
 
 import asyncio
+import sys
+import threading
+import time
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ghidra_headless.errors import HeadlessError
+from ghidra_headless.gui import programs as programs_module
 from ghidra_headless.gui import project_handle as gui_handle_module
+from ghidra_headless.gui.programs import DialogAwareDeadline, PostedWork
 from ghidra_headless.gui.project_handle import GuiProjectHandle
 from ghidra_headless.session.transactions import TransactionRecord
 from ghidra_mcp.domain import DomainError, ErrorCode
@@ -328,3 +335,180 @@ class TestProjectClosureWatch:
         assert not closed.wait(0.1)
         state["open"] = False
         assert closed.wait(5)
+
+
+def _edt_busy() -> HeadlessError:
+    return HeadlessError("LOCK_TIMEOUT: the Ghidra GUI did not start the request", details={"lock": "gui_event_thread"})
+
+
+class TestPostedWork:
+    def test_work_given_up_before_its_turn_does_nothing(self):
+        work = PostedWork()
+        assert work.abandon()
+        assert not work.begin() and not work.started
+
+    def test_work_that_began_cannot_be_given_up(self):
+        work = PostedWork()
+        assert work.begin() and work.running
+        assert not work.abandon()
+        work.end()
+        assert work.done and not work.running
+
+
+class TestDialogAwareDeadline:
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        now, dialogs = [100.0], []
+        monkeypatch.setattr(programs_module, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=lambda _s: None))
+        monkeypatch.setattr(programs_module, "modal_dialog_titles", lambda: list(dialogs))
+        return now, dialogs
+
+    def test_it_counts_while_nobody_answers_a_dialog_and_no_work_of_its_runs(self, clock):
+        now, _dialogs = clock
+        deadline = DialogAwareDeadline(10)
+        now[0] += 9
+        assert not deadline.expired()
+        now[0] += 2
+        assert deadline.expired()
+
+    def test_a_dialog_stops_the_count(self, clock):
+        now, dialogs = clock
+        deadline = DialogAwareDeadline(10)
+        dialogs.append("Analyze?")
+        now[0] += 1000
+        assert not deadline.expired()
+        dialogs.clear()
+        now[0] += 9
+        assert not deadline.expired()
+        now[0] += 2
+        assert deadline.expired()
+
+    def test_while_its_work_keeps_the_edt_busy_only_the_busy_limit_counts(self, clock):
+        """Posted work cannot be taken back once it runs: the wait goes on for it (spec §4.5)."""
+        now, _dialogs = clock
+        work = PostedWork()
+        deadline = DialogAwareDeadline(10, work=work)
+        assert work.begin()
+        now[0] += 60
+        assert not deadline.expired()
+        now[0] += programs_module.POSTED_WORK_LIMIT_SECONDS
+        assert deadline.expired()
+
+
+class TestOpenInGui:
+    """A load's wait for the tab it posted (spec §5.2): the EDT its own open keeps busy is no failure,
+    and an open given up before its turn never opens a tab bound to no target."""
+
+    @pytest.fixture
+    def gui(self, monkeypatch):
+        services = types.ModuleType("ghidra.app.services")
+        services.ProgramManager = SimpleNamespace(OPEN_VISIBLE=1)
+        model = types.ModuleType("ghidra.framework.model")
+        model.DomainFile = SimpleNamespace(DEFAULT_VERSION=-1)
+        monkeypatch.setitem(sys.modules, "ghidra.app.services", services)
+        monkeypatch.setitem(sys.modules, "ghidra.framework.model", model)
+        posted, opened = [], []
+        domain_file = SimpleNamespace(getPathname=lambda: "/sample.exe")
+        program = SimpleNamespace(getDomainFile=lambda: SimpleNamespace(equals=lambda other: other is domain_file))
+        manager = SimpleNamespace(openProgram=lambda *args: opened.append(args))
+        tool = SimpleNamespace(getService=lambda _service: manager)
+        monkeypatch.setattr(programs_module, "post_to_edt", lambda function, label="": posted.append(function))
+        monkeypatch.setattr(programs_module, "modal_dialog_titles", list)
+        monkeypatch.setattr(programs_module, "find_open_program", lambda _project, _file: (None, None))
+        monkeypatch.setattr(programs_module, "ensure_code_browser", lambda _project: tool)
+        monkeypatch.setattr(programs_module, "_POLL_SECONDS", 0.001)
+        return SimpleNamespace(posted=posted, opened=opened, domain_file=domain_file, program=program, manager=manager)
+
+    def test_a_look_the_edt_is_too_busy_to_serve_does_not_fail_the_load(self, gui, monkeypatch):
+        looks = []
+
+        def open_programs(_tool):
+            looks.append(1)
+            if len(looks) == 1:
+                gui.posted[0]()  # the EDT runs the open while the look waits for its turn
+                raise _edt_busy()
+            return [gui.program]
+
+        monkeypatch.setattr(programs_module, "_open_programs", open_programs)
+        assert programs_module.open_in_gui(object(), gui.domain_file, timeout=5) is gui.program
+        assert len(gui.opened) == 1
+
+    def test_the_time_the_open_keeps_the_edt_busy_does_not_count(self, gui, monkeypatch):
+        release = threading.Event()
+        opened = []
+
+        def open_program(*args):
+            opened.append(args)
+            release.wait(10)
+
+        gui.manager.openProgram = open_program
+        looks = []
+
+        def open_programs(_tool):
+            looks.append(1)
+            if len(looks) == 1:
+                threading.Thread(target=gui.posted[0], daemon=True).start()
+                while not opened:  # the open has begun on the "EDT"
+                    time.sleep(0.001)
+            if not release.is_set():
+                time.sleep(0.02)  # run_on_edt waits for the EDT in vain
+                if len(looks) >= 10:
+                    release.set()  # the open lets go of the EDT after longer than the load's own limit
+                raise _edt_busy()
+            return [gui.program]
+
+        monkeypatch.setattr(programs_module, "_open_programs", open_programs)
+        assert programs_module.open_in_gui(object(), gui.domain_file, timeout=0.05) is gui.program
+
+    def test_an_open_that_never_began_is_given_up_with_the_error(self, gui, monkeypatch):
+        monkeypatch.setattr(programs_module, "_open_programs", lambda _tool: [])
+        with pytest.raises(HeadlessError) as raised:
+            programs_module.open_in_gui(object(), gui.domain_file, timeout=0.05)
+        assert raised.value.code == "PROGRAM_OPEN_FAILED" and "within 0.05 s" in str(raised.value)
+        gui.posted[0]()  # its turn comes after the error: it opens nothing
+        assert gui.opened == []
+
+    def test_another_failure_of_the_look_is_not_taken_for_a_busy_edt(self, gui, monkeypatch):
+        def open_programs(_tool):
+            raise HeadlessError("PROGRAM_NOT_OPEN: gone")
+
+        monkeypatch.setattr(programs_module, "_open_programs", open_programs)
+        with pytest.raises(HeadlessError) as raised:
+            programs_module.open_in_gui(object(), gui.domain_file, timeout=5)
+        assert raised.value.code == "PROGRAM_NOT_OPEN"
+
+
+class TestFrontEndWait:
+    """The startup's wait for Ghidra's project window (spec §4.4, step 10): GhidraRun's own startup thread
+    at work is progress, however slow the machine; once it has ended, a window that never comes is a failure."""
+
+    @pytest.fixture
+    def front_end(self, monkeypatch):
+        from ghidra_headless.gui import readiness
+
+        shown = {"tool": None}
+        main = types.ModuleType("ghidra.framework.main")
+        main.AppInfo = SimpleNamespace(getFrontEndTool=lambda: shown["tool"])
+        monkeypatch.setitem(sys.modules, "ghidra.framework.main", main)
+        monkeypatch.setattr(readiness, "modal_dialog_titles", list)
+        monkeypatch.setattr(readiness, "FRONT_END_GRACE_SECONDS", 0.05)
+        monkeypatch.setattr(readiness, "_POLL_SECONDS", 0.001)
+        monkeypatch.setattr(readiness, "_STARTUP_THREAD_LOOK_SECONDS", 0)
+        alive = {"value": True}
+        monkeypatch.setattr(
+            readiness, "_find_ghidra_startup_thread", lambda: SimpleNamespace(isAlive=lambda: alive["value"])
+        )
+        launch = SimpleNamespace(failure=None, finished=threading.Event())
+        return readiness, shown, alive, launch
+
+    def test_the_startup_thread_at_work_is_progress(self, front_end):
+        readiness, shown, _alive, launch = front_end
+        threading.Timer(0.3, lambda: shown.update(tool="front end")).start()  # six graces later
+        assert readiness.wait_for_front_end(readiness.GuiStartupStatus(), launch) == "front end"
+
+    def test_once_the_startup_thread_ended_no_window_is_a_failure(self, front_end):
+        readiness, _shown, alive, launch = front_end
+        alive["value"] = False
+        with pytest.raises(HeadlessError) as raised:
+            readiness.wait_for_front_end(readiness.GuiStartupStatus(), launch)
+        assert raised.value.code == "STARTUP_FAILED" and "after its startup thread ended" in str(raised.value)

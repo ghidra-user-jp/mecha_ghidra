@@ -26,6 +26,10 @@
 | `--backend gui` で `STARTUP_FAILED`（`details.stage` が `project_lock`） | 別のGhidraかサーバーがそのProjectを開いている（`details.cause_type` は `PROJECT_LOCKED`）。そちらでProjectを閉じてから起動する。有効なロックファイルを削除しない |
 | `--backend gui` の起動が進まない | `LOCK_TIMEOUT` の `details.modal_dialogs` にある画面（使用許諾など）が、人間の操作を待っている。GUIで答える。Mechaは代わりに答えない |
 | `--backend gui` で、GUIは開いているのに呼び出しが `STARTUP_FAILED` を返し続ける | GUIが立ち上がった後の段階（`details.stage` が `project_open`、`code_browser`、`default_session` など）が失敗した。GUIは人間のために開いたまま残る。`message` で原因を確かめ、Ghidraを終えてから設定を直して起動し直す |
+| Windowsで、stdioのクライアントの `--backend gui` が `RUNTIME_UNAVAILABLE`（`message` が `cannot be detached from this client's job object`）を返す | クライアントが、終わるときに中のプロセスを終えるJob Objectの中でサーバーを起動したので（CodexやMCPのPython SDKで作ったクライアント）、中継はGhidraを起動しなかった（Ghidraがクライアントと一緒に終わるため）。端末で `--backend gui --transport http` を先に起動してから、クライアントを使う（[stdioのクライアントから使う](gui-live.ja.md#stdio)） |
+| Windowsで端末を閉じたら、Ghidraが保存の確認なしに終わった | Windowsは、閉じた端末で動いていたプロセスを確認なしに終える。端末を閉じる前にGhidraを終えるか、端末から切り離して動くstdioのクライアントから使う（[保存と終了](gui-live.ja.md#save-and-exit)） |
+| 遅い環境で、`--backend gui` の呼び出しが `LOCK_TIMEOUT`（`details.lock` が `gui_event_thread`）を返す | GhidraのGUIのスレッドが20秒以上ふさがっていた。何も変えていないので、少し待って呼び直す |
+| Windowsで `uv sync` がJPypeのビルドで失敗する（Microsoft C++ Build Toolsが要る） | Python 3.14用のJPype 1.5.2のwheelがない。Python 3.13以前で環境を作る（`uv sync --python 3.13`） |
 
 ## ツールのエラー
 
