@@ -4,13 +4,35 @@
 
 With `--backend gui`, Mecha Ghidra starts the Ghidra GUI in its own process and shares the project and programs the GUI has open with MCP clients. The AI's changes appear in the GUI as they happen, and a human's GUI edits are in the AI's next read. No Ghidra Server check-in, save or reload is needed in between.
 
-This page covers [startup](#startup), [usage](#usage), [the GUI tools](#gui-tools), [writes](#writes), [saving and exiting](#save-and-exit), [what is not available](#limits) and [remaining risks](#risks).
+This page covers [startup](#startup) (from [stdio clients](#stdio), over HTTP, and [where runtimes are found](#registry)), [usage](#usage), [the GUI tools](#gui-tools), [writes](#writes), [saving and exiting](#save-and-exit), [what is not available](#limits) and [remaining risks](#risks).
 
 <a id="startup"></a>
 
 ## Startup
 
-The GUI backend needs a display (a logged-in macOS desktop, or an X display on Linux) and runs over HTTP only. The stdio transport is not available yet.
+The GUI backend needs a display (a logged-in macOS desktop, or an X display on Linux) and serves MCP over stdio or HTTP. Either way, one process per project, the runtime, runs the Ghidra GUI and the MCP server; the processes that clients start only relay to it.
+
+<a id="stdio"></a>
+
+### From a stdio client
+
+An MCP client that starts its servers over stdio (Codex, Claude Code) starts `mecha_ghidra --backend gui` itself:
+
+```bash
+uv run mecha_ghidra --backend gui \
+  --project-location /Users/me/analysis/project.gpr \
+  --domain-path /sample.exe \
+  --allowed-project-root /Users/me/analysis \
+  --allowed-export-root /Users/me/analysis/exports
+```
+
+This process is a relay. It looks for the project's runtime, starts one in the background if none runs, and forwards the client's messages to it. The runtime outlives the client: when the client ends, the Ghidra GUI stays with the human, and the next client, or another one at the same time, uses the same GUI and programs. The runtime ends when the human exits Ghidra.
+
+- MCP clients give a stdio server only a few environment variables. Set `GHIDRA_INSTALL_DIR` in the client's configuration of the server, and on Linux `DISPLAY` (and `XAUTHORITY` where the X server needs it); see [MCP clients](clients.md).
+- A client that connects to a running runtime must use its configuration: the same `--allowed-*-root` directories, `--domain-path`, `--target-name` and `--session`, and the same Mecha version and Ghidra installation. Otherwise every tool call returns `RUNTIME_CONFIG_MISMATCH`, with what differs in `details`. A client with fewer tools (another `--tool-profile`, for example) sees and runs only its own. Settings of the whole runtime, such as `--lock-timeout-seconds` and the large-result settings, stay the runtime's; the relay logs a warning when the client's differ.
+- If the runtime goes away (its process was killed, say), the relay's calls return `RUNTIME_UNAVAILABLE`. A call that was running then has `details.outcome` `unknown`: check the program before sending a change again. The relay does not start the runtime again; start the client again, which starts a new one.
+
+### Over HTTP
 
 ```bash
 uv run mecha_ghidra --backend gui --transport http \
@@ -21,15 +43,23 @@ uv run mecha_ghidra --backend gui --transport http \
   --allowed-export-root /Users/me/analysis/exports
 ```
 
+When no runtime runs for the project, this process becomes the runtime, in the foreground: its HTTP listener takes requests as any Mecha HTTP server does, and Ctrl+C starts Ghidra's exit ([saving and exiting](#save-and-exit)). When the project's runtime runs already (a stdio client started it, for example), this process relays HTTP to it at the given address, and Ctrl+C ends only the relay. Configure MCP clients as for any HTTP server ([MCP clients](clients.md)).
+
+### What happens at startup
+
 - `--project-location` must name an existing project. The GUI backend does not create projects.
 - With `--domain-path`, the program opens in a CodeBrowser after startup and is bound to the default target.
 - The server serves before Ghidra is up, as the headless backend does. Until the GUI is ready, a tool call returns `LOCK_TIMEOUT` with `details.lock="startup"` and the current step in `details.stage`. A dialog waiting for the human (the user agreement, for example) is listed in `details.modal_dialogs`.
-- Without a usable display (no logged-in desktop on macOS; no `DISPLAY`, or one no X server answers, on Linux), or when another process holds the project's lock, the GUI does not start: tool calls return `STARTUP_FAILED` with `details.stage` set to `display` or `project_lock`, and the server exits. When a step after the GUI came up fails (the `--domain-path` program is missing, say), the GUI stays up for the human and every tool call keeps returning `STARTUP_FAILED` with that step in `details.stage`; exiting Ghidra ends the server.
+- Without a usable display (no logged-in desktop on macOS; no `DISPLAY`, or one no X server answers, on Linux), or when another process holds the project's lock, the GUI does not start: tool calls return `STARTUP_FAILED` with `details.stage` set to `display` or `project_lock`, and the runtime exits. When a step after the GUI came up fails (the `--domain-path` program is missing, say), the GUI stays up for the human and every tool call keeps returning `STARTUP_FAILED` with that step in `details.stage`; exiting Ghidra ends the runtime.
 - On macOS the application is named "Ghidra (Mecha)" (`-Dapple.awt.application.name`).
 
 The GUI uses the person's normal Ghidra settings (window positions, tool layouts, the user agreement). Ghidra restores the tools and programs that were open at its last exit, as usual.
 
-Configure MCP clients as for any HTTP server ([MCP clients](clients.md)).
+<a id="registry"></a>
+
+### Where runtimes are found
+
+Runtimes announce themselves in a directory of the OS user that only its owner can read: `~/Library/Application Support/mecha_ghidra/gui-runtimes/` on macOS, `${XDG_STATE_HOME:-~/.local/state}/mecha_ghidra/gui-runtimes/` on Linux and `%LOCALAPPDATA%\mecha_ghidra\gui-runtimes\` on Windows. For each project it holds a lock the runtime keeps while it runs, a record with the runtime's endpoint and a random token, and, for a runtime a relay started, its log (`<key>.log`). Relays reach the runtime on loopback only, with the token. A runtime that ended leaves its record behind; the next relay sees that the lock is free and replaces the record, so nothing needs cleaning by hand.
 
 <a id="usage"></a>
 
@@ -81,7 +111,7 @@ Live sharing needs no saves. `save_project_program` saves the whole program as t
 
 `close_session` only unbinds the target: the program stays open in the GUI, neither saved nor discarded. `discard_changes=true` is refused.
 
-The human exits with File > Exit in the GUI. Ghidra and the Mecha server are one process, so exiting Ghidra ends the server too. Programs the AI opened or changed are in Ghidra's usual save prompt. SIGINT (Ctrl+C) or SIGTERM from a terminal starts the same exit, with the prompt if anything is unsaved; Cancel keeps Ghidra running. A SIGINT or SIGTERM while that prompt is up does not stack a second one. A signal that was already ignored when the server started stays ignored (SIGINT for a job a script started with `&`, SIGHUP under `nohup`); use SIGTERM then. SIGHUP does not close the GUI; it stops output to the terminal (this version writes no log file, so later log lines are not kept).
+The human exits with File > Exit in the GUI. Ghidra and the runtime are one process, so exiting Ghidra ends the runtime too; ending a stdio client does not. After the exit, calls of relays still connected return `RUNTIME_UNAVAILABLE`. Programs the AI opened or changed are in Ghidra's usual save prompt. SIGINT (Ctrl+C) or SIGTERM from a terminal starts the same exit, with the prompt if anything is unsaved; Cancel keeps Ghidra running. A SIGINT or SIGTERM while that prompt is up does not stack a second one. A signal that was already ignored when the server started stays ignored (SIGINT for a job a script started with `&`, SIGHUP under `nohup`); use SIGTERM then. SIGHUP does not close the GUI; it stops output to the terminal (this version writes no log file, so later log lines are not kept).
 
 <a id="limits"></a>
 
@@ -98,6 +128,8 @@ The first GUI backend does not offer these tools.
 `--tool-profile full` and `--enable-tool` do not bring them back; the startup log lists them. Ghidra Server credential options such as `--ghidra-server-user` are errors: Ghidra's own login dialog handles the server. `--bsim-*` and `--script-root` have no effect.
 
 `version` on `load_project_program`, and another project on `open_program` or `register_target`, return `GUI_UNSUPPORTED`.
+
+The GUI backend has been tested on macOS and on Linux under Xvfb. Windows, including starting the runtime from a client's job object and Ctrl+C in a console, has not been verified yet.
 
 <a id="risks"></a>
 

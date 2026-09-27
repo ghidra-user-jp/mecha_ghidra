@@ -28,6 +28,8 @@ classifiers = [
 dependencies = [
     "anyio>=4.5,<5",
     "mcp>=2.2.0,<3",
+    # The MCP SDK's own HTTP client; the Ghidra GUI backend's relays forward with it.
+    "httpx2>=2.5.0,<3",
     # Published metadata stays installable from PyPI. The exception propagation
     # fix the scripts tools need (ghidra#9288) is only in the unreleased 3.2
     # snapshot pinned under [tool.uv.sources]; on an older PyGhidra the startup

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
+import json
 import logging
 import signal
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from mcp.server.transport_security import TransportSecuritySettings
@@ -113,6 +116,52 @@ def run_kwargs_for_transport(*, transport: str, args: Any, logger: logging.Logge
     raise ValueError(f"Unsupported transport: {transport}")
 
 
+@dataclass(frozen=True)
+class RuntimeAuth:
+    """The token a Ghidra GUI runtime's relays send (spec §10.7).
+
+    ``public``: the runtime was started in the foreground with the user's HTTP
+    listener, which takes requests without a token as before; a request that
+    sends a token must still send the right one.
+    """
+
+    token: str
+    public: bool = False
+
+
+class BearerToken:
+    """ASGI middleware: refuse HTTP requests without ``Authorization: Bearer <token>`` (unless public)."""
+
+    def __init__(self, app, auth: RuntimeAuth) -> None:
+        self.app = app
+        self._expected = f"Bearer {auth.token}".encode()
+        self._public = auth.public
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            values = [value for name, value in scope.get("headers", ()) if name.lower() == b"authorization"]
+            if values:
+                allowed = len(values) == 1 and hmac.compare_digest(values[0], self._expected)
+            else:
+                allowed = self._public
+            if not allowed:
+                body = json.dumps({"error": "unauthorized"}).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"www-authenticate", b"Bearer"),
+                            (b"content-length", str(len(body)).encode()),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
 def uvicorn_log_level(log_level: str | None) -> str:
     """Lower-case uvicorn level name for a free-form ``--log-level`` value."""
 
@@ -174,8 +223,13 @@ def run_mcp_server(server, *, transport: str, log_level: str = "INFO", startup=N
 
         options = dict(kwargs)
         port = options.pop("port", DEFAULT_HTTP_PORT)
+        # A listening socket the caller bound already (a detached GUI runtime's free loopback port).
+        sock = options.pop("sock", None)
+        auth = options.pop("auth", None)
         host = options.get("host", "127.0.0.1")
         app = server.streamable_http_app(**options)
+        if auth is not None:
+            app = BearerToken(app, auth)
         # uvicorn accepts only its own level names: the CLI's WARN/FATAL
         # aliases must be normalised first, exactly as the MCP server does.
         config = uvicorn.Config(app, host=host, port=port, log_level=uvicorn_log_level(log_level))
@@ -187,7 +241,10 @@ def run_mcp_server(server, *, transport: str, log_level: str = "INFO", startup=N
 
             startup.start(loop=asyncio.get_running_loop(), stop_serving=stop_serving)
         with _graceful_hangup(http_server):
-            await http_server.serve()
+            if sock is None:
+                await http_server.serve()
+            else:
+                await http_server.serve(sockets=[sock])
 
     if normalized == "stdio":
         asyncio.run(serve_stdio())
@@ -199,6 +256,8 @@ def run_mcp_server(server, *, transport: str, log_level: str = "INFO", startup=N
 
 __all__ = [
     "DEFAULT_HTTP_PORT",
+    "BearerToken",
+    "RuntimeAuth",
     "normalize_host",
     "normalize_streamable_http_path",
     "normalize_transport",

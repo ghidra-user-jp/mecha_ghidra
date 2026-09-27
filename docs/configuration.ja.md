@@ -11,14 +11,14 @@
 | オプション | 既定値 | 用途 |
 | --- | --- | --- |
 | `--transport` | `stdio` | `stdio`、`http`（別名 `streamable-http`） |
-| `--backend` | `headless` | `headless`、`gui`（GhidraのGUIを起動し、そのProjectとProgramを共有する。HTTPだけで使える。[GUIでのライブ共有](gui-live.ja.md)） |
+| `--backend` | `headless` | `headless`、`gui`（GhidraのGUIを起動し、そのProjectとProgramを共有する。[GUIでのライブ共有](gui-live.ja.md)） |
 | `--mcp-host` | `127.0.0.1` | HTTPの待ち受けアドレス |
 | `--mcp-port` | `8081` | HTTPのポート |
 | `--mcp-path` | `/mcp` | Streamable HTTPのエンドポイントパス |
 | `--ghidra-path` | `GHIDRA_INSTALL_DIR` | Ghidraのインストール先 |
 | `--log-level` | `INFO` | サーバーのログレベル |
 
-`--backend gui` は `--transport http` だけで使え、`--project-location` に既存のProjectが要ります。`--ghidra-server-user`、`--ghidra-server-password`、`--ghidra-server-password-env` と、別のProjectを指す `--session` はエラーになり、`--bsim-url`、`--bsim-password`、`--bsim-password-env`、`--bsim-remote-cache-dir`、`--script-root` は効果がありません（[使えない機能](gui-live.ja.md#limits)）。
+`--backend gui` では、`--project-location` に既存のProjectが要ります。stdioでは、プロセスはそのProjectのGUIのruntimeへの中継になり、runtimeが動いていなければ起動します。HTTPでは、プロセスがそのruntimeになるか、runtimeが既に動いていればその中継になります（[起動](gui-live.ja.md#startup)）。`--ghidra-server-user`、`--ghidra-server-password`、`--ghidra-server-password-env` と、別のProjectを指す `--session` はエラーになり、`--bsim-url`、`--bsim-password`、`--bsim-password-env`、`--bsim-remote-cache-dir`、`--script-root` は効果がありません（[使えない機能](gui-live.ja.md#limits)）。
 
 Streamable HTTP（`--transport http` または `streamable-http`）は、[公式Python SDKの推奨設定](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py)に合わせて `stateless_http=True`、`json_response=True` に固定しています。MCPのセッションIDを発行せず、各要求にJSONで応答します。ステートフルに戻す互換設定はありません。Ghidraのターゲット・プログラムの変更状態・結果キャッシュはHTTP要求をまたいでサーバープロセス内に保持します。`--session` はGhidraのターゲット設定であり、HTTPセッションとは別です。同じ `target` と返された `result_id` を使って処理を続けてください。再起動すると結果キャッシュは消え、稼働中も既存の容量制限が適用されます。
 

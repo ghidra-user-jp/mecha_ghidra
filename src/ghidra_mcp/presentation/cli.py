@@ -76,18 +76,30 @@ from ghidra_mcp.presentation.cli_runtime import (
 )
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.gui_policy import GuiArgumentPolicy
+from ghidra_mcp.presentation.gui_registry import ProjectRegistry
+from ghidra_mcp.presentation.gui_relay import (
+    RuntimeRegistration,
+    claim_runtime,
+    free_loopback_socket,
+    release_launch,
+    run_relay,
+    runtime_config,
+)
 from ghidra_mcp.presentation.gui_runtime import GuiRuntime
 from ghidra_mcp.presentation.startup import FAILED, BackgroundStartup, StartupGate, StartupStep
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 from ghidra_mcp.presentation.tool_registry import build_tool_functions
 from ghidra_mcp.presentation.transport import (
+    DEFAULT_HTTP_PORT,
+    RuntimeAuth,
+    normalize_streamable_http_path,
+    run_mcp_server,
+)
+from ghidra_mcp.presentation.transport import (
     normalize_transport as _normalize_transport,
 )
 from ghidra_mcp.presentation.transport import (
     run_kwargs_for_transport as _run_kwargs_for_transport,
-)
-from ghidra_mcp.presentation.transport import (
-    run_mcp_server,
 )
 from ghidra_mcp.presentation.transport import (
     streamable_http_run_kwargs as _streamable_http_run_kwargs,
@@ -275,8 +287,9 @@ def parse_args(argv: list[str]):
         default="headless",
         choices=["headless", "gui"],
         help=(
-            "headless (default) runs Ghidra without a display; gui starts Ghidra's GUI in this process and "
-            "shares its project and programs with MCP clients live (needs --transport http)"
+            "headless (default) runs Ghidra without a display; gui shares the Ghidra GUI's project and programs "
+            "with MCP clients live: over stdio this process relays to the project's GUI runtime, started if none "
+            "runs; over HTTP it is that runtime, or a relay to it"
         ),
     )
     parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="Streamable HTTP host (unused for stdio)")
@@ -490,8 +503,6 @@ def parse_args(argv: list[str]):
 
 def _check_gui_arguments(parser: argparse.ArgumentParser, args) -> None:
     """What ``--backend gui`` refuses before anything starts (spec §4.1); each ends with one usage error."""
-    if _normalize_transport(args.transport) != "streamable-http":
-        parser.error("--backend gui needs --transport http (stdio for the GUI backend is not available yet)")
     if not args.project_location:
         parser.error("--backend gui needs --project-location: the existing project the Ghidra GUI opens")
     try:
@@ -788,9 +799,10 @@ def _dump_stacks_on_sigquit() -> Callable[[], None]:
     return functools.partial(faulthandler.unregister, sigquit)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, detached: bool = False) -> int:
+    """The CLI; ``detached`` is the Ghidra GUI runtime a relay started (``gui_runtime``'s module entry)."""
     if threading.current_thread() is not threading.main_thread():
-        return _run_cli(argv)
+        return _run_cli(argv, detached=True) if detached else _run_cli(argv)
 
     received: list[int] = []
 
@@ -826,7 +838,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     undo_sigquit = _dump_stacks_on_sigquit()
     try:
-        return _run_cli(argv)
+        return _run_cli(argv, detached=True) if detached else _run_cli(argv)
     except BaseException as exc:
         # Decided by the signal, not by the exception that got here: a cleanup
         # step that failed after the signal replaces _Terminated with its own
@@ -844,10 +856,14 @@ def main(argv: list[str] | None = None) -> int:
                 signal.signal(signum, handler)
 
 
-def _run_cli(argv: list[str] | None = None) -> int:
+def _run_cli(argv: list[str] | None = None, *, detached: bool = False) -> int:
     if argv is None:
         argv = sys.argv[1:]
     args = parse_args(argv)
+    if detached:
+        # The relay's own options (its transport, host, port) are not the runtime's (spec §10.3):
+        # the runtime serves a free loopback port with a token (spec §10.7).
+        args.transport, args.mcp_host, args.mcp_path = "http", "127.0.0.1", "/mcp"
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
 
     selected_specs = resolve_tool_specs_from_args(args)
@@ -875,10 +891,50 @@ def _run_cli(argv: list[str] | None = None) -> int:
             logger.error("--bsim-remote-cache-dir is outside the allowed project roots: %s", exc)
             return 2
     gui_runtime: GuiRuntime | None = None
+    registration: RuntimeRegistration | None = None
     if args.backend == "gui":
         project_location, project_name = ProjectHandle.resolve_project_location_and_file(
             args.project_location, args.project_name
         )
+        registry = ProjectRegistry(os.path.join(project_location, f"{project_name}.gpr"))
+        gui_config = runtime_config(args, selected_specs, ghidra_path=ghidra_path or None, path_policy=path_policy)
+        if detached:
+            registration = claim_runtime(registry, wait_for_launch=False)
+            if registration is None:
+                logger.error("Another Ghidra GUI runtime of this project is running")
+                return 1
+        elif _normalize_transport(args.transport) == "stdio":
+            return run_relay(
+                argv=argv,
+                registry=registry,
+                specs=selected_specs,
+                config=gui_config,
+                presentation_config=presentation_config,
+                transport="stdio",
+                log_level=args.log_level,
+            )
+        else:
+            try:
+                registration = claim_runtime(registry, wait_for_launch=True)
+            except TimeoutError as exc:
+                logger.error("%s", exc)
+                return 1
+            if registration is None:
+                logger.info("The Ghidra GUI runtime of this project is running: this server relays HTTP to it")
+                return run_relay(
+                    argv=argv,
+                    registry=registry,
+                    specs=selected_specs,
+                    config=gui_config,
+                    presentation_config=presentation_config,
+                    transport="http",
+                    http_options={
+                        "host": args.mcp_host,
+                        "port": args.mcp_port or DEFAULT_HTTP_PORT,
+                        "path": normalize_streamable_http_path(args.mcp_path),
+                    },
+                    log_level=args.log_level,
+                )
         gui_runtime = GuiRuntime(
             ghidra_path=ghidra_path or None, project_location=project_location, project_name=project_name
         )
@@ -1054,6 +1110,16 @@ def _run_cli(argv: list[str] | None = None) -> int:
                 keep_serving_on_failure=gui_runtime.ghidra_is_running,
             )
             run_kwargs = _run_kwargs_for_transport(transport=transport, args=args, logger=logger)
+            if registration is not None:
+                _register_runtime(
+                    registration,
+                    run_kwargs,
+                    detached=detached,
+                    config=gui_config,
+                    ghidra_path=ghidra_path or None,
+                    startup_gate=startup_gate,
+                    gui_runtime=gui_runtime,
+                )
             logger.info("The Ghidra GUI starts on the main thread; tool calls wait until it is ready")
             gui_startup = startup
 
@@ -1122,6 +1188,50 @@ def _run_cli(argv: list[str] | None = None) -> int:
                         from ghidra_headless.scripts import providers
 
                         providers.shutdown()
+
+
+def _endpoint_host(host: str) -> str:
+    """Where a relay on this machine reaches a listener bound to ``host``."""
+    normalized = (host or "").strip().lower()
+    if normalized in {"", "0.0.0.0", "localhost"}:  # noqa: S104 - reaching, not binding
+        return "127.0.0.1"
+    if normalized in {"::", "::1", "[::]", "[::1]"}:
+        return "[::1]"
+    return f"[{normalized}]" if ":" in normalized and not normalized.startswith("[") else normalized
+
+
+def _register_runtime(
+    registration: RuntimeRegistration,
+    run_kwargs: dict[str, Any],
+    *,
+    detached: bool,
+    config,
+    ghidra_path: str | None,
+    startup_gate: StartupGate,
+    gui_runtime: GuiRuntime,
+) -> None:
+    """Announce this runtime in the registry before it serves (spec §10.1, §10.7).
+
+    A detached runtime serves a free loopback port with the token only; one in
+    the foreground keeps the user's listener, which also takes requests
+    without the token.  Relays read the record once the launch lock is free.
+    """
+    if detached:
+        sock = free_loopback_socket()
+        run_kwargs.update(sock=sock, host="127.0.0.1", port=sock.getsockname()[1], streamable_http_path="/mcp")
+        endpoint = f"http://127.0.0.1:{sock.getsockname()[1]}/mcp"
+    else:
+        endpoint = (
+            f"http://{_endpoint_host(run_kwargs['host'])}:{run_kwargs['port']}{run_kwargs['streamable_http_path']}"
+        )
+    run_kwargs["auth"] = RuntimeAuth(registration.token, public=not detached)
+    registration.publish(endpoint=endpoint, public=not detached, config=config, ghidra_path=ghidra_path)
+    release_launch(registration)
+    startup_gate.add_listener(registration.on_startup_end)
+    startup_gate.add_listener(
+        lambda state, _failure: gui_runtime.watch_project_closure(registration.close) if state == "ready" else None
+    )
+    logger.info("Registered the Ghidra GUI runtime %s for relays at %s", registration.runtime_id, endpoint)
 
 
 def _load_startup_session(registry, config: Dict[str, str]) -> None:

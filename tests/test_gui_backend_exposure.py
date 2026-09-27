@@ -175,9 +175,12 @@ class TestGuiArguments:
             cli.parse_args(["--backend", "gui", *argv])
         return raised.value
 
-    def test_stdio_is_not_available_yet(self, project, capsys):
-        assert self.run("--project-location", str(project / "sample.gpr")).code == 2
-        assert "--transport http" in capsys.readouterr().err
+    def test_stdio_is_a_relay_with_the_same_checks(self, project, capsys):
+        """stdio relays to the project's runtime (spec §10.2); the project still has to exist."""
+        args = cli.parse_args(["--backend", "gui", "--project-location", str(project / "sample.gpr")])
+        assert args.transport == "stdio"
+        self.run("--project-location", str(project), "--project-name", "missing")
+        assert "missing.gpr not found" in capsys.readouterr().err
 
     def test_a_project_is_required_and_must_exist(self, project, capsys):
         self.run("--transport", "http")

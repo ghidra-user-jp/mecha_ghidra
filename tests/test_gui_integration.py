@@ -41,23 +41,6 @@ def _free_port() -> int:
         return reserved.getsockname()[1]
 
 
-@pytest.fixture(scope="session")
-def prepared(tmp_path_factory):
-    """One analyzed project and seeded settings, built headlessly once per test session."""
-    base = tmp_path_factory.mktemp("gui-prepared")
-    project, settings = base / "project", base / "settings"
-    completed = subprocess.run(
-        [sys.executable, str(TESTS / "gui_project_setup.py"), str(project), str(settings)],
-        cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(TESTS), str(ROOT / "src")])},
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr[-4000:]
-    return project, settings
-
-
 class Run:
     def __init__(self, workdir: Path, returncode: int, results: list[dict], log: str) -> None:
         self.workdir = workdir
@@ -120,11 +103,16 @@ def run_scenario(
         str(exports),
         *server_args,
     ]
+    registry_home = workdir / "home"
+    registry_home.mkdir(exist_ok=True)
     process_env = {
         **os.environ,
         "JAVA_TOOL_OPTIONS": f"-Dapplication.settingsdir={settings}",
         "GUI_TEST_EXPORTS": str(exports),
         "PYTHONPATH": os.pathsep.join([str(TESTS), str(ROOT / "src")]),
+        # The runtime registers for relays (spec §10.1): in this run's directory, not the user's.
+        "HOME": str(registry_home),
+        "XDG_STATE_HOME": str(registry_home / "state"),
     }
     for key, value in (env or {}).items():  # None removes the variable
         if value is None:

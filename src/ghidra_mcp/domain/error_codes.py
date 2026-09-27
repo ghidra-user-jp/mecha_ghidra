@@ -112,6 +112,8 @@ REFUSED_BEFORE_ANY_CHANGE: frozenset[ErrorCode] = frozenset(
         ErrorCode.VERSION_NOT_FOUND,
         # Refused before the transaction starts (spec §7.4).
         ErrorCode.GUI_UNSUPPORTED,
+        # A relay refuses before forwarding anything to the runtime (spec §10.3).
+        ErrorCode.RUNTIME_CONFIG_MISMATCH,
         ErrorCode.BSIM_URL_REQUIRED,
         ErrorCode.BSIM_URL_INVALID,
         ErrorCode.BSIM_PARAMETER_INVALID,

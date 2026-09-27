@@ -11,14 +11,14 @@ Server options are passed to `uv run mecha_ghidra`. Run `uv run mecha_ghidra --h
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--transport` | `stdio` | `stdio` or `http` (alias `streamable-http`) |
-| `--backend` | `headless` | `headless` or `gui` (start the Ghidra GUI and share its project and programs; HTTP only; see [live sharing with the GUI](gui-live.md)) |
+| `--backend` | `headless` | `headless` or `gui` (start the Ghidra GUI and share its project and programs; see [live sharing with the GUI](gui-live.md)) |
 | `--mcp-host` | `127.0.0.1` | HTTP bind address |
 | `--mcp-port` | `8081` | HTTP port |
 | `--mcp-path` | `/mcp` | Streamable HTTP endpoint path |
 | `--ghidra-path` | `GHIDRA_INSTALL_DIR` | Ghidra installation |
 | `--log-level` | `INFO` | Server logging level |
 
-`--backend gui` works with `--transport http` only and needs `--project-location` naming an existing project. `--ghidra-server-user`, `--ghidra-server-password`, `--ghidra-server-password-env`, and a `--session` in another project are errors; `--bsim-url`, `--bsim-password`, `--bsim-password-env`, `--bsim-remote-cache-dir` and `--script-root` have no effect (see [what is not available](gui-live.md#limits)).
+`--backend gui` needs `--project-location` naming an existing project. Over stdio the process is a relay to the project's GUI runtime, which it starts if none runs; over HTTP it is that runtime, or a relay to it when the runtime runs already ([startup](gui-live.md#startup)). `--ghidra-server-user`, `--ghidra-server-password`, `--ghidra-server-password-env`, and a `--session` in another project are errors; `--bsim-url`, `--bsim-password`, `--bsim-password-env`, `--bsim-remote-cache-dir` and `--script-root` have no effect (see [what is not available](gui-live.md#limits)).
 
 Streamable HTTP (`--transport http` or `streamable-http`) always uses the [official Python SDK's recommended configuration](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py): `stateless_http=True` and `json_response=True`. Requests receive JSON responses without an MCP session ID. There is no stateful compatibility setting. Ghidra targets, program changes and the result cache remain in the server process across HTTP requests; `--session` configures Ghidra targets, not HTTP sessions. Continue using the same `target` and returned `result_id` values. Restarting the process clears the result cache, and the normal cache limits still apply.
 

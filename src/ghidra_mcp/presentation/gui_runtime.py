@@ -48,6 +48,8 @@ _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 _SERVER_STOP_SECONDS = 30.0
 # How long the main thread waits for the exiting JVM to end the process.
 _JVM_EXIT_SECONDS = 30.0
+# How often the runtime looks whether the human closed its project (spec §5.1).
+_CLOSURE_POLL_SECONDS = 1.0
 
 
 def _detach_from_terminal() -> None:
@@ -197,6 +199,29 @@ class GuiRuntime:
         """Stop the startup waits (the server is shutting down)."""
         self.status.stop.set()
 
+    def watch_project_closure(self, on_closed: Callable[[], None]) -> None:
+        """Call ``on_closed`` once the human closes this runtime's project or opens another (spec §5.1).
+
+        The runtime is CLOSED from then on: its registry record goes, so a new
+        relay starts a new runtime, while this process stays a plain Ghidra
+        until the human exits it.  Started once the startup is ready.
+        """
+
+        def watch() -> None:
+            from ghidra_headless.gui.project_handle import runtime_project
+
+            while not self.status.stop.wait(_CLOSURE_POLL_SECONDS):
+                try:
+                    closed = runtime_project() is None
+                except Exception:  # the JVM is going down
+                    return
+                if closed:
+                    logger.info("The Ghidra GUI closed this server's project: the runtime is CLOSED")
+                    on_closed()
+                    return
+
+        threading.Thread(target=watch, name="gui-project-closure", daemon=True).start()
+
     def ghidra_is_running(self) -> bool:
         """Whether GhidraRun started: a later startup failure leaves the GUI up, and the server keeps
         answering every call with STARTUP_FAILED until the human exits Ghidra (spec §12)."""
@@ -261,3 +286,10 @@ class GuiRuntime:
         # Before the GUI's project window exists there is nothing to save.
         logger.info("Received %s before the Ghidra GUI was up: exiting", name)
         os._exit(128 + number)
+
+
+if __name__ == "__main__":
+    # The Ghidra GUI runtime a relay starts detached (spec §4.1, §10.6): not a public entry point.
+    from ghidra_mcp.presentation.cli import main
+
+    sys.exit(main(sys.argv[1:], detached=True))

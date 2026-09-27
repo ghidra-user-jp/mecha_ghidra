@@ -20,7 +20,8 @@
 | 長い呼び出しでクライアントがタイムアウト | どの呼び出しも約50秒を超えて待たせない。ジョブ（`import_program`・`analyze_program`・`run_script`）は`wait_seconds`以内に応答し、それ以外の呼び出しは40秒で終わらなければ`deferred: true`を返す。上限を延ばしたり呼び直したりせず、返された`operation_id`で`get_operation`を呼ぶ。50秒より短い期限では切れることがある（[長い呼び出し](usage.ja.md#long-calls)） |
 | 読み込み後に関数がほとんど・まったくない | 読み込みでは解析しない。読み込みの応答が`is_analyzed: false`なら、`analyze_program`を実行してジョブの完了を待つ |
 | 必要なツールが見えない | プロファイル、カテゴリ、個別の有効・無効指定を確認。起動引数変更後はクライアントの一覧を更新・再接続する |
-| `--backend gui` が引数のエラーで起動しない | stdioでは使えないので `--transport http` を指定する。`--project-location` には既存のProjectが要る。Ghidra Serverの認証のオプションと、別のProjectを指す `--session` は指定できない（[GUIでのライブ共有](gui-live.ja.md#startup)） |
+| `--backend gui` が引数のエラーで起動しない | `--project-location` には既存のProjectが要る。Ghidra Serverの認証のオプションと、別のProjectを指す `--session` は指定できない（[GUIでのライブ共有](gui-live.ja.md#startup)） |
+| stdioのクライアントの `--backend gui` が `STARTUP_FAILED`（`details.stage` が `launch`）を返す | 中継が起動したruntimeが、登録の前に終わった。`details.cause_message` に、runtimeのログ（[registryのディレクトリ](gui-live.ja.md#registry)の `<key>.log`）の最後の行が入る。クライアントのサーバーの設定に `GHIDRA_INSTALL_DIR`（Linuxでは `DISPLAY` も）がないのがよくある原因。クライアントが渡す環境変数は限られている |
 | `--backend gui` で `STARTUP_FAILED`（`details.stage` が `display`） | 画面を表示できる環境で起動する。macOSではログイン中のデスクトップが、Linuxでは応答するXのサーバーを指す `DISPLAY` が要る。GhidraのGUIを起動する前に確かめるので、画面は開かない |
 | `--backend gui` で `STARTUP_FAILED`（`details.stage` が `project_lock`） | 別のGhidraかサーバーがそのProjectを開いている（`details.cause_type` は `PROJECT_LOCKED`）。そちらでProjectを閉じてから起動する。有効なロックファイルを削除しない |
 | `--backend gui` の起動が進まない | `LOCK_TIMEOUT` の `details.modal_dialogs` にある画面（使用許諾など）が、人間の操作を待っている。GUIで答える。Mechaは代わりに答えない |
@@ -50,6 +51,8 @@
 | `JVM_NOT_HEADLESS`、`HEADLESS_UNSUPPORTED` | [JVM起動ルール](development.ja.md)を確認。表示が必要なAPIをheadlessで再試行しない |
 | `GUI_UNSUPPORTED` | GUIのバックエンドが扱わない操作か引数で、何も変えていない。`details.reason` が理由（`dry_run`、`edit_kind_decompiles`、`version`、`discard_changes`、`other_project`、`foreign_undo`、`foreign_redo`、`import`、`version_control`、`delete_file`、`remove_program`）。`hint` の代わりの方法を使うか、GhidraのGUIで行う（[使えない機能](gui-live.ja.md#limits)） |
 | `GUI_NAVIGATION_FAILED` | `show_in_gui` がProgramを表示したが、指定の位置へ移動できなかった。アドレスか名前を確かめて呼び直す |
+| `RUNTIME_CONFIG_MISMATCH` | そのProjectのGUIのruntimeが、このクライアントと違う設定で動いている（`details.differs` に `path_policy`、`targets`、`versions`、`details.missing_tools` にruntimeが公開していないツール）。runtimeの設定に合わせてクライアントを起動するか、そのGhidraを終えてから起動し直す（[stdioのクライアントから使う](gui-live.ja.md#stdio)） |
+| `RUNTIME_UNAVAILABLE` | 中継が、そのProjectのGUIのruntimeに届かない（強制終了された、Ghidraが終わった）。`details.outcome` が `unknown` なら呼び出しが実行された可能性があるので、変更を送り直す前にGUIでProgramを確かめる。中継はruntimeを起動し直さないので、クライアントを起動し直す |
 | `SESSION_NOT_FOUND`（`details.reason` が `gui_project_closed`） | 人間がGhidraのGUIでこのサーバーのProjectを閉じたか、別のProjectを開いた。同じProjectを開き直しても、このサーバーは戻らない。Ghidraを終えてから、サーバーを起動し直す |
 | `BSIM_URL_REQUIRED`、`BSIM_URL_INVALID` | 対応するBSim URLを指定する |
 | `BSIM_AUTHENTICATION_FAILED`、`BSIM_DATABASE_UNREACHABLE` | バックエンドの認証情報と到達性を確認する。データベース自身の報告で判定する。ログインを拒否されたなら`BSIM_AUTHENTICATION_FAILED`で、再試行しても直らない。データベースに届かない場合は再試行可能で、読み取り専用のBSimのツールはそのまま呼び直せる。書き込みは`output_state`が`absent`のときに再試行する |

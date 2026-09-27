@@ -310,3 +310,21 @@ class TestOperationHold:
                 events.append("operation")
         assert raised.value.code == "PROGRAM_NOT_OPEN" and raised.value.details == {"reason": "closed_in_gui"}
         assert "operation" not in events
+
+
+class TestProjectClosureWatch:
+    def test_the_runtime_is_closed_once_the_gui_project_goes(self, monkeypatch):
+        """The registry record goes once the human closes the runtime's project (spec §5.1)."""
+        import threading
+
+        from ghidra_mcp.presentation import gui_runtime as runtime_module
+
+        monkeypatch.setattr(runtime_module, "_CLOSURE_POLL_SECONDS", 0.01)
+        state = {"open": True}
+        monkeypatch.setattr(gui_handle_module, "runtime_project", lambda: object() if state["open"] else None)
+        runtime = runtime_module.GuiRuntime(ghidra_path=None, project_location="/p", project_name="GUI")
+        closed = threading.Event()
+        runtime.watch_project_closure(closed.set)
+        assert not closed.wait(0.1)
+        state["open"] = False
+        assert closed.wait(5)

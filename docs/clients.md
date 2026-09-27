@@ -6,7 +6,7 @@ Choose one connection method per client. **HTTP** connects to a server you start
 
 HTTP uses stateless JSON responses, with no MCP session ID or stateful compatibility option. See [transport configuration](configuration.md#transports) for application state and timeout behavior.
 
-Connect to a server started with `--backend gui` ([live sharing with the GUI](gui-live.md)) with the HTTP settings below. The GUI backend does not support stdio, so a client cannot start that server itself.
+With `--backend gui` ([live sharing with the GUI](gui-live.md)) both methods work. Over stdio, the client starts a relay: the first one starts the Ghidra GUI, later ones and other clients share it, and the GUI stays open when the client exits. Add `--backend gui` to the stdio arguments below, as in [the GUI examples](#gui). Over HTTP, connect to the server you started with `--backend gui --transport http`.
 
 ## Tool discovery
 
@@ -54,6 +54,34 @@ claude mcp add --transport http mecha_ghidra http://127.0.0.1:8081/mcp
 ```
 
 Use `/mcp` in Claude Code to inspect the connection. Configuration scopes and stdio options are described in the [Claude Code MCP guide](https://code.claude.com/docs/en/mcp).
+
+<a id="gui"></a>
+
+## The Ghidra GUI over stdio
+
+The relay starts the Ghidra GUI with the environment the client gives it, which holds few variables: set `GHIDRA_INSTALL_DIR`, and on Linux also `DISPLAY` (and `XAUTHORITY` where the X server needs it). Replace all absolute paths; `analysis.gpr` must already exist.
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.mecha_ghidra_gui]
+command = "uv"
+args = [
+  "--directory", "/absolute/path/to/mecha_ghidra",
+  "run", "mecha_ghidra", "--backend", "gui",
+  "--project-location", "/absolute/path/to/analysis.gpr",
+  "--transport", "stdio"
+]
+env = { GHIDRA_INSTALL_DIR = "/absolute/path/to/ghidra" }
+```
+
+Claude Code:
+
+```bash
+claude mcp add mecha_ghidra_gui -e GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra -- uv --directory /absolute/path/to/mecha_ghidra run mecha_ghidra --backend gui --project-location /absolute/path/to/analysis.gpr --transport stdio
+```
+
+Clients that share one GUI must start it with the same options that apply to the whole runtime (path roots, `--domain-path`, targets); see [stdio clients](gui-live.md#stdio).
 
 ## Kilo Code and JSON-based clients
 

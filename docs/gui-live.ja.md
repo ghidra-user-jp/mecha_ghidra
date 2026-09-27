@@ -4,13 +4,35 @@
 
 `--backend gui` で起動すると、Mecha GhidraはGhidraのGUIを同じプロセスで起動し、GUIが開いたProjectとProgramを、そのままMCPクライアントと共有します。AIの変更はGUIの画面にその場で現れ、人間のGUIでの編集はAIの次の読み取りに現れます。Ghidra Serverへのcheck-inや、保存と再読み込みを挟む必要はありません。
 
-このページでは、[起動](#startup)、[使い方](#usage)、[GUIのツール](#gui-tools)、[書き込みの扱い](#writes)、[保存と終了](#save-and-exit)、[使えない機能](#limits)、[残るリスク](#risks)を説明します。
+このページでは、[起動](#startup)（[stdioのクライアントから使う](#stdio)場合、HTTPで使う場合、[runtimeの見つけ方](#registry)）、[使い方](#usage)、[GUIのツール](#gui-tools)、[書き込みの扱い](#writes)、[保存と終了](#save-and-exit)、[使えない機能](#limits)、[残るリスク](#risks)を説明します。
 
 <a id="startup"></a>
 
 ## 起動
 
-GUIのバックエンドは、画面を表示できる環境（macOSのログイン中のデスクトップ、LinuxのXのディスプレイ）で、HTTPの接続方式だけで動きます。stdioの接続方式は、まだ使えません。
+GUIのバックエンドは、画面を表示できる環境（macOSのログイン中のデスクトップ、LinuxのXのディスプレイ）で、stdioとHTTPのどちらの接続方式でも動きます。どちらの場合も、Projectごとに一つのプロセス（runtime）がGhidraのGUIとMCPサーバーを動かし、クライアントが起動するプロセスはそのruntimeへの中継になります。
+
+<a id="stdio"></a>
+
+### stdioのクライアントから使う
+
+stdioでサーバーを起動するMCPクライアント（Codex、Claude Code）は、`mecha_ghidra --backend gui` を自分で起動します。
+
+```bash
+uv run mecha_ghidra --backend gui \
+  --project-location /Users/me/analysis/project.gpr \
+  --domain-path /sample.exe \
+  --allowed-project-root /Users/me/analysis \
+  --allowed-export-root /Users/me/analysis/exports
+```
+
+このプロセスは中継です。そのProjectのruntimeを探し、動いていなければ裏で起動して、クライアントのメッセージを転送します。runtimeはクライアントより長く生きます。クライアントが終わってもGhidraのGUIは人間の手元に残り、次のクライアントや、同時に接続した別のクライアントは、同じGUIとProgramを使います。runtimeは、人間がGhidraを終えたときに終わります。
+
+- MCPクライアントがstdioのサーバーに渡す環境変数は限られています。クライアントのサーバーの設定で `GHIDRA_INSTALL_DIR` を渡し、Linuxでは `DISPLAY`（Xのサーバーが求めるなら `XAUTHORITY` も）を渡してください（[MCPクライアント](clients.ja.md)）。
+- 動いているruntimeに接続するクライアントは、そのruntimeの設定に合わせる必要があります。`--allowed-*-root` のディレクトリ、`--domain-path`、`--target-name`、`--session`、Mechaの版、Ghidraのインストール先が同じでなければ、ツールの呼び出しはすべて `RUNTIME_CONFIG_MISMATCH` になり、違う点が `details` に入ります。ツールが少ないクライアント（別の `--tool-profile` など）は、自分のツールだけを見て使えます。`--lock-timeout-seconds` や大きな結果の設定など、runtime全体に効く設定はruntimeのものが使われ、クライアントの設定が違えば中継が警告をログに出します。
+- runtimeが消えたとき（プロセスが強制終了されたときなど）、中継の呼び出しは `RUNTIME_UNAVAILABLE` を返します。そのとき実行中だった呼び出しは `details.outcome` が `unknown` になるので、変更を送り直す前にProgramを確かめてください。中継はruntimeを起動し直しません。クライアントを起動し直すと、新しいruntimeが起動します。
+
+### HTTPで使う
 
 ```bash
 uv run mecha_ghidra --backend gui --transport http \
@@ -21,15 +43,23 @@ uv run mecha_ghidra --backend gui --transport http \
   --allowed-export-root /Users/me/analysis/exports
 ```
 
+そのProjectのruntimeが動いていなければ、このプロセスが前面でruntimeになります。HTTPの受付は、ほかのMechaのHTTPサーバーと同じように要求を受け付け、Ctrl+CでGhidraの終了が始まります（[保存と終了](#save-and-exit)）。そのProjectのruntimeが既に動いていれば（stdioのクライアントが起動したときなど）、このプロセスは指定のアドレスでruntimeへのHTTPの中継になり、Ctrl+Cでは中継だけが終わります。MCPクライアントの設定は、HTTPの通常の設定と同じです（[MCPクライアント](clients.ja.md)）。
+
+### 起動のときに起きること
+
 - `--project-location` には既存のProjectを指定します。GUIのバックエンドはProjectを作りません。
 - `--domain-path` を付けると、起動の後にそのProgramをCodeBrowserで開き、既定のtargetに結び付けます。
 - 起動は、headlessと同じく、Ghidraの準備を待たずに受付を始めます。GUIの準備ができるまでのツールの呼び出しは、`LOCK_TIMEOUT`（`details.lock="startup"`）と現在の段階（`details.stage`）を返します。使用許諾などの確認の画面が人間の操作を待っていれば、その題名も `details.modal_dialogs` に入ります。
-- 画面を表示できないとき（macOSでログイン中のデスクトップがない、Linuxで `DISPLAY` がないか接続できない）と、ProjectのlockをほかのプロセスがもっているときはGUIを起動しません。ツールの呼び出しに `STARTUP_FAILED`（`details.stage` が `display` または `project_lock`）を返し、サーバーは終了します。GUIが立ち上がった後の段階の失敗（`--domain-path` のProgramがない、など）では、GUIは人間のために開いたままで、ツールの呼び出しには `STARTUP_FAILED`（`details.stage` がその段階）を返し続けます。Ghidraを終えるとサーバーも終わります。
+- 画面を表示できないとき（macOSでログイン中のデスクトップがない、Linuxで `DISPLAY` がないか接続できない）と、ProjectのlockをほかのプロセスがもっているときはGUIを起動しません。ツールの呼び出しに `STARTUP_FAILED`（`details.stage` が `display` または `project_lock`）を返し、runtimeは終了します。GUIが立ち上がった後の段階の失敗（`--domain-path` のProgramがない、など）では、GUIは人間のために開いたままで、ツールの呼び出しには `STARTUP_FAILED`（`details.stage` がその段階）を返し続けます。Ghidraを終えるとruntimeも終わります。
 - macOSでは、アプリケーションの名前を「Ghidra (Mecha)」にします（`-Dapple.awt.application.name`）。
 
 GhidraのGUIは、利用者の通常のGhidraの設定（前回のウィンドウの位置、ツールの構成、使用許諾）を使います。前回終了したときに開いていたツールとProgramは、Ghidraが通常どおり復元します。
 
-MCPクライアントの設定は、HTTPの通常の設定と同じです（[MCPクライアント](clients.ja.md)）。
+<a id="registry"></a>
+
+### runtimeの見つけ方
+
+runtimeは、OSのユーザーごとの、所有者だけが読めるディレクトリに自分を登録します。macOSでは `~/Library/Application Support/mecha_ghidra/gui-runtimes/`、Linuxでは `${XDG_STATE_HOME:-~/.local/state}/mecha_ghidra/gui-runtimes/`、Windowsでは `%LOCALAPPDATA%\mecha_ghidra\gui-runtimes\` です。Projectごとに、runtimeが動いている間持ち続けるロック、runtimeの接続先とランダムなtokenの記録、中継が起動したruntimeのログ（`<key>.log`）を置きます。中継は、loopbackだけで、tokenを付けてruntimeに接続します。終わったruntimeの記録は残りますが、次の中継がロックの空きを見て置き換えるので、手で片付ける必要はありません。
 
 <a id="usage"></a>
 
@@ -81,7 +111,7 @@ Ghidraのtransactionは、どのスレッドから開始しても、開いてい
 
 `close_session` は、targetとProgramの結び付きを外すだけで、ProgramはGUIに開いたまま残り、保存も破棄もしません。`discard_changes=true` は使えません。
 
-Ghidraの終了は、人間がGUIのFile > Exitで行います。GhidraとMechaのサーバーは同じプロセスなので、Ghidraを終えるとサーバーも終わります。AIが開いて変更したProgramも、Ghidraの標準の保存の確認に含まれます。端末からSIGINT（Ctrl+C）かSIGTERMを送ると、同じ終了の手順が始まり、未保存の変更があれば確認の画面が出ます。取り消せばGhidraは動き続けます。確認の画面が出ている間のSIGINTとSIGTERMは、画面を重ねて出しません。起動した時点で無視する設定になっていたシグナル（スクリプトから `&` で起動したときのSIGINTや、`nohup` で起動したときのSIGHUP）は、無視したままにします。その場合はSIGTERMを使います。SIGHUPではGUIは閉じず、端末への出力を止めます（この版はログのファイルを書かないので、以後のログは残りません）。
+Ghidraの終了は、人間がGUIのFile > Exitで行います。Ghidraとruntimeは同じプロセスなので、Ghidraを終えるとruntimeも終わります。stdioのクライアントを終えても、runtimeは終わりません。Ghidraを終えた後、つながったままの中継の呼び出しは `RUNTIME_UNAVAILABLE` を返します。AIが開いて変更したProgramも、Ghidraの標準の保存の確認に含まれます。端末からSIGINT（Ctrl+C）かSIGTERMを送ると、同じ終了の手順が始まり、未保存の変更があれば確認の画面が出ます。取り消せばGhidraは動き続けます。確認の画面が出ている間のSIGINTとSIGTERMは、画面を重ねて出しません。起動した時点で無視する設定になっていたシグナル（スクリプトから `&` で起動したときのSIGINTや、`nohup` で起動したときのSIGHUP）は、無視したままにします。その場合はSIGTERMを使います。SIGHUPではGUIは閉じず、端末への出力を止めます（この版はログのファイルを書かないので、以後のログは残りません）。
 
 <a id="limits"></a>
 
@@ -98,6 +128,8 @@ Ghidraの終了は、人間がGUIのFile > Exitで行います。GhidraとMecha�
 `--tool-profile full` や `--enable-tool` を指定しても、これらは公開されず、起動ログに一覧が出ます。`--ghidra-server-user` などのServerの認証のオプションはエラーになり、Serverの認証はGhidraの標準の入力画面が扱います。`--bsim-*` と `--script-root` は効果がありません。
 
 `load_project_program` の `version` の指定と、`open_program` や `register_target` で別のProjectを指定することは、`GUI_UNSUPPORTED` になります。
+
+GUIのバックエンドは、macOSと、XvfbのLinuxで試験しています。Windows（クライアントのJob Objectからruntimeを起動すること、コンソールでのCtrl+Cを含む）は、まだ確かめていません。
 
 <a id="risks"></a>
 

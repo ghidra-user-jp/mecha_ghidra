@@ -42,6 +42,12 @@ RECOVERY_HINTS: dict[ErrorCode, str] = {
         "details.reason says what the Ghidra GUI backend refused; use the alternative it names, or do it in the GUI"
     ),
     ErrorCode.GUI_NAVIGATION_FAILED: "Check the address or name, then call show_in_gui again",
+    ErrorCode.RUNTIME_CONFIG_MISMATCH: (
+        "details says what differs; start this client with the runtime's settings, or exit that Ghidra and start again"
+    ),
+    ErrorCode.RUNTIME_UNAVAILABLE: (
+        "Check the program in the Ghidra GUI before sending a change again; the relay never resends a call"
+    ),
     ErrorCode.BSIM_DATABASE_UNREACHABLE: "Check that the BSim database is running and reachable, then retry",
     ErrorCode.BSIM_AUTHENTICATION_FAILED: "Check the BSim user and password",
     ErrorCode.BSIM_FUNCTION_NOT_FOUND: _FIND_A_FUNCTION,

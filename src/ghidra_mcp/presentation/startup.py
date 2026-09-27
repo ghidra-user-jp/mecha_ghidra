@@ -59,6 +59,18 @@ class StartupGate:
         self._stage: str | None = None
         self._report_stage = report_stage
         self._details_provider = details_provider
+        self._listeners: list[Callable[[str, StartupFailure | None], None]] = []
+
+    def add_listener(self, listener: Callable[[str, StartupFailure | None], None]) -> None:
+        """Call ``listener(state, failure)`` once the startup ends (the GUI runtime's registry record)."""
+        self._listeners.append(listener)
+
+    def _notify(self) -> None:
+        for listener in self._listeners:
+            try:
+                listener(self._state, self._failure)
+            except Exception:
+                logger.exception("A startup listener failed")
 
     @property
     def state(self) -> str:
@@ -78,14 +90,18 @@ class StartupGate:
 
     def mark_ready(self) -> None:
         with self._lock:
-            if self._state == STARTING:
-                self._state = READY
+            if self._state != STARTING:
+                return
+            self._state = READY
+        self._notify()
 
     def mark_failed(self, failure: StartupFailure) -> None:
         with self._lock:
-            if self._state == STARTING:
-                self._failure = failure
-                self._state = FAILED
+            if self._state != STARTING:
+                return
+            self._failure = failure
+            self._state = FAILED
+        self._notify()
 
     async def wait(self, timeout: float) -> float:
         """Wait on the event loop, holding no thread, until the startup ends; return the seconds waited.

@@ -6,7 +6,7 @@
 
 HTTPはMCPのセッションIDを発行せず、ステートレスなJSON応答を返します。ステートフルに戻す互換設定はありません。解析状態とタイムアウトの扱いは[接続方式の設定](configuration.ja.md#transports)を参照してください。
 
-`--backend gui` で起動したサーバー（[GUIでのライブ共有](gui-live.ja.md)）には、下のHTTPの設定で接続します。GUIのバックエンドはstdioに対応していないので、クライアントにサーバーを起動させる設定は使えません。
+`--backend gui`（[GUIでのライブ共有](gui-live.ja.md)）では、どちらの接続方式も使えます。stdioでは、クライアントが中継を起動します。最初の中継がGhidraのGUIを起動し、後の中継や別のクライアントはそれを共有し、クライアントが終わってもGUIは開いたまま残ります。下のstdioの引数に `--backend gui` を足します（[GUIの設定の例](#gui)）。HTTPでは、`--backend gui --transport http` で起動したサーバーに接続します。
 
 ## ツールの発見
 
@@ -54,6 +54,34 @@ claude mcp add --transport http mecha_ghidra http://127.0.0.1:8081/mcp
 ```
 
 接続状態はClaude Code内の `/mcp` で確認します。設定のスコープやstdio接続は[Claude CodeのMCPガイド](https://code.claude.com/docs/en/mcp)を参照してください。
+
+<a id="gui"></a>
+
+## stdioでGhidraのGUIを使う
+
+中継は、クライアントが渡す環境変数でGhidraのGUIを起動しますが、渡される変数は限られています。`GHIDRA_INSTALL_DIR` を渡し、Linuxでは `DISPLAY`（Xのサーバーが求めるなら `XAUTHORITY` も）を渡してください。絶対パスはすべて置き換えてください。`analysis.gpr` は既存である必要があります。
+
+Codex（`~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.mecha_ghidra_gui]
+command = "uv"
+args = [
+  "--directory", "/absolute/path/to/mecha_ghidra",
+  "run", "mecha_ghidra", "--backend", "gui",
+  "--project-location", "/absolute/path/to/analysis.gpr",
+  "--transport", "stdio"
+]
+env = { GHIDRA_INSTALL_DIR = "/absolute/path/to/ghidra" }
+```
+
+Claude Code：
+
+```bash
+claude mcp add mecha_ghidra_gui -e GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra -- uv --directory /absolute/path/to/mecha_ghidra run mecha_ghidra --backend gui --project-location /absolute/path/to/analysis.gpr --transport stdio
+```
+
+一つのGUIを共有するクライアントは、runtime全体に効く設定（パスの制限、`--domain-path`、target）をそろえて起動します（[stdioのクライアントから使う](gui-live.ja.md#stdio)）。
 
 ## Kilo CodeとJSON形式のクライアント
 

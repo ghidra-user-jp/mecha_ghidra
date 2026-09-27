@@ -107,15 +107,19 @@ Run `tests/test_runtime_registry_shared_sync_commands.py` for the shared lifecyc
 
 To check a built image, set `MECHA_GHIDRA_DOCKER_IMAGE` to its tag and run `tests/test_docker_image.py`; it needs Docker but no local Ghidra. The test copies the same exercise PE out of the image, starts the image's default command, and over HTTP imports, analyzes, decompiles, and edits the program. It then checks that `docker stop`, `SIGINT`, and `SIGHUP` each close the projects before the container exits. The CI job `docker-image` builds the `linux/amd64` image with `./build_docker_image.sh` and runs this test.
 
-The GUI backend's acceptance tests are `tests/test_gui_integration.py`. Run them in their own pytest invocation where a display is available (macOS, or Linux with an X display such as Xvfb):
+The GUI backend's acceptance tests are `tests/test_gui_integration.py` (one GUI session) and `tests/test_gui_relay_integration.py` (relays and the runtimes they start). Run them in their own pytest invocation where a display is available (macOS, or Linux with an X display such as Xvfb):
 
 ```bash
 GHIDRA_GUI_VALIDATION=1 \
 GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra \
-uv run pytest tests/test_gui_integration.py
+uv run pytest tests/test_gui_integration.py tests/test_gui_relay_integration.py
 ```
 
 Each scenario runs `tests/gui_driver.py` in its own process, which runs the real CLI on the main thread and, from another thread, calls it over MCP and replays the human's actions as Ghidra commands on the EDT. The project is a copy of one that `tests/gui_project_setup.py` builds headlessly from the bundled exercise PE. Ghidra's settings live in a throwaway `-Dapplication.settingsdir` directory, so the tests touch neither the person's projects nor their settings; the user agreement is accepted in that throwaway directory only. Ghidra windows open and close several times during the run. In a Docker container, point `--basetemp` at a directory inside the container: on a Docker Desktop bind mount the project lock does not hold between processes, and the lock test cannot pass.
+
+The relay tests start no JVM in pytest: they are MCP clients of relays (`python -c "from ghidra_mcp.cli import main; ..." --backend gui`), which start the runtime as `python -m ghidra_mcp.presentation.gui_runtime`. Every test sets `HOME` and `XDG_STATE_HOME` inside its directory, so the [runtime registry](gui-live.md#registry) is the test's own, and stops the runtimes it saw by pid; the other GUI tests point the registry there as well. The CI job `gui-acceptance` builds `tests/docker/gui-tests.Dockerfile` (the image of `docker-image` plus a display-capable JRE, Xvfb and the test dependencies) and runs both files under Xvfb with `tests/docker/run_gui_tests.sh`.
+
+A relay (`ghidra_mcp.presentation.gui_relay`) forwards JSON-RPC as it is and reads only two things: its configuration against the runtime's record, and which tools a narrower client may see. Whatever the runtime cannot answer, the relay's fallback answers: the MCP server this package builds for the relay's own tools, with a startup gate that refuses every call, so its `initialize`, `tools/list` and error envelopes are the runtime's. It talks to the runtime with `httpx2`, the MCP SDK's HTTP client, without the environment's proxies and without kept-alive connections.
 
 <a id="native-builds"></a>
 

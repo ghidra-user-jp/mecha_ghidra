@@ -75,6 +75,10 @@ class ErrorCode(str, Enum):
     # and a display that succeeded while moving to the location did not.
     GUI_UNSUPPORTED = "GUI_UNSUPPORTED"
     GUI_NAVIGATION_FAILED = "GUI_NAVIGATION_FAILED"
+    # A relay of the Ghidra GUI backend: the project's runtime runs with another configuration,
+    # or the relay cannot reach it (or it went away during a call).
+    RUNTIME_CONFIG_MISMATCH = "RUNTIME_CONFIG_MISMATCH"
+    RUNTIME_UNAVAILABLE = "RUNTIME_UNAVAILABLE"
     READ_ONLY_PROGRAM = "READ_ONLY_PROGRAM"
     PROGRAM_NOT_ANALYZED = "PROGRAM_NOT_ANALYZED"
     RAW_LOADER_OPTION_UNAVAILABLE = "RAW_LOADER_OPTION_UNAVAILABLE"

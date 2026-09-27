@@ -57,6 +57,9 @@ DETAIL_PRESERVING_CODES: frozenset[ErrorCode] = frozenset(
         # details.reason (and details.kinds or details.top_undo_name) say what the GUI refused.
         ErrorCode.GUI_UNSUPPORTED,
         ErrorCode.GUI_NAVIGATION_FAILED,
+        # details say what differs from the runtime, or whether a call reached it (outcome).
+        ErrorCode.RUNTIME_CONFIG_MISMATCH,
+        ErrorCode.RUNTIME_UNAVAILABLE,
     }
 )
 

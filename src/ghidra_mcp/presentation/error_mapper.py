@@ -106,6 +106,10 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.GUI_NAVIGATION_FAILED: (
         "GUI_NAVIGATION_FAILED: the program is shown in the Ghidra GUI, but moving to the location failed"
     ),
+    ErrorCode.RUNTIME_CONFIG_MISMATCH: (
+        "RUNTIME_CONFIG_MISMATCH: the Ghidra GUI runtime of this project runs with another configuration"
+    ),
+    ErrorCode.RUNTIME_UNAVAILABLE: "RUNTIME_UNAVAILABLE: the relay cannot reach the Ghidra GUI runtime of this project",
     ErrorCode.PROGRAM_NOT_ANALYZED: (
         "PROGRAM_NOT_ANALYZED: the program has not been analyzed, so the decompiler's variables are unavailable"
     ),
@@ -173,6 +177,9 @@ _DETAIL_IS_PUBLIC: frozenset[ErrorCode] = frozenset(
         # Our checks say which argument or operation the GUI backend refuses.
         ErrorCode.GUI_UNSUPPORTED,
         ErrorCode.GUI_NAVIGATION_FAILED,
+        # The relay's own findings: what differs from the runtime, whether a call reached it.
+        ErrorCode.RUNTIME_CONFIG_MISMATCH,
+        ErrorCode.RUNTIME_UNAVAILABLE,
     }
 )
 # A validation message can quote a file path the caller sent (binary_path);
