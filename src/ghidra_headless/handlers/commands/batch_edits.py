@@ -1,6 +1,7 @@
 """Apply bounded annotation edits while preserving transaction outcomes."""
 
 from ghidra_headless.errors import HeadlessError
+from ghidra_headless.session.write_boundary import write_boundary
 
 from .mutating_symbols import COMMENT_KINDS
 from .query_support import function_ref, program_metadata, program_revision
@@ -67,6 +68,25 @@ def apply_edits(
     params, *, ensure_context, execute_edit, get_address, decompile_high_function, iter_items, comment_types
 ):
     ctx = ensure_context()
+    # One section: with the Ghidra GUI the whole batch, snapshots included, runs
+    # as one unit on the Swing thread, and each edit's own transaction nests
+    # in the outer one (spec §6.2).
+    return write_boundary().section(
+        ctx.program,
+        lambda: _apply_edits(
+            ctx,
+            params,
+            execute_edit=execute_edit,
+            get_address=get_address,
+            decompile_high_function=decompile_high_function,
+            iter_items=iter_items,
+            comment_types=comment_types,
+        ),
+    )
+
+
+def _apply_edits(ctx, params, *, execute_edit, get_address, decompile_high_function, iter_items, comment_types):
+    boundary = write_boundary()
     edits = params.get("edits")
     if not isinstance(edits, list) or not 1 <= len(edits) <= 100:
         raise ValueError("edits must contain between 1 and 100 operations")
@@ -81,7 +101,7 @@ def apply_edits(
         raise HeadlessError("SESSION_CHANGED: program changed; read current state before applying edits")
     atomic = params.get("atomic", True)
     dry_run = params.get("dry_run", False)
-    outer = ctx.program.startTransaction("Apply annotation edits") if atomic or dry_run else None
+    outer = boundary.start(ctx.program, "Apply annotation edits") if atomic or dry_run else None
     results = []
     completed = False
     try:
@@ -89,9 +109,13 @@ def apply_edits(
             result = {"index": index, "kind": edit["kind"]}
             # An item includes both the mutation and its verified after-state.
             # In non-atomic mode a failed item rolls back without losing prior items.
-            item_transaction = ctx.program.startTransaction("Annotation edit") if outer is None else None
+            item_transaction = None
             item_ok = False
             try:
+                if outer is None:
+                    # Inside the item: the GUI boundary refuses a start that would join another
+                    # thread's transaction, and that fails this item only.
+                    item_transaction = boundary.start(ctx.program, "Annotation edit")
                 snapshot_args = dict(
                     get_address=get_address,
                     decompile_high_function=decompile_high_function,
@@ -116,7 +140,7 @@ def apply_edits(
                 result["error"] = {"code": getattr(exc, "code", "EDIT_FAILED"), "message": str(exc)}
             finally:
                 if item_transaction is not None:
-                    ctx.program.endTransaction(item_transaction, item_ok)
+                    boundary.end(ctx.program, item_transaction, item_ok)
                     if not item_ok:
                         ctx.reset_decompiler()
             results.append(result)
@@ -125,7 +149,7 @@ def apply_edits(
         completed = len(results) == len(edits) and all(r["status"] == "applied" for r in results)
     finally:
         if outer is not None:
-            ctx.program.endTransaction(outer, completed and not dry_run)
+            boundary.end(ctx.program, outer, completed and not dry_run)
             if dry_run or not completed:
                 ctx.reset_decompiler()
     rolled_back = outer is not None and (dry_run or not completed)

@@ -14,6 +14,7 @@ Install Mecha Ghidra, connect an MCP client, and open your first program. The sh
 | Find a tool | [Tool reference](tools.md) |
 | Run a container | [Docker](docker.md) |
 | Share analysis through Ghidra Server | [Shared projects](shared-projects.md) |
+| Work on the same programs as a human in the Ghidra GUI | [Live sharing with the GUI](gui-live.md) |
 | Search for similar functions | [BSim](bsim.md) |
 | Resolve an error or update an old configuration | [Troubleshooting and upgrades](troubleshooting.md) |
 | Change or release the code | [Development](development.md) |

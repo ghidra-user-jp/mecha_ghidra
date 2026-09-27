@@ -4,7 +4,7 @@
 
 Use this index to find a tool by task. Consult the client-visible tool schema before calling it. Full arguments, constraints, and error codes are available as MCP resources at `ghidra://docs/tools` and `ghidra://docs/tools/{tool_name}`. `tools/list` gives each tool its full result schema but only a short form of the replies every tool shares (stored-result notices, deferred replies, errors); `ghidra://docs/tools/{tool_name}` has their full shapes.
 
-Most program tools select a `target` (default `default`). The `shared_sync` and `bsim` categories are not exposed by default; enable them through [configuration](configuration.md#tool-exposure).
+Most program tools select a `target` (default `default`). The `shared_sync` and `bsim` categories are not exposed by default; enable them through [configuration](configuration.md#tool-exposure). The `gui` category is exposed with `--backend gui` only, and the GUI backend leaves some tools out (see [the Ghidra GUI](#gui)).
 
 Replies and errors follow the same rules across tools:
 
@@ -24,6 +24,7 @@ Replies and errors follow the same rules across tools:
 - [Shared-project tools](#shared-sync)
 - [BSim tools](#bsim)
 - [Ghidra scripts](#scripts)
+- [The Ghidra GUI](#gui)
 - [Large-result retrieval](#result-retrieval)
 
 <a id="core"></a>
@@ -141,6 +142,7 @@ Call edges include caller/callee identities and the instruction address in `call
 | `apply_edits` | Batch function/variable/data renames, types, and comments, with atomic rollback, dry runs, and before/after state |
 | `set_function_prototype` | Set function prototype (function by `function_address` or `function_name`) |
 | `set_local_variable_type` | Set type for local variable/argument (function by `function_address` or `function_name`) |
+| `rename_variable` | Rename a local variable/argument from `old_name` to `new_name` (function by `function_address` or `function_name`). Offered with `--backend gui` only; headless uses the `rename_variable` kind of `apply_edits` |
 | `set_global_data_type` | Set global data type (`clear_mode` optional) |
 | `set_bytes` | Write bytes into memory |
 | `get_comments` | Read every comment slot at an address |
@@ -260,6 +262,19 @@ Exposed by the tool profile / category flags like every other category (`--tool-
 | `run_script` | Run a script against the loaded program, as the Script Manager would, as a background job: the reply waits up to `wait_seconds` and returns the job record. Pass `source` (the script text; Java is recognised by `public class X extends GhidraScript`, Python by an `# @runtime PyGhidra` / `# @runtime Jython` header, else pass `runtime`) or `script_id` (a catalog script). `args` are positional strings. The run is wrapped in a transaction: committed on success, rolled back on exception or timeout. The job's `result` carries `transaction_outcome`, stdout/stderr and Java compiler diagnostics, so a failing script can be corrected and re-run |
 
 Failures roll back: the job's `operation_error` for `SCRIPT_FAILED` / `SCRIPT_TIMEOUT` carries `details.transaction_outcome` (`rolled_back`, `unchanged`, `unknown`), captured `stdout` / `stderr` (bounded, with `dropped_bytes`), and for Java `SCRIPT_COMPILE_FAILED` the compiler diagnostics. `details.output_state` follows the transaction: `absent` for `rolled_back` or `unchanged`, `created` for `committed` (unsaved), `uncertain` for `unknown` or when `execution_state` is `invalid` (work the script left running may still change the program; the target is quarantined); it covers program changes only, not files or network effects. Large diagnostics move to the result store like any large result: `operation_error.result_id` reads them in full.
+
+<a id="gui"></a>
+
+## The Ghidra GUI
+
+Exposed with `--backend gui` only. See [live sharing with the GUI](gui-live.md) for how they are used. `--backend gui` also offers `rename_variable` from [symbols and comments](#symbol-comment-edit).
+
+| Tool | Use |
+| --- | --- |
+| `get_gui_context` | What the human sees (the CodeBrowsers, the active tool's program, location, function and selection), the targets bound to that program with their revision, and the title of a modal dialog on screen. With Ghidra in the background, the CodeBrowser used last. Changes neither the view nor any target |
+| `show_in_gui` | Show a target's program in a CodeBrowser and move to `address` or to the function `name`. An invalid address or name fails before the view changes. Changes the view only: no edit, save or analysis |
+
+The GUI backend does not offer `import_program`, `analyze_program`, `create_project`, `close_session_and_remove_program`, or the `bsim`, `shared_sync` and `scripts` categories. Among the tools it offers, `apply_edits` with `dry_run` or with decompiling kinds (`rename_variable`, `set_local_variable_type`; use the standalone tools of those names), `version` on `load_project_program`, `discard_changes` on `close_session`, and another project are `GUI_UNSUPPORTED` (see [what is not available](gui-live.md#limits)).
 
 <a id="result-retrieval"></a>
 

@@ -14,6 +14,7 @@ Mecha Ghidraを導入し、MCPクライアントから最初のプログラム�
 | 必要なツールを探す | [ツール一覧](tools.ja.md) |
 | コンテナで動かす | [Docker](docker.ja.md) |
 | Ghidra Serverで解析結果を共有する | [共有プロジェクト](shared-projects.ja.md) |
+| GhidraのGUIで人間とAIが同じProgramを扱う | [GUIでのライブ共有](gui-live.ja.md) |
 | 類似する関数を探す | [BSim](bsim.ja.md) |
 | エラーの解決や古い設定の更新をする | [トラブルシューティング・移行](troubleshooting.ja.md) |
 | ソースコードの変更やリリースを行う | [開発](development.ja.md) |

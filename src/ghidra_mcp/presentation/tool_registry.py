@@ -17,6 +17,7 @@ from ghidra_mcp.contracts.tool_spec import (
     ToolCategoryTag,
     ToolSafetyTag,
     ToolSpec,
+    is_canonical,
 )
 from ghidra_mcp.domain import DomainError
 from ghidra_mcp.presentation.config import ToolDescriptionMode, ToolPresentationConfig
@@ -32,15 +33,20 @@ class PublicArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+def _target_is_optional(spec: ToolSpec) -> bool:
+    """Whether ``target`` may be left out ("default"): core commands, and registry tools that say so."""
+    return spec.include_target and (spec.executor_kind == ExecutorKind.CORE_COMMAND or spec.optional_target)
+
+
 def public_arguments_model(spec: ToolSpec) -> type[PublicArguments]:
     fields = {}
-    if spec.include_target and spec.executor_kind != ExecutorKind.CORE_COMMAND:
+    if spec.include_target and not _target_is_optional(spec):
         fields["target"] = (str, ...)
     for name, field in spec.input_model.model_fields.items():
         public_field = deepcopy(field)
         public_field.alias = public_field.validation_alias = public_field.serialization_alias = None
         fields[_public_name(spec, name)] = (field.annotation, public_field)
-    if spec.include_target and spec.executor_kind == ExecutorKind.CORE_COMMAND:
+    if _target_is_optional(spec):
         fields["target"] = (str, "default")
     return create_model(spec.input_model.__name__, __base__=PublicArguments, **fields)
 
@@ -52,7 +58,11 @@ def _public_name(spec: ToolSpec, raw_key: str) -> str:
 def _build_signature(spec: ToolSpec) -> inspect.Signature:
     params: list[inspect.Parameter] = []
 
-    if spec.executor_kind in {ExecutorKind.REGISTRY_METHOD, ExecutorKind.SHARED_SYNC_METHOD} and spec.include_target:
+    if (
+        spec.executor_kind in {ExecutorKind.REGISTRY_METHOD, ExecutorKind.SHARED_SYNC_METHOD}
+        and spec.include_target
+        and not _target_is_optional(spec)
+    ):
         params.append(
             inspect.Parameter(
                 "target",
@@ -73,7 +83,7 @@ def _build_signature(spec: ToolSpec) -> inspect.Signature:
             )
         )
 
-    if spec.executor_kind == ExecutorKind.CORE_COMMAND and spec.include_target:
+    if _target_is_optional(spec):
         params.append(
             inspect.Parameter(
                 "target",
@@ -99,7 +109,7 @@ def _build_raw_args(spec: ToolSpec, bound: inspect.BoundArguments) -> tuple[dict
             continue
         raw_args[raw_key] = value
 
-    if spec.executor_kind == ExecutorKind.CORE_COMMAND:
+    if spec.executor_kind == ExecutorKind.CORE_COMMAND or _target_is_optional(spec):
         target = bound.arguments.get("target", "default")
     elif spec.include_target:
         target = bound.arguments["target"]
@@ -164,7 +174,7 @@ def public_input_schema(spec: ToolSpec) -> dict[str, Any]:
             "title": "Target",
             "description": "Target session name.",
         }
-        if spec.executor_kind == ExecutorKind.CORE_COMMAND:
+        if _target_is_optional(spec):
             # Optional: _build_signature gives target a "default" default.
             properties["target"] = {**target_prop, "default": "default"}
         else:
@@ -213,6 +223,9 @@ def _build_callable(
         bound.apply_defaults()
         raw_args, target = _build_raw_args(spec, bound)
         dispatcher = dispatcher_provider()
+        if not is_canonical(spec):
+            # A backend's variant contract (see tool_spec.gui_variant): the dispatcher checks against it.
+            return dispatcher(spec.name, raw_args, target, registry=registry_provider(), spec=spec)
         return dispatcher(spec.name, raw_args, target, registry=registry_provider())
 
     _tool_callable.__name__ = spec.name

@@ -6,9 +6,11 @@ Choose one connection method per client. **HTTP** connects to a server you start
 
 HTTP uses stateless JSON responses, with no MCP session ID or stateful compatibility option. See [transport configuration](configuration.md#transports) for application state and timeout behavior.
 
+Connect to a server started with `--backend gui` ([live sharing with the GUI](gui-live.md)) with the HTTP settings below. The GUI backend does not support stdio, so a client cannot start that server itself.
+
 ## Tool discovery
 
-Mecha Ghidra exposes tool definitions through standard `tools/list`. Clients supporting tool search can load the relevant definitions on demand. The server's `instructions` describe binary-analysis tasks and search capabilities using the tools actually enabled by the profile and individual filters: a readonly profile does not advertise editing operations. Optional BSim, repository and script capabilities appear only when their tools are exposed. Detailed usage stays in tool descriptions and `ghidra://docs/tools/{tool_name}`.
+Mecha Ghidra exposes tool definitions through standard `tools/list`. Clients supporting tool search can load the relevant definitions on demand. The server's `instructions` describe binary-analysis tasks and search capabilities using the tools actually enabled by the profile and individual filters: a readonly profile does not advertise editing operations. Optional BSim, repository and script capabilities appear only when their tools are exposed. With the GUI tools exposed, they also say that a human edits the same programs in the GUI and that `show_in_gui` is for when the human asks. Detailed usage stays in tool descriptions and `ghidra://docs/tools/{tool_name}`.
 
 The guidance is deterministic and limited to 1,900 UTF-8 bytes in the tested configurations. This follows the [server-author guidance](https://code.claude.com/docs/en/mcp#for-mcp-server-authors) to explain the tasks, when to search and key capabilities concisely. Search and deferral still depend on the client; `--tool-description-mode full` does not force that client to load every definition into the model context.
 

@@ -32,6 +32,14 @@ _IMPORT_DOMAIN_PATH_PATTERNS = (
 )
 
 
+def _with_gui_dialog(result: Dict[str, object], handle) -> Dict[str, object]:
+    """Add the modal dialog the Ghidra GUI shows after a load, such as its auto-analysis prompt (spec §5.2)."""
+    current_dialog = getattr(handle, "current_modal_dialog", None)
+    if current_dialog is None:
+        return result
+    return {**result, "modal_dialog": current_dialog()}
+
+
 class RuntimeTargetLifecycle(SyncReopenMixin):
     """Target/session lifecycle; reuses the sync close/reopen lease for in-place reloads."""
 
@@ -440,13 +448,14 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 if handle_closed:
                     if self._store.project_handles.get(handle.get_key()) is handle:
                         self._store.project_handles.pop(handle.get_key(), None)
-            return {
+            loaded = {
                 "program": loaded_domain_path,
                 "reloaded": False,
                 "version": requested_version,
                 "read_only": requested_version is not None,
                 "is_analyzed": analyzed,
             }
+            return _with_gui_dialog(loaded, handle)
 
     def _session_matches_load_locked(self, session: ProgramSession, *, domain_path: str, version: int | None) -> bool:
         try:
@@ -459,9 +468,24 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         return (None if current_version is None else int(current_version)) == version
 
     def _reload_current_session_locked(self, name: str, *, domain_path: str, version: int | None) -> Dict[str, object]:
-        """Close and reopen the program the target already holds (unsaved edits are saved first)."""
+        """Close and reopen the program the target already holds (unsaved edits are saved first).
+
+        With the Ghidra GUI backend the target already holds the live program
+        the GUI shows: nothing is saved (the unsaved edits may be the human's)
+        and nothing reopened, unless the human closed its tab; then it opens again.
+        """
         with self._store.registry_lock.read_lock():
             session = self._store.ensure_session(name)
+        handle = session.get_project_handle()
+        if getattr(handle, "live_programs", False) and version is None:
+            if handle.program_is_open(session.get_program()):
+                try:
+                    analyzed = session.is_analyzed()
+                except Exception:
+                    analyzed = None
+                current = {"program": domain_path, "reloaded": False, "version": None, "read_only": False}
+                return _with_gui_dialog({**current, "is_analyzed": analyzed}, handle)
+            return self._reopen_closed_gui_program_locked(name, session, handle, domain_path)
         save_before_close = version is None and self._active_program_is_changed_locked(name, session, domain_path)
         self._run_with_reopened_program_locked(
             name,
@@ -484,6 +508,34 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             "read_only": version is not None,
             "is_analyzed": analyzed,
         }
+
+    def _reopen_closed_gui_program_locked(self, name: str, session, handle, domain_path: str) -> Dict[str, object]:
+        """The human closed the target's tab: open the program in the GUI again, then move the target to it.
+
+        The new program is opened before the target changes, so an open that
+        fails (a dialog the human cancelled, an error) leaves the expired
+        target as it was, to load again later, instead of unregistering it.
+        """
+        expired = session.get_program()
+        with contextlib.suppress(Exception):  # the expired program's binding; the tab is gone
+            handle.release_program(expired)
+        reopened = handle.open_program(domain_path)
+        try:
+            self._store.core_accessor().initialize(reopened.get_program(), key=name)
+            bind_session_project(self._store.core_accessor, name, reopened)
+        except Exception:
+            with contextlib.suppress(Exception):
+                reopened.close(save=False)
+            raise
+        with self._store.registry_lock.write_lock():
+            self._store.sessions[name] = reopened
+            self._store.clear_dirty_program(name, domain_path)
+        try:
+            analyzed = reopened.is_analyzed()
+        except Exception:
+            analyzed = None
+        loaded = {"program": domain_path, "reloaded": True, "version": None, "read_only": False}
+        return _with_gui_dialog({**loaded, "is_analyzed": analyzed}, handle)
 
     def loaded_program(self, name: str) -> LoadedProgram:
         """What a job would run on, read from the registry without Ghidra locks or Java calls.

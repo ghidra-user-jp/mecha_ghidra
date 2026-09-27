@@ -8,6 +8,7 @@ from ghidra_headless.errors import HeadlessError
 from ghidra_headless.handlers.commands.pagination import normalize_pagination
 from ghidra_headless.handlers.commands.query_support import program_revision
 from ghidra_headless.session.models import program_is_analyzed
+from ghidra_headless.session.write_boundary import write_boundary
 
 MAX_UNDO_STEPS = 100
 MAX_ENTRY_POINTS = 50
@@ -183,13 +184,7 @@ def undo_program_change(params, *, ensure_context, safe_call, iter_items):
     ctx = ensure_context()
     program = ctx.program
     count = _undo_count(params)
-    undone = []
-    for _ in range(count):
-        if not bool(program.canUndo()):
-            break
-        name = safe_call(program, "getUndoName")
-        program.undo()
-        undone.append(_text(name))
+    undone = [_text(name) for name in write_boundary().undo(program, count, lambda: safe_call(program, "getUndoName"))]
     result = {"status": "ok" if undone else "noop", "undone": undone, "undone_count": len(undone)}
     result.update(_undo_state(program, safe_call, iter_items))
     return result
@@ -200,13 +195,7 @@ def redo_program_change(params, *, ensure_context, safe_call, iter_items):
     ctx = ensure_context()
     program = ctx.program
     count = _undo_count(params)
-    redone = []
-    for _ in range(count):
-        if not bool(program.canRedo()):
-            break
-        name = safe_call(program, "getRedoName")
-        program.redo()
-        redone.append(_text(name))
+    redone = [_text(name) for name in write_boundary().redo(program, count, lambda: safe_call(program, "getRedoName"))]
     result = {"status": "ok" if redone else "noop", "redone": redone, "redone_count": len(redone)}
     result.update(_undo_state(program, safe_call, iter_items))
     return result
@@ -253,6 +242,8 @@ def export_program(params, *, ensure_context, safe_call):
     from java.io import File
 
     exporter = _exporter_for(export_format)
+    # A .gzf locks the program; with the GUI, another transaction may be open (rule 1).
+    write_boundary().wait_until_idle(ctx.program)
     ok = bool(exporter.export(File(str(path)), ctx.program, None, ctx.monitor()))
     log = safe_call(exporter, "getMessageLog")
     messages = None if log is None else str(log).strip() or None

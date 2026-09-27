@@ -45,10 +45,20 @@ class StartupFailure:
 class StartupGate:
     """Whether tool calls may run: ``starting`` until the startup ends ``ready`` or ``failed``."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        report_stage: bool = False,
+        details_provider: Callable[[], dict[str, object]] | None = None,
+    ) -> None:
+        """``report_stage`` adds the step in progress to the still-starting error, and
+        ``details_provider`` more details, such as the dialogs the GUI waits on (GUI backend)."""
         self._lock = threading.Lock()
         self._state = STARTING
         self._failure: StartupFailure | None = None
+        self._stage: str | None = None
+        self._report_stage = report_stage
+        self._details_provider = details_provider
 
     @property
     def state(self) -> str:
@@ -57,6 +67,14 @@ class StartupGate:
     @property
     def failure(self) -> StartupFailure | None:
         return self._failure
+
+    @property
+    def stage(self) -> str | None:
+        """The startup step in progress (None before the first)."""
+        return self._stage
+
+    def set_stage(self, stage: str) -> None:
+        self._stage = stage
 
     def mark_ready(self) -> None:
         with self._lock:
@@ -84,14 +102,29 @@ class StartupGate:
         if self._state == FAILED:
             raise startup_failed_error(self._failure)
         if self._state == STARTING:
-            raise DomainError(
-                code=ErrorCode.LOCK_TIMEOUT,
-                message="Ghidra is still starting",
-                hint="The server starts Ghidra in the background after it begins serving; retry in a few seconds",
-                retryable=True,
-                details={"lock": "startup", "timeout": timeout},
-            )
+            raise self._still_starting(timeout)
         return waited
+
+    def _still_starting(self, timeout: float) -> DomainError:
+        details: dict[str, object] = {"lock": "startup", "timeout": timeout}
+        hint = "The server starts Ghidra in the background after it begins serving; retry in a few seconds"
+        if self._report_stage and self._stage is not None:
+            details["stage"] = self._stage
+        if self._details_provider is not None:
+            try:
+                details.update(self._details_provider())
+            except Exception:
+                logger.debug("startup details unavailable", exc_info=True)
+        dialogs = details.get("modal_dialogs")
+        if dialogs:
+            hint = (
+                "The Ghidra GUI shows a dialog that waits for the human ("
+                + ", ".join(str(title) for title in dialogs)  # type: ignore[union-attr]
+                + "); retry once it is answered"
+            )
+        return DomainError(
+            code=ErrorCode.LOCK_TIMEOUT, message="Ghidra is still starting", hint=hint, retryable=True, details=details
+        )
 
 
 def startup_failed_error(failure: StartupFailure) -> DomainError:
@@ -146,7 +179,10 @@ class BackgroundStartup:
     failed step, ``on_failure`` runs on the startup thread to release what the
     earlier steps opened, before the gate reports the failure.
     ``on_thread_exit`` runs last on the startup thread, whatever happened: the
-    CLI detaches the thread from the JVM it may have started there.
+    CLI detaches the thread from the JVM it may have started there.  A failed
+    startup ends the transport unless ``keep_serving_on_failure`` says
+    otherwise: the Ghidra GUI stays up for the human once GhidraRun started,
+    and every call then reports why the server cannot run tools.
     """
 
     def __init__(
@@ -156,11 +192,13 @@ class BackgroundStartup:
         *,
         on_failure: Callable[[], None] | None = None,
         on_thread_exit: Callable[[], None] | None = None,
+        keep_serving_on_failure: Callable[[], bool] | None = None,
     ) -> None:
         self.gate = gate
         self._steps = tuple(steps)
         self._on_failure = on_failure
         self._on_thread_exit = on_thread_exit
+        self._keep_serving_on_failure = keep_serving_on_failure
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -214,6 +252,7 @@ class BackgroundStartup:
                     if self._stop.is_set():
                         raise _Stopped
                     step_began = time.monotonic()
+                    self.gate.set_stage(step.name)
                     try:
                         if step.main_thread:
                             self._run_on_loop(step.run)
@@ -244,7 +283,8 @@ class BackgroundStartup:
             logger.info("Ghidra startup stopped: the transport ended first")
         elif failure is not None:
             self.gate.mark_failed(failure)
-            if self._stop_serving is not None:
+            keep_serving = self._keep_serving_on_failure is not None and self._keep_serving_on_failure()
+            if self._stop_serving is not None and not keep_serving:
                 self._stop_serving()
         else:
             self.gate.mark_ready()

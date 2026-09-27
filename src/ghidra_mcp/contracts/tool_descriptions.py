@@ -2,6 +2,8 @@
 
 SHORT_TOOL_DESCRIPTIONS = {
     "batch_read": "Read 1-20 independent queries on one target. Check item statuses; large results use one result_id with /items indexing.",
+    "get_gui_context": "What the human sees in the Ghidra GUI: tools, program, location, selection, and bound targets.",
+    "show_in_gui": "Show the target's program (and an address or function) in the human's Ghidra CodeBrowser.",
     "list_targets": "List registered targets and their state, including project info and whether a program is loaded (domain_path).",
     "create_project": "Create an empty local Ghidra project.",
     "open_program": "Open an existing project program in a new target without analyzing it; use register_target before importing a new binary.",
@@ -52,6 +54,7 @@ SHORT_TOOL_DESCRIPTIONS = {
     "search_bytes": "Find occurrences of a hex byte pattern in memory and return their addresses (paginated).",
     "set_function_prototype": "Apply a C prototype string to the function given by function_address or function_name (address wins), replacing its signature.",
     "set_local_variable_type": "Set the data type of a local variable or parameter by name in the function given by function_address or function_name (address wins).",
+    "rename_variable": "Rename a local variable or parameter by name in the function given by function_address or function_name (address wins).",
     "set_global_data_type": "Apply a data type at an address; clear_mode controls how conflicting existing data is cleared (default CHECK_FOR_SPACE).",
     "set_bytes": "Overwrite memory at address with the given hex bytes (up to 1 MiB).",
     "get_comments": "Return the pre, eol, post, plate, and repeatable comments at an address (null when unset).",

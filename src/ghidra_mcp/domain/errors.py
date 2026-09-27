@@ -71,6 +71,10 @@ class ErrorCode(str, Enum):
     SESSION_CHANGED = "SESSION_CHANGED"
     HEADLESS_UNSUPPORTED = "HEADLESS_UNSUPPORTED"
     JVM_NOT_HEADLESS = "JVM_NOT_HEADLESS"
+    # The Ghidra GUI backend (--backend gui): an operation or argument it does not offer,
+    # and a display that succeeded while moving to the location did not.
+    GUI_UNSUPPORTED = "GUI_UNSUPPORTED"
+    GUI_NAVIGATION_FAILED = "GUI_NAVIGATION_FAILED"
     READ_ONLY_PROGRAM = "READ_ONLY_PROGRAM"
     PROGRAM_NOT_ANALYZED = "PROGRAM_NOT_ANALYZED"
     RAW_LOADER_OPTION_UNAVAILABLE = "RAW_LOADER_OPTION_UNAVAILABLE"

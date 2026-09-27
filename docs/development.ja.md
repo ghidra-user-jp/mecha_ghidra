@@ -42,11 +42,15 @@ JVMは `ghidra_headless.launcher.start_headless_jvm()` だけを経由して起�
 
 macOSでは特に重要です。MCP 2.xはワーカースレッドでハンドラを実行するため、そこで初めてAWTを初期化するとAppKitのメインスレッドを待ち続ける場合があります。JVM起動後のheadless設定では間に合いません。表示に依存する操作は `HEADLESS_UNSUPPORTED` で失敗させます。
 
+例外は、GUIのバックエンド（`--backend gui`、[GUIでのライブ共有](gui-live.ja.md)）の起動だけです。`ghidra_headless.gui.launch.GuiLaunch` が、PyGhidraの `GuiPyGhidraLauncher` で表示を使うJVMをメインスレッドで起動し、GhidraRunを実行します。macOSではメインスレッドがそのままAppKitのイベントループに入るので、MCPサーバーは別のスレッドで動かします。表示を使うJVMを起動する経路はこの一か所に限り、headlessのバックエンドとテストには `start_headless_jvm()` の規則をそのまま適用します。GUIのオブジェクトはSwingのイベントスレッド（EDT）で扱い、`ghidra_headless.gui.edt` の `run_on_edt`（開始までの期限付き）か `post_to_edt` を使います。これらは、呼び出したPythonのスレッドにGhidraのクラスローダーを設定します。JPypeが結び付けたスレッドはcontext class loaderを持たず、そのスレッドが最初にAWTを使うとEDTもクラスローダーを持たなくなり、FlatLafのテーマの画面を組み立てられないので、AWTやSwingを直接呼ばないでください。EDTの上では、decompileや人間の操作を待つ処理など、終わるまでの時間が決まらない処理をしないでください。
+
 ### プログラム・トランザクション・リソース
 
 プログラムは `DomainFile.getDomainObject(project, ...)` で開き、`Program.release(project)` で解放します。`GhidraProject.openProgram` に置き換えないでください。永続するバッチトランザクションによって `isChanged()` が見えなくなり、undoが使えず、`.gzf` のエクスポートも妨げられます。
 
 変更ごとにトランザクションが必要です。ハンドラは `core_helpers._txn`、セッション・実行環境側は `ghidra_headless.session.transactions.run_in_transaction` を使います。インポートしたプログラムは直後に閉じるため、GhidraProjectを使えます。コンテキストを交換するときは古いデコンパイラを解放し、交換に失敗したときは利用可能な既存コンテキストを保持します。
+
+プログラムへの書き込み（`_txn`、`apply_edits`、undoとredo）は、`ghidra_headless.session.write_boundary.write_boundary()` の書き込みの境界を通ります。headlessの境界は、呼び出したスレッドでtransactionを開きます。GUIのバックエンドは `ghidra_headless.gui.write_boundary.GuiWriteBoundary` に差し替え、ほかのtransactionが閉じるのを待ってから、transactionの区間をEDTで実行し、名前に `Mecha: ` を付けます。そのため、transactionの中でdecompileしないでください（その間GUIが止まります）。decompileは区間の前に済ませ、区間ではデータベースの更新だけを行います（`rename_variable` と `set_local_variable_type` を参照）。ハンドラにはbackendで分ける分岐を足さず、違いはProjectHandle（`ghidra_headless.gui.project_handle`）、書き込みの境界、ツールの公開の判定に集めます。
 
 共有コマンドでは、成功したリポジトリ接続確認を2秒間再利用します。バージョンとチェックアウト状態は毎回取得します。同期処理を変更するときも、この区別を維持してください。
 
@@ -102,6 +106,16 @@ Jythonまで検証する場合は、使用するGhidraと同じバージョン�
 共有側のcheckout、commit、別クライアントからの更新取得、試験ファイル削除は `tests/test_runtime_registry_shared_sync_commands.py` で検証します。BSimのカテゴリ・メタデータ変更には `GHIDRA_BSIM_MUTATION_VALIDATION=1` が必要です。カテゴリ定義は試験後も残るため、使い捨てのDBを指定してください。
 
 ビルドしたイメージを確かめるには、`MECHA_GHIDRA_DOCKER_IMAGE` にそのタグを指定して `tests/test_docker_image.py` を実行します。Dockerが必要ですが、手元のGhidraは要りません。試験は同じ演習用のPEをイメージから取り出し、イメージの既定のコマンドで起動して、HTTPでインポート・解析・逆コンパイル・編集をします。そのあと、`docker stop`、`SIGINT`、`SIGHUP` のそれぞれで、コンテナが終わる前にプロジェクトを閉じることを確かめます。CIの `docker-image` ジョブは、`./build_docker_image.sh` で `linux/amd64` のイメージをビルドし、この試験を実行します。
+
+GUIのバックエンドの受け入れ試験は `tests/test_gui_integration.py` です。画面のある環境（macOS、またはXvfbなどのXのディスプレイがあるLinux）で、単独のpytestとして実行します。
+
+```bash
+GHIDRA_GUI_VALIDATION=1 \
+GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra \
+uv run pytest tests/test_gui_integration.py
+```
+
+試験は場面ごとに `tests/gui_driver.py` を別プロセスで起動します。そのプロセスは実際のCLIをメインスレッドで動かし、別のスレッドからMCPで呼び出しながら、人間の操作をEDTでのGhidraのコマンドとして再現します。Projectは、`tests/gui_project_setup.py` が同梱の演習用PEからheadlessで作ったものの複製です。Ghidraの設定は `-Dapplication.settingsdir` の使い捨ての領域を使うので、利用者のProjectと設定には触れません。使用許諾の同意も、この使い捨ての領域にだけ書き込みます。実行中はGhidraのウィンドウが何度か開いて閉じます。Dockerのコンテナで実行するときは、`--basetemp` をコンテナの中のディレクトリにします。Docker Desktopのバインドマウントでは、プロセスの間でProjectのlockが効かず、lockの試験が成り立ちません。
 
 <a id="native-builds"></a>
 

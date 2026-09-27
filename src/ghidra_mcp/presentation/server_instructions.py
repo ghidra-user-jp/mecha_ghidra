@@ -39,7 +39,7 @@ _CAPABILITIES = (
         "set_function_prototype set_local_variable_type set_global_data_type create_struct add_struct_members "
         "delete_data_type remove_struct_members rename_data_type create_enum set_enum_values parse_c_declarations",
     ),
-    ("symbol/comment edits", "apply_edits"),
+    ("symbol/comment edits", "apply_edits rename_variable"),
     ("label creation", "create_label"),
     ("bookmark edits", "add_bookmark delete_bookmark"),
     ("undo/redo", "undo_program_change redo_program_change"),
@@ -96,6 +96,17 @@ def build_server_instructions(*, specs: Mapping[str, ToolSpec], config: ToolPres
         parts.append(
             "Loading never analyzes: run analyze_program when a load or get_program_info reports is_analyzed=false."
         )
+    if "get_gui_context" in enabled or "show_in_gui" in enabled:
+        # The Ghidra GUI backend (spec §9); each tool is named only when published.
+        gui = ["A human works on the same programs in the Ghidra GUI; their edits appear in your next read."]
+        if "get_gui_context" in enabled:
+            gui.append("When the human refers to what they see, call get_gui_context.")
+        if "show_in_gui" in enabled:
+            gui.append(
+                "Call show_in_gui only when asked to show something or to have a result checked, "
+                "not during ordinary analysis."
+            )
+        parts.append(" ".join(gui))
     if any(spec.include_target for spec in specs.values()):
         parts.append("Pass the intended target across calls; paths refer to the server filesystem.")
     parts.append("Tool details: ghidra://docs/tools and ghidra://docs/tools/{tool_name}.")

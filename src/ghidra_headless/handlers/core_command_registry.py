@@ -116,10 +116,11 @@ COMMAND_NAMES = (
 )
 
 INTERNAL_COMMAND_NAMES = (
-    # Annotation primitives used by apply_edits; not standalone MCP tools.
+    # Annotation primitives used by apply_edits; not standalone MCP tools.  rename_variable, not listed, is
+    # also a standalone tool with the Ghidra GUI backend only (tool_spec.GUI_ONLY_TOOL_NAMES), whose
+    # apply_edits refuses the kinds that decompile.
     "rename_function",
     "rename_data",
-    "rename_variable",
     "set_comment",
     "bsim_validate_match",
     # export_program is exposed through the registry so the path policy runs first.

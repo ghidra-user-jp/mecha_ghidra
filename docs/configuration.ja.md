@@ -11,11 +11,14 @@
 | オプション | 既定値 | 用途 |
 | --- | --- | --- |
 | `--transport` | `stdio` | `stdio`、`http`（別名 `streamable-http`） |
+| `--backend` | `headless` | `headless`、`gui`（GhidraのGUIを起動し、そのProjectとProgramを共有する。HTTPだけで使える。[GUIでのライブ共有](gui-live.ja.md)） |
 | `--mcp-host` | `127.0.0.1` | HTTPの待ち受けアドレス |
 | `--mcp-port` | `8081` | HTTPのポート |
 | `--mcp-path` | `/mcp` | Streamable HTTPのエンドポイントパス |
 | `--ghidra-path` | `GHIDRA_INSTALL_DIR` | Ghidraのインストール先 |
 | `--log-level` | `INFO` | サーバーのログレベル |
+
+`--backend gui` は `--transport http` だけで使え、`--project-location` に既存のProjectが要ります。`--ghidra-server-user`、`--ghidra-server-password`、`--ghidra-server-password-env` と、別のProjectを指す `--session` はエラーになり、`--bsim-url`、`--bsim-password`、`--bsim-password-env`、`--bsim-remote-cache-dir`、`--script-root` は効果がありません（[使えない機能](gui-live.ja.md#limits)）。
 
 Streamable HTTP（`--transport http` または `streamable-http`）は、[公式Python SDKの推奨設定](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py)に合わせて `stateless_http=True`、`json_response=True` に固定しています。MCPのセッションIDを発行せず、各要求にJSONで応答します。ステートフルに戻す互換設定はありません。Ghidraのターゲット・プログラムの変更状態・結果キャッシュはHTTP要求をまたいでサーバープロセス内に保持します。`--session` はGhidraのターゲット設定であり、HTTPセッションとは別です。同じ `target` と返された `result_id` を使って処理を続けてください。再起動すると結果キャッシュは消え、稼働中も既存の容量制限が適用されます。
 
@@ -74,7 +77,7 @@ HTTPでは3種類とも指定してください。起動時の警告は**3種類
 | `readonly` | defaultのカテゴリから、安全性タグが `read_only` のツールだけ |
 | `full` | `shared_sync` と `bsim` を含む全カテゴリ |
 
-指定がなければ `default` です。任意カテゴリは `--add-category shared_sync`、`--add-category bsim` で追加します。
+指定がなければ `default` です。任意カテゴリは `--add-category shared_sync`、`--add-category bsim` で追加します。`--backend gui` では、`gui` カテゴリ（`get_gui_context`、`show_in_gui`）がプロファイルのカテゴリに加わり、`symbol_comment_edit` カテゴリにGUIだけの `rename_variable` が加わります。`--allow-category` でカテゴリを置き換えたときは、`--add-category gui` で加えます。
 
 `readonly` は公開するツールを絞るだけの設定で、プロジェクトを読み取り専用にはしません。不変の過去バージョンを調べる場合は、[共有プロジェクトの履歴確認](shared-projects.ja.md#history)を使ってください。
 
@@ -82,7 +85,7 @@ HTTPでは3種類とも指定してください。起動時の警告は**3種類
 
 | タグ | 値 |
 | --- | --- |
-| `category` | 上記 7 カテゴリと `scripts`（[スクリプト実行](#scripts)参照） |
+| `category` | 上記 7 カテゴリ、`scripts`（[スクリプト実行](#scripts)参照）、`gui`（[GUIのツール](gui-live.ja.md#gui-tools)参照） |
 | `safety` | `read_only`、`write`、`destructive_write` |
 | `operation_level` | `basic`、`standard`、`advanced` |
 
@@ -93,6 +96,7 @@ HTTPでは3種類とも指定してください。起動時の警告は**3種類
 3. `--enable-tool` でツールを個別追加します。
 4. 最後に `--disable-tool` で除外します。無効化が常に優先されます。
 5. `import_program`・`analyze_program`・`run_script`のどれかが残る場合は、ジョブの結果を読むために `get_operation` も残します。どれかを有効にしたまま `get_operation` を無効化すると起動時エラーになります。ジョブを隠す場合は、`get_operation`と一緒に無効化してください。`cancel_operation`は`get_operation`に従い、`get_operation`がなければ公開されません。`get_operation`がなければ、呼び出しの[先送り](usage.ja.md#long-calls)も行いません。
+6. 最後に、バックエンドが実行できないツールを外します。`headless` では `gui` カテゴリ、`gui` では[GUIで使えないツール](gui-live.ja.md#limits)で、どの指定もこれを覆しません。外したツールが指定で選ばれていた場合は、起動ログに一覧が出ます。
 
 通常の起動コマンドに、目的に応じて以下を追加します。
 

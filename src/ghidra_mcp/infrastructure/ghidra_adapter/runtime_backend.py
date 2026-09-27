@@ -20,6 +20,7 @@ from ghidra_mcp.application.services.runtime_state import RuntimeState
 
 from .runtime import (
     RuntimeCoreExecution,
+    RuntimeGuiOperations,
     RuntimeScriptExecution,
     RuntimeSessionStore,
     RuntimeSyncOperations,
@@ -78,6 +79,17 @@ class RuntimeBackend:
             normalize_result=state.normalize_result,
         )
         self._script_execution = RuntimeScriptExecution(store=store, core_execution=self._core_execution)
+        self._gui_operations = RuntimeGuiOperations(store=store)
+
+    # ---- the Ghidra GUI backend's view of the GUI ---------------------------
+
+    @_delegate("_gui_operations")
+    def get_gui_context(self) -> Dict[str, Any]: ...
+
+    @_delegate("_gui_operations")
+    def show_in_gui(
+        self, name: str, *, address: str | None = None, function_name: str | None = None
+    ) -> Dict[str, Any]: ...
 
     # ---- target lifecycle -------------------------------------------------
 

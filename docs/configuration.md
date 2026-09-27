@@ -11,11 +11,14 @@ Server options are passed to `uv run mecha_ghidra`. Run `uv run mecha_ghidra --h
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--transport` | `stdio` | `stdio` or `http` (alias `streamable-http`) |
+| `--backend` | `headless` | `headless` or `gui` (start the Ghidra GUI and share its project and programs; HTTP only; see [live sharing with the GUI](gui-live.md)) |
 | `--mcp-host` | `127.0.0.1` | HTTP bind address |
 | `--mcp-port` | `8081` | HTTP port |
 | `--mcp-path` | `/mcp` | Streamable HTTP endpoint path |
 | `--ghidra-path` | `GHIDRA_INSTALL_DIR` | Ghidra installation |
 | `--log-level` | `INFO` | Server logging level |
+
+`--backend gui` works with `--transport http` only and needs `--project-location` naming an existing project. `--ghidra-server-user`, `--ghidra-server-password`, `--ghidra-server-password-env`, and a `--session` in another project are errors; `--bsim-url`, `--bsim-password`, `--bsim-password-env`, `--bsim-remote-cache-dir` and `--script-root` have no effect (see [what is not available](gui-live.md#limits)).
 
 Streamable HTTP (`--transport http` or `streamable-http`) always uses the [official Python SDK's recommended configuration](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py): `stateless_http=True` and `json_response=True`. Requests receive JSON responses without an MCP session ID. There is no stateful compatibility setting. Ghidra targets, program changes and the result cache remain in the server process across HTTP requests; `--session` configures Ghidra targets, not HTTP sessions. Continue using the same `target` and returned `result_id` values. Restarting the process clears the result cache, and the normal cache limits still apply.
 
@@ -74,7 +77,7 @@ Configure all three root types for HTTP deployments. The startup warning is emit
 | `readonly` | The default categories, limited to the `read_only` safety tag |
 | `full` | All categories, including `shared_sync` and `bsim` |
 
-Omitting profile flags selects `default`. Add optional categories with `--add-category shared_sync` or `--add-category bsim`.
+Omitting profile flags selects `default`. Add optional categories with `--add-category shared_sync` or `--add-category bsim`. With `--backend gui`, the `gui` category (`get_gui_context`, `show_in_gui`) joins the profile's categories, and the `symbol_comment_edit` category gains the GUI-only `rename_variable`; after `--allow-category` replaces them, add it with `--add-category gui`.
 
 The `readonly` profile only filters exposed tools; it does not mount projects read-only. Use a historical version for immutable version inspection; see [shared projects](shared-projects.md#history).
 
@@ -82,7 +85,7 @@ Each tool has three tags:
 
 | Tag | Values |
 | --- | --- |
-| `category` | The seven categories above, plus `scripts` (see [script execution](#scripts)) |
+| `category` | The seven categories above, plus `scripts` (see [script execution](#scripts)) and `gui` (see [GUI tools](gui-live.md#gui-tools)) |
 | `safety` | `read_only`, `write`, `destructive_write` |
 | `operation_level` | `basic`, `standard`, `advanced` |
 
@@ -93,6 +96,7 @@ Filtering order:
 3. Add explicit `--enable-tool` names.
 4. Remove `--disable-tool` names last. Disabling always wins.
 5. If `import_program`, `analyze_program` or `run_script` remains, `get_operation` is kept too, because job results are read through it. Disabling `get_operation` while any of them stays enabled is a startup error; to hide jobs, disable them together with `get_operation`. `cancel_operation` follows `get_operation` and is dropped with it. Without `get_operation`, no call is [deferred](usage.md#long-calls).
+6. Last, tools the backend cannot run are removed: the `gui` category with `headless`, and the [tools the GUI backend does not offer](gui-live.md#limits) with `gui`. No flag overrides this; the startup log lists removed tools that the flags had selected.
 
 Append these options to your normal startup command:
 

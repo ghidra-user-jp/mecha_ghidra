@@ -49,6 +49,14 @@ DETAIL_PRESERVING_CODES: frozenset[ErrorCode] = frozenset(
         ErrorCode.TARGET_EXECUTION_INVALID,
         ErrorCode.TARGET_ORPHAN_UNRELEASED,
         ErrorCode.RUNTIME_DEGRADED,
+        # details.reason says why: closed_in_gui, gui_project_closed (the Ghidra GUI backend).
+        ErrorCode.PROGRAM_NOT_OPEN,
+        ErrorCode.SESSION_NOT_FOUND,
+        # details.lock says which lock timed out (program_transaction: details.transaction is the open one).
+        ErrorCode.LOCK_TIMEOUT,
+        # details.reason (and details.kinds or details.top_undo_name) say what the GUI refused.
+        ErrorCode.GUI_UNSUPPORTED,
+        ErrorCode.GUI_NAVIGATION_FAILED,
     }
 )
 

@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from ghidra_mcp.application.services.bsim_service import BsimConfig, BsimService
 from ghidra_mcp.application.services.core_command_service import CoreCommandService
+from ghidra_mcp.application.services.gui_service import GuiService
 from ghidra_mcp.application.services.operations import PENDING_STATES, OperationManager
 from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.application.services.runtime_state import RuntimeState
@@ -128,6 +129,9 @@ class ServiceRegistryAdapter:
         "bsim_apply_matches": "_bsim_service",
         "bsim_update_target_signatures": "_bsim_service",
         "bsim_delete_executable": "_bsim_service",
+        # the Ghidra GUI backend
+        "get_gui_context": "_gui_service",
+        "show_in_gui": "_gui_service",
         # scripts
         "list_scripts": "_script_service",
         "get_script_info": "_script_service",
@@ -141,8 +145,10 @@ class ServiceRegistryAdapter:
         sync_service: SyncService,
         bsim_service: BsimService,
         script_service: ScriptService | None = None,
+        gui_service: GuiService | None = None,
     ) -> None:
         self._core_command_service = core_command_service
+        self._gui_service = gui_service
         self._target_service = target_service
         self._sync_service = sync_service
         self._bsim_service = bsim_service
@@ -265,11 +271,14 @@ def create_cli_runtime(
     path_policy: PathPolicy | None = None,
     script_config: ScriptConfig | None = None,
     startup_gate: StartupGate | None = None,
+    project_handle_factory: Callable[[str, str], Any] | None = None,
+    argument_policy: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> CLIRuntimeBundle:
     runtime_state = RuntimeState(
         core_accessor=core_accessor,
         checkout_required_commands=set(checkout_required_commands),
         normalize_result=normalize_empty_list_result,
+        project_handle_factory=project_handle_factory,
     )
     runtime_backend = RuntimeBackend(state=runtime_state)
     lock_manager = LockManager()
@@ -290,6 +299,7 @@ def create_cli_runtime(
         sync_service=sync_service,
         bsim_service=bsim_service,
         script_service=script_service,
+        gui_service=GuiService(runtime_backend),
     )
     effective_dispatcher_provider = dispatcher_provider or (lambda: dispatch_tool)
     effective_registry_provider = registry_provider or (lambda: registry)
@@ -300,6 +310,7 @@ def create_cli_runtime(
         presentation_config=presentation_config,
         prepare_thread=_attach_server_thread,
         startup_gate=startup_gate,
+        argument_policy=argument_policy,
         # The headless core's command_source: where the thread's last command left its program.
         command_source=lambda: core_accessor().command_source(),
     )

@@ -151,3 +151,71 @@ def test_remove_struct_members_deletes_matching_ordinals_in_reverse_order():
 
     assert result == {"name": "Fields"}
     assert structure.deleted == [3, 1, 0]
+
+
+class _SymbolIterator:
+    def __init__(self, symbols) -> None:
+        self._symbols = list(symbols)
+
+    def hasNext(self):
+        return bool(self._symbols)
+
+    def next(self):
+        return self._symbols.pop(0)
+
+
+def _variable_edit_fixture(*, edited_while_decompiling: bool):
+    """A program whose modification number moves while the function decompiles, as a GUI human's edit would."""
+    program = SimpleNamespace(modification=5)
+    program.getModificationNumber = lambda: program.modification
+    symbol = SimpleNamespace(getName=lambda: "param_1")
+    high_function = SimpleNamespace(
+        getLocalSymbolMap=lambda: SimpleNamespace(getSymbols=lambda: _SymbolIterator([symbol]))
+    )
+    function = SimpleNamespace(getName=lambda: "main", getSignatureSource=lambda: "user")
+    ctx = SimpleNamespace(
+        program=program, function_manager=SimpleNamespace(getFunctionContaining=lambda _address: function)
+    )
+
+    def decompile(_ctx, _function):
+        if edited_while_decompiling:
+            program.modification += 1
+        return high_function
+
+    applied = []
+    dependencies = dict(
+        ensure_context=lambda: ctx,
+        get_address=lambda _ctx, text: text,
+        find_function_by_name=lambda _ctx, _name: function,
+        decompile_high_function=decompile,
+        requires_full_param_commit=lambda _symbol, _high: False,
+        high_function_db_util=SimpleNamespace(updateDBVariable=lambda *args: applied.append(args)),
+        txn=lambda _ctx, _description, func: func(),
+        source_type=SimpleNamespace(USER_DEFINED="user"),
+    )
+    return dependencies, applied
+
+
+@pytest.mark.parametrize("edited_while_decompiling", [False, True])
+def test_variable_edits_never_apply_a_decompiled_view_the_program_moved_past(edited_while_decompiling):
+    """rename_variable and set_local_variable_type decompile before their transaction (GUI: off the EDT)."""
+    from ghidra_headless.errors import HeadlessError
+    from ghidra_headless.handlers.commands.mutating_symbols import rename_variable, set_local_variable_type
+
+    calls = [
+        lambda deps: rename_variable({"functionAddress": "0x1000", "oldName": "param_1", "newName": "ctx"}, **deps),
+        lambda deps: set_local_variable_type(
+            {"function_address": "0x1000", "variable_name": "param_1", "new_type": "int"},
+            parse_data_type=lambda _ctx, text: text,
+            **deps,
+        ),
+    ]
+    for call in calls:
+        dependencies, applied = _variable_edit_fixture(edited_while_decompiling=edited_while_decompiling)
+        if edited_while_decompiling:
+            with pytest.raises(HeadlessError) as raised:
+                call(dependencies)
+            assert raised.value.code == "SESSION_CHANGED" and applied == []
+        else:
+            call(dependencies)
+            assert len(applied) == 1

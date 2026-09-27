@@ -31,6 +31,7 @@ from ghidra_headless.errors import HeadlessError
 from ghidra_headless.installation import validate_linux_arm64_decompiler_install
 from ghidra_headless.session.analysis import run_auto_analysis
 from ghidra_headless.session.models import program_is_analyzed
+from ghidra_headless.session.write_boundary import write_boundary
 
 
 def _to_int(value, default):
@@ -44,14 +45,7 @@ def _to_int(value, default):
 
 def _txn(ctx, description, func):
     _ensure_checkout_for_versioned_program(ctx)
-    tx_id = ctx.program.startTransaction(description)
-    success = False
-    try:
-        result = func()
-        success = True
-        return result
-    finally:
-        ctx.program.endTransaction(tx_id, success)
+    return write_boundary().write(ctx.program, description, func)
 
 
 def _safe_call(obj, name, *args):

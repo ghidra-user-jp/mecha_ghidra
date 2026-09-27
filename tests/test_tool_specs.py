@@ -625,6 +625,7 @@ def test_checkout_required_tools_are_declared_on_specs():
         "apply_edits",
         "set_function_prototype",
         "set_local_variable_type",
+        "rename_variable",
         "set_global_data_type",
         "create_function",
         "delete_function",
@@ -733,6 +734,32 @@ def test_all_output_models_are_strict_and_typed():
             "target": (str, ...),
             "program": (str, ...),
             "saved": (bool, ...),
+        },
+        "get_gui_context": {
+            "tools": (list[dict], ...),
+            "active_tool": (dict | None, ...),
+            "active_known": (bool, ...),
+            "program": (dict | None, ...),
+            "location": (dict | None, ...),
+            "selection": (dict | None, ...),
+            "targets": (list[str], ...),
+            "revision": (str | None, ...),
+            "modal_dialog": (str | None, ...),
+        },
+        "show_in_gui": {
+            "target": (str, ...),
+            "program": (str | None, ...),
+            "tool": (str, ...),
+            "tool_id": (str, ...),
+            "shown": (bool | None, ...),
+            "created_tab": (bool, ...),
+            "launched_tool": (bool, ...),
+            "navigated": (bool | None, ...),
+            "requested": (dict, ...),
+            "actual_address": (str | None, ...),
+            "focus_requested": (bool, ...),
+            "focus_confirmed": (bool | None, ...),
+            "modal_dialog": (str | None, ...),
         },
         "get_project_sync_status": {
             "target": (str, ...),
@@ -930,7 +957,7 @@ def test_all_specs_have_required_contract_fields():
         assert isinstance(tuple(public_parameter_names(spec)), tuple)
 
         fields = tuple(spec.public_name_overrides.get(key, key) for key in spec.input_model.model_fields)
-        if spec.executor_kind == ExecutorKind.CORE_COMMAND and spec.include_target:
+        if spec.include_target and (spec.executor_kind == ExecutorKind.CORE_COMMAND or spec.optional_target):
             expected_signature = (*fields, "target")
         elif spec.include_target:
             expected_signature = ("target", *fields)

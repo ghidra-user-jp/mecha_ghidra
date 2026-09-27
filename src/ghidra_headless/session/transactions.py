@@ -83,6 +83,19 @@ class TransactionRecord:
         self._recorder = recorder
         # Set by note_external_write: the block wrote outside the program too.
         self.external_write = False
+        # Noted by a write boundary that knows its own transactions (see
+        # note_transaction): with the Ghidra GUI, listener callbacks come later
+        # on the Swing thread, so the recorder alone sees none of them.
+        self._noted: list = []
+        self._noted_history = False
+
+    def note_transaction(self, transaction) -> None:
+        """Count ``transaction`` (a ``TransactionInfo``) as started by the block."""
+        self._noted.append(transaction)
+
+    def note_history_change(self) -> None:
+        """Count an undo or redo step as a change made by the block."""
+        self._noted_history = True
 
     def outcome(self) -> str:
         """``committed`` includes applied undo/redo steps; ``unchanged`` means neither kind of change ran.
@@ -90,15 +103,21 @@ class TransactionRecord:
         After a write outside the program, which transactions do not show,
         the outcome is ``unknown``.
         """
-        if self._recorder is None or self.external_write:
+        if self.external_write:
             return UNKNOWN
-        changed = self._recorder.history_changed
-        if not self._recorder.started:
+        noted = bool(self._noted) or self._noted_history
+        if self._recorder is None and not noted:
+            return UNKNOWN
+        started = list(self._recorder.started) if self._recorder is not None else []
+        for transaction in self._noted:
+            if not any(transaction is seen or transaction == seen for seen in started):
+                started.append(transaction)
+        changed = self._noted_history or (self._recorder is not None and self._recorder.history_changed)
+        if not started:
             return COMMITTED if changed else UNCHANGED
         try:
             ended = [
-                (str(transaction.getStatus()), bool(transaction.hasCommittedDBTransaction()))
-                for transaction in self._recorder.started
+                (str(transaction.getStatus()), bool(transaction.hasCommittedDBTransaction())) for transaction in started
             ]
         except Exception:
             return UNKNOWN
@@ -125,6 +144,36 @@ def note_external_write() -> None:
     record = getattr(_CURRENT, "record", None)
     if record is not None:
         record.external_write = True
+
+
+def current_record() -> TransactionRecord | None:
+    """The record of the block running on this thread, or None."""
+    return getattr(_CURRENT, "record", None)
+
+
+def note_transaction(transaction) -> None:
+    """Count ``transaction`` in the running block's record (a write boundary's own transaction, rule 6)."""
+    record = current_record()
+    if record is not None:
+        record.note_transaction(transaction)
+
+
+def note_history_change() -> None:
+    """Count an undo or redo step in the running block's record."""
+    record = current_record()
+    if record is not None:
+        record.note_history_change()
+
+
+@contextlib.contextmanager
+def use_record(record: TransactionRecord | None) -> Iterator[TransactionRecord | None]:
+    """Make ``record`` this thread's running record, as on the thread that entered the block."""
+    previous = getattr(_CURRENT, "record", None)
+    _CURRENT.record = record
+    try:
+        yield record
+    finally:
+        _CURRENT.record = previous
 
 
 @contextlib.contextmanager
@@ -171,7 +220,11 @@ __all__ = [
     "UNCHANGED",
     "UNKNOWN",
     "TransactionRecord",
+    "current_record",
     "note_external_write",
+    "note_history_change",
+    "note_transaction",
     "recorded_transactions",
     "run_in_transaction",
+    "use_record",
 ]

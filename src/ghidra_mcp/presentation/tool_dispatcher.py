@@ -7,7 +7,14 @@ from typing import Any
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
-from ghidra_mcp.contracts.tool_spec import JOB_TOOLS, OPERATION_CONTROL_TOOLS, ExecutorKind, ToolSpec, get_tool_spec
+from ghidra_mcp.contracts.tool_spec import (
+    JOB_TOOLS,
+    OPERATION_CONTROL_TOOLS,
+    ExecutorKind,
+    ToolCategoryTag,
+    ToolSpec,
+    get_tool_spec,
+)
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.output_state import ABSENT, UNCERTAIN, says_nothing_changed, with_output_state
 from ghidra_mcp.presentation.config import ToolPresentationConfig
@@ -119,9 +126,9 @@ def _with_output_state(spec: ToolSpec, exc: Exception) -> Exception:
     the job, which then never ran (its record says what a run left behind),
     unless an earlier import of the name may have left a program.
     cancel_operation's refusals name a job that may well have run, so they
-    say nothing about it.  Otherwise the code tells: a refusal or a
-    retryable failure left nothing, anything else may have done part of the
-    work.
+    say nothing about it.  A GUI tool changes only the view, never a program
+    (spec §8.5).  Otherwise the code tells: a refusal or a retryable failure
+    left nothing, anything else may have done part of the work.
     """
     if (
         not isinstance(exc, DomainError)
@@ -131,6 +138,8 @@ def _with_output_state(spec: ToolSpec, exc: Exception) -> Exception:
         or "output_state" in (exc.details or {})
     ):
         return exc
+    if spec.category_tag is ToolCategoryTag.GUI:
+        return with_output_state(exc, ABSENT)
     if spec.name in JOB_TOOLS:
         return with_output_state(exc, UNCERTAIN if exc.code is ErrorCode.IMPORT_OUTPUT_UNCERTAIN else ABSENT)
     return with_output_state(exc, ABSENT if says_nothing_changed(exc) else UNCERTAIN)
@@ -173,8 +182,10 @@ def dispatch_tool(
     registry,
     presentation_config: ToolPresentationConfig | None = None,
     result_store: ResultResourceStore | None = None,
+    spec: ToolSpec | None = None,
 ) -> Any:
-    spec = get_tool_spec(spec_name)
+    """Run ``spec_name``; ``spec`` is a backend's variant contract for it, when it has one."""
+    spec = spec if spec is not None else get_tool_spec(spec_name)
     params = _validate_raw_args(spec, raw_args)
     if spec.replays_requests:
         # The MCP server answers resends by it (GhidraMCPServer); the handler never sees it.

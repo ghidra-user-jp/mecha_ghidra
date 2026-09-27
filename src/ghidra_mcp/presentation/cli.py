@@ -37,7 +37,9 @@ from typing import Any, Dict, NoReturn
 
 import jpype
 
+from ghidra_headless.gui.project_handle import GuiProjectHandle
 from ghidra_headless.launcher import detach_current_thread, prepare_headless_launcher, start_headless_jvm
+from ghidra_headless.session.project_handle import ProjectHandle
 from ghidra_mcp.application.services.bsim_service import BsimConfig
 from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.application.services.script_catalog import parse_root_argument
@@ -46,6 +48,7 @@ from ghidra_mcp.application.services.script_service import (
     ScriptService,
 )
 from ghidra_mcp.contracts.tool_spec import (
+    ToolBackend,
     ToolCategoryTag,
     ToolOperationLevel,
     ToolProfile,
@@ -54,6 +57,7 @@ from ghidra_mcp.contracts.tool_spec import (
     filter_tool_specs,
     get_all_tool_specs,
     get_checkout_required_tool_names,
+    tools_removed_by_backend,
 )
 from ghidra_mcp.domain import (
     DEFAULT_LOCK_TIMEOUT_SECONDS,
@@ -71,6 +75,8 @@ from ghidra_mcp.presentation.cli_runtime import (
     defer_shutdown_signals,
 )
 from ghidra_mcp.presentation.config import ToolPresentationConfig
+from ghidra_mcp.presentation.gui_policy import GuiArgumentPolicy
+from ghidra_mcp.presentation.gui_runtime import GuiRuntime
 from ghidra_mcp.presentation.startup import FAILED, BackgroundStartup, StartupGate, StartupStep
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 from ghidra_mcp.presentation.tool_registry import build_tool_functions
@@ -170,6 +176,8 @@ def build_application(
     path_policy: PathPolicy | None = None,
     script_config: ScriptConfig | None = None,
     startup_gate: StartupGate | None = None,
+    project_handle_factory: Callable[[str, str], Any] | None = None,
+    argument_policy: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> CLIApplication:
     effective_specs = _DEFAULT_TOOL_SPECS if selected_specs is None else selected_specs
     bound: dict[str, Any] = {}
@@ -193,6 +201,10 @@ def build_application(
         runtime_kwargs["script_config"] = script_config
     if startup_gate is not None:
         runtime_kwargs["startup_gate"] = startup_gate
+    if project_handle_factory is not None:
+        runtime_kwargs["project_handle_factory"] = project_handle_factory
+    if argument_policy is not None:
+        runtime_kwargs["argument_policy"] = argument_policy
     bundle = create_cli_runtime(**runtime_kwargs)
     bound["registry"] = bundle.registry
     return CLIApplication(bundle=bundle, tools=bind_tools(registry_provider, presentation_config=presentation_config))
@@ -257,6 +269,15 @@ def parse_args(argv: list[str]):
         default="stdio",
         choices=["stdio", "http", "streamable-http"],
         help="MCP transport",
+    )
+    parser.add_argument(
+        "--backend",
+        default="headless",
+        choices=["headless", "gui"],
+        help=(
+            "headless (default) runs Ghidra without a display; gui starts Ghidra's GUI in this process and "
+            "shares its project and programs with MCP clients live (needs --transport http)"
+        ),
     )
     parser.add_argument("--mcp-host", type=str, default="127.0.0.1", help="Streamable HTTP host (unused for stdio)")
     parser.add_argument("--mcp-port", type=int, help="Streamable HTTP port (unused for stdio)")
@@ -450,6 +471,8 @@ def parse_args(argv: list[str]):
     )
     parser.add_argument("--log-level", default="INFO", help="Log level")
     args = parser.parse_args(argv)
+    if args.backend == "gui":
+        _check_gui_arguments(parser, args)
     if args.lock_timeout_seconds <= 0:
         parser.error("--lock-timeout-seconds must be > 0")
     if args.script_queue_timeout_seconds <= 0:
@@ -463,6 +486,58 @@ def parse_args(argv: list[str]):
     except ValueError as exc:
         parser.error(str(exc))
     return args
+
+
+def _check_gui_arguments(parser: argparse.ArgumentParser, args) -> None:
+    """What ``--backend gui`` refuses before anything starts (spec §4.1); each ends with one usage error."""
+    if _normalize_transport(args.transport) != "streamable-http":
+        parser.error("--backend gui needs --transport http (stdio for the GUI backend is not available yet)")
+    if not args.project_location:
+        parser.error("--backend gui needs --project-location: the existing project the Ghidra GUI opens")
+    try:
+        location, name = ProjectHandle.resolve_project_location_and_file(args.project_location, args.project_name)
+    except ValueError as exc:
+        parser.error(f"--backend gui: {exc}")
+    if not os.path.isfile(os.path.join(location, f"{name}.gpr")):
+        parser.error(f"--backend gui opens an existing project and creates none: {name}.gpr not found in {location}")
+    for option in ("ghidra_server_user", "ghidra_server_password", "ghidra_server_password_env"):
+        if getattr(args, option):
+            parser.error(
+                f"--{option.replace('_', '-')} is not available with --backend gui: "
+                "the Ghidra GUI asks for the server login itself"
+            )
+    runtime_key = (location, name)
+    for definition in args.session or []:
+        try:
+            config = _parse_session_definition(definition)
+            key = ProjectHandle.make_key(config["project_location"], config.get("project_name"))
+        except (ValueError, KeyError) as exc:
+            parser.error(f"--session {definition}: {exc}")
+        if key != runtime_key:
+            parser.error(
+                f"--session {definition}: with --backend gui every target uses the project the GUI opens "
+                f"({name}); this one names another project"
+            )
+
+
+def _warn_gui_ignored_options(args) -> None:
+    """Options that the GUI backend's first version accepts but does not use (spec §4.1)."""
+    ignored = [
+        option
+        for option, value in (
+            ("--bsim-url", args.bsim_url),
+            ("--bsim-password", args.bsim_password),
+            ("--bsim-password-env", args.bsim_password_env),
+            ("--bsim-remote-cache-dir", args.bsim_remote_cache_dir),
+            ("--script-root", args.script_root),
+        )
+        if value
+    ]
+    if ignored:
+        logger.warning(
+            "%s: no effect with --backend gui (BSim and scripts tools are not available in the GUI backend yet)",
+            ", ".join(ignored),
+        )
 
 
 def presentation_config_from_args(args) -> ToolPresentationConfig:
@@ -540,7 +615,24 @@ def resolve_tool_specs_from_args(args) -> dict[str, ToolSpec]:
         allow_operation_levels=args.allow_operation_level,
         enable_tools=args.enable_tool,
         disable_tools=args.disable_tool,
+        backend=getattr(args, "backend", ToolBackend.HEADLESS.value),
     )
+
+
+def _warn_tools_the_backend_cannot_run(args) -> None:
+    removed = tools_removed_by_backend(
+        backend=args.backend,
+        specs=_ALL_TOOL_SPECS,
+        profile=args.tool_profile,
+        allow_categories=args.allow_category,
+        add_categories=args.add_category,
+        allow_safety=args.allow_safety,
+        allow_operation_levels=args.allow_operation_level,
+        enable_tools=args.enable_tool,
+        disable_tools=args.disable_tool,
+    )
+    if removed:
+        logger.warning("Not available with --backend %s, so not published: %s", args.backend, ", ".join(removed))
 
 
 def redirect_java_stdout_to_stderr() -> None:
@@ -759,6 +851,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
 
     selected_specs = resolve_tool_specs_from_args(args)
+    _warn_tools_the_backend_cannot_run(args)
     presentation_config = presentation_config_from_args(args)
     try:
         path_policy = path_policy_from_args(args)
@@ -781,7 +874,19 @@ def _run_cli(argv: list[str] | None = None) -> int:
         except Exception as exc:
             logger.error("--bsim-remote-cache-dir is outside the allowed project roots: %s", exc)
             return 2
-    startup_gate = StartupGate()
+    gui_runtime: GuiRuntime | None = None
+    if args.backend == "gui":
+        project_location, project_name = ProjectHandle.resolve_project_location_and_file(
+            args.project_location, args.project_name
+        )
+        gui_runtime = GuiRuntime(
+            ghidra_path=ghidra_path or None, project_location=project_location, project_name=project_name
+        )
+        # A call during startup says the stage, and the dialog the GUI waits on (spec §4.4).
+        startup_gate = StartupGate(report_stage=True, details_provider=gui_runtime.details)
+        _warn_gui_ignored_options(args)
+    else:
+        startup_gate = StartupGate()
     app = build_application(
         selected_specs,
         bsim_config=BsimConfig(
@@ -795,6 +900,15 @@ def _run_cli(argv: list[str] | None = None) -> int:
         path_policy=path_policy,
         script_config=script_config,
         startup_gate=startup_gate,
+        project_handle_factory=GuiProjectHandle if gui_runtime is not None else None,
+        argument_policy=(
+            GuiArgumentPolicy(
+                project_key=(gui_runtime.project_location, gui_runtime.project_name),
+                resolve_project_key=ProjectHandle.make_key,
+            )
+            if gui_runtime is not None
+            else None
+        ),
     )
     registry = app.registry
     script_service = app.script_service
@@ -852,16 +966,24 @@ def _run_cli(argv: list[str] | None = None) -> int:
         # What can be checked without the JVM is checked before serving: a
         # misconfiguration is an operator error, not a crash, and still ends
         # with one line and exit code 1 before any client connects.
-        try:
-            launcher = _prepare_pyghidra_headless(ghidra_path or None)
-        except Exception as exc:
-            logger.error("Failed to start the Ghidra JVM: %s", exc)
-            return 1
-        try:
-            _ghidra_server_credentials(args)
-        except ValueError as exc:
-            logger.error("Failed to configure Ghidra server authentication: %s", exc)
-            return 1
+        launcher = None
+        if gui_runtime is not None:
+            try:
+                gui_runtime.prepare()
+            except Exception as exc:
+                logger.error("Failed to prepare the Ghidra GUI: %s", exc)
+                return 1
+        else:
+            try:
+                launcher = _prepare_pyghidra_headless(ghidra_path or None)
+            except Exception as exc:
+                logger.error("Failed to start the Ghidra JVM: %s", exc)
+                return 1
+            try:
+                _ghidra_server_credentials(args)
+            except ValueError as exc:
+                logger.error("Failed to configure Ghidra server authentication: %s", exc)
+                return 1
 
         # Programs open in the background; targets with project metadata only
         # need no JVM and are registered now.
@@ -918,6 +1040,30 @@ def _run_cli(argv: list[str] | None = None) -> int:
             logger.error("Specify at least one target via --session or --project-location")
             return 1
 
+        if gui_runtime is not None:
+            startup = BackgroundStartup(
+                gui_runtime.startup_steps(
+                    session_steps=session_steps,
+                    prepare_event_loop_thread=_prepare_event_loop_thread,
+                    load_core=_core,
+                    mark_jvm_started=lambda: ghidra.update(jvm_started=True),
+                ),
+                startup_gate,
+                on_failure=close_ghidra,
+                on_thread_exit=detach_current_thread,
+                keep_serving_on_failure=gui_runtime.ghidra_is_running,
+            )
+            run_kwargs = _run_kwargs_for_transport(transport=transport, args=args, logger=logger)
+            logger.info("The Ghidra GUI starts on the main thread; tool calls wait until it is ready")
+            gui_startup = startup
+
+            def serve() -> None:
+                run_mcp_server(
+                    app.mcp, transport=transport, log_level=args.log_level, startup=gui_startup, **run_kwargs
+                )
+
+            return gui_runtime.run(serve)
+
         def start_jvm() -> None:
             _start_pyghidra_headless(ghidra_path or None, launcher)
             ghidra["jvm_started"] = True
@@ -960,6 +1106,8 @@ def _run_cli(argv: list[str] | None = None) -> int:
             # A signal now would skip closing the projects; it is delivered
             # once they are closed (see defer_shutdown_signals).
             with defer_shutdown_signals():
+                if gui_runtime is not None:
+                    gui_runtime.stop()
                 if startup is not None:
                     # Waits for the step in progress: starting the JVM and opening
                     # a program cannot be interrupted, and cleanup must not race them.

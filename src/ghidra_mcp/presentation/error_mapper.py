@@ -102,6 +102,10 @@ _PUBLIC_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.SESSION_CHANGED: "SESSION_CHANGED: the target session changed during the operation; retry",
     ErrorCode.HEADLESS_UNSUPPORTED: "HEADLESS_UNSUPPORTED: this Ghidra operation needs a display and is not available in the headless server",
     ErrorCode.JVM_NOT_HEADLESS: "JVM_NOT_HEADLESS: the JVM was started without java.awt.headless=true",
+    ErrorCode.GUI_UNSUPPORTED: "GUI_UNSUPPORTED: this operation or argument is not available with the Ghidra GUI backend",
+    ErrorCode.GUI_NAVIGATION_FAILED: (
+        "GUI_NAVIGATION_FAILED: the program is shown in the Ghidra GUI, but moving to the location failed"
+    ),
     ErrorCode.PROGRAM_NOT_ANALYZED: (
         "PROGRAM_NOT_ANALYZED: the program has not been analyzed, so the decompiler's variables are unavailable"
     ),
@@ -166,6 +170,9 @@ _DETAIL_IS_PUBLIC: frozenset[ErrorCode] = frozenset(
         ErrorCode.NOT_FOUND,
         ErrorCode.PROGRAM_NOT_OPEN,
         ErrorCode.TARGET_NOT_REGISTERED,
+        # Our checks say which argument or operation the GUI backend refuses.
+        ErrorCode.GUI_UNSUPPORTED,
+        ErrorCode.GUI_NAVIGATION_FAILED,
     }
 )
 # A validation message can quote a file path the caller sent (binary_path);

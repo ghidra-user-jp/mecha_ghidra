@@ -42,11 +42,15 @@ Start the JVM only through `ghidra_headless.launcher.start_headless_jvm()`, neve
 
 This matters on macOS: MCP 2.x executes handlers in worker threads, and first-time AWT initialization there can wait indefinitely for AppKit's main thread. Setting headless mode after startup is too late. Display-dependent operations must fail with `HEADLESS_UNSUPPORTED`.
 
+The one exception is the GUI backend's startup (`--backend gui`, see [live sharing with the GUI](gui-live.md)). `ghidra_headless.gui.launch.GuiLaunch` starts a display JVM on the main thread with PyGhidra's `GuiPyGhidraLauncher` and runs GhidraRun. On macOS the main thread then stays in AppKit's event loop, so the MCP server runs on another thread. This is the only path that starts a display JVM; the headless backend and the tests keep the `start_headless_jvm()` rule. Use GUI objects on Swing's event thread (EDT) through `ghidra_headless.gui.edt`: `run_on_edt` (with a deadline for the work to start) or `post_to_edt`. They give the calling Python thread Ghidra's class loader; do not call AWT or Swing directly. A thread JPype attaches has no context class loader, and if it is the first to use AWT, the EDT has none either and FlatLaf themes cannot build Ghidra's windows. Never run work of unbounded length on the EDT, such as a decompile or a wait for the human.
+
 ### Programs, transactions, and resources
 
 Open programs using `DomainFile.getDomainObject(project, ...)` and release them with `Program.release(project)`. Do not replace this with `GhidraProject.openProgram`: its permanent batch transaction hides `isChanged()`, prevents undo, and can block `.gzf` exports.
 
 Each mutation needs its own transaction: handlers use `core_helpers._txn`; session/runtime operations use `ghidra_headless.session.transactions.run_in_transaction`. Imported programs can use GhidraProject because they are closed immediately after import. Replacing a program context must release its old decompiler, and failed replacement must preserve the usable context.
+
+Program writes (`_txn`, `apply_edits`, undo and redo) go through the write boundary, `ghidra_headless.session.write_boundary.write_boundary()`. The headless boundary opens the transaction on the calling thread. The GUI backend installs `ghidra_headless.gui.write_boundary.GuiWriteBoundary` instead: it waits for other transactions to close, runs the transaction section on the EDT, and prefixes its name with `Mecha: `. So never decompile inside a transaction, which would freeze the GUI meanwhile: decompile before the section and only update the database inside it (see `rename_variable` and `set_local_variable_type`). Do not add backend branches to the handlers; keep the differences in the project handle (`ghidra_headless.gui.project_handle`), the write boundary and the tool exposure.
 
 For shared commands, the successful repository connection check is trusted for two seconds; version and checkout state are still read fresh on each call. Keep this distinction when changing the synchronization path.
 
@@ -102,6 +106,16 @@ To include Jython, install the Jython extension matching your Ghidra version and
 Run `tests/test_runtime_registry_shared_sync_commands.py` for the shared lifecycle, including checkout, commit, updates from a second client, and deletion of test files. BSim category and metadata writes require `GHIDRA_BSIM_MUTATION_VALIDATION=1`; use a disposable database because category definitions remain after the tests.
 
 To check a built image, set `MECHA_GHIDRA_DOCKER_IMAGE` to its tag and run `tests/test_docker_image.py`; it needs Docker but no local Ghidra. The test copies the same exercise PE out of the image, starts the image's default command, and over HTTP imports, analyzes, decompiles, and edits the program. It then checks that `docker stop`, `SIGINT`, and `SIGHUP` each close the projects before the container exits. The CI job `docker-image` builds the `linux/amd64` image with `./build_docker_image.sh` and runs this test.
+
+The GUI backend's acceptance tests are `tests/test_gui_integration.py`. Run them in their own pytest invocation where a display is available (macOS, or Linux with an X display such as Xvfb):
+
+```bash
+GHIDRA_GUI_VALIDATION=1 \
+GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra \
+uv run pytest tests/test_gui_integration.py
+```
+
+Each scenario runs `tests/gui_driver.py` in its own process, which runs the real CLI on the main thread and, from another thread, calls it over MCP and replays the human's actions as Ghidra commands on the EDT. The project is a copy of one that `tests/gui_project_setup.py` builds headlessly from the bundled exercise PE. Ghidra's settings live in a throwaway `-Dapplication.settingsdir` directory, so the tests touch neither the person's projects nor their settings; the user agreement is accepted in that throwaway directory only. Ghidra windows open and close several times during the run. In a Docker container, point `--basetemp` at a directory inside the container: on a Docker Desktop bind mount the project lock does not hold between processes, and the lock test cannot pass.
 
 <a id="native-builds"></a>
 

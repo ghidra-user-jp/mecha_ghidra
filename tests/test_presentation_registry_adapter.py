@@ -82,6 +82,34 @@ class RecordingService:
                 }
             if name == "load_program":
                 return {"program": "/program", "is_analyzed": False}
+            if name == "get_gui_context":
+                return {
+                    "tools": [],
+                    "active_tool": None,
+                    "active_known": False,
+                    "program": None,
+                    "location": None,
+                    "selection": None,
+                    "targets": [],
+                    "revision": None,
+                    "modal_dialog": None,
+                }
+            if name == "show_in_gui":
+                return {
+                    "target": args[0],
+                    "program": "/program",
+                    "tool": "CodeBrowser",
+                    "tool_id": "tool-1",
+                    "shown": True,
+                    "created_tab": False,
+                    "launched_tool": False,
+                    "navigated": False,
+                    "requested": {"address": None, "name": None},
+                    "actual_address": None,
+                    "focus_requested": True,
+                    "focus_confirmed": None,
+                    "modal_dialog": None,
+                }
             if name == "save_project_program":
                 target = args[0]
                 return {
@@ -349,12 +377,14 @@ def test_service_registry_adapter_routes_synchronous_tools(tool_name: str):
     sync = RecordingService("sync")
     bsim = RecordingService("bsim")
     script = RecordingService("script")
+    gui = RecordingService("gui")
     adapter = cli.ServiceRegistryAdapter(
         core_command_service=core,
         target_service=target,
         sync_service=sync,
         bsim_service=bsim,
         script_service=script,
+        gui_service=gui,
     )
 
     dispatch_tool(tool_name, raw_args, target_name, registry=adapter)
@@ -379,9 +409,11 @@ def test_service_registry_adapter_routes_synchronous_tools(tool_name: str):
 
     if spec.executor_kind == ExecutorKind.REGISTRY_METHOD:
         assert core.calls == []
-        services = {"target": target, "bsim": bsim, "script": script}
+        services = {"target": target, "bsim": bsim, "script": script, "gui": gui}
         if spec.category_tag == ToolCategoryTag.BSIM:
             expected_name = "bsim"
+        elif spec.category_tag == ToolCategoryTag.GUI:
+            expected_name = "gui"
         elif spec.category_tag == ToolCategoryTag.SCRIPTS and spec.command_or_method != "close_session":
             expected_name = "script"
         else:

@@ -16,6 +16,9 @@ class RuntimeState:
     core_accessor: Callable[[], Any]
     checkout_required_commands: set[str]
     normalize_result: Callable[[Any], Any]
+    # Builds a project handle from (project_location, project_name); None means the headless one.
+    # The GUI backend's handle borrows the project the Ghidra GUI has open.
+    project_handle_factory: Callable[[str, str], Any] | None = None
     sessions: dict[str, Any] = field(default_factory=dict)
     locks: dict[str, threading.RLock] = field(default_factory=dict)
     project_locks: dict[tuple[str, str], threading.RLock] = field(default_factory=dict)

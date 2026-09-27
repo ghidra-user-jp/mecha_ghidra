@@ -31,6 +31,13 @@ def _analyzed_after_open(session, info: dict) -> bool | None:
         return None
 
 
+def _gui_dialog(session) -> dict:
+    """With the Ghidra GUI, the modal dialog the open left up (the analysis prompt); nothing headless."""
+    get_handle = getattr(session, "get_project_handle", None)
+    current_modal_dialog = getattr(get_handle() if get_handle is not None else None, "current_modal_dialog", None)
+    return {} if current_modal_dialog is None else {"modal_dialog": current_modal_dialog()}
+
+
 class TargetService:
     def __init__(
         self,
@@ -116,6 +123,7 @@ class TargetService:
                     "domain_path": info.get("domain_path", domain_path),
                     # Opening never analyzes; false tells the caller to run analyze_program.
                     "is_analyzed": _analyzed_after_open(session, info),
+                    **_gui_dialog(session),
                 }
         except Exception as exc:
             self._raise_domain_error(exc, operation="create_session", target=name)

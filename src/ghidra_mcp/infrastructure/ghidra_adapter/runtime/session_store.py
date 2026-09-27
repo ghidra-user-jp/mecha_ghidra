@@ -56,6 +56,7 @@ class RuntimeSessionStore:
         core_accessor: Callable[[], Any],
     ) -> None:
         self.core_accessor = core_accessor
+        self.project_handle_factory = state.project_handle_factory
         self.sessions = state.sessions
         self.locks = state.locks
         self.project_locks = state.project_locks
@@ -241,7 +242,9 @@ class RuntimeSessionStore:
         if observed is not None and not observed.is_closed():
             return observed
 
-        candidate = ProjectHandle(key[0], key[1])
+        # Looked up at call time, so tests that replace ProjectHandle still apply.
+        factory = self.project_handle_factory or ProjectHandle
+        candidate = factory(key[0], key[1])
         while True:
             with self.registry_lock.write_lock():
                 current = self.project_handles.get(key)

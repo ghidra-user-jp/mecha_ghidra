@@ -38,6 +38,10 @@ RECOVERY_HINTS: dict[ErrorCode, str] = {
     ErrorCode.PROJECT_LOCKED: (
         "Another process, such as a Ghidra GUI or another server, has the project open; close it there, then retry"
     ),
+    ErrorCode.GUI_UNSUPPORTED: (
+        "details.reason says what the Ghidra GUI backend refused; use the alternative it names, or do it in the GUI"
+    ),
+    ErrorCode.GUI_NAVIGATION_FAILED: "Check the address or name, then call show_in_gui again",
     ErrorCode.BSIM_DATABASE_UNREACHABLE: "Check that the BSim database is running and reachable, then retry",
     ErrorCode.BSIM_AUTHENTICATION_FAILED: "Check the BSim user and password",
     ErrorCode.BSIM_FUNCTION_NOT_FOUND: _FIND_A_FUNCTION,

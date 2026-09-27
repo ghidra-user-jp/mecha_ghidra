@@ -4,7 +4,7 @@
 
 用途からツールを探すための一覧です。呼び出し前にクライアントのツールスキーマを確認してください。全引数・制約・エラーコードはMCPリソース `ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}` にあります。`tools/list` の出力スキーマは、ツール固有の結果の形は完全に示しますが、全ツールに共通する応答（保存した大きな結果の通知、先送りの応答、エラー）は短い形だけです。それらの完全な形は `ghidra://docs/tools/{tool_name}` にあります。
 
-多くのツールは `target`（既定値 `default`）で対象を選びます。`shared_sync` と `bsim` は既定では公開されません。[設定](configuration.ja.md#tool-exposure)で追加してください。
+多くのツールは `target`（既定値 `default`）で対象を選びます。`shared_sync` と `bsim` は既定では公開されません。[設定](configuration.ja.md#tool-exposure)で追加してください。`gui` は `--backend gui` のときだけ公開され、GUIのバックエンドは一部のツールを公開しません（[GhidraのGUI](#gui)）。
 
 応答とエラーは、どのツールでも次の決まりに従います。
 
@@ -24,6 +24,7 @@
 - [共有プロジェクト](#shared-sync)
 - [BSim](#bsim)
 - [Ghidra スクリプト](#scripts)
+- [GhidraのGUI](#gui)
 - [大きな結果の取得](#result-retrieval)
 
 <a id="core"></a>
@@ -141,6 +142,7 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 | `apply_edits` | 関数・変数・データの命名、型、コメントを一括編集。全件確定・ロールバック、dry run、変更前後の状態に対応 |
 | `set_function_prototype` | 関数プロトタイプを設定（関数は `function_address` または `function_name` で指定） |
 | `set_local_variable_type` | ローカル変数/引数の型を設定（関数は `function_address` または `function_name` で指定） |
+| `rename_variable` | ローカル変数/引数の名前を `old_name` から `new_name` に変更（関数は `function_address` または `function_name` で指定）。`--backend gui` のときだけ公開。headlessでは `apply_edits` の `rename_variable` を使う |
 | `set_global_data_type` | グローバルデータの型を設定（`clear_mode` 指定可） |
 | `set_bytes` | メモリ内容をバイト列で書き換え |
 | `get_comments` | アドレスの全コメント種別を読み出し |
@@ -260,6 +262,19 @@ C本文は`read_result(result_id, mode="text", path="/items/2/data", offset_char
 | `run_script` | 読み込み中のプログラムに対して、Script Manager と同じようにスクリプトをバックグラウンドのジョブとして実行する。応答は最大`wait_seconds`秒待ってジョブの記録を返す。`source`（スクリプト本文。Java は `public class X extends GhidraScript`、Python は `# @runtime PyGhidra` / `# @runtime Jython` ヘッダで判定、無ければ `runtime` を指定）か `script_id`（カタログのスクリプト）を渡す。`args` は位置引数の文字列。実行はトランザクションで包まれ、成功時はコミット、例外やタイムアウト時はロールバック。ジョブの`result`には `transaction_outcome`、stdout／stderr、Java のコンパイル診断が付くので、失敗したスクリプトを直して再実行できる |
 
 失敗はロールバックされます。`SCRIPT_FAILED` / `SCRIPT_TIMEOUT` のジョブの`operation_error`は、`details.transaction_outcome`（`rolled_back` / `unchanged` / `unknown`）、上限付きで捕捉した `stdout` / `stderr`（`dropped_bytes` 付き）、Java の `SCRIPT_COMPILE_FAILED` ではコンパイラ診断を含みます。`details.output_state`はトランザクションの結果に従います。`rolled_back`と`unchanged`は`absent`、`committed`は`created`（未保存）、`unknown`と、`execution_state`が`invalid`の場合は`uncertain`です（スクリプトが残した処理が、後でプログラムを変えるおそれがあり、ターゲットは隔離されます）。対象はプログラムの変更だけで、ファイルや通信への影響は含みません。大きな診断は、他の大きな結果と同じく結果の保存先へ移り、`operation_error.result_id`で全文を読めます。
+
+<a id="gui"></a>
+
+## GhidraのGUI
+
+`--backend gui` のときだけ公開されます。使い方は[GUIでのライブ共有](gui-live.ja.md)を参照してください。`--backend gui` では、[シンボルとコメント](#symbol-comment-edit)の `rename_variable` も公開されます。
+
+| ツール | 用途 |
+| --- | --- |
+| `get_gui_context` | 人間が見ているもの（CodeBrowserの一覧、アクティブなツールのProgram、位置、関数、選択範囲）、そのProgramに結び付いたtargetとrevision、表示中のモーダルの画面の題名を返す。Ghidraが背面にあるときは、最後に使ったCodeBrowserが対象。表示もtargetも変えない |
+| `show_in_gui` | targetのProgramをCodeBrowserに表示し、`address` か関数の `name` へ移動する。無効な指定は表示を変える前にエラーになる。表示だけを変え、編集、保存、解析はしない |
+
+GUIのバックエンドは、`import_program`、`analyze_program`、`create_project`、`close_session_and_remove_program` と、`bsim`、`shared_sync`、`scripts` のカテゴリを公開しません。公開するツールでも、`apply_edits` の `dry_run` と、decompileする種類（`rename_variable`、`set_local_variable_type`）の一括の編集（同じ名前の単独のツールを使う）、`load_project_program` の `version`、`close_session` の `discard_changes`、別のProjectの指定は `GUI_UNSUPPORTED` です（[使えない機能](gui-live.ja.md#limits)）。
 
 <a id="result-retrieval"></a>
 

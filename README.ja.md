@@ -82,6 +82,7 @@ uv run mecha_ghidra \
 | [ツール一覧](docs/tools.ja.md) | 用途別の全ツール一覧 |
 | [Docker](docs/docker.ja.md) | ビルド、保存先、最初のインポート、ARM64 |
 | [共有プロジェクト](docs/shared-projects.ja.md) | Ghidra Server、チェックアウト／チェックイン、競合、履歴 |
+| [GUIでのライブ共有](docs/gui-live.ja.md) | `--backend gui`、GhidraのGUIとの同じProgramの共有、書き込みの扱い、使えない機能 |
 | [BSim](docs/bsim.ja.md) | 類似検索、データベースへの登録、一致したプログラムの読み込み |
 | [トラブルシューティング・移行](docs/troubleshooting.ja.md) | エラーコード、よくある問題、旧ツール名からの移行 |
 | [開発](docs/development.ja.md) | 構成、テスト、ネイティブビルド、リリース |

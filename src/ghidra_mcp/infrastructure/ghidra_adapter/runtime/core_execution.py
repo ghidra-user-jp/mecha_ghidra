@@ -168,24 +168,52 @@ class RuntimeCoreExecution:
                         # Reloaded, reopened or switched while the job waited:
                         # never run a job on a program the client did not ask for.
                         raise self._session_changed(target)
-                self._ensure_target_not_quarantined_locked(command, target)
-                self._ensure_checkout_for_mutating_command_locked(command, target)
-                if progress is not None:
-                    progress.ran = True
-                try:
-                    result = self._execute_locked(command, params or {}, target, control, record=progress is not None)
-                finally:
-                    if command == "run_script":
-                        self._refresh_domain_path_locked(target)
-                if control is None:
-                    return self._finish_command_locked(command, target, result)
-                try:
-                    return self._finish_command_locked(command, target, result)
-                except Exception as exc:
-                    # The command's transaction has committed: the job did change the program.
-                    error = to_domain_error(exc, operation=command, target=target)
-                    error.details = {**(error.details or {}), "output_created": True}
-                    raise error from exc
+                with self._program_held_locked(session, target):
+                    return self._run_checked_locked(command, params, target, control, progress)
+
+    def _run_checked_locked(
+        self,
+        command: str,
+        params: Dict[str, Any] | None,
+        target: str,
+        control: OperationControl | None,
+        progress: _Progress | None,
+    ) -> Any:
+        self._ensure_target_not_quarantined_locked(command, target)
+        self._ensure_checkout_for_mutating_command_locked(command, target)
+        if progress is not None:
+            progress.ran = True
+        try:
+            result = self._execute_locked(command, params or {}, target, control, record=progress is not None)
+        finally:
+            if command == "run_script":
+                self._refresh_domain_path_locked(target)
+        if control is None:
+            return self._finish_command_locked(command, target, result)
+        try:
+            return self._finish_command_locked(command, target, result)
+        except Exception as exc:
+            # The command's transaction has committed: the job did change the program.
+            error = to_domain_error(exc, operation=command, target=target)
+            error.details = {**(error.details or {}), "output_created": True}
+            raise error from exc
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _program_held_locked(session, target: str) -> Iterator[None]:
+        """With the Ghidra GUI, hold the program for the operation; a closed tab expires the target (spec §5.2)."""
+        hold_program = getattr(session.get_project_handle(), "hold_program", None)
+        if hold_program is None:
+            yield
+            return
+        with hold_program(session.get_program()) as still_open:
+            if not still_open:
+                raise HeadlessError(
+                    f"PROGRAM_NOT_OPEN: target '{target}'s program was closed in the Ghidra GUI; "
+                    "load it again with load_project_program",
+                    details={"reason": "closed_in_gui"},
+                )
+            yield
 
     def analyze_program(self, name: str, *, force: bool = False, control: OperationControl) -> Any:
         """Run the analyze_program command for a background job."""
@@ -337,6 +365,10 @@ class RuntimeCoreExecution:
         if session is None:
             return False
         handle = session.get_project_handle()
+        if getattr(handle, "live_programs", False):
+            # The Ghidra GUI owns the program: versioning is the human's, and a reopen to find a remote
+            # version would only reset the target (and fail on the human's unsaved changes).
+            return False
         is_repository = getattr(handle, "is_repository_project", None)
         if callable(is_repository) and not is_repository():
             # canAddToRepository() also returns true for a private local project.

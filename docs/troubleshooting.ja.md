@@ -20,6 +20,11 @@
 | 長い呼び出しでクライアントがタイムアウト | どの呼び出しも約50秒を超えて待たせない。ジョブ（`import_program`・`analyze_program`・`run_script`）は`wait_seconds`以内に応答し、それ以外の呼び出しは40秒で終わらなければ`deferred: true`を返す。上限を延ばしたり呼び直したりせず、返された`operation_id`で`get_operation`を呼ぶ。50秒より短い期限では切れることがある（[長い呼び出し](usage.ja.md#long-calls)） |
 | 読み込み後に関数がほとんど・まったくない | 読み込みでは解析しない。読み込みの応答が`is_analyzed: false`なら、`analyze_program`を実行してジョブの完了を待つ |
 | 必要なツールが見えない | プロファイル、カテゴリ、個別の有効・無効指定を確認。起動引数変更後はクライアントの一覧を更新・再接続する |
+| `--backend gui` が引数のエラーで起動しない | stdioでは使えないので `--transport http` を指定する。`--project-location` には既存のProjectが要る。Ghidra Serverの認証のオプションと、別のProjectを指す `--session` は指定できない（[GUIでのライブ共有](gui-live.ja.md#startup)） |
+| `--backend gui` で `STARTUP_FAILED`（`details.stage` が `display`） | 画面を表示できる環境で起動する。macOSではログイン中のデスクトップが、Linuxでは応答するXのサーバーを指す `DISPLAY` が要る。GhidraのGUIを起動する前に確かめるので、画面は開かない |
+| `--backend gui` で `STARTUP_FAILED`（`details.stage` が `project_lock`） | 別のGhidraかサーバーがそのProjectを開いている（`details.cause_type` は `PROJECT_LOCKED`）。そちらでProjectを閉じてから起動する。有効なロックファイルを削除しない |
+| `--backend gui` の起動が進まない | `LOCK_TIMEOUT` の `details.modal_dialogs` にある画面（使用許諾など）が、人間の操作を待っている。GUIで答える。Mechaは代わりに答えない |
+| `--backend gui` で、GUIは開いているのに呼び出しが `STARTUP_FAILED` を返し続ける | GUIが立ち上がった後の段階（`details.stage` が `project_open`、`code_browser`、`default_session` など）が失敗した。GUIは人間のために開いたまま残る。`message` で原因を確かめ、Ghidraを終えてから設定を直して起動し直す |
 
 ## ツールのエラー
 
@@ -28,10 +33,10 @@
 | `PATH_NOT_ALLOWED` | シンボリックリンク解決後も許可ルート内になるパスを使う |
 | `NOT_FOUND` | `message`に書かれた関数・データ型・変数・データシンボル・ブックマーク・名前空間・リポジトリが存在しない。`hint`が、探すためのツール（`list_functions`、`list_data_types`、`list_namespaces`（または`create_namespace=true`）など）を示す |
 | `VALIDATION_ERROR` | `message`が、どの引数をなぜ受け付けなかったかを示す（ファイルのパスは`<path>`と表示）。入力の形の誤り、解析できないCの宣言（`C_PARSE_FAILED`）、名前空間以外を通る名前空間のパス（`INVALID_NAMESPACE_TYPE`）、既にあるかディレクトリのない書き出し先（`EXPORT_TARGET_EXISTS`、`EXPORT_DIRECTORY_MISSING`）など。直して呼び直す |
-| `PROGRAM_NOT_OPEN` | targetにプログラムが読み込まれていない。`list_project_programs`で探して`load_project_program`で読み込むか、`import_program`で追加する |
+| `PROGRAM_NOT_OPEN` | targetにプログラムが読み込まれていない。`list_project_programs`で探して`load_project_program`で読み込むか、`import_program`で追加する。`details.reason` が `closed_in_gui` なら、人間がGhidraのGUIでそのタブを閉じたので、`load_project_program`で読み込み直す |
 | `TARGET_NOT_REGISTERED` | その名前のtargetはない。`list_targets`で一覧し、`register_target`で追加する |
 | `STARTUP_FAILED` | 受付を始めた後の起動処理（JVMの起動、スクリプト実行環境の確認、Ghidra Server認証の設定、起動時のプログラムの読み込み）が失敗した。`details.stage` が失敗した段階、`message` が原因（ホストのパスは`<path>`と表示）で、サーバーログには行の全体がある。再試行では直らない。設定を直してサーバーを再起動する |
-| `LOCK_TIMEOUT` | 別の呼び出しがターゲットを使用中、または `run_script` が実行中。`details.lock` が `startup` なら、Ghidraがまだ起動中なので、少し待ってから再試行する。バックグラウンドのジョブか先送りした呼び出しが使用中なら、`details.operation_id`でそれが分かる。`get_operation`で完了を待ってから再試行する。`cancel_operation`で終えたジョブは示さないが、そのワーカーは最大`--lock-timeout-seconds`の間ロックを持ち続けうるので、その後で再試行する。`create_project`も、バックグラウンドの取り込みなど他の操作の実行中はこれを返す（`details.lock`は`runtime`）。それらが終わってから再試行する。`details.script_state` でスクリプトが `running` か、待機中（`queued`、この場合は `retry_after_seconds` 後に再試行）かが分かる。`run_script`のジョブがこれで失敗することはなく、開始できるまで待ち続ける（`phase`は`waiting_for_lock`） |
+| `LOCK_TIMEOUT` | 別の呼び出しがターゲットを使用中、または `run_script` が実行中。`details.lock` が `startup` なら、Ghidraがまだ起動中なので、少し待ってから再試行する。バックグラウンドのジョブか先送りした呼び出しが使用中なら、`details.operation_id`でそれが分かる。`get_operation`で完了を待ってから再試行する。`cancel_operation`で終えたジョブは示さないが、そのワーカーは最大`--lock-timeout-seconds`の間ロックを持ち続けうるので、その後で再試行する。`create_project`も、バックグラウンドの取り込みなど他の操作の実行中はこれを返す（`details.lock`は`runtime`）。それらが終わってから再試行する。`details.script_state` でスクリプトが `running` か、待機中（`queued`、この場合は `retry_after_seconds` 後に再試行）かが分かる。`run_script`のジョブがこれで失敗することはなく、開始できるまで待ち続ける（`phase`は`waiting_for_lock`）。`--backend gui` では、`details.lock` が `program_transaction` なら別のtransaction（`details.transaction`、たとえば自動解析）が開いたままで、何も変えていない。`gui_event_thread` ならGUIのスレッドが応答せず、`details.modal_dialogs` に表示中の画面がある。どちらも、それが終わってから再試行する |
 | `SCRIPT_RUNTIME_UNAVAILABLE` | providerの導入と起動時の例外伝播チェックのログを確認。チェック失敗時は全言語を使用不可にするため、[固定したPyGhidra依存](development.ja.md#pyghidraの依存バージョンとスクリプト失敗)を導入して再起動する。標準のPyGhidra 3.1.0はこのチェックに失敗する |
 | `RAW_LOADER_OPTION_UNAVAILABLE` | 指定した言語・compiler・オプションに対するBinaryLoaderの公開メタデータを取得できなかった。指定値と対応Ghidraバージョンを確認する。`details.cause_message`がそのオプションを示す |
 | `AMBIGUOUS_FUNCTION`、`AMBIGUOUS_DATA_TYPE` | `details.candidates` を確認し、関数アドレス・完全修飾名、または型の完全パスを指定する |
@@ -43,6 +48,9 @@
 | `READ_ONLY_PROGRAM` | 過去バージョンを読み込み中。編集するには現在のファイルを開く |
 | `MERGE_REQUIRED` | [競合時の手順](shared-projects.ja.md#conflicts)に従う。ヘッドレスのマージは非対応 |
 | `JVM_NOT_HEADLESS`、`HEADLESS_UNSUPPORTED` | [JVM起動ルール](development.ja.md)を確認。表示が必要なAPIをheadlessで再試行しない |
+| `GUI_UNSUPPORTED` | GUIのバックエンドが扱わない操作か引数で、何も変えていない。`details.reason` が理由（`dry_run`、`edit_kind_decompiles`、`version`、`discard_changes`、`other_project`、`foreign_undo`、`foreign_redo`、`import`、`version_control`、`delete_file`、`remove_program`）。`hint` の代わりの方法を使うか、GhidraのGUIで行う（[使えない機能](gui-live.ja.md#limits)） |
+| `GUI_NAVIGATION_FAILED` | `show_in_gui` がProgramを表示したが、指定の位置へ移動できなかった。アドレスか名前を確かめて呼び直す |
+| `SESSION_NOT_FOUND`（`details.reason` が `gui_project_closed`） | 人間がGhidraのGUIでこのサーバーのProjectを閉じたか、別のProjectを開いた。同じProjectを開き直しても、このサーバーは戻らない。Ghidraを終えてから、サーバーを起動し直す |
 | `BSIM_URL_REQUIRED`、`BSIM_URL_INVALID` | 対応するBSim URLを指定する |
 | `BSIM_AUTHENTICATION_FAILED`、`BSIM_DATABASE_UNREACHABLE` | バックエンドの認証情報と到達性を確認する。データベース自身の報告で判定する。ログインを拒否されたなら`BSIM_AUTHENTICATION_FAILED`で、再試行しても直らない。データベースに届かない場合は再試行可能で、読み取り専用のBSimのツールはそのまま呼び直せる。書き込みは`output_state`が`absent`のときに再試行する |
 | `BSIM_DATABASE_INIT_FAILED` | データベースが存在しない、別のプロセスがH2のファイルを使っているなど、接続やログイン以外の理由でBSimのデータベースを開けなかった。`message`にデータベース自身の報告がある。作成するか解放する（[BSimの運用](bsim-operations.md)）。書き込みは`output_state: absent`を返す |

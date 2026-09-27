@@ -110,6 +110,8 @@ REFUSED_BEFORE_ANY_CHANGE: frozenset[ErrorCode] = frozenset(
         ErrorCode.SHARED_FILE_DELETE_BLOCKED,
         ErrorCode.LATEST_VERSION_MISMATCH,
         ErrorCode.VERSION_NOT_FOUND,
+        # Refused before the transaction starts (spec §7.4).
+        ErrorCode.GUI_UNSUPPORTED,
         ErrorCode.BSIM_URL_REQUIRED,
         ErrorCode.BSIM_URL_INVALID,
         ErrorCode.BSIM_PARAMETER_INVALID,

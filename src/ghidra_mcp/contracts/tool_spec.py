@@ -33,6 +33,24 @@ class ToolCategoryTag(str, Enum):
     DATATYPE_OPS = "datatype_ops"
     SHARED_SYNC = "shared_sync"
     SCRIPTS = "scripts"
+    # Reading and moving the Ghidra GUI's view; only the GUI backend offers it.
+    GUI = "gui"
+
+
+class ToolBackend(str, Enum):
+    """Where Ghidra runs: without a display (the default), or as the GUI in this process."""
+
+    HEADLESS = "headless"
+    GUI = "gui"
+
+
+# What the GUI backend does not offer in its first version (spec §7.2, "U").
+GUI_UNSUPPORTED_CATEGORIES = frozenset({ToolCategoryTag.BSIM, ToolCategoryTag.SHARED_SYNC, ToolCategoryTag.SCRIPTS})
+GUI_UNSUPPORTED_TOOL_NAMES = frozenset(
+    {"import_program", "analyze_program", "create_project", "close_session_and_remove_program"}
+)
+# Tools outside the gui category that only the GUI backend offers (spec §7.2); headless keeps its tools/list (G01).
+GUI_ONLY_TOOL_NAMES = frozenset({"rename_variable"})
 
 
 class ToolSafetyTag(str, Enum):
@@ -74,6 +92,8 @@ class ToolSpec:
     output_model: type[BaseModel]
     empty_list_policy: str = "normalize"
     include_target: bool = True
+    # A registry tool whose target may be left out, as core commands' may ("default").
+    optional_target: bool = False
     static_kwargs: dict[str, Any] = field(default_factory=dict)
     result_adapter: str | None = None
     error_adapter: str | None = None
@@ -620,6 +640,7 @@ def _tool(
     scalar_output_type: type[Any] | None = None,
     output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
     include_target: bool = True,
+    optional_target: bool = False,
     static_kwargs: dict[str, Any] | None = None,
     result_adapter: str | None = None,
     error_adapter: str | None = None,
@@ -648,6 +669,7 @@ def _tool(
             output_fields=output_fields,
         ),
         include_target=include_target,
+        optional_target=optional_target,
         static_kwargs=dict(static_kwargs or {}),
         result_adapter=result_adapter,
         error_adapter=error_adapter,
@@ -717,6 +739,7 @@ def _registry_tool(
     scalar_output_type: type[Any] | None = None,
     output_fields: tuple[ToolFieldSpec, ...] = _NO_FIELDS,
     include_target: bool = True,
+    optional_target: bool = False,
     static_kwargs: dict[str, Any] | None = None,
     result_adapter: str | None = None,
     error_adapter: str | None = None,
@@ -741,6 +764,7 @@ def _registry_tool(
         scalar_output_type=scalar_output_type,
         output_fields=output_fields,
         include_target=include_target,
+        optional_target=optional_target,
         static_kwargs=static_kwargs,
         result_adapter=result_adapter,
         error_adapter=error_adapter,
@@ -2116,6 +2140,155 @@ _TOOL_SPECS["batch_read"] = _core_tool(
     input_model=batch_input_model(_TOOL_SPECS),
     presenter="batch",
 )
+# Tools whose contract differs with the Ghidra GUI backend; filter_tool_specs(backend="gui") publishes these.
+# The headless contracts stay as they are (spec §14.3, G01).
+_GUI_VARIANTS: dict[str, ToolSpec] = {
+    "load_project_program": _registry_tool(
+        "load_project_program",
+        method_name="load_program",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.BASIC,
+        input_fields=(
+            ("domain_path", str, ...),
+            ("version", _VERSION_NUMBER | None, None),
+        ),
+        output_fields=(*_LOAD_PROJECT_PROGRAM_OUTPUT_FIELDS, ("modal_dialog", str | None, None)),
+        result_adapter="status_program_ok",
+        description=(
+            "Load or switch a program for an existing target by domain path. With the Ghidra GUI backend it opens "
+            "as a CodeBrowser tab without changing the human's current tab, or binds the program a GUI tool already "
+            "has open; loading the program the target already holds changes nothing and saves nothing. version is "
+            "not available. Loading never runs auto-analysis; the GUI may ask the human, and modal_dialog then "
+            "names that dialog."
+        ),
+        idempotent_hint=False,
+    ),
+    "open_program": _registry_tool(
+        "open_program",
+        method_name="create_session",
+        category_tag=ToolCategoryTag.CORE,
+        safety_tag=ToolSafetyTag.WRITE,
+        operation_level=ToolOperationLevel.STANDARD,
+        input_fields=(
+            ("project_location", str, ...),
+            ("domain_path", str, ...),
+            ("project_name", str | None, None),
+        ),
+        output_fields=(*_CREATE_SESSION_OUTPUT_FIELDS, ("modal_dialog", str | None, None)),
+        result_adapter="status_target_ok",
+        error_adapter="create_session_error",
+        description=(
+            "Open a program of the project the Ghidra GUI has open in a new target session: it opens as a "
+            "CodeBrowser tab without changing the human's current tab, or binds the program a GUI tool already has "
+            "open. Opening never runs auto-analysis; the GUI may ask the human, and modal_dialog then names that "
+            "dialog. This is non-idempotent and fails if the target already exists; then use load_project_program."
+        ),
+        idempotent_hint=False,
+    ),
+}
+
+
+def gui_variant(spec: ToolSpec) -> ToolSpec:
+    """The GUI backend's contract for ``spec``'s tool (the same spec for most tools)."""
+    if _TOOL_SPECS.get(spec.name) is spec:
+        return _GUI_VARIANTS.get(spec.name, spec)
+    return spec
+
+
+def is_canonical(spec: ToolSpec) -> bool:
+    """Whether ``spec`` is the one ``get_tool_spec`` returns (not a backend variant)."""
+    return _TOOL_SPECS.get(spec.name) is spec
+
+
+# The Ghidra GUI backend's view of the GUI (spec §8, §9): published only with --backend gui.
+_TOOL_SPECS["get_gui_context"] = _registry_tool(
+    "get_gui_context",
+    method_name="get_gui_context",
+    category_tag=ToolCategoryTag.GUI,
+    safety_tag=ToolSafetyTag.READ_ONLY,
+    operation_level=ToolOperationLevel.BASIC,
+    include_target=False,
+    output_fields=(
+        ("tools", list[dict], ...),
+        ("active_tool", dict | None, ...),
+        ("active_known", bool, ...),
+        ("program", dict | None, ...),
+        ("location", dict | None, ...),
+        ("selection", dict | None, ...),
+        ("targets", list[str], ...),
+        ("revision", str | None, ...),
+        ("modal_dialog", str | None, ...),
+    ),
+    description=(
+        "What the human sees in the Ghidra GUI of this server: the CodeBrowser tools, the active tool's "
+        "program (domain_path), location, function and selection, and the targets bound to that program. "
+        "Changes nothing and loads nothing; load_project_program takes the domain_path. modal_dialog names "
+        "a dialog waiting for the human."
+    ),
+    idempotent_hint=True,
+)
+_TOOL_SPECS["show_in_gui"] = _registry_tool(
+    "show_in_gui",
+    method_name="show_in_gui",
+    category_tag=ToolCategoryTag.GUI,
+    safety_tag=ToolSafetyTag.WRITE,
+    operation_level=ToolOperationLevel.BASIC,
+    input_fields=(("address", str | None, None), ("function_name", str | None, None)),
+    optional_target=True,
+    public_name_overrides={"function_name": "name"},
+    output_fields=(
+        ("target", str, ...),
+        ("program", str | None, ...),
+        ("tool", str, ...),
+        ("tool_id", str, ...),
+        ("shown", bool | None, ...),
+        ("created_tab", bool, ...),
+        ("launched_tool", bool, ...),
+        ("navigated", bool | None, ...),
+        ("requested", dict, ...),
+        ("actual_address", str | None, ...),
+        ("focus_requested", bool, ...),
+        ("focus_confirmed", bool | None, ...),
+        ("modal_dialog", str | None, ...),
+    ),
+    description=(
+        "Show the target's program in the human's Ghidra CodeBrowser, and move to address (or function name; "
+        "address wins). Use it when the human asks to see something or to have a result checked, not during "
+        "ordinary analysis. Changes only the view: no edit, save or analysis. Adds a tab only if no tool shows "
+        "the program; without address or name the view keeps its position."
+    ),
+    idempotent_hint=True,
+)
+
+# The GUI backend's apply_edits refuses the kinds that decompile (spec §7.4), so a variable rename has its
+# own tool there, as a variable's type has set_local_variable_type.  Headless renames through apply_edits.
+# The command reads apply_edits' item keys, so the raw names are those and the public names are the tool's.
+_TOOL_SPECS["rename_variable"] = _core_tool(
+    "rename_variable",
+    category_tag=ToolCategoryTag.SYMBOL_COMMENT_EDIT,
+    safety_tag=ToolSafetyTag.WRITE,
+    operation_level=ToolOperationLevel.STANDARD,
+    input_fields=(
+        ("oldName", str, ...),
+        ("newName", str, ...),
+        ("functionAddress", str | None, None),
+        ("functionName", str | None, None),
+    ),
+    public_name_overrides={
+        "oldName": "old_name",
+        "newName": "new_name",
+        "functionAddress": "function_address",
+        "functionName": "function_name",
+    },
+    omit_falsey_keys=("functionAddress", "functionName"),
+    checkout_required=True,
+    description=(
+        "Rename a local variable or parameter from old_name to new_name in the function given by "
+        "function_address or function_name (address wins). The function is decompiled before the change; "
+        "if the program changes meanwhile, nothing is applied and the call returns SESSION_CHANGED."
+    ),
+)
 
 _DEFAULT_PROFILE_CATEGORIES = frozenset(
     {
@@ -2204,6 +2377,13 @@ def get_checkout_required_tool_names(specs: dict[str, ToolSpec] | None = None) -
     }
 
 
+def backend_offers(spec: ToolSpec, backend: ToolBackend | str) -> bool:
+    """Whether ``backend`` can run ``spec``'s tool at all, whatever the exposure flags say (spec §7.3)."""
+    if _coerce_enum_member(backend, ToolBackend, "backend") is ToolBackend.HEADLESS:
+        return spec.category_tag is not ToolCategoryTag.GUI and spec.name not in GUI_ONLY_TOOL_NAMES
+    return spec.category_tag not in GUI_UNSUPPORTED_CATEGORIES and spec.name not in GUI_UNSUPPORTED_TOOL_NAMES
+
+
 def filter_tool_specs(
     *,
     specs: dict[str, ToolSpec] | None = None,
@@ -2214,11 +2394,55 @@ def filter_tool_specs(
     allow_operation_levels: Iterable[ToolOperationLevel | str] | None = None,
     enable_tools: Iterable[str] | None = None,
     disable_tools: Iterable[str] | None = None,
+    backend: ToolBackend | str = ToolBackend.HEADLESS,
 ) -> dict[str, ToolSpec]:
+    """The tools to publish.
+
+    The flags apply in order (profile categories, --allow-category replacing
+    them, --add-category, safety and operation level, --enable-tool, then
+    --disable-tool); last, what ``backend`` cannot run is removed, which no
+    flag overrides.  The GUI backend adds the ``gui`` category to the
+    profile's own categories.
+    """
     available_specs = _TOOL_SPECS if specs is None else specs
+    effective_backend = _coerce_enum_member(backend, ToolBackend, "backend")
+    selected_names = _selected_tool_names(
+        available_specs,
+        profile=profile,
+        allow_categories=allow_categories,
+        add_categories=add_categories,
+        allow_safety=allow_safety,
+        allow_operation_levels=allow_operation_levels,
+        enable_tools=enable_tools,
+        disable_tools=disable_tools,
+        backend=effective_backend,
+    )
+    # Last, and beyond any flag: what the backend cannot run.
+    return {
+        name: gui_variant(spec) if effective_backend is ToolBackend.GUI else spec
+        for name, spec in available_specs.items()
+        if name in selected_names and backend_offers(spec, effective_backend)
+    }
+
+
+def _selected_tool_names(
+    available_specs: dict[str, ToolSpec],
+    *,
+    profile: ToolProfile | str,
+    allow_categories: Iterable[ToolCategoryTag | str] | None,
+    add_categories: Iterable[ToolCategoryTag | str] | None,
+    allow_safety: Iterable[ToolSafetyTag | str] | None,
+    allow_operation_levels: Iterable[ToolOperationLevel | str] | None,
+    enable_tools: Iterable[str] | None,
+    disable_tools: Iterable[str] | None,
+    backend: ToolBackend,
+) -> set[str]:
+    """The names the flags select, before the backend's capability step (see filter_tool_specs)."""
     profile_spec = _PROFILE_SPECS[_coerce_enum_member(profile, ToolProfile, "tool profile")]
 
     categories = set(profile_spec.categories)
+    if backend is ToolBackend.GUI:
+        categories.add(ToolCategoryTag.GUI)
     allowed_categories = _coerce_enum_set(
         allow_categories,
         enum_cls=ToolCategoryTag,
@@ -2273,8 +2497,61 @@ def filter_tool_specs(
     if "get_operation" not in selected_names:
         # Cancelling is only useful to a client that can read the job record.
         selected_names.discard("cancel_operation")
+    return selected_names
 
-    return {name: spec for name, spec in available_specs.items() if name in selected_names}
+
+def tools_removed_by_backend(
+    *,
+    backend: ToolBackend | str,
+    specs: dict[str, ToolSpec] | None = None,
+    profile: ToolProfile | str = ToolProfile.DEFAULT,
+    allow_categories: Iterable[ToolCategoryTag | str] | None = None,
+    add_categories: Iterable[ToolCategoryTag | str] | None = None,
+    allow_safety: Iterable[ToolSafetyTag | str] | None = None,
+    allow_operation_levels: Iterable[ToolOperationLevel | str] | None = None,
+    enable_tools: Iterable[str] | None = None,
+    disable_tools: Iterable[str] | None = None,
+) -> list[str]:
+    """The tools the flags ask for that ``backend`` cannot run, for the startup warning (spec §7.3).
+
+    Asked for means selected by the flags, before the capability step, and
+    named with --enable-tool, in a category named with --add-category or
+    --allow-category, or, with the GUI backend, in the profile; the headless
+    backend's ``full`` profile covers the ``gui`` category without asking
+    for it.  A GUI-only tool of another category never existed for headless,
+    so there only --enable-tool asks for it.
+    """
+    available_specs = _TOOL_SPECS if specs is None else specs
+    effective_backend = _coerce_enum_member(backend, ToolBackend, "backend")
+    selected = _selected_tool_names(
+        available_specs,
+        profile=profile,
+        allow_categories=allow_categories,
+        add_categories=add_categories,
+        allow_safety=allow_safety,
+        allow_operation_levels=allow_operation_levels,
+        enable_tools=enable_tools,
+        disable_tools=disable_tools,
+        backend=effective_backend,
+    )
+    named_categories = set(_coerce_enum_set(add_categories, enum_cls=ToolCategoryTag, label="category") or ())
+    named_categories |= set(_coerce_enum_set(allow_categories, enum_cls=ToolCategoryTag, label="category") or ())
+    if effective_backend is ToolBackend.GUI:
+        named_categories |= set(_PROFILE_SPECS[_coerce_enum_member(profile, ToolProfile, "tool profile")].categories)
+    named_tools = set(enable_tools or ())
+
+    def asked_for(name: str, spec: ToolSpec) -> bool:
+        if name in named_tools:
+            return True
+        if effective_backend is ToolBackend.HEADLESS and name in GUI_ONLY_TOOL_NAMES:
+            return False
+        return spec.category_tag in named_categories
+
+    return sorted(
+        name
+        for name, spec in available_specs.items()
+        if name in selected and asked_for(name, spec) and not backend_offers(spec, effective_backend)
+    )
 
 
 def _job_tools(specs: Mapping[str, ToolSpec]) -> list[str]:

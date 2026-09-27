@@ -44,6 +44,7 @@ from ghidra_mcp.contracts.tool_spec import (
     OPERATION_CONTROL_TOOLS,
     ExecutorKind,
     ToolSpec,
+    is_canonical,
     validate_tool_selection,
 )
 from ghidra_mcp.domain import DomainError, ErrorCode, get_lock_timeout_seconds
@@ -140,8 +141,11 @@ class GhidraMCPServer(Server):
         deferrable: frozenset[str] = frozenset(),
         prepare_thread: Callable[[], None] | None = None,
         startup_gate: StartupGate | None = None,
+        argument_policy: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         self.bindings = {binding.definition.name: binding for binding in bindings}
+        # Raises a DomainError for arguments the backend refuses (the GUI backend's, spec §7.4).
+        self.argument_policy = argument_policy
         self.specs = specs
         self.result_store = result_store
         self.operations_provider = operations_provider
@@ -182,6 +186,12 @@ class GhidraMCPServer(Server):
         except ValidationError as exc:
             raise ToolInputError(f"{name} input validation failed: {exc}", write=writes) from exc
         kwargs = parsed.model_dump()
+        if self.argument_policy is not None:
+            try:
+                # Off the event loop: the policy may resolve a project path (a stat on a slow mount).
+                await anyio.to_thread.run_sync(self.argument_policy, name, kwargs)
+            except DomainError as exc:
+                return self.complete_result(name, kwargs, domain_error_result(self._refused(name, exc)))
         is_operation = spec is not None and spec.presenter == "operation"
         deadline = (
             time.monotonic() + (kwargs.get("wait_seconds") or self.deferred_calls.defer_after) if is_operation else None
@@ -433,6 +443,7 @@ def create_mcp_server(
     prepare_thread: Callable[[], None] | None = None,
     startup_gate: StartupGate | None = None,
     command_source: Callable[[], dict[str, Any] | None] | None = None,
+    argument_policy: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> MCPServerRuntime:
     """Build the MCP server for ``specs``.
 
@@ -460,7 +471,9 @@ def create_mcp_server(
         target: str,
         *,
         registry,
+        spec: ToolSpec | None = None,
     ) -> Any:
+        del spec  # the published spec below is the one that applies, a backend's variant included
         spec = effective_specs[spec_name]
         if spec.presenter == "batch":
             raw_args = _validate_raw_args(spec, raw_args)
@@ -469,11 +482,13 @@ def create_mcp_server(
                 if child is None or child.writes or child.executor_kind != ExecutorKind.CORE_COMMAND:
                     raise ToolInputError("batch_read tool is not enabled for reads: %s" % request["tool"])
         dispatcher = dispatcher_provider()
+        variant = {} if is_canonical(spec) else {"spec": spec}
         result = dispatcher(
             spec_name,
             raw_args,
             target,
             registry=registry,
+            **variant,
         )
         if spec.presenter == "operation":
             # Bounded job records stay inline and are never replaced by a
@@ -536,6 +551,7 @@ def create_mcp_server(
         deferrable=deferrable,
         prepare_thread=prepare_thread,
         startup_gate=startup_gate,
+        argument_policy=argument_policy,
     )
     return MCPServerRuntime(
         mcp=mcp,
