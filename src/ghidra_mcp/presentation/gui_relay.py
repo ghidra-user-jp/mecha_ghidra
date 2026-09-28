@@ -5,7 +5,12 @@ A relay starts no JVM.  It finds the runtime of its project in the registry
 runtime runs with its configuration (spec §10.3), and then forwards each
 JSON-RPC message to the runtime's loopback endpoint as it is.  The runtime
 answers every request with one JSON body (stateless Streamable HTTP), so
-forwarding needs no MCP session of its own.
+forwarding needs no MCP session of its own.  The HTTP routing headers go
+along: an HTTP client's are passed on unchanged, and for a stdio client the
+relay sends what an HTTP client would (the protocol version, ``Mcp-Method``
+and ``Mcp-Name``), which the runtime checks against the body from protocol
+2026-07-28 on.  The HTTP relay answers with the runtime's HTTP status, which
+such a client reads too.
 
 What the runtime cannot answer, the relay's fallback answers: the same MCP
 server this package builds for the relay's own tools, whose startup gate
@@ -33,6 +38,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx2
+from mcp.shared.inbound import (
+    MCP_METHOD_HEADER,
+    MCP_NAME_HEADER,
+    MCP_PARAM_HEADER_PREFIX,
+    MCP_PROTOCOL_VERSION_HEADER,
+    NAME_BEARING_METHODS,
+    encode_header_value,
+)
+from mcp_types import PROTOCOL_VERSION_META_KEY
 
 from ghidra_mcp.contracts.tool_spec import ToolSpec
 from ghidra_mcp.domain import DomainError, ErrorCode
@@ -450,11 +464,46 @@ class RuntimeGone(Exception):
         self.reached = reached
 
 
-def _headers(protocol_version: str | None) -> dict[str, str]:
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    if protocol_version:
-        headers["MCP-Protocol-Version"] = protocol_version
+# The MCP routing headers, as (name, value) pairs so a duplicate an HTTP client sent stays for the runtime to refuse.
+Routing = list[tuple[str, str]]
+_ROUTING_HEADERS = frozenset({MCP_PROTOCOL_VERSION_HEADER, MCP_METHOD_HEADER, MCP_NAME_HEADER})
+
+
+def routing_headers_of(headers: Any) -> Routing:
+    """The routing headers an HTTP client sent (protocol version, method, name, ``Mcp-Param-*``), to pass on unchanged."""
+    param_prefix = MCP_PARAM_HEADER_PREFIX.lower()
+    return [
+        (name, value)
+        for name, value in headers.items()
+        if name.lower() in _ROUTING_HEADERS or name.lower().startswith(param_prefix)
+    ]
+
+
+def derived_routing_headers(message: Mapping[str, Any], negotiated: str | None) -> Routing:
+    """The routing headers a Streamable HTTP client sends with ``message``, for a client that sent none (stdio).
+
+    The protocol version is the request's own (``params._meta``, from protocol
+    2026-07-28 on) or the one ``initialize`` settled.  ``Mcp-Method`` names the
+    method, and ``Mcp-Name`` the tool, prompt or resource a request names.
+    """
+    params = message.get("params")
+    params = params if isinstance(params, Mapping) else {}
+    meta = params.get("_meta")
+    version = meta.get(PROTOCOL_VERSION_META_KEY) if isinstance(meta, Mapping) else None
+    version = version if isinstance(version, str) else negotiated
+    headers: Routing = [(MCP_PROTOCOL_VERSION_HEADER, version)] if version else []
+    method = message.get("method")
+    if isinstance(method, str):
+        headers.append((MCP_METHOD_HEADER, method))
+        name_key = NAME_BEARING_METHODS.get(method)
+        name = params.get(name_key) if name_key else None
+        if isinstance(name, str):
+            headers.append((MCP_NAME_HEADER, encode_header_value(name)))
     return headers
+
+
+def _headers(routing: Routing) -> Routing:
+    return [("Content-Type", "application/json"), ("Accept", "application/json, text/event-stream"), *routing]
 
 
 class RuntimeEndpoint:
@@ -480,10 +529,10 @@ class RuntimeEndpoint:
             finally:
                 self._client = None
 
-    async def post(self, body: bytes, protocol_version: str | None) -> tuple[int, bytes]:
+    async def post(self, body: bytes, routing: Routing) -> tuple[int, bytes]:
         assert self._client is not None, "RuntimeEndpoint.connected() first"
         try:
-            response = await self._client.post(self.record.endpoint, content=body, headers=_headers(protocol_version))
+            response = await self._client.post(self.record.endpoint, content=body, headers=_headers(routing))
         except (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout) as exc:
             raise RuntimeGone(f"cannot connect: {exc}", reached=False) from exc
         except httpx2.TransportError as exc:
@@ -544,9 +593,9 @@ class Fallback:
             finally:
                 self._client = None
 
-    async def post(self, body: bytes, protocol_version: str | None) -> tuple[int, bytes]:
+    async def post(self, body: bytes, routing: Routing) -> tuple[int, bytes]:
         assert self._client is not None, "Fallback.running() first"
-        response = await self._client.post("/mcp", content=body, headers=_headers(protocol_version))
+        response = await self._client.post("/mcp", content=body, headers=_headers(routing))
         return response.status_code, response.content
 
 
@@ -621,28 +670,38 @@ class Relay:
         result = domain_error_result(error).model_dump(mode="json", by_alias=True, exclude_none=True)
         return {"jsonrpc": "2.0", "id": message.get("id"), "result": result}
 
-    async def handle(self, message: dict[str, Any], protocol_version: str | None = None) -> dict[str, Any] | None:
+    async def exchange(
+        self, message: dict[str, Any], routing: Routing | None = None
+    ) -> tuple[int, dict[str, Any] | None]:
+        """Forward ``message``: the HTTP status and the reply (None for a notification).
+
+        ``routing`` is what an HTTP client sent; without it (stdio), the relay
+        sends the routing headers an HTTP client would.
+        """
         method = message.get("method")
-        version = protocol_version or self.protocol_version
+        if routing is None:
+            routing = derived_routing_headers(message, self.protocol_version)
         body = json.dumps(message).encode()
         to_fallback = self._gone or (
             method == "tools/call" and str((message.get("params") or {}).get("name")) not in self.tools
         )
         if not to_fallback:
             try:
-                status, payload = await self.runtime.post(body, version)
+                status, payload = await self.runtime.post(body, routing)
             except RuntimeGone as exc:
                 self._runtime_gone()
                 if method == "tools/call" and exc.reached and "id" in message:
-                    return self._in_flight_error(message, str(exc))
+                    return 200, self._in_flight_error(message, str(exc))
             else:
                 if status == 401:  # another runtime took the project (the token is not its)
                     self._runtime_gone()
                 else:
-                    reply = _parse_reply(status, payload, message.get("id"))
-                    return self._filtered(method, reply)
-        status, payload = await self.fallback.post(body, version)
-        return self._filtered(method, _parse_reply(status, payload, message.get("id")))
+                    return status, self._filtered(method, _parse_reply(status, payload, message.get("id")))
+        status, payload = await self.fallback.post(body, routing)
+        return status, self._filtered(method, _parse_reply(status, payload, message.get("id")))
+
+    async def handle(self, message: dict[str, Any], routing: Routing | None = None) -> dict[str, Any] | None:
+        return (await self.exchange(message, routing))[1]
 
     def _filtered(self, method: Any, reply: dict[str, Any] | None) -> dict[str, Any] | None:
         if reply is None:
@@ -655,23 +714,27 @@ class Relay:
             result["tools"] = [tool for tool in result["tools"] if tool.get("name") in self.tools]
         return reply
 
-    async def handle_body(self, body: bytes, protocol_version: str | None = None) -> bytes | None:
-        """One wire message (or a batch of them): the reply to write, or None for notifications only."""
+    async def exchange_body(self, body: bytes, routing: Routing | None = None) -> tuple[int, bytes | None]:
+        """One wire message (or a batch of them): the HTTP status and the reply to write (None: notifications only)."""
         try:
             message = json.loads(body)
         except ValueError:
             reply: Any = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
-            return json.dumps(reply).encode()
+            return 400, json.dumps(reply).encode()
         if isinstance(message, list):
-            replies = [await self.handle(item, protocol_version) for item in message if isinstance(item, dict)]
+            replies = [await self.handle(item, routing) for item in message if isinstance(item, dict)]
             answered = [reply for reply in replies if reply is not None]
-            return json.dumps(answered).encode() if answered else None
+            return (200, json.dumps(answered).encode()) if answered else (202, None)
         if not isinstance(message, dict):
-            return json.dumps(
+            return 400, json.dumps(
                 {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
             ).encode()
-        reply = await self.handle(message, protocol_version)
-        return None if reply is None else json.dumps(reply).encode()
+        status, reply = await self.exchange(message, routing)
+        return status, None if reply is None else json.dumps(reply).encode()
+
+    async def handle_body(self, body: bytes, routing: Routing | None = None) -> bytes | None:
+        """One wire message (or a batch of them): the reply to write, or None for notifications only."""
+        return (await self.exchange_body(body, routing))[1]
 
 
 # ---- serving the relay ---------------------------------------------------------------------------
@@ -741,10 +804,11 @@ def _http_relay_app(relay: Relay, *, path: str, host: str):
             return refused
         if request.method != "POST":
             return Response(status_code=405, headers={"Allow": "POST"})
-        reply = await relay.handle_body(await request.body(), request.headers.get("mcp-protocol-version"))
+        # A client of protocol 2026-07-28 or later reads the status too (400 for an unsupported version).
+        status, reply = await relay.exchange_body(await request.body(), routing_headers_of(request.headers))
         if reply is None:
             return Response(status_code=202)
-        return Response(reply, media_type="application/json")
+        return Response(reply, status_code=status, media_type="application/json")
 
     return Starlette(routes=[Route(path, endpoint, methods=["GET", "POST", "DELETE"])])
 

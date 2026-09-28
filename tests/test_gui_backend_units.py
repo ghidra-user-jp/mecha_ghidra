@@ -512,3 +512,34 @@ class TestFrontEndWait:
         with pytest.raises(HeadlessError) as raised:
             readiness.wait_for_front_end(readiness.GuiStartupStatus(), launch)
         assert raised.value.code == "STARTUP_FAILED" and "after its startup thread ended" in str(raised.value)
+
+    def test_a_startup_thread_that_runs_on_and_on_has_hung(self, front_end, monkeypatch, caplog):
+        """Calls hear STARTUP_FAILED, not a retryable LOCK_TIMEOUT for good; the log says where it waits."""
+        readiness, _shown, _alive, launch = front_end
+        monkeypatch.setattr(readiness, "STARTUP_THREAD_LIMIT_SECONDS", 0.1)
+        with caplog.at_level("ERROR"), pytest.raises(HeadlessError) as raised:
+            readiness.wait_for_front_end(readiness.GuiStartupStatus(), launch)
+        assert raised.value.code == "STARTUP_FAILED" and "startup thread ran for 0.1 s" in str(raised.value)
+        assert "it waits at" in caplog.text
+
+    def test_a_dialog_the_startup_thread_shows_does_not_count(self, front_end, monkeypatch):
+        """The user agreement waits for a human while the startup thread shows it (spec §4.6)."""
+        readiness, shown, _alive, launch = front_end
+        monkeypatch.setattr(readiness, "STARTUP_THREAD_LIMIT_SECONDS", 0.1)
+        monkeypatch.setattr(readiness, "modal_dialog_titles", lambda: ["Ghidra User Agreement"])
+        threading.Timer(0.4, lambda: shown.update(tool="front end")).start()  # four limits later
+        assert readiness.wait_for_front_end(readiness.GuiStartupStatus(), launch) == "front end"
+
+
+class TestPlainText:
+    def test_tags_and_character_references_become_plain_words(self):
+        """A lock holder's details are an HTML table padded with &nbsp; (spec §16.2, S2)."""
+        from ghidra_headless.gui.edt import plain_text
+
+        holder = "<html><table><tr><td>&nbsp;&nbsp;Username:</td><td>alice &amp; bob</td></tr></table></html>"
+        assert plain_text(holder) == "Username: alice & bob"
+
+    def test_an_escaped_angle_bracket_is_text_not_a_tag(self):
+        from ghidra_headless.gui.edt import plain_text
+
+        assert plain_text("<b>a &lt;b&gt; c</b>") == "a <b> c"

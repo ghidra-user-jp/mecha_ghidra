@@ -24,7 +24,12 @@ settings_dir.mkdir(parents=True, exist_ok=True)
 from ghidra_headless.launcher import prepare_headless_launcher, start_headless_jvm  # noqa: E402
 
 launcher = prepare_headless_launcher(os.environ["GHIDRA_INSTALL_DIR"])
-launcher.add_vmargs(f"-Dapplication.settingsdir={settings_dir}")
+# Ghidra's cache and temporary files stay beside the settings, apart from the user's Ghidra.
+launcher.add_vmargs(
+    f"-Dapplication.settingsdir={settings_dir}",
+    f"-Dapplication.cachedir={settings_dir.parent / 'ghidra-cache'}",
+    f"-Dapplication.tempdir={settings_dir.parent / 'ghidra-temp'}",
+)
 start_headless_jvm(os.environ["GHIDRA_INSTALL_DIR"], launcher=launcher)
 
 from ghidra.base.project import GhidraProject  # noqa: E402

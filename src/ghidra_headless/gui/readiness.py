@@ -35,6 +35,10 @@ OPEN_STEP_TIMEOUT_SECONDS = 300.0
 # How long GhidraRun may show neither its FrontEnd nor a dialog, once its own startup thread has ended,
 # before it is taken to have failed.
 FRONT_END_GRACE_SECONDS = 180.0
+# How long GhidraRun's startup thread may run with no dialog up before it is taken to have hung.  It
+# initializes the application in seconds (under a minute on an emulated Windows VM); a dialog it shows,
+# such as the user agreement, waits for a human and does not count.
+STARTUP_THREAD_LIMIT_SECONDS = 600.0
 # How often the FrontEnd wait looks for GhidraRun's startup thread before it has found it.
 _STARTUP_THREAD_LOOK_SECONDS = 1.0
 
@@ -113,6 +117,13 @@ class _GhidraStartupThread:
             self._thread = _find_ghidra_startup_thread()
         return self._thread is not None and bool(self._thread.isAlive())
 
+    def stack(self, frames: int = 25) -> str:
+        """Where the thread is now, for the log of a startup taken to have hung."""
+        try:
+            return "\n".join(f"    at {element}" for element in list(self._thread.getStackTrace())[:frames])
+        except Exception:  # gone, or never found
+            return "    (not available)"
+
 
 def _find_ghidra_startup_thread():
     from java.lang import Thread
@@ -129,12 +140,15 @@ def wait_for_front_end(status: GuiStartupStatus, launch: GuiLaunch):
 
     GhidraRun runs on a Java thread whose failure never reaches the launcher,
     so a long stretch with neither the FrontEnd, a dialog, nor GhidraRun's
-    startup thread at work is a failure too.
+    startup thread at work is a failure too.  So is a startup thread that
+    runs on with no dialog up for STARTUP_THREAD_LIMIT_SECONDS: it has hung,
+    and calls get STARTUP_FAILED instead of retrying a startup that never ends.
     """
     from ghidra.framework.main import AppInfo
 
     startup_thread = _GhidraStartupThread()
-    quiet_since = time.monotonic()
+    quiet_since = last = time.monotonic()
+    thread_busy = 0.0  # how long the startup thread has run with no dialog up
     while True:
         _check_stop(status)
         failure = launch.failure
@@ -148,9 +162,24 @@ def wait_for_front_end(status: GuiStartupStatus, launch: GuiLaunch):
             front_end = None
         if front_end is not None:
             return front_end
-        if status.update() or startup_thread.running():
-            quiet_since = time.monotonic()
-        elif time.monotonic() - quiet_since > FRONT_END_GRACE_SECONDS:
+        now = time.monotonic()
+        elapsed, last = now - last, now
+        if status.update():
+            quiet_since = now
+        elif startup_thread.running():
+            quiet_since = now
+            thread_busy += elapsed
+            if thread_busy > STARTUP_THREAD_LIMIT_SECONDS:
+                logger.error(
+                    "GhidraRun's startup thread ran for %g s with no project window and no dialog; it waits at:\n%s",
+                    STARTUP_THREAD_LIMIT_SECONDS,
+                    startup_thread.stack(),
+                )
+                raise HeadlessError(
+                    f"STARTUP_FAILED: GhidraRun's startup thread ran for {STARTUP_THREAD_LIMIT_SECONDS:g} s without "
+                    "showing the project window; the server log shows where it waits"
+                )
+        elif now - quiet_since > FRONT_END_GRACE_SECONDS:
             raise HeadlessError(
                 f"STARTUP_FAILED: the Ghidra GUI showed no project window within {FRONT_END_GRACE_SECONDS:g} s "
                 "after its startup thread ended; the server log has GhidraRun's error"

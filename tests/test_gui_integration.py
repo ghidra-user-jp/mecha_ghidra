@@ -110,7 +110,11 @@ def run_scenario(
     registry_home.mkdir(exist_ok=True)
     process_env = {
         **os.environ,
-        "JAVA_TOOL_OPTIONS": f"-Dapplication.settingsdir={settings}",
+        # Ghidra's settings, cache and temporary files are this run's, apart from the user's Ghidra.
+        "JAVA_TOOL_OPTIONS": (
+            f"-Dapplication.settingsdir={settings} -Dapplication.cachedir={workdir / 'ghidra-cache'}"
+            f" -Dapplication.tempdir={workdir / 'ghidra-temp'}"
+        ),
         "GUI_TEST_EXPORTS": str(exports),
         "PYTHONPATH": os.pathsep.join([str(TESTS), str(ROOT / "src")]),
         # The runtime registers for relays (spec §10.1): in this run's directory, not the user's.
@@ -222,11 +226,13 @@ def test_a_project_another_process_holds_is_not_opened(tmp_path, prepared):
     holder = {}
 
     def hold_the_project(workdir: Path) -> None:
+        # The holder's Ghidra settings, cache and temporary files go to its own directory in the run's.
         script = (
-            "import os, sys, tempfile\n"
+            "import os, sys\n"
             "from ghidra_headless.launcher import prepare_headless_launcher, start_headless_jvm\n"
             "launcher = prepare_headless_launcher(os.environ['GHIDRA_INSTALL_DIR'])\n"
-            "launcher.add_vmargs('-Dapplication.settingsdir=' + tempfile.mkdtemp())\n"
+            "launcher.add_vmargs(*('-Dapplication.' + name + '=' + os.path.join(sys.argv[2], name)\n"
+            "                      for name in ('settingsdir', 'cachedir', 'tempdir')))\n"
             "start_headless_jvm(os.environ['GHIDRA_INSTALL_DIR'], launcher=launcher)\n"
             "from ghidra.base.project import GhidraProject\n"
             "project = GhidraProject.openProject(sys.argv[1], 'GUI', False)\n"
@@ -235,7 +241,7 @@ def test_a_project_another_process_holds_is_not_opened(tmp_path, prepared):
             "project.close()\n"
         )
         process = subprocess.Popen(
-            [sys.executable, "-c", script, str(workdir / "project")],
+            [sys.executable, "-c", script, str(workdir / "project"), str(workdir / "holder")],
             cwd=ROOT,
             env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
             stdin=subprocess.PIPE,

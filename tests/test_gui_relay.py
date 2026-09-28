@@ -6,6 +6,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx2
 import pytest
 
 from ghidra_mcp.contracts.tool_spec import filter_tool_specs
@@ -16,9 +17,12 @@ from ghidra_mcp.presentation.gui_relay import (
     Relay,
     RuntimeConfig,
     RuntimeGone,
+    _http_relay_app,
     claim_runtime,
     config_mismatch,
+    derived_routing_headers,
     release_launch,
+    routing_headers_of,
 )
 from ghidra_mcp.presentation.transport import BearerToken, RuntimeAuth
 
@@ -50,12 +54,15 @@ class FakeRuntime:
     def __init__(self, *, fail: Exception | None = None, status: int = 200) -> None:
         self.record = SimpleNamespace(runtime_id="r1", token="t")
         self.calls: list[tuple[str | None, str | None]] = []
+        self.headers: list[dict[str, str]] = []  # the routing headers of each request, by lowercase name
         self.fail = fail
         self.status = status
 
-    async def post(self, body: bytes, protocol_version: str | None):
+    async def post(self, body: bytes, routing):
         message = json.loads(body)
-        self.calls.append((message.get("method"), protocol_version))
+        headers = {name.lower(): value for name, value in routing}
+        self.headers.append(headers)
+        self.calls.append((message.get("method"), headers.get("mcp-protocol-version")))
         if self.fail is not None:
             raise self.fail
         method = message.get("method")
@@ -131,6 +138,95 @@ class TestForwarding:
         broken, batch = relay_run(scenario, runtime=FakeRuntime())
         assert broken["error"]["code"] == -32700
         assert [reply["id"] for reply in batch] == [1, 2]
+
+
+MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
+class ServerAsRuntime:
+    """A real MCP server of this package (the fallback's build) in the runtime's place: the SDK's own checks."""
+
+    def __init__(self, server: Fallback) -> None:
+        self.server = server
+        self.record = SimpleNamespace(runtime_id="r1", token="t")
+
+    async def post(self, body: bytes, routing):
+        return await self.server.post(body, routing)
+
+
+class TestRoutingHeaders:
+    """From protocol 2026-07-28 on, the runtime checks the HTTP routing headers against the body (-32020)."""
+
+    def test_a_stdio_client_s_requests_go_with_the_headers_an_http_client_sends(self):
+        runtime = FakeRuntime()
+
+        async def scenario(relay):
+            await relay.handle(
+                call("get_program_info") | {"params": {"name": "get_program_info", "_meta": MODERN_META}}
+            )
+            await relay.handle(INIT)
+            await relay.handle(call("get_program_info"))
+
+        relay_run(scenario, runtime=runtime)
+        modern, init, settled = runtime.headers
+        assert modern == {
+            "mcp-protocol-version": "2026-07-28",
+            "mcp-method": "tools/call",
+            "mcp-name": "get_program_info",
+        }
+        assert init == {"mcp-method": "initialize"}
+        assert settled["mcp-protocol-version"] == "2025-11-25" and settled["mcp-name"] == "get_program_info"
+
+    def test_a_name_that_is_no_plain_header_text_is_base64_wrapped(self):
+        message = {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": "ghidra://results/結果"}}
+        headers = dict(derived_routing_headers(message, "2025-11-25"))
+        assert headers["mcp-name"] == "=?base64?Z2hpZHJhOi8vcmVzdWx0cy/ntZDmnpw=?="
+
+    def test_an_http_client_s_routing_headers_go_unchanged(self):
+        sent = {
+            "Host": "127.0.0.1", "Authorization": "Bearer x", "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call", "Mcp-Name": "get_program_info", "Mcp-Param-Region": "a",
+        }  # fmt: skip
+        routing = routing_headers_of(sent)
+        assert [name for name, _ in routing] == ["MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Mcp-Param-Region"]
+        runtime = FakeRuntime()
+
+        async def scenario(relay):
+            return await relay.handle(call("get_program_info"), routing)
+
+        relay_run(scenario, runtime=runtime)
+        assert runtime.headers == [{name.lower(): value for name, value in routing}]
+
+    def test_a_real_mcp_server_takes_what_the_relays_send(self):
+        async def main():
+            runtime_server = Fallback(GUI_SPECS, ToolPresentationConfig())
+            fallback = Fallback(GUI_SPECS, ToolPresentationConfig())
+            async with runtime_server.running(), fallback.running():
+                relay = Relay(specs=GUI_SPECS, fallback=fallback, runtime=ServerAsRuntime(runtime_server), refusal=None)
+                discovered = await relay.exchange(
+                    {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": MODERN_META}}
+                )
+                listed = await relay.exchange(
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": MODERN_META}}
+                )
+                app = _http_relay_app(relay, path="/mcp", host="127.0.0.1")
+                transport = httpx2.ASGITransport(app=app)
+                async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                    body = {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": MODERN_META}}
+                    accept = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28"}
+                    over_http = await client.post("/mcp", json=body, headers=accept | {"Mcp-Method": "tools/list"})
+                    unnamed = await client.post("/mcp", json=body, headers=accept)
+                return discovered, listed, over_http, unnamed
+
+        (discovered_status, discovered), (listed_status, listed), over_http, unnamed = asyncio.run(main())
+        assert discovered_status == 200 and discovered["result"]["supportedVersions"] == ["2026-07-28"]
+        assert listed_status == 200 and {"read_result", "show_in_gui"} <= {t["name"] for t in listed["result"]["tools"]}
+        assert over_http.status_code == 200 and "tools" in over_http.json()["result"]
+        # The relay answers as the runtime does, status included.
+        assert unnamed.status_code == 400 and unnamed.json()["error"]["code"] == -32020
 
 
 def test_the_result_tools_the_presentation_adds_are_relayed():

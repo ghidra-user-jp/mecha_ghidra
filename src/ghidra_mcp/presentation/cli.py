@@ -1109,7 +1109,8 @@ def _run_cli(argv: list[str] | None = None, *, detached: bool = False) -> int:
                 on_thread_exit=detach_current_thread,
                 keep_serving_on_failure=gui_runtime.ghidra_is_running,
             )
-            run_kwargs = _run_kwargs_for_transport(transport=transport, args=args, logger=logger)
+            # A detached runtime listens on a free loopback port, which its registration names.
+            run_kwargs = _run_kwargs_for_transport(transport=transport, args=args, logger=logger, announce=not detached)
             if registration is not None:
                 _register_runtime(
                     registration,

@@ -51,6 +51,11 @@ pytestmark = pytest.mark.skipif(
 
 TIME_SCALE = float(os.environ.get("GHIDRA_GUI_TEST_TIME_SCALE") or "1")
 READY_SECONDS = 180 * TIME_SCALE
+# A request of protocol 2026-07-28 carries its version and the client's capabilities itself.
+MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
 # What the MCP SDKs pass a stdio server on Windows besides the configured variables (mcp.client.stdio).
 _WINDOWS_CLIENT_ENV = (
     "APPDATA", "HOMEDRIVE", "HOMEPATH", "PATHEXT", "PROCESSOR_ARCHITECTURE", "SYSTEMDRIVE", "SYSTEMROOT",
@@ -97,7 +102,11 @@ class Workspace:
             "XDG_STATE_HOME": str(self.state),
             "PATH": os.environ.get("PATH", ""),
             "GHIDRA_INSTALL_DIR": os.environ["GHIDRA_INSTALL_DIR"],
-            "JAVA_TOOL_OPTIONS": f"-Dapplication.settingsdir={self.settings}",
+            # Ghidra's settings, cache and temporary files are this test's, apart from the user's Ghidra.
+            "JAVA_TOOL_OPTIONS": (
+                f"-Dapplication.settingsdir={self.settings} -Dapplication.cachedir={self.root / 'ghidra-cache'}"
+                f" -Dapplication.tempdir={self.root / 'ghidra-temp'}"
+            ),
             "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), os.environ.get("PYTHONPATH", "")]).rstrip(os.pathsep),
         }
         for key in ("DISPLAY", "LANG", "LC_ALL", *(_WINDOWS_CLIENT_ENV if WINDOWS else ())):
@@ -356,10 +365,12 @@ def test_a_stdio_client_starts_a_detached_runtime_that_outlives_it(workspace):
     for message in (
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        # A client of protocol 2026-07-28 names its version in each request; the relay tells the runtime so.
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": MODERN_META}},
     ):
         relay.stdin.write((json.dumps(message) + "\n").encode())
         relay.stdin.flush()
-    lines.append(_read_line(relay.stdout, 30 * TIME_SCALE))
+    lines.extend(_read_line(relay.stdout, 30 * TIME_SCALE) for _ in range(2))
     record = workspace.record()
     assert record is not None and record.pid != relay.pid
     relay.stdin.close()
@@ -367,7 +378,9 @@ def test_a_stdio_client_starts_a_detached_runtime_that_outlives_it(workspace):
     lines.extend(line for line in _rest(relay.stdout) if line.strip())
     replies = [json.loads(line) for line in lines]
     assert all(reply.get("jsonrpc") == "2.0" for reply in replies), lines
-    assert [reply.get("id") for reply in replies] == [1, 2]
+    assert sorted(reply.get("id") for reply in replies) == [1, 2, 3]
+    modern = next(reply for reply in replies if reply.get("id") == 3)
+    assert modern["result"]["resultType"] == "complete" and modern["result"]["tools"], modern
     # The runtime runs on in its own session, and the record says so (on Windows, the job tests below
     # check what the client's job objects do to it).
     assert _alive(record.pid) and (WINDOWS or os.getsid(record.pid) == record.pid)
@@ -530,18 +543,42 @@ def test_stdio_and_http_relays_share_one_runtime(workspace):
                     "apply_edits",
                     {"edits": [{"kind": "rename_function", "address": entry, "new_name": "g47_entry"}]},
                 )
+            # Protocol 2026-07-28: the runtime checks the routing headers, which the relay passes on.
+            modern = await _modern_call(port, "get_function", {"address": entry})
+            unnamed = await _modern_call(port, "get_function", {"address": entry}, name_header=False)
             seen_by_stdio = await call_when_ready(stdio, "get_function", {"address": entry})
             http_relay.terminate()
             http_relay.wait(20)
             after_http_ended = await call_when_ready(stdio, "get_program_info")
-            return info, edited, seen_by_stdio, after_http_ended
+            return info, edited, modern, unnamed, seen_by_stdio, after_http_ended
 
-    info, edited, seen, after = run(scenario())
+    info, edited, (modern_status, modern), (unnamed_status, unnamed), seen, after = run(scenario())
     assert info["result"]["name"] == "WinHelloCPP.exe"
     assert edited["result"]["status"] == "applied"
+    assert modern_status == 200 and modern["result"]["structuredContent"]["result"]["name"] == "g47_entry", modern
+    # The relay answers as the runtime does, status included.
+    assert unnamed_status == 400 and unnamed["error"]["code"] == -32020, unnamed
     assert seen["result"]["name"] == "g47_entry"
     assert after["result"]["name"] == "WinHelloCPP.exe"
     assert len(workspace.runtime_processes()) == 1
+
+
+async def _modern_call(port: int, tool: str, arguments: dict, *, name_header: bool = True) -> tuple[int, dict]:
+    """A tools/call of protocol 2026-07-28 to the HTTP relay, its routing headers as a client sends them."""
+    import httpx2
+
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+    }
+    if name_header:
+        headers["Mcp-Name"] = tool
+    params = {"name": tool, "arguments": arguments, "_meta": MODERN_META}
+    body = {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": params}
+    async with httpx2.AsyncClient(trust_env=False, timeout=60 * TIME_SCALE) as client:
+        response = await client.post(f"http://127.0.0.1:{port}/mcp", json=body, headers=headers)
+    return response.status_code, response.json()
 
 
 def test_a_crash_during_a_call_is_an_unknown_outcome_and_no_restart(workspace):

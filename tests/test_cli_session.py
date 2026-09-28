@@ -912,6 +912,22 @@ def test_run_kwargs_for_stdio_transport_are_empty():
     assert run_kwargs_for_transport(transport="stdio", args=args, logger=cli.logger) == {}
 
 
+def test_the_http_listener_is_named_unless_the_caller_listens_elsewhere(caplog):
+    """A detached GUI runtime takes a free port after this, and names that one when it registers."""
+    from ghidra_mcp.presentation.transport import run_kwargs_for_transport
+
+    args = types.SimpleNamespace(log_level="INFO", mcp_host="127.0.0.1", mcp_port=None, mcp_path="/mcp")
+    with caplog.at_level("INFO"):
+        announced = run_kwargs_for_transport(transport="streamable-http", args=args, logger=cli.logger)
+        assert "http://127.0.0.1:8081/mcp" in caplog.text
+        caplog.clear()
+        quiet = run_kwargs_for_transport(transport="streamable-http", args=args, logger=cli.logger, announce=False)
+    assert "Starting MCP" not in caplog.text
+    assert {key: quiet[key] for key in ("host", "port", "streamable_http_path")} == {
+        key: announced[key] for key in ("host", "port", "streamable_http_path")
+    }
+
+
 def test_redirect_java_stdout_to_stderr_swaps_system_out(monkeypatch):
     calls: list[object] = []
 

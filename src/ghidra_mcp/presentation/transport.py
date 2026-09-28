@@ -87,14 +87,20 @@ def _apply_log_level(args: Any) -> None:
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
 
 
-def streamable_http_run_kwargs(*, args: Any, logger: logging.Logger) -> dict[str, Any]:
-    """HTTP listener and public ``Server.streamable_http_app`` options."""
+def streamable_http_run_kwargs(*, args: Any, logger: logging.Logger, announce: bool = True) -> dict[str, Any]:
+    """HTTP listener and public ``Server.streamable_http_app`` options.
+
+    ``announce=False`` leaves out the line that names the listener, for a
+    caller that listens elsewhere (a detached GUI runtime takes a free
+    loopback port and names it once it has registered).
+    """
 
     _apply_log_level(args)
     host = args.mcp_host
     port = args.mcp_port or DEFAULT_HTTP_PORT
     path = normalize_streamable_http_path(args.mcp_path)
-    logger.info("Starting MCP in stateless Streamable HTTP mode (JSON responses): http://%s:%s%s", host, port, path)
+    if announce:
+        logger.info("Starting MCP in stateless Streamable HTTP mode (JSON responses): http://%s:%s%s", host, port, path)
     return {
         "host": host,
         "port": port,
@@ -107,10 +113,12 @@ def streamable_http_run_kwargs(*, args: Any, logger: logging.Logger) -> dict[str
     }
 
 
-def run_kwargs_for_transport(*, transport: str, args: Any, logger: logging.Logger) -> dict[str, Any]:
+def run_kwargs_for_transport(
+    *, transport: str, args: Any, logger: logging.Logger, announce: bool = True
+) -> dict[str, Any]:
     normalized = normalize_transport(transport)
     if normalized == "streamable-http":
-        return streamable_http_run_kwargs(args=args, logger=logger)
+        return streamable_http_run_kwargs(args=args, logger=logger, announce=announce)
     if normalized == "stdio":
         return {}
     raise ValueError(f"Unsupported transport: {transport}")

@@ -16,6 +16,7 @@ with a bounded poll.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import threading
@@ -165,5 +166,8 @@ def modal_dialog_titles() -> list[str]:
 
 
 def plain_text(text: str) -> str:
-    """``text`` without HTML tags or repeated whitespace (Ghidra's messages are often HTML)."""
-    return _WHITESPACE.sub(" ", _HTML_TAG.sub(" ", text)).strip()
+    """``text`` without HTML tags, character references or repeated whitespace (Ghidra's messages are often HTML).
+
+    The references are read after the tags are gone, so an escaped ``<`` stays in the text.
+    """
+    return _WHITESPACE.sub(" ", html.unescape(_HTML_TAG.sub(" ", text))).strip()
