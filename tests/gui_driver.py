@@ -22,6 +22,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import NamedTuple
 
 SCENARIO, RESULTS, PORT = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
 SERVER_ARGS = sys.argv[sys.argv.index("--") + 1 :]
@@ -170,6 +171,29 @@ class Driver:
             else:
                 quiet_since = None
             time.sleep(0.02)
+
+    @staticmethod
+    def quiet_edt(program, *, quiet: float = 1.0, timeout: float = 10.0) -> bool:
+        """Send the program's pending change events, then wait until the EDT answers quickly for a while.
+
+        A program sends its change events up to half a second after a change, and the GUI's views
+        answer them on the EDT, some later still.  False if the EDT did not quiet down in time.
+        """
+        from java.lang import Thread
+        from javax.swing import SwingUtilities
+
+        program.flushEvents()
+        deadline = time.monotonic() + timeout * TIME_SCALE
+        quiet_since = time.monotonic()
+        while time.monotonic() < deadline:
+            began = time.perf_counter()
+            SwingUtilities.invokeAndWait(Thread())
+            if (time.perf_counter() - began) * 1000 >= 20:
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since >= quiet * TIME_SCALE:
+                return True
+            time.sleep(0.02)
+        return False
 
     def human(self, command, program) -> bool:
         tool = self.tool()
@@ -695,50 +719,56 @@ async def main_scenario(driver: Driver, started: float) -> None:
         error=dry,
     )
 
-    # G33: the EDT answers during a long decompile.  The probe is a Java no-op, so it measures the EDT
-    # and not Python's GIL; a Python probe's latency is recorded for comparison.
-    from javax.swing import SwingUtilities
+    # G33: the EDT answers during a long decompile.  Two Java timers stamp System.nanoTime every
+    # _STAMP_PERIOD_MS, one on the EDT and one on a thread of its own.  No Python runs in them, so Python's
+    # GIL does not delay them.  The EDT's wait is its longest gap between stamps beyond the period, less
+    # what the control thread waited at the same time: a pause of the whole JVM or machine (a
+    # collection, a safepoint, a busy runner) stops both, and is not the EDT's.  The GUI's answer to the
+    # edits above runs on the EDT too, so it ends first.
+    from java.lang.management import ManagementFactory
+    from java.util.concurrent import ConcurrentLinkedQueue, Executors, TimeUnit
+    from javax.swing import Timer as SwingTimer
 
-    samples: list[float] = []
-    python_samples: list[float] = []
-    probe_errors: list[str] = []
-    stop = threading.Event()
+    def collector_ms() -> int:
+        return sum(max(0, int(bean.getCollectionTime())) for bean in ManagementFactory.getGarbageCollectorMXBeans())
 
-    def probe():
-        try:
-            while not stop.is_set():
-                began = time.perf_counter()
-                SwingUtilities.invokeAndWait(Thread())
-                samples.append((time.perf_counter() - began) * 1000)
-                began = time.perf_counter()
-                driver.on_edt(lambda: None)
-                python_samples.append((time.perf_counter() - began) * 1000)
-                time.sleep(0.02)
-        except BaseException as exc:  # recorded: a dead prober must not look like a responsive EDT
-            probe_errors.append(repr(exc))
-
-    prober = threading.Thread(target=probe, daemon=True)
-    prober.start()
-    decompile_began = time.perf_counter()
-    _code, decompile_error = await driver.call("decompile_function", {"address": function_address})
-    decompile_ms = (time.perf_counter() - decompile_began) * 1000
-    alive = prober.is_alive()
-    stop.set()
-    prober.join(5)
-    worst = max(samples or [0])
+    edt_quiet = driver.quiet_edt(program)
+    edt_queue, control_queue = ConcurrentLinkedQueue(), ConcurrentLinkedQueue()
+    edt_timer = SwingTimer(_STAMP_PERIOD_MS, _nano_stamper(edt_queue).listener)
+    control = Executors.newSingleThreadScheduledExecutor()
+    collected_before = collector_ms()
+    decompile_ms, decompile_error = 0.0, None
+    try:
+        edt_timer.start()
+        control.scheduleWithFixedDelay(
+            _nano_stamper(control_queue).runnable, 0, _STAMP_PERIOD_MS, TimeUnit.MILLISECONDS
+        )
+        _until(lambda: edt_queue.size() > 0 and control_queue.size() > 0)
+        decompile_began = time.perf_counter()
+        _code, decompile_error = await driver.call("decompile_function", {"address": function_address})
+        decompile_ms = (time.perf_counter() - decompile_began) * 1000
+        await asyncio.sleep(3 * _STAMP_PERIOD_MS / 1000)  # a stamp after the decompile closes the last gap
+    finally:
+        edt_timer.stop()
+        control.shutdownNow()
+    collected_ms = collector_ms() - collected_before
+    edt_stamps, control_stamps = _millis(edt_queue), _millis(control_queue)
+    edt_wait = _own_wait(edt_stamps, control_stamps)
     record(
         "G33",
         decompile_error is None
-        and alive
-        and not probe_errors
-        and len(samples) >= 3
-        and worst < 100
-        and decompile_ms >= 2 * worst,
-        max_ms=round(worst, 2),
-        python_max_ms=round(max(python_samples or [0]), 2),
+        and len(edt_stamps) >= 3
+        and len(control_stamps) >= 3
+        and edt_wait < 100
+        and decompile_ms >= 2 * edt_wait,
+        edt_wait_ms=round(edt_wait, 2),
+        edt_max_gap_ms=round(_max_gap(edt_stamps), 2),
+        control_max_gap_ms=round(_max_gap(control_stamps), 2),
         decompile_ms=round(decompile_ms, 1),
-        samples=len(samples),
-        errors=probe_errors,
+        stamps=[len(edt_stamps), len(control_stamps)],
+        gc_ms=collected_ms,
+        edt_quiet_before=edt_quiet,
+        error=decompile_error,
     )
 
     # G27: every step the AI left in the undo list is named "Mecha: "; the rest are the human's commands.
@@ -868,6 +898,62 @@ async def _data_type_at(driver: Driver, address: str) -> str | None:
 
 def _address(program, text: str):
     return program.getAddressFactory().getAddress(text)
+
+
+_STAMP_PERIOD_MS = 10
+
+
+class _Stamper(NamedTuple):
+    runnable: object
+    listener: object
+
+
+def _nano_stamper(queue) -> _Stamper:
+    """A Java Runnable and ActionListener that add System.nanoTime() to ``queue``, with no Python in them."""
+    from java.awt.event import ActionEvent, ActionListener
+    from java.lang import Boolean, Long, Object, Runnable, System
+    from java.lang.invoke import MethodHandleProxies, MethodHandles, MethodType
+
+    lookup = MethodHandles.publicLookup()
+    now = lookup.findStatic(System.class_, "nanoTime", MethodType.methodType(Long.TYPE))
+    box = lookup.findStatic(Long.class_, "valueOf", MethodType.methodType(Long.class_, Long.TYPE))
+    add = lookup.findVirtual(queue.getClass(), "add", MethodType.methodType(Boolean.TYPE, Object.class_))
+    stamp = MethodHandles.dropReturn(
+        MethodHandles.collectArguments(
+            add.bindTo(queue), 0, MethodHandles.filterReturnValue(now, box).asType(MethodType.methodType(Object.class_))
+        )
+    )
+    return _Stamper(
+        MethodHandleProxies.asInterfaceInstance(Runnable.class_, stamp),
+        MethodHandleProxies.asInterfaceInstance(
+            ActionListener.class_, MethodHandles.dropArguments(stamp, 0, ActionEvent.class_)
+        ),
+    )
+
+
+def _millis(queue) -> list[float]:
+    return [int(value) / 1e6 for value in queue.toArray()]
+
+
+def _max_gap(stamps: list[float]) -> float:
+    return max((later - earlier for earlier, later in zip(stamps, stamps[1:])), default=0.0)
+
+
+def _own_wait(stamps: list[float], control: list[float]) -> float:
+    """The longest wait beyond the period in ``stamps`` that ``control`` did not share, in ms."""
+    control_gaps = list(zip(control, control[1:]))
+    worst = 0.0
+    for start, end in zip(stamps, stamps[1:]):
+        shared = max(
+            (
+                min(end, c_end) - max(start, c_start)
+                for c_start, c_end in control_gaps
+                if c_start < end and c_end > start
+            ),
+            default=0.0,
+        )
+        worst = max(worst, (end - start) - _STAMP_PERIOD_MS - max(0.0, shared - _STAMP_PERIOD_MS))
+    return worst
 
 
 def _until(condition, timeout: float = 5.0) -> bool:

@@ -127,7 +127,7 @@ docker build --file tests/docker/gui-tests.Dockerfile --build-arg BASE_IMAGE=mec
 docker run --rm --volume "$PWD:/work:ro" mecha_ghidra:gui-tests
 ```
 
-Windowsでは、場面ごとに非表示のコンソールを作り、試験が送るCtrl+CとCtrl+Breakがその場面だけに届くようにします。registryの置き場所（`LOCALAPPDATA`）と一時ファイル（`TEMP`）も、試験のディレクトリに向けます。MCPのPython SDKは、Windowsではstdioのサーバーを、切り離しを許さず、終わるときに中のプロセスを終えるJob Objectの中で起動します。そのため中継の試験は、SDKのJobを外したクライアント（libuvを使うNodeやBunのクライアントと同じ扱い）で行い、SDKのJobのままの動作、入れ子のJob、切り離しを許すJob、中継のプロセスの木を終わらせるクライアント（Claude Codeと同じ動き）、HTTPの中継へのCtrl+Cは、Windowsだけの試験（G50）で確かめます。遅い環境では、`GHIDRA_GUI_TEST_TIME_SCALE`（既定は1）で、試験の側の待ち（起動、画面、試験用のProjectの作成）を伸ばします。判定の基準（G33のEDTの往復の100ミリ秒など）は変わりません。
+Windowsでは、場面ごとに非表示のコンソールを作り、試験が送るCtrl+CとCtrl+Breakがその場面だけに届くようにします。registryの置き場所（`LOCALAPPDATA`）と一時ファイル（`TEMP`）も、試験のディレクトリに向けます。MCPのPython SDKは、Windowsではstdioのサーバーを、切り離しを許さず、終わるときに中のプロセスを終えるJob Objectの中で起動します。そのため中継の試験は、SDKのJobを外したクライアント（libuvを使うNodeやBunのクライアントと同じ扱い）で行い、SDKのJobのままの動作、入れ子のJob、切り離しを許すJob、中継のプロセスの木を終わらせるクライアント（Claude Codeと同じ動き）、HTTPの中継へのCtrl+Cは、Windowsだけの試験（G50）で確かめます。遅い環境では、`GHIDRA_GUI_TEST_TIME_SCALE`（既定は1）で、試験の側の待ち（起動、画面、試験用のProjectの作成）を伸ばします。判定の基準（G33で、decompileの間にEDTだけが止まってよい100ミリ秒など）は変わりません。
 
 CIの `gui-acceptance-windows` ジョブは、GitHubのWindowsのランナー（`windows-2025`）にTemurin 21とGhidraを入れ、GUIの単体の試験と、両方の受け入れ試験を実行します。切り離したruntimeがクライアントより長く動けるかは、ランナーが手順を動かすJob Objectで決まるので、試験の前に `tests/windows/runner_environment.py` で、そのJobと、画面を持つセッションかを記録します。CIの `gui-acceptance-ubuntu` ジョブは、GitHubのUbuntu 26.04のランナーで、UbuntuのOpenJDK 21のパッケージとXvfbを使って、同じ受け入れ試験を実行します（Ghidra 12.1はJDK 21を求め、Ubuntu 26.04の既定のJDKは25です）。Ghidraが使うJDKは、試験の前に記録します。
 

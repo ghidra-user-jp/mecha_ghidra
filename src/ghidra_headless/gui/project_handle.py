@@ -249,15 +249,22 @@ class GuiProjectHandle(ProjectHandle):
     def hold_program(self, program) -> Iterator[bool]:
         """Keep ``program`` open for one operation with a consumer of its own (spec §5.2).
 
-        Yields whether a GUI tool still has the program open.  A tab the human
-        closes meanwhile closes the program only when the operation releases it.
+        Yields whether the operation holds the program: a GUI tool had it open,
+        and it was still open when the consumer was added.  A tab the human
+        closes after that closes the program only when the operation releases
+        it.  The tab is checked before the consumer is added: checked after, a
+        tab closed in between would fail an operation the consumer already
+        keeps open.
         """
         if self.is_closed():  # the human closed the project or opened another one (spec §5.1)
             raise project_closed_error()
+        if program is None or not self.program_is_open(program):
+            yield False
+            return
         consumer = _new_consumer()
-        held = program is not None and bool(program.addConsumer(consumer))
+        held = bool(program.addConsumer(consumer))  # False once the program closed after the check
         try:
-            yield held and self.program_is_open(program)
+            yield held
         finally:
             if held:
                 program.release(consumer)

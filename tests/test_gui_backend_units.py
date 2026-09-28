@@ -238,6 +238,32 @@ class TestGuiProjectHandle:
             assert not program.closed
         assert program.closed and program.consumers == []
 
+    def test_a_tab_closed_as_the_operation_takes_hold_does_not_fail_it(self, gui_project, monkeypatch):
+        monkeypatch.setattr(gui_handle_module, "_new_consumer", object)
+        monkeypatch.setattr(gui_handle_module, "is_open_in_gui", lambda _project, program: program.in_tab)
+        program = FakeProgram()
+        add_consumer = program.addConsumer
+
+        def add_then_close_the_tab(consumer):
+            added = add_consumer(consumer)
+            program.close_tab()  # the human, between the consumer and the operation (G31 on a CI runner)
+            return added
+
+        program.addConsumer = add_then_close_the_tab
+        handle = GuiProjectHandle(gui_project.locator.getLocation(), "sample")
+        with handle.hold_program(program) as still_open:
+            assert still_open and not program.closed
+        assert program.closed and program.consumers == []
+
+    def test_a_program_that_closed_before_the_consumer_is_not_held(self, gui_project, monkeypatch):
+        monkeypatch.setattr(gui_handle_module, "_new_consumer", object)
+        monkeypatch.setattr(gui_handle_module, "is_open_in_gui", lambda _project, program: program.in_tab)
+        program = FakeProgram()
+        program.addConsumer = lambda _consumer: False  # closed between the check and the consumer
+        handle = GuiProjectHandle(gui_project.locator.getLocation(), "sample")
+        with handle.hold_program(program) as still_open:
+            assert not still_open
+
     def test_a_program_the_human_closed_is_not_held(self, gui_project, monkeypatch):
         monkeypatch.setattr(gui_handle_module, "_new_consumer", object)
         monkeypatch.setattr(gui_handle_module, "is_open_in_gui", lambda _project, program: program.in_tab)
