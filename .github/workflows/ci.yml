@@ -84,34 +84,13 @@ jobs:
           MECHA_GHIDRA_DOCKER_IMAGE: mecha_ghidra:ci
         run: uv run pytest -q tests/test_docker_image.py
 
-  gui-acceptance:
-    # The Ghidra GUI backend end to end under Xvfb: one GUI session shared with
-    # the tests as the human (tests/test_gui_integration.py), and the relays
-    # with the detached runtimes they start (tests/test_gui_relay_integration.py).
-    # The image is the one docs/docker.md builds, plus a display-capable JRE and
-    # Xvfb (tests/docker/gui-tests.Dockerfile); the checkout is mounted read-only.
-    name: Ghidra GUI acceptance (Xvfb)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-      - name: Build the image
-        run: ./build_docker_image.sh --tag mecha_ghidra:ci
-
-      - name: Build the GUI test image
-        run: >-
-          docker build --file tests/docker/gui-tests.Dockerfile
-          --build-arg BASE_IMAGE=mecha_ghidra:ci --tag mecha_ghidra:gui-tests .
-
-      - name: Run the GUI acceptance tests
-        run: docker run --rm --volume "$PWD:/work:ro" mecha_ghidra:gui-tests
-
   gui-acceptance-windows:
-    # The same acceptance tests on a Windows desktop, with what only Windows has
-    # (G50): the job objects a client may start its server in, the console's
-    # Ctrl+C and Ctrl+Break, and a client that ends the relay's process tree.
+    # The Ghidra GUI backend end to end on a Windows desktop: one GUI session
+    # shared with the tests as the human (tests/test_gui_integration.py), and
+    # the relays with the detached runtimes they start
+    # (tests/test_gui_relay_integration.py), with what only Windows has (G50):
+    # the job objects a client may start its server in, the console's Ctrl+C
+    # and Ctrl+Break, and a client that ends the relay's process tree.
     # The runner's own job object decides whether a detached runtime can
     # outlive its client here, so it is recorded before the tests run.
     name: Ghidra GUI acceptance (Windows)
@@ -184,10 +163,10 @@ jobs:
             ${{ runner.temp }}/gui-it/**/results.jsonl
 
   gui-acceptance-ubuntu:
-    # The same acceptance tests on Ubuntu 26.04 itself under Xvfb; the Xvfb job
-    # above runs them in a Debian image. Ghidra 12.1 documents JDK 21, and
-    # Ubuntu 26.04 defaults to 25, so its OpenJDK 21 package is installed.
-    # Still no desktop (Wayland, a window manager).
+    # The same acceptance tests on Ubuntu 26.04 under Xvfb, with no desktop
+    # (Wayland, a window manager). Ghidra 12.1 documents JDK 21, and Ubuntu
+    # 26.04 defaults to 25, so its OpenJDK 21 package is installed.
+    # tests/docker/ runs them in a Linux container from a machine without Linux.
     name: Ghidra GUI acceptance (Ubuntu 26.04)
     runs-on: ubuntu-26.04
     timeout-minutes: 45

@@ -117,7 +117,15 @@ uv run pytest tests/test_gui_integration.py tests/test_gui_relay_integration.py
 
 試験は場面ごとに `tests/gui_driver.py` を別プロセスで起動します。そのプロセスは実際のCLIをメインスレッドで動かし、別のスレッドからMCPで呼び出しながら、人間の操作をEDTでのGhidraのコマンドとして再現します。Projectは、`tests/gui_project_setup.py` が同梱の演習用PEからheadlessで作ったものの複製です。Ghidraの設定、キャッシュ、一時ファイルは、`-Dapplication.settingsdir`、`-Dapplication.cachedir`、`-Dapplication.tempdir` で試験のディレクトリの中に置くので、利用者のProject、設定、Ghidraのキャッシュには触れません。使用許諾の同意も、試験の設定の領域にだけ書き込みます。実行中はGhidraのウィンドウが何度か開いて閉じます。Dockerのコンテナで実行するときは、`--basetemp` をコンテナの中のディレクトリにします。Docker Desktopのバインドマウントでは、プロセスの間でProjectのlockが効かず、lockの試験が成り立ちません。
 
-中継の試験では、pytestはJVMを起動しません。試験は中継（`python -c "from ghidra_mcp.cli import main; ..." --backend gui`）のMCPクライアントで、中継がruntimeを `python -m ghidra_mcp.presentation.gui_runtime` で起動します。試験ごとに `HOME` と `XDG_STATE_HOME` を試験のディレクトリの中に向けるので、[runtimeのregistry](gui-live.ja.md#registry)は試験のものになり、試験は自分が見たruntimeをpidで止めます。ほかのGUIの試験も、registryを同じように向けます。CIの `gui-acceptance` ジョブは、`tests/docker/gui-tests.Dockerfile`（`docker-image` のイメージに、画面を表示できるJRE、Xvfb、試験の依存を足したもの）をビルドし、`tests/docker/run_gui_tests.sh` で両方の試験をXvfbの上で実行します。
+中継の試験では、pytestはJVMを起動しません。試験は中継（`python -c "from ghidra_mcp.cli import main; ..." --backend gui`）のMCPクライアントで、中継がruntimeを `python -m ghidra_mcp.presentation.gui_runtime` で起動します。試験ごとに `HOME` と `XDG_STATE_HOME` を試験のディレクトリの中に向けるので、[runtimeのregistry](gui-live.ja.md#registry)は試験のものになり、試験は自分が見たruntimeをpidで止めます。ほかのGUIの試験も、registryを同じように向けます。
+
+Linuxの試験を、Linuxのない機械（macOSなど）から流すときは、`tests/docker/gui-tests.Dockerfile`（`docker-image` のイメージに、画面を表示できるJRE、Xvfb、試験の依存を足したもの）をビルドし、`tests/docker/run_gui_tests.sh` で両方の試験をXvfbの上で実行します。作業木は読み取り専用でマウントし、Projectと設定の領域はコンテナの中のファイルシステムに置きます。Apple Siliconでは、[Dockerの文書](docker.ja.md)と同じく `DOCKER_PLATFORM=linux/arm64` を付けてビルドします。
+
+```bash
+./build_docker_image.sh --tag mecha_ghidra:ci
+docker build --file tests/docker/gui-tests.Dockerfile --build-arg BASE_IMAGE=mecha_ghidra:ci --tag mecha_ghidra:gui-tests .
+docker run --rm --volume "$PWD:/work:ro" mecha_ghidra:gui-tests
+```
 
 Windowsでは、場面ごとに非表示のコンソールを作り、試験が送るCtrl+CとCtrl+Breakがその場面だけに届くようにします。registryの置き場所（`LOCALAPPDATA`）と一時ファイル（`TEMP`）も、試験のディレクトリに向けます。MCPのPython SDKは、Windowsではstdioのサーバーを、切り離しを許さず、終わるときに中のプロセスを終えるJob Objectの中で起動します。そのため中継の試験は、SDKのJobを外したクライアント（libuvを使うNodeやBunのクライアントと同じ扱い）で行い、SDKのJobのままの動作、入れ子のJob、切り離しを許すJob、中継のプロセスの木を終わらせるクライアント（Claude Codeと同じ動き）、HTTPの中継へのCtrl+Cは、Windowsだけの試験（G50）で確かめます。遅い環境では、`GHIDRA_GUI_TEST_TIME_SCALE`（既定は1）で、試験の側の待ち（起動、画面、試験用のProjectの作成）を伸ばします。判定の基準（G33のEDTの往復の100ミリ秒など）は変わりません。
 
