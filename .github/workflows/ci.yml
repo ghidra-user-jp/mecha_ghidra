@@ -184,9 +184,10 @@ jobs:
             ${{ runner.temp }}/gui-it/**/results.jsonl
 
   gui-acceptance-ubuntu:
-    # The same acceptance tests on Ubuntu 26.04 itself, with the JDK it installs
-    # by default (OpenJDK 25) under Xvfb; the Xvfb job above runs them in a
-    # Debian image with JDK 21. Still no desktop (Wayland, a window manager).
+    # The same acceptance tests on Ubuntu 26.04 itself under Xvfb; the Xvfb job
+    # above runs them in a Debian image. Ghidra 12.1 documents JDK 21, and
+    # Ubuntu 26.04 defaults to 25, so its OpenJDK 21 package is installed.
+    # Still no desktop (Wayland, a window manager).
     name: Ghidra GUI acceptance (Ubuntu 26.04)
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -200,12 +201,12 @@ jobs:
           # JPype 1.5.2 has Linux wheels up to Python 3.13.
           python-version: "3.13"
 
-      - name: Install OpenJDK 25, Xvfb and unzip
+      - name: Install OpenJDK 21, Xvfb and unzip
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openjdk-25-jdk xvfb xauth unzip
+          sudo apt-get install -y --no-install-recommends openjdk-21-jdk xvfb xauth unzip
           # The package's own java, whatever the runner's other JDKs set /usr/bin/java to.
-          java_home="$(dirname "$(dirname "$(dpkg -L openjdk-25-jre-headless | grep '/bin/java$' | head -n 1)")")"
+          java_home="$(dirname "$(dirname "$(dpkg -L openjdk-21-jre-headless | grep '/bin/java$' | head -n 1)")")"
           # First on PATH: the relays pass PATH on, and PyGhidra asks the java there which JDK to use.
           echo "JAVA_HOME=${java_home}" >> "${GITHUB_ENV}"
           echo "${java_home}/bin" >> "${GITHUB_PATH}"

@@ -2,8 +2,9 @@
 
 Not a check.  A detached runtime outlives its client only where the job
 object around the relay lets it leave (or does not end its processes when it
-closes), and the GUI needs an interactive window station; this records both
-before the tests run, so a failure there reads at once.
+closes), and the GUI needs an interactive window station; the tests' Ctrl+C
+reaches a scenario only where Ctrl+C is not disabled for it.  This records
+them before the tests run, so a failure there reads at once.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import subprocess
 import sys
 from ctypes import wintypes
 
@@ -56,10 +58,41 @@ def _window_station() -> str:
     return f"interactive {bool(flags.dwFlags & _WSF_VISIBLE)}, screen {screen}"
 
 
+# A child with a console of its own sends itself Ctrl+C, as the tests' scenarios do.
+_CTRL_C_PROBE = """
+import ctypes, signal, time
+got = []
+signal.signal(signal.SIGINT, lambda *_: got.append(1))
+ctypes.windll.kernel32.GenerateConsoleCtrlEvent(0, 0)
+deadline = time.monotonic() + 3
+while not got and time.monotonic() < deadline:
+    time.sleep(0.05)
+print("yes" if got else "no")
+"""
+
+
+def _ctrl_c_reaches_a_child() -> str:
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0  # SW_HIDE
+    completed = subprocess.run(
+        [sys.executable, "-c", _CTRL_C_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=startup,
+    )
+    return completed.stdout.strip() or f"no answer (exit {completed.returncode})"
+
+
 def main() -> int:
     print(f"Windows {platform.version()} ({platform.machine()}), Python {sys.version.split()[0]}")
     print(f"Job object of this step: {_job()}")
     print(f"Window station: {_window_station()}")
+    print(f"Ctrl+C reaches a child as the step starts it: {_ctrl_c_reaches_a_child()}")
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)  # what the GUI tests do before their scenarios
+    print(f"Ctrl+C reaches a child once enabled here: {_ctrl_c_reaches_a_child()}")
     return 0
 
 

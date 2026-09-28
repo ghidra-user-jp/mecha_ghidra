@@ -124,6 +124,11 @@ class Workspace:
         ]  # fmt: skip
 
     def spawn_relay(self, *extra: str, transport: str = "stdio", **options) -> subprocess.Popen:
+        if WINDOWS:
+            # A CI runner's steps run with Ctrl+C disabled, which children inherit; a terminal's relay takes it.
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
         process = subprocess.Popen(
             [sys.executable, *self.relay_args(*extra, transport=transport)],
             cwd=self.root,

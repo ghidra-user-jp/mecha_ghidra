@@ -137,12 +137,24 @@ def run_scenario(
         try:
             returncode = process.wait(SCENARIO_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
+            _dump_threads(process.pid, workdir / "jstack.log")
             process.kill()
             returncode = process.wait(30)
     lines = []
     if results.exists():
         lines = [json.loads(line) for line in results.read_text().splitlines() if line.strip()]
     return Run(workdir, returncode, lines, (workdir / "server.log").read_text(errors="replace"))
+
+
+def _dump_threads(pid: int, path: Path) -> None:
+    """Where a scenario that ran out of time waits: the JVM's threads, from the JDK's jstack, if there is one."""
+    java_home = os.environ.get("JAVA_HOME")
+    jstack = shutil.which("jstack") or (java_home and shutil.which("jstack", path=str(Path(java_home) / "bin")))
+    if not jstack:
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        dumped = subprocess.run([jstack, str(pid)], capture_output=True, text=True, timeout=60)
+        path.write_text(dumped.stdout + dumped.stderr)
 
 
 def _own_console() -> dict:
@@ -162,7 +174,17 @@ def _sigint_not_ignored():
     A job that a non-interactive shell starts with ``&`` ignores SIGINT, and
     the server keeps an ignored signal ignored (like ``nohup``).  Only an
     ignored signal survives ``exec``, so a handler here gives the child the default.
+    Windows has the like: a process started in a new process group (a CI
+    runner starts its steps so) has Ctrl+C disabled, and its children inherit
+    that.  It is enabled here for the scenario to inherit, as in a terminal;
+    Windows cannot read the old setting back, so it stays enabled.
     """
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)
+        yield
+        return
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         yield
