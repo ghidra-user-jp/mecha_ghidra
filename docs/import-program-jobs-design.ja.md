@@ -1,8 +1,8 @@
 # import_programの非同期化と結果追跡の設計
 
-2026-09-23。調査基準: `3c8e6840efa9958fbb03ae319b0afbcb199d5040`（main）。2026-09-24改訂: 実装レビューの指摘を受け、サーバー側で待つ照会、`request_id`の任意化、失敗後の出力状態の返却、停止時の解析キャンセルへ設計を改めた（第10節）。
+2026-09-23。調査基準: `3c8e6840efa9958fbb03ae319b0afbcb199d5040`（main）。2026-09-24改訂: サーバー側で待つ照会、`request_id`の任意化、失敗後の出力状態の返却、停止時の解析キャンセルへ設計を改めた。
 
-**改訂版の実装・検証記録。Codexのtimeout設定は変更していない。** ユーザーの「一旦メモリ上の管理」「大掛かりにはしない」という指定を反映した最小構成。ジョブIDは`operation_id`とし、import専用の小さな管理機能を追加する。[AI向け実行基盤の拡張設計](ai-execution-design.ja.md)の永続OperationStoreや汎用executorは今回の前提にしない。
+**改訂版の実装・検証記録。Codexのtimeout設定は変更していない。** メモリ上の管理だけにし、大掛かりにしない最小構成。ジョブIDは`operation_id`とし、import専用の小さな管理機能を追加する。[AI向け実行基盤の拡張設計](ai-execution-design.ja.md)の永続OperationStoreや汎用executorは今回の前提にしない。
 
 ## 1. 結論と確認範囲
 
@@ -10,7 +10,7 @@
 
 採用する案は、**メモリへジョブを登録してジョブの記録を返し、サーバー側で短時間待つ照会で結果を追跡する方式**。同じサーバープロセスが動いている間は、同じ引数の再送で再実行せず（`request_id`の有無を問わない）、同じ出力先へ別の要求を同時にdispatchしない。再起動後の追跡・冪等性は保証範囲に含めない。
 
-ユーザーから報告された`/implant.exe`、PE x64、解析済み、1,220関数、未保存変更なしは観測事実として扱う。この調査では当該Windows環境・検体を開いていない。以下の実装根拠と、模擬Ghidraを使ったstdio再現結果を区別する。
+障害の報告にあった条件（PE x64、解析済み、1,220関数、未保存変更なし）は観測事実として扱う。この調査では、報告された環境と検体を開いていない。以下の実装根拠と、模擬Ghidraを使ったstdio再現結果を区別する。
 
 ## 2. 期限の所在
 
@@ -26,9 +26,9 @@
 
 Codex一次資料: [既定値](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-mcp/src/rmcp_client.rs#L99-L100)、[設定値からの解決](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-mcp/src/connection_manager.rs#L299-L306)、[呼び出し予算とエラー文字列](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-mcp/src/binding.rs#L266-L332)。
 
-OpenAIの[設定説明](https://developers.openai.com/codex/mcp/#connect-codex-to-an-mcp-server)は調査時点でツール期限の既定値を60秒と記載していた。公開実装の300秒と差があるため、資料の既定値を今回の実測へ適用しない。このMacのstandalone CLIは0.154.0、アプリ同梱CLIは0.155.0-alpha.9.2で、双方の実行ファイルに報告されたエラー文字列の書式が存在した。アプリ同梱版と公開タグの完全な対応、および障害発生環境のeffective configまでは確認していない。
+OpenAIの[設定説明](https://developers.openai.com/codex/mcp/#connect-codex-to-an-mcp-server)は調査時点でツール期限の既定値を60秒と記載していた。公開実装の300秒と差があるため、資料の既定値を今回の実測へ適用しない。調査環境のstandalone CLIは0.154.0、アプリ同梱CLIは0.155.0-alpha.9.2で、双方の実行ファイルに報告されたエラー文字列の書式が存在した。アプリ同梱版と公開タグの完全な対応、および障害発生環境のeffective configまでは確認していない。
 
-このMacの`~/.codex/config.toml`では、120秒は`mcp_servers.node_repl.startup_timeout_sec`に設定されていた。`mecha_ghidra`と`ghidra-in-vm`に両timeoutの明示値はなく、両登録とも調査時点では無効だった。これは障害当時の設定を否定するものではない。実装後の実機検証では、実際に使うクライアントの版・接続方式・該当登録のeffective timeoutも記録する。
+調査環境のCodexの設定では、120秒は別のMCPサーバーの`startup_timeout_sec`に設定されていた。Mechaを含むGhidra用の2つの登録に、起動とツール呼び出しの両timeoutの明示値はなく、どちらも調査時点では無効だった。これは障害当時の設定を否定するものではない。実装後の実機検証では、実際に使うクライアントの版・接続方式・該当登録のeffective timeoutも記録する。
 
 ## 3. 修正前の処理・ロック・保存
 
@@ -100,7 +100,7 @@ SQLite、履歴ファイル、staging用のコピー機構、再起動復旧、h
 ```json
 {
   "target": "default",
-  "binary_path": "C:\\Users\\cobhc\\Downloads\\bin\\implant.exe",
+  "binary_path": "C:\\Users\\me\\Downloads\\bin\\sample.exe",
   "import_mode": "auto"
 }
 ```
@@ -270,44 +270,3 @@ tag指定のtool filterで`import_program`が残る場合は、`get_operation`�
 公開前に、ジョブ全般に当てはまる4つのエラーコードを`IMPORT_*`から`OPERATION_*`へ改めた（`OPERATION_QUEUE_FULL`・`OPERATION_SHUTDOWN`・`OPERATION_WORKER_UNAVAILABLE`・`OPERATION_WORKER_FAILED`）。[解析ジョブ](analyze-program-jobs-design.ja.md)でも同じコードを使うためである。本書の記述は新しい名前に揃えた。
 
 この変更で解析自体が高速化したり、loaderの実行中に止められるようになったりするわけではない。改善するのは、**同じサーバープロセス内で、受付後の処理と結果を少ない呼び出しで追跡でき、応答消失による重複実行を抑え、終了時に解析途中のプログラムを残さないこと**。再起動復旧・他ツールへの展開は必要になった時に検討する。
-
-## 10. 外部レビューの反映
-
-2026-09-23、ユーザーの送信許可後、設計書と関連ソース計14ファイルの固定snapshotをClaude Opus 5.5へ送り、読み取り専用レビューを実施した。実行ログのモデルは`claude-opus-5-5`、結果はsuccess。評価は「条件付きで採用可。メモリ管理のみ・小規模という制約の中で改善になる」。この初回設計レビューの時点では未実装だった。
-
-- 受付・再送・照会の独立、shutdownのjoin順序、実行ロック内のproject一致確認、worker例外処理、公開schema更新を反映した。
-- 工程通知を3種類へ減らし、ProjectHandleへの進捗callbackや新しい設定項目を省いた。
-- request_idによる照会を省く提案は採らなかった。改訂版でも照会は残し、引数を任意にした。
-- すべての失敗で予約を解除する提案は採らない。既存DomainFileの拒否は有効だが、後始末の不明な異常まで安全な再試行と断定できない。
-
-実装レビューの1〜3回目では、入力不存在の検査位置、loader失敗時の出力確認、workerの最外周例外、受付途中の失敗、public error mapperの再利用、遅いpath検査中の照会、shutdown時のproject open防止、終端失敗の再試行条件、終了時シグナル、symlinkを含む`..`の扱いを修正した。
-
-### 実装レビュー4回目と改訂（2026-09-23〜24）
-
-作業ツリーの差分を対象に、Claude Code（`claude-opus-5-5`）の複数観点レビューを実施した。10観点で候補を集め、19件を個別に検証し（棄却1件）、取りこぼしの確認で2件を追加した。続けて設計そのものを評価し、ポーリング回数、必須の`request_id`、長期運用での上限、終了時に解析を止められない点を見直した。改訂版で次のとおり対応した。
-
-| 指摘 | 対応 |
-| --- | --- |
-| tag指定のtool filterが起動時に未捕捉の例外で落ちる | `get_operation`の自動維持、明示的な無効化のみ使用法エラー |
-| 誤ったパスを受け付け、失敗まで同名の予約を握る | 受付時に入力の存在を検査 |
-| 受付段階の例外が`code`なしで返る | 受付処理をDomainErrorの写像で囲み、path解決の失敗も`VALIDATION_ERROR`へ |
-| 終端エラーで元のhintが失われる | hintを保持し、`output_state`を追加 |
-| `OPERATION_QUEUE_FULL`が`retryable=false` | `retryable=true` |
-| worker異常終了がログに残らない | 最外周例外と結果変換の失敗をログ出力 |
-| 入力削除後の再importで`PROGRAM_ALREADY_IMPORTED`が隠れる | 既存DomainFileの判定を存在確認より先に |
-| 再送がイベントループ上で`~user`の解決を行う | 再送の照合を正規化前の引数で行い、ファイルシステムに触れない |
-| 別表記のアドレス・UUIDの扱い | アドレスの表記を統一、UUIDは標準表記のみ |
-| 待機中のworkerがプロセス終了を妨げ得る | 2秒の待機で終了 |
-| 終了競合で確定済みの記録を再度書き換える | 待機中以外の記録は処理しない |
-| job種別の特別扱いがツール名の直書き | `ToolSpec.presenter="operation"`に統一し、schemaから保存済み結果の形を除外 |
-| `TARGET_REBOUND`の三重確認とkey文字列の手組み | `_target_operation`の1か所と共通のkey整形関数へ |
-| job制御のcallbackがローダー引数に混ざる | `ImportControl`をportの明示的な引数に |
-| 非同期経路のパス制限・shutdown防止・ローダー引数の受け渡しが未テスト | 回帰テストを追加し、変異テスト8種で検出を確認 |
-| テストのポーリングに期限がない | 期限付きの待機へ |
-| 取り込み中の`create_project`で全操作が期限なく止まる（以前からのロック構造。当初は見送り） | 読み取りを止めない上限付きの排他取得へ（第6節） |
-
-続く設計の見直しで、auto importの既定を解析ありに変えた（第4節）。`analyze_program`と初回loadのジョブ化は見送った。初回loadをジョブにしても、解析中はtargetのロックを持ち続け、直後の操作がLOCK_TIMEOUTになるためである。残る同期解析は、必要になった時点で`analyze_program`のジョブ化として扱う。その後、同じリリースの中で[解析のジョブ化](analyze-program-jobs-design.ja.md)を行った。loadは解析せず、`analyze_program`は同じジョブ管理の上で動く。
-
-改訂後の最終確認でも独立したレビューを行い、2件を修正した。解析なしでentry bootstrapを行う取り込みの最中に停止すると、キャンセルで途中までの逆アセンブル結果が保存され、jobが成功扱いになる問題（保存直前のキャンセル確認を追加）と、正規化前のIDで`wait_for`が待たずに返る問題である。あわせて、未着手のまま停止したjobには`cancelled`を付けないようにした。並行性の負荷試験、出力schema、要求の比較、`TARGET_REBOUND`、tool filterの組合せには問題がなかった。
-
-棄却した1件は、終了待ちの間に複数回のシグナルで止められない点である。第7節の方針どおり、実行中の処理は完了（改訂後はキャンセル）まで待つ。
