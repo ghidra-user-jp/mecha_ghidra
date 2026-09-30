@@ -638,6 +638,77 @@ def test_a_resend_through_a_new_relay_gets_the_first_reply(workspace):
     assert missing["error"]["code"] == "OPERATION_NOT_FOUND"
 
 
+STARTING = "get_program_info: waiting for Ghidra to start"
+
+
+def test_progress_reaches_a_stdio_client_while_the_runtime_starts(workspace):
+    """A call sent with a progressToken while Ghidra starts hears from the runtime through a stdio relay, as lines
+    before its reply."""
+    reports: list[tuple[float, str | None]] = []
+
+    async def on_progress(progress, total, message):
+        reports.append((progress, message))
+
+    async def scenario():
+        async with session_for(workspace) as session:
+            # The relay has found or started the runtime, which is still starting: the call waits on its gate.
+            return structured(await session.call_tool("get_program_info", {}, progress_callback=on_progress))
+
+    reply = run(scenario())
+    assert reply.get("result") or (reply.get("error") or {}).get("code") == "LOCK_TIMEOUT", reply
+    values = [progress for progress, _ in reports]
+    assert values and values == sorted(set(values)), reports
+    assert STARTING in {message for _, message in reports}, reports
+
+
+def test_progress_reaches_an_http_client_as_an_event_stream_through_the_relay(workspace):
+    """The same call through an HTTP relay (protocol 2026-07-28): the reply is an event stream, from the first
+    progress notification on, and its last event is the reply."""
+    import httpx2
+
+    port = _free_port()
+
+    async def scenario():
+        workspace.spawn_relay("--mcp-port", str(port), transport="http", stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 60 * TIME_SCALE
+        while True:
+            with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+            assert time.monotonic() < deadline, "the HTTP relay did not listen"
+            await asyncio.sleep(0.1)
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "get_program_info",
+        }
+        meta = {**MODERN_META, "progressToken": "relay-progress"}
+        body = {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "get_program_info", "arguments": {}, "_meta": meta},
+        }
+        events = []
+        async with httpx2.AsyncClient(trust_env=False, timeout=120 * TIME_SCALE) as client:
+            async with client.stream("POST", f"http://127.0.0.1:{port}/mcp", json=body, headers=headers) as response:
+                content_type = response.headers["content-type"]
+                async for line in response.aiter_lines():
+                    if line.startswith("data:"):
+                        events.append(json.loads(line[5:]))
+        return content_type, events
+
+    content_type, events = run(scenario())
+    assert content_type.startswith("text/event-stream"), content_type
+    *reports, reply = events
+    assert reports and all(report["method"] == "notifications/progress" for report in reports), events
+    assert {report["params"]["progressToken"] for report in reports} == {"relay-progress"}
+    values = [report["params"]["progress"] for report in reports]
+    assert values == sorted(set(values)), values
+    assert STARTING in {report["params"]["message"] for report in reports}, reports
+    assert reply["id"] == 9 and "result" in reply, reply
+
+
 # ---- Windows: the client's job objects and Ctrl+C (G50) ---------------------------------------------------
 
 _BREAKAWAY_OK, _KILL_ON_JOB_CLOSE = 0x800, 0x2000

@@ -30,6 +30,7 @@ from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, OPERATION_WAIT_M
 from ghidra_mcp.domain import DomainError, ErrorCode
 
 from .operation_presentation import structured_error, structured_source, structured_value
+from .progress import ProgressReporter, ticking
 from .result_compaction import _json_text
 from .tool_binding import tool_error_result
 from .tool_errors import ToolError
@@ -149,6 +150,7 @@ class DeferredCalls:
         already_waited: float = 0.0,
         claimed: dict[str, Any] | None = None,
         defer: bool = True,
+        progress: ProgressReporter | None = None,
     ) -> Any:
         """Return the call's value, or a ``DeferredReply`` when it outlives the wait.
 
@@ -209,15 +211,17 @@ class DeferredCalls:
             )
         )
         task.add_done_callback(_consume)
-        with anyio.move_on_after(max(0.0, self.defer_after - already_waited) if defer else math.inf):
-            try:
-                value = await asyncio.shield(task)
-            except Exception:
-                if call.recorded is None:
-                    raise
-                value = None
-            # A claimed call's record already holds the reply, completed on the call's thread.
-            return value if call.recorded is None else DeferredReply(call.recorded)
+        # A client that asked for progress hears from the call every second while it waits (progress.py).
+        async with ticking(progress, f"{name}: running"):
+            with anyio.move_on_after(max(0.0, self.defer_after - already_waited) if defer else math.inf):
+                try:
+                    value = await asyncio.shield(task)
+                except Exception:
+                    if call.recorded is None:
+                        raise
+                    value = None
+                # A claimed call's record already holds the reply, completed on the call's thread.
+                return value if call.recorded is None else DeferredReply(call.recorded)
         if claimed is not None:
             if task.done():
                 # It finished just as the wait ended; its record has the outcome too.

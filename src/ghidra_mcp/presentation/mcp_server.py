@@ -53,6 +53,7 @@ from ghidra_mcp.presentation.batch_results import present_batch_result
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.deferred_calls import DeferredCalls, DeferredReply, deferred_reply
 from ghidra_mcp.presentation.doc_resources import tool_docs_detail, tool_docs_index
+from ghidra_mcp.presentation.progress import ProgressReporter, ticking
 from ghidra_mcp.presentation.result_compaction import _json_text, _presentation_failure_result
 from ghidra_mcp.presentation.result_errors import present_tool_error
 from ghidra_mcp.presentation.result_resources import (
@@ -184,7 +185,9 @@ class GhidraMCPServer(Server):
     async def handle_list_tools(self, _context, _params):
         return ListToolsResult(tools=await self.list_tools())
 
-    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None):
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any] | None = None, *, progress: ProgressReporter | None = None
+    ):
         binding = self.bindings.get(name)
         if binding is None:
             # The spec (tools, error handling) calls an unknown tool a protocol error; only a tool
@@ -214,15 +217,16 @@ class GhidraMCPServer(Server):
                 startup_wait = min(get_lock_timeout_seconds(), self.deferred_calls.defer_after)
                 if deadline is not None:
                     startup_wait = min(startup_wait, max(0.0, deadline - time.monotonic()))
-                waited = await self.startup_gate.wait(startup_wait)
+                async with ticking(progress, f"{name}: waiting for Ghidra to start"):
+                    waited = await self.startup_gate.wait(startup_wait)
             except DomainError as exc:
                 return self.complete_result(name, kwargs, startup_error_result(self._refused(name, exc)))
         operations = self.operations_provider() if self.operations_provider is not None else None
         if name in self.replaying and kwargs.get("request_id") is not None and operations is not None:
-            return await self._call_once(name, binding, kwargs, operations, waited)
+            return await self._call_once(name, binding, kwargs, operations, waited, progress)
         if inspect.iscoroutinefunction(binding.function):
             if is_operation:
-                value = await binding.function(_deadline=deadline, **kwargs)
+                value = await binding.function(_deadline=deadline, _progress=progress, **kwargs)
             else:
                 value = await binding.function(**kwargs)
         elif name in self.deferrable and operations is not None:
@@ -233,6 +237,7 @@ class GhidraMCPServer(Server):
                 operations=operations,
                 complete=partial(self.complete_result, name, kwargs),
                 already_waited=waited,
+                progress=progress,
             )
             if isinstance(value, DeferredReply):
                 self._check_output(name, value.result)
@@ -241,7 +246,15 @@ class GhidraMCPServer(Server):
             value = await anyio.to_thread.run_sync(partial(_prepared, self.prepare_thread, binding.function, kwargs))
         return self.complete_result(name, kwargs, value)
 
-    async def _call_once(self, name: str, binding, kwargs: dict[str, Any], operations, waited: float):
+    async def _call_once(
+        self,
+        name: str,
+        binding,
+        kwargs: dict[str, Any],
+        operations,
+        waited: float,
+        progress: ProgressReporter | None = None,
+    ):
         """Run a call sent with a request_id at most once; a resend gets the first call's reply.
 
         The record exists before the call runs (``OperationManager.claim_call``),
@@ -261,7 +274,7 @@ class GhidraMCPServer(Server):
             # REQUEST_ID_CONFLICT, say: the call did not run.
             return self.complete_result(name, kwargs, domain_error_result(self._refused(name, exc)))
         if not fresh:
-            return await self._replay(name, target, record["operation_id"], operations, waited)
+            return await self._replay(name, target, record["operation_id"], operations, waited, progress)
         value = await self.deferred_calls.run(
             name,
             binding.function,
@@ -271,16 +284,26 @@ class GhidraMCPServer(Server):
             already_waited=waited,
             claimed=record,
             defer=name in self.deferrable,
+            progress=progress,
         )
         if isinstance(value, DeferredReply):
             self._check_output(name, value.result)
             return value.result
         return self.complete_result(name, kwargs, value)
 
-    async def _replay(self, name: str, target: str, operation_id: str, operations, waited: float):
+    async def _replay(
+        self,
+        name: str,
+        target: str,
+        operation_id: str,
+        operations,
+        waited: float,
+        progress: ProgressReporter | None = None,
+    ):
         """The reply a resend gets: the first call's, once that call has finished."""
         wait = max(0.0, self.deferred_calls.defer_after - waited) if name in self.deferrable else math.inf
-        await wait_while_pending(operations, operation_id, wait)
+        async with ticking(progress, f"{name}: running"):
+            await wait_while_pending(operations, operation_id, wait)
         try:
             record = operations.handle(operation_id)
         except DomainError as exc:
@@ -360,9 +383,12 @@ class GhidraMCPServer(Server):
             return False
         return True
 
-    async def handle_call_tool(self, _context, params):
+    async def handle_call_tool(self, context, params):
         try:
-            return await self.call_tool(params.name, params.arguments)
+            # A client that sent a progressToken hears from a call that waits (progress.py).
+            return await self.call_tool(
+                params.name, params.arguments, progress=ProgressReporter.for_request(context, params)
+            )
         except MCPError:
             raise
         except Exception as exc:
@@ -575,6 +601,15 @@ def create_mcp_server(
     )
 
 
+def _job_message(operations, operation_id: str) -> str:
+    """What a progress notification says about a job: its kind and state."""
+    try:
+        record = operations.handle(operation_id)
+    except Exception:  # the record is gone; say only that the job runs
+        return "job: running"
+    return f"{record['kind']}: {record['state']}"
+
+
 # How often a waiting call re-reads the in-memory job record.
 async def wait_while_pending(operations, operation_id: str, timeout: float) -> None:
     """Return once the record is no longer pending, or after ``timeout`` seconds, without holding a thread."""
@@ -706,7 +741,7 @@ def _operation_binding(entry, name, registry_provider, admission_limiter, prepar
     the remaining wait happens on the event loop, holding no thread.
     """
 
-    async def control(*, _deadline=None, **kwargs):
+    async def control(*, _deadline=None, _progress=None, **kwargs):
         wait_seconds = kwargs.get("wait_seconds") or 0
         deadline = _deadline if _deadline is not None else time.monotonic() + (wait_seconds or DEFER_AFTER_SECONDS)
         # cancel_operation takes no wait.
@@ -731,7 +766,8 @@ def _operation_binding(entry, name, registry_provider, admission_limiter, prepar
         if value.get("state") not in PENDING_STATES:
             return value
         operation_id = value["operation_id"]
-        await wait_while_pending(manager, operation_id, max(0.0, deadline - time.monotonic()))
+        async with ticking(_progress, lambda: _job_message(manager, operation_id)):
+            await wait_while_pending(manager, operation_id, max(0.0, deadline - time.monotonic()))
         try:
             latest = manager.wait_for(operation_id, 0)
         except DomainError:

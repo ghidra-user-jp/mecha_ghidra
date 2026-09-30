@@ -102,8 +102,13 @@ async def request(app, method="tools/list", params=None, *, modern=True, headers
     response_headers = dict(start["headers"])
     assert b"mcp-session-id" not in response_headers
     body = b"".join(item.get("body", b"") for item in messages if item["type"] == "http.response.body")
-    if b"application/json" in response_headers.get(b"content-type", b""):
+    content_type = response_headers.get(b"content-type", b"")
+    if b"application/json" in content_type:
         return start["status"], json.loads(body)
+    if b"text/event-stream" in content_type:
+        # The legacy wire (initialize) answers every request as an event stream; the reply is its last message.
+        data = [line[5:].strip() for line in body.decode().splitlines() if line.startswith("data:")]
+        return start["status"], json.loads(data[-1])
     return start["status"], body
 
 
@@ -242,6 +247,21 @@ def test_initialize_cannot_create_an_http_session():
             assert successful_result(await request(app, modern=False, headers={"mcp-protocol-version": "2025-11-25"}))[
                 "tools"
             ]
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("modern", [True, False], ids=["2026-07-28", "initialize"])
+def test_a_client_must_accept_both_json_and_event_streams(modern):
+    """A reply may become an event stream (progress), so the MCP specification's Accept header is required."""
+
+    async def check():
+        _, registry, app = runtime_and_app()
+        async with app.router.lifespan_context(app):
+            refused, _ = await request(app, modern=modern, headers={"accept": "application/json"})
+            accepted, _ = await request(app, modern=modern, headers={"accept": "text/event-stream, application/json"})
+            assert (refused, accepted) == (406, 200)
+            assert not registry.calls
 
     asyncio.run(check())
 

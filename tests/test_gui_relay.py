@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from ghidra_mcp.contracts.tool_spec import filter_tool_specs
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.gui_registry import FAILED, ProjectRegistry, RuntimeRecord
 from ghidra_mcp.presentation.gui_relay import (
+    Answer,
     Fallback,
     Relay,
     RuntimeConfig,
@@ -48,6 +50,16 @@ def error_of(reply: dict) -> dict:
     return reply["result"]["structuredContent"]["error"]
 
 
+def json_answer(status: int, body: bytes) -> Answer:
+    """What a plain JSON reply of the runtime looks like to the relay."""
+
+    async def messages():
+        if body:
+            yield json.loads(body)
+
+    return Answer(status, messages())
+
+
 class FakeRuntime:
     """Answers like the runtime would, or goes away."""
 
@@ -58,6 +70,7 @@ class FakeRuntime:
         self.fail = fail
         self.status = status
 
+    @contextlib.asynccontextmanager
     async def post(self, body: bytes, routing):
         message = json.loads(body)
         headers = {name.lower(): value for name, value in routing}
@@ -65,6 +78,9 @@ class FakeRuntime:
         self.calls.append((message.get("method"), headers.get("mcp-protocol-version")))
         if self.fail is not None:
             raise self.fail
+        yield json_answer(*self.reply(message))
+
+    def reply(self, message) -> tuple[int, bytes]:
         method = message.get("method")
         if method == "initialize":
             result = {
@@ -155,8 +171,10 @@ class ServerAsRuntime:
         self.server = server
         self.record = SimpleNamespace(runtime_id="r1", token="t")
 
+    @contextlib.asynccontextmanager
     async def post(self, body: bytes, routing):
-        return await self.server.post(body, routing)
+        async with self.server.post(body, routing) as answer:
+            yield answer
 
 
 class TestRoutingHeaders:

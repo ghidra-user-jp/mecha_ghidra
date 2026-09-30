@@ -4,8 +4,11 @@ A relay starts no JVM.  It finds the runtime of its project in the registry
 (``gui_registry``), or starts one detached from itself, checks that the
 runtime runs with its configuration (spec §10.3), and then forwards each
 JSON-RPC message to the runtime's loopback endpoint as it is.  The runtime
-answers every request with one JSON body (stateless Streamable HTTP), so
-forwarding needs no MCP session of its own.  The HTTP routing headers go
+(stateless Streamable HTTP) answers a request with one JSON body, or with an
+event stream when the call reports progress; forwarding needs no MCP session
+of its own, and a stream is passed on message by message as it arrives (a
+stdio client gets one line for each, an HTTP client the same event stream).
+The HTTP routing headers go
 along: an HTTP client's are passed on unchanged, and for a stdio client the
 relay sends what an HTTP client would (the protocol version, ``Mcp-Method``
 and ``Mcp-Name``), which the runtime checks against the body from protocol
@@ -33,10 +36,11 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
 import httpx2
 from mcp.shared.inbound import (
     MCP_METHOD_HEADER,
@@ -506,6 +510,73 @@ def _headers(routing: Routing) -> Routing:
     return [("Content-Type", "application/json"), ("Accept", "application/json, text/event-stream"), *routing]
 
 
+class BadReply(ValueError):
+    """A reply body that is no JSON."""
+
+
+class _Keepalive:
+    """What a comment line of an event stream (``: ping``) turns into; it keeps an idle stream open."""
+
+    def __repr__(self) -> str:
+        return "KEEPALIVE"
+
+
+KEEPALIVE = _Keepalive()
+
+
+@dataclass
+class Answer:
+    """What a POST got back: the HTTP status, and the JSON-RPC messages the reply carries, as they arrive.
+
+    A plain reply carries one message (none for a 202), an event stream any number of
+    notifications and then the reply to the request, with ``KEEPALIVE`` for each ping in between.
+    """
+
+    status: int
+    messages: AsyncIterator[Any]
+
+
+@dataclass
+class Reply:
+    """What a relay answers with: the HTTP status and the messages of the reply (see ``Answer``)."""
+
+    status: int
+    messages: AsyncIterator[Any]
+
+
+async def _only(message: dict[str, Any]) -> AsyncIterator[Any]:
+    yield message
+
+
+def _decode(text: str | bytes) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise BadReply(str(exc)) from exc
+
+
+async def _json_messages(payload: bytes) -> AsyncIterator[Any]:
+    if payload:
+        yield _decode(payload)
+
+
+async def _event_messages(lines: AsyncIterator[str]) -> AsyncIterator[Any]:
+    """The JSON bodies of a ``text/event-stream``, one for each event that has data."""
+    data: list[str] = []
+    async for line in lines:
+        if line.startswith("data:"):
+            data.append(line[5:].removeprefix(" "))
+        elif line == "":  # the blank line that ends an event
+            if data:
+                yield _decode("\n".join(data))
+                data = []
+        elif line.startswith(":"):
+            yield KEEPALIVE
+        # event:, id: and retry: name nothing the runtime needs
+    if data:  # the stream ended inside an event
+        yield _decode("\n".join(data))
+
+
 class RuntimeEndpoint:
     """The runtime's loopback endpoint, with its token."""
 
@@ -529,15 +600,33 @@ class RuntimeEndpoint:
             finally:
                 self._client = None
 
-    async def post(self, body: bytes, routing: Routing) -> tuple[int, bytes]:
+    @contextlib.asynccontextmanager
+    async def post(self, body: bytes, routing: Routing) -> AsyncIterator[Answer]:
+        """POST ``body``; the answer is there once the runtime has sent its headers, and the connection closes with the block."""
         assert self._client is not None, "RuntimeEndpoint.connected() first"
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                response = await stack.enter_async_context(
+                    self._client.stream("POST", self.record.endpoint, content=body, headers=_headers(routing))
+                )
+            except (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout) as exc:
+                raise RuntimeGone(f"cannot connect: {exc}", reached=False) from exc
+            except httpx2.TransportError as exc:
+                raise RuntimeGone(f"the connection broke: {exc!r}", reached=True) from exc
+            yield Answer(response.status_code, self._messages(response))
+
+    @staticmethod
+    async def _messages(response: httpx2.Response) -> AsyncIterator[Any]:
         try:
-            response = await self._client.post(self.record.endpoint, content=body, headers=_headers(routing))
-        except (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout) as exc:
-            raise RuntimeGone(f"cannot connect: {exc}", reached=False) from exc
+            if response.headers.get("content-type", "").startswith("text/event-stream"):
+                async with contextlib.aclosing(_event_messages(response.aiter_lines())) as events:
+                    async for message in events:
+                        yield message
+            else:
+                async for message in _json_messages(await response.aread()):
+                    yield message
         except httpx2.TransportError as exc:
             raise RuntimeGone(f"the connection broke: {exc!r}", reached=True) from exc
-        return response.status_code, response.content
 
 
 class RelayGate(StartupGate):
@@ -593,29 +682,14 @@ class Fallback:
             finally:
                 self._client = None
 
-    async def post(self, body: bytes, routing: Routing) -> tuple[int, bytes]:
+    @contextlib.asynccontextmanager
+    async def post(self, body: bytes, routing: Routing) -> AsyncIterator[Answer]:
         assert self._client is not None, "Fallback.running() first"
         response = await self._client.post("/mcp", content=body, headers=_headers(routing))
-        return response.status_code, response.content
+        yield Answer(response.status_code, _json_messages(response.content))
 
 
 # ---- the relay ----------------------------------------------------------------------------------
-
-
-def _parse_reply(status: int, payload: bytes, message_id: Any) -> dict[str, Any] | None:
-    if not payload:
-        return None
-    try:
-        reply = json.loads(payload)
-    except ValueError:
-        reply = None
-    if isinstance(reply, dict):
-        return reply
-    return {
-        "jsonrpc": "2.0",
-        "id": message_id,
-        "error": {"code": -32603, "message": f"the Ghidra GUI runtime answered HTTP {status} without JSON-RPC"},
-    }
 
 
 class Relay:
@@ -670,13 +744,13 @@ class Relay:
         result = domain_error_result(error).model_dump(mode="json", by_alias=True, exclude_none=True)
         return {"jsonrpc": "2.0", "id": message.get("id"), "result": result}
 
-    async def exchange(
-        self, message: dict[str, Any], routing: Routing | None = None
-    ) -> tuple[int, dict[str, Any] | None]:
-        """Forward ``message``: the HTTP status and the reply (None for a notification).
+    @contextlib.asynccontextmanager
+    async def open(self, message: dict[str, Any], routing: Routing | None = None) -> AsyncIterator[Reply]:
+        """Forward ``message``: the HTTP status, and the messages of the reply as they arrive.
 
-        ``routing`` is what an HTTP client sent; without it (stdio), the relay
-        sends the routing headers an HTTP client would.
+        A call that waits may send notifications (progress) before its reply, and they are passed on at
+        once.  A notification of the client gets no message back.  ``routing`` is what an HTTP client
+        sent; without it (stdio), the relay sends the routing headers an HTTP client would.
         """
         method = message.get("method")
         if routing is None:
@@ -685,20 +759,80 @@ class Relay:
         to_fallback = self._gone or (
             method == "tools/call" and str((message.get("params") or {}).get("name")) not in self.tools
         )
-        if not to_fallback:
-            try:
-                status, payload = await self.runtime.post(body, routing)
-            except RuntimeGone as exc:
-                self._runtime_gone()
-                if method == "tools/call" and exc.reached and "id" in message:
-                    return 200, self._in_flight_error(message, str(exc))
-            else:
-                if status == 401:  # another runtime took the project (the token is not its)
+        async with contextlib.AsyncExitStack() as stack:
+            reply: Reply | None = None
+            if not to_fallback:
+                try:
+                    answer = await stack.enter_async_context(self.runtime.post(body, routing))
+                except RuntimeGone as exc:
                     self._runtime_gone()
+                    if method == "tools/call" and exc.reached and "id" in message:
+                        reply = Reply(200, _only(self._in_flight_error(message, str(exc))))
                 else:
-                    return status, self._filtered(method, _parse_reply(status, payload, message.get("id")))
-        status, payload = await self.fallback.post(body, routing)
-        return status, self._filtered(method, _parse_reply(status, payload, message.get("id")))
+                    if answer.status == 401:  # another runtime took the project (the token is not its)
+                        self._runtime_gone()
+                    else:
+                        reply = Reply(answer.status, self._replies(message, answer))
+            if reply is None:
+                answer = await stack.enter_async_context(self.fallback.post(body, routing))
+                reply = Reply(answer.status, self._replies(message, answer))
+            yield reply
+
+    async def _replies(self, message: dict[str, Any], answer: Answer) -> AsyncIterator[Any]:
+        """The messages of ``answer`` for the client: notifications as they are, the reply filtered."""
+        method = message.get("method")
+        answered = seen = False
+        try:
+            async with contextlib.aclosing(answer.messages) as messages:
+                async for item in messages:
+                    seen = True
+                    if item is KEEPALIVE or (isinstance(item, dict) and "method" in item):
+                        yield item  # a ping, or a notification of the server
+                    elif isinstance(item, dict):
+                        answered = True
+                        yield self._filtered(method, item)
+                    else:
+                        answered = True
+                        yield self._without_json_rpc(message, answer.status)
+        except BadReply:
+            answered = True
+            yield self._without_json_rpc(message, answer.status)
+        except RuntimeGone as exc:
+            self._runtime_gone()
+            if "id" in message:
+                answered = True
+                yield self._went_away(message, str(exc))
+        if seen and not answered and "id" in message:
+            yield self._went_away(message, "the reply ended before it answered the request")
+
+    def _went_away(self, message: dict[str, Any], cause: str) -> dict[str, Any]:
+        """The reply for a request the runtime had begun to answer: a call may have run, anything else failed."""
+        if message.get("method") == "tools/call":
+            return self._in_flight_error(message, cause)
+        error = {"code": -32603, "message": "the Ghidra GUI runtime went away while it answered the request"}
+        return {"jsonrpc": "2.0", "id": message.get("id"), "error": error}
+
+    @staticmethod
+    def _without_json_rpc(message: dict[str, Any], status: int) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "error": {"code": -32603, "message": f"the Ghidra GUI runtime answered HTTP {status} without JSON-RPC"},
+        }
+
+    async def exchange(
+        self, message: dict[str, Any], routing: Routing | None = None
+    ) -> tuple[int, dict[str, Any] | None]:
+        """Forward ``message``: the HTTP status and the reply (None for a notification).
+
+        What the runtime sends before the reply (progress) has no place in one JSON body and is left out.
+        """
+        async with self.open(message, routing) as reply:
+            answer = None
+            async for item in reply.messages:
+                if item is not KEEPALIVE and "method" not in item:
+                    answer = item
+            return reply.status, answer
 
     async def handle(self, message: dict[str, Any], routing: Routing | None = None) -> dict[str, Any] | None:
         return (await self.exchange(message, routing))[1]
@@ -762,11 +896,22 @@ async def serve_stdio(relay: Relay) -> None:
     write_lock = asyncio.Lock()
     pending: set[asyncio.Task] = set()
 
+    async def write(message: Any) -> None:
+        async with write_lock:
+            wire.write(json.dumps(message).encode() + b"\n")
+
     async def answer(line: bytes) -> None:
-        reply = await relay.handle_body(line)
-        if reply is not None:
-            async with write_lock:
-                wire.write(reply + b"\n")
+        message = single_message(line)
+        if message is None:  # a batch, or no JSON-RPC object
+            reply = await relay.handle_body(line)
+            if reply is not None:
+                async with write_lock:
+                    wire.write(reply + b"\n")
+            return
+        async with relay.open(message) as reply:
+            async for item in reply.messages:
+                if item is not KEEPALIVE:  # a stdio client needs no ping
+                    await write(item)
 
     def is_initialize(line: bytes) -> bool:
         with contextlib.suppress(ValueError):
@@ -790,11 +935,43 @@ async def serve_stdio(relay: Relay) -> None:
         wire.close()
 
 
+def single_message(body: bytes) -> dict[str, Any] | None:
+    """The JSON-RPC message ``body`` holds, or None if it is a batch, not JSON or no object."""
+    try:
+        message = json.loads(body)
+    except ValueError:
+        return None
+    return message if isinstance(message, dict) else None
+
+
+_EVENT_STREAM_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+def _event(message: Any) -> bytes:
+    if message is KEEPALIVE:
+        return b": ping\r\n\r\n"
+    return b"event: message\r\ndata: " + json.dumps(message, separators=(",", ":")).encode() + b"\r\n\r\n"
+
+
 def _http_relay_app(relay: Relay, *, path: str, host: str):
     from mcp.server.transport_security import TransportSecurityMiddleware
     from starlette.applications import Starlette
-    from starlette.responses import Response
+    from starlette.responses import Response, StreamingResponse
     from starlette.routing import Route
+
+    class EventStream(StreamingResponse):
+        """An event stream that closes what feeds it, whether it ends or its client goes away."""
+
+        async def stream_response(self, send) -> None:
+            try:
+                await super().stream_response(send)
+            finally:
+                with anyio.CancelScope(shield=True):
+                    await self.body_iterator.aclose()
 
     security = TransportSecurityMiddleware(resolve_transport_security_for_host(host))
 
@@ -804,11 +981,46 @@ def _http_relay_app(relay: Relay, *, path: str, host: str):
             return refused
         if request.method != "POST":
             return Response(status_code=405, headers={"Allow": "POST"})
-        # A client of protocol 2026-07-28 or later reads the status too (400 for an unsupported version).
-        status, reply = await relay.exchange_body(await request.body(), routing_headers_of(request.headers))
-        if reply is None:
-            return Response(status_code=202)
-        return Response(reply, status_code=status, media_type="application/json")
+        body, routing = await request.body(), routing_headers_of(request.headers)
+        message = single_message(body)
+        if message is None:  # a batch, or no JSON-RPC object: one JSON body, however long it takes
+            status, reply = await relay.exchange_body(body, routing)
+            if reply is None:
+                return Response(status_code=202)
+            return Response(reply, status_code=status, media_type="application/json")
+        # The reply is JSON unless the runtime has something to say before it (progress): then an event
+        # stream, from the first notification on, like the runtime's own.  A client of protocol 2026-07-28
+        # or later reads the status too (400 for an unsupported version).
+        stack = contextlib.AsyncExitStack()
+        try:
+            reply = await stack.enter_async_context(relay.open(message, routing))
+            messages = reply.messages.__aiter__()
+            first = await anext(messages, None)
+            while first is KEEPALIVE:
+                first = await anext(messages, None)
+            if first is None or "method" not in first:
+                await stack.aclose()
+                if first is None:
+                    return Response(status_code=202)
+                return Response(json.dumps(first), status_code=reply.status, media_type="application/json")
+        except BaseException:
+            await stack.aclose()
+            raise
+
+        async def events():
+            try:
+                yield _event(first)
+                async for item in messages:
+                    yield _event(item)
+            finally:
+                # The client may have gone (this then runs cancelled): the runtime's connection still closes.
+                with anyio.CancelScope(shield=True):
+                    await messages.aclose()
+                    await stack.aclose()
+
+        return EventStream(
+            events(), status_code=reply.status, media_type="text/event-stream", headers=_EVENT_STREAM_HEADERS
+        )
 
     return Starlette(routes=[Route(path, endpoint, methods=["GET", "POST", "DELETE"])])
 

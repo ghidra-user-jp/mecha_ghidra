@@ -4,7 +4,7 @@
 
 Choose one connection method per client. **HTTP** connects to a server you start separately; **stdio** lets the client start and stop its own server process. For HTTP, complete [local setup](usage.md#local-setup) or [Docker setup](docker.md) first.
 
-HTTP uses stateless JSON responses, with no MCP session ID or stateful compatibility option. See [transport configuration](configuration.md#transports) for application state and timeout behavior.
+HTTP is stateless, with no MCP session ID or stateful compatibility option. A reply is JSON, or an event stream while a call reports progress, so the client must accept both, as the MCP specification requires. See [transport configuration](configuration.md#transports) for application state and timeout behavior.
 
 With `--backend gui` ([live sharing with the GUI](gui-live.md)) both methods work. Over stdio, the client starts a relay: the first one starts the Ghidra GUI, later ones and other clients share it, and the GUI stays open when the client exits. Add `--backend gui` to the stdio arguments below, as in [the GUI examples](#gui). Over HTTP, connect to the server you started with `--backend gui --transport http`.
 

@@ -13,6 +13,7 @@ from ghidra_mcp.contracts.tool_spec import get_tool_spec
 from ghidra_mcp.domain.policies import configure_lock_timeout_seconds, get_lock_timeout_seconds
 from ghidra_mcp.presentation.cli_runtime import create_cli_runtime
 from ghidra_mcp.presentation.config import ToolPresentationConfig
+from ghidra_mcp.presentation.progress import ProgressReporter
 from import_operation_support import FakeMonitor
 from runtime_fakes import FakeProgram
 from test_import_operations import wait_until
@@ -280,3 +281,60 @@ def test_lock_timeout_names_the_job_that_holds_the_target(jobs):
     jobs.core.release.set()
     record_of(call(jobs, "get_operation", {"operation_id": receipt["operation_id"], "wait_seconds": 5}))
     assert not call(jobs, "get_program_info", {"target": "default"}).is_error
+
+
+class Reports:
+    """What a client that sent a progressToken would receive while a call waits."""
+
+    def __init__(self, interval=0.05):
+        self.received = []
+        self.reporter = ProgressReporter(self._send, interval=interval)
+
+    async def _send(self, progress, total, message):
+        self.received.append((progress, message))
+
+
+def call_with_reports(jobs, name, arguments, reports, *, release_after=None):
+    async def run():
+        if release_after is not None:
+            asyncio.get_running_loop().call_later(release_after, jobs.core.release.set)
+        return await jobs.bundle.runtime.mcp.call_tool(name, arguments, progress=reports.reporter)
+
+    return asyncio.run(run())
+
+
+def test_a_call_that_waits_for_its_job_reports_what_the_job_is_doing(jobs):
+    reports = Reports()
+    record = record_of(
+        call_with_reports(jobs, "analyze_program", {"target": "default", "wait_seconds": 5}, reports, release_after=0.4)
+    )
+    assert record["state"] == "succeeded"
+    values = [value for value, _ in reports.received]
+    assert len(values) >= 3 and values == sorted(set(values)), "reports arrive while it waits and only grow"
+    messages = [message for _, message in reports.received]
+    assert messages[-1] == "analyze_program: running"
+    assert all(message.startswith("analyze_program: ") for message in messages)
+
+
+def test_get_operation_reports_while_it_waits_for_the_job(jobs):
+    receipt = record_of(call(jobs, "analyze_program", {"target": "default", "wait_seconds": 0}))
+    assert jobs.core.entered.wait(2)
+    reports = Reports()
+    done = record_of(
+        call_with_reports(
+            jobs,
+            "get_operation",
+            {"operation_id": receipt["operation_id"], "wait_seconds": 5},
+            reports,
+            release_after=0.3,
+        )
+    )
+    assert done["state"] == "succeeded"
+    assert reports.received and {message for _, message in reports.received} == {"analyze_program: running"}
+
+
+def test_a_job_that_finishes_before_the_first_interval_is_not_reported(jobs):
+    jobs.core.release.set()
+    reports = Reports(interval=5.0)
+    record = record_of(call_with_reports(jobs, "analyze_program", {"target": "default", "wait_seconds": 5}, reports))
+    assert record["state"] == "succeeded" and reports.received == []

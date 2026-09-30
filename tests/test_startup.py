@@ -288,7 +288,7 @@ def test_the_startup_wait_counts_against_the_deferral_and_job_waits():
     server = _server(gate, "decompile_function", "get_operation")
     seen = {}
 
-    async def deferred_run(name, function, kwargs, *, operations, complete, already_waited=0.0):
+    async def deferred_run(name, function, kwargs, *, operations, complete, already_waited=0.0, progress=None):
         seen["already_waited"] = already_waited
         return "int main(void) { return 0; }\n"
 

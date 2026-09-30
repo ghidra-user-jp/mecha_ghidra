@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 import subprocess
 import sys
@@ -36,12 +37,47 @@ async def defer_then_collect(client, root):
     assert record["state"] == "succeeded" and record["result"] == PSEUDOCODE
 
 
+async def wait_and_collect_progress(client, root):
+    """A call that runs for a moment, sent with a progress callback: what it reported, and its reply."""
+    reports = []
+
+    async def on_progress(progress, total, message):
+        reports.append((progress, message))
+
+    async def release_soon():
+        await wait_file(root / "started")
+        await asyncio.sleep(0.4)
+        (root / "release").touch()
+
+    releasing = asyncio.ensure_future(release_soon())
+    with anyio.fail_after(10):
+        reply = await client.call_tool("decompile_function", DECOMPILE, progress_callback=on_progress)
+    await releasing
+    assert not reply.is_error and reply.structured_content == {"result": PSEUDOCODE}, reply
+    values = [progress for progress, _ in reports]
+    assert len(values) >= 3 and values == sorted(set(values)), reports
+    assert {message for _, message in reports} == {"decompile_function: running"}
+    await asyncio.sleep(0.2)
+    assert len(reports) == len(values), "nothing follows the reply"
+
+
 def test_a_deferred_call_over_stdio(tmp_path):
     params = StdioServerParameters(command=sys.executable, args=[SERVER, str(tmp_path)])
 
     async def scenario():
         async with Client(params, read_timeout_seconds=5) as client:
             await defer_then_collect(client, tmp_path)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+def test_a_waiting_call_reports_progress_over_stdio(tmp_path, mode):
+    params = StdioServerParameters(command=sys.executable, args=[SERVER, str(tmp_path), "--defer-after", "8"])
+
+    async def scenario():
+        async with Client(params, mode=mode, read_timeout_seconds=10) as client:
+            await wait_and_collect_progress(client, tmp_path)
 
     asyncio.run(scenario())
 
@@ -66,13 +102,15 @@ def test_stdio_eof_waits_for_a_deferred_call_before_closing(tmp_path):
     assert entered <= finished <= closed
 
 
-def test_a_deferred_call_over_http(tmp_path):
+@contextlib.contextmanager
+def serving_http(root, *extra):
+    """The fixture server on a free loopback port; yields its URL once it accepts connections."""
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}/mcp"
 
-    async def scenario():
+    async def wait_until_listening():
         with anyio.fail_after(5):
             while True:
                 try:
@@ -82,15 +120,14 @@ def test_a_deferred_call_over_http(tmp_path):
                     break
                 except OSError:
                     await asyncio.sleep(0.01)
-        async with Client(url, read_timeout_seconds=5) as client:
-            await defer_then_collect(client, tmp_path)
 
-    with (tmp_path / "http.stderr").open("w") as log:
-        process = subprocess.Popen([sys.executable, SERVER, str(tmp_path), str(port)], stdout=log, stderr=log)
+    with (root / "http.stderr").open("w") as log:
+        process = subprocess.Popen([sys.executable, SERVER, str(root), str(port), *extra], stdout=log, stderr=log)
         try:
-            asyncio.run(scenario())
+            asyncio.run(wait_until_listening())
+            yield url
         finally:
-            (tmp_path / "release").touch()
+            (root / "release").touch()
             process.terminate()
             try:
                 process.wait(timeout=5)
@@ -98,4 +135,25 @@ def test_a_deferred_call_over_http(tmp_path):
                 process.kill()
                 process.wait(timeout=5)
             if process.returncode not in (0, -15, 143):
-                pytest.fail((tmp_path / "http.stderr").read_text())
+                pytest.fail((root / "http.stderr").read_text())
+
+
+def test_a_deferred_call_over_http(tmp_path):
+    async def scenario(url):
+        async with Client(url, read_timeout_seconds=5) as client:
+            await defer_then_collect(client, tmp_path)
+
+    with serving_http(tmp_path) as url:
+        asyncio.run(scenario(url))
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+def test_a_waiting_call_reports_progress_over_http(tmp_path, mode):
+    """The reply becomes an event stream only because the client sent a progressToken and the call waited."""
+
+    async def scenario(url):
+        async with Client(url, mode=mode, read_timeout_seconds=10) as client:
+            await wait_and_collect_progress(client, tmp_path)
+
+    with serving_http(tmp_path, "--defer-after", "8") as url:
+        asyncio.run(scenario(url))

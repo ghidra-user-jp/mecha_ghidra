@@ -1,0 +1,14 @@
+# The required server scenarios of 2026-07-28 that this server is known not to pass, and why.
+# The suite counts every one of them as a failure; this file only keeps the run from failing on them
+# (and fails it if one starts to pass, so the entry is removed).
+#
+# Not scored, so not listed: the Tasks extension scenarios (tasks-*). Tasks is not implemented; no
+# client supports it yet (docs: long-operation jobs, section on Tasks).
+server:
+  # Sampling and roots are deprecated in 2026-07-28 (SEP-2577) and are not adopted.
+  - input-required-result-basic-sampling
+  - input-required-result-basic-list-roots
+  # Asks for elicitation, sampling and roots together; the last two are deprecated.
+  - input-required-result-multiple-input-requests
+  # Expects input requests for sampling alone; sampling is deprecated.
+  - input-required-result-capability-check
