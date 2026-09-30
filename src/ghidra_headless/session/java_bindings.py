@@ -34,6 +34,16 @@ def _console_monitor():
 
 
 @cache
+def _task_monitor_adapter_class():
+    return jpype.JClass("ghidra.util.task.TaskMonitorAdapter")
+
+
+def _cancellable_monitor():
+    """Return a silent task monitor that honors ``cancel()`` (DUMMY ignores it)."""
+    return _task_monitor_adapter_class()(True)
+
+
+@cache
 def _timeout_task_monitor_class():
     return jpype.JClass("ghidra.util.task.TimeoutTaskMonitor")
 

@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from cli_support import import_and_wait
 from test_runtime_import_lifecycle import bundle as _bundle
 
 bundle = _bundle
@@ -23,7 +24,8 @@ def project(bundle, tmp_path):
     api["register_target"](target="source", project_location=str(tmp_path), project_name="sample")
     binary = tmp_path / "tiny.bin"
     binary.write_bytes(bytes.fromhex("b8 2a 00 00 00 c3"))
-    imported = api["import_program"](
+    imported = import_and_wait(
+        api,
         target="source",
         binary_path=str(binary),
         import_mode="raw_binary",
@@ -103,7 +105,8 @@ def test_bsim_validation_rollback_keeps_other_program_in_same_project(project, t
     api["close_session"](target="source")
     peer_binary = tmp_path / "peer.bin"
     peer_binary.write_bytes(bytes.fromhex("b8 07 00 00 00 c3"))
-    peer = api["import_program"](
+    peer = import_and_wait(
+        api,
         target="source",
         binary_path=str(peer_binary),
         import_mode="raw_binary",

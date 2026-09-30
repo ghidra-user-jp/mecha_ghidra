@@ -9,6 +9,7 @@ from ghidra.program.model.pcode import HighFunctionDBUtil
 from ghidra.program.model.symbol import SourceType
 from ghidra.util.task import TaskMonitor
 
+from ghidra_headless.handlers.commands.query_support import program_metadata
 from ghidra_headless.handlers.core_command_registry import (
     COMMAND_NAMES,
     COMMAND_PROFILE,
@@ -46,14 +47,17 @@ from ghidra_headless.handlers.core_helpers import (
 from ghidra_headless.handlers.core_runtime import (
     _THREAD_STATE,
     _ensure_context_for_key,
+    begin_command,
     bind_project,
     clear_contexts,
+    current_task_monitor,
     describe_state,
     ensure_context,
     execution_state,
     initialize,
     remove_context,
 )
+from ghidra_headless.session.transactions import UNCHANGED, recorded_transactions
 
 
 def _execute_nested_command(command, params, *, budget=None):
@@ -75,6 +79,8 @@ _PROFILE_DEPENDENCIES = {
     "find_function_by_name": _find_function_by_name,
     "decompile_function_object": _decompile_function_object,
     "analyze_program_impl": _analyze_program,
+    "current_task_monitor": current_task_monitor,
+    "begin_command": begin_command,
     "get_address": _get_address,
     "txn": _txn,
     "source_type": SourceType,
@@ -141,16 +147,46 @@ if tuple(SUPPORTED_COMMANDS.keys()) != COMMAND_NAMES:
     raise RuntimeError("SUPPORTED_COMMANDS and COMMAND_NAMES order/membership mismatch")
 
 
-def execute(command, params, key="default"):
+def execute(command, params, key="default", *, task_monitor=None, on_begin=None, record_transactions=False):
+    """Run ``command`` against the context for ``key``.
+
+    ``task_monitor`` lets a background job cancel the command; handlers that
+    can be cancelled receive it through the ``current_task_monitor`` profile key.
+    ``on_begin`` is the job's hook for the moment the command starts changing
+    the program, which the handler signals through ``begin_command``.
+    ``record_transactions`` notes the transactions the command starts, for
+    ``transaction_outcome``; the runtime asks for it for program writes.
+    """
+    # A command refused below changed nothing, and produced no result.
+    _THREAD_STATE.transaction_outcome = UNCHANGED
+    _THREAD_STATE.transaction_record = None
+    _THREAD_STATE.command_source = None
     handler = SUPPORTED_COMMANDS.get(command)
     if handler is None:
         raise KeyError("Unsupported command: %s" % command)
-    _ensure_context_for_key(key)
+    context = _ensure_context_for_key(key)
     previous = getattr(_THREAD_STATE, "current_key", None)
+    previous_monitor = getattr(_THREAD_STATE, "task_monitor", None)
+    previous_begin = getattr(_THREAD_STATE, "on_begin", None)
     _THREAD_STATE.current_key = key
+    _THREAD_STATE.task_monitor = task_monitor
+    _THREAD_STATE.on_begin = on_begin
     try:
-        return _json_safe(handler(params or {}))
+        if record_transactions:
+            with recorded_transactions(context.program) as record:
+                # Read only if the command fails: the outcome costs Java calls.
+                _THREAD_STATE.transaction_record = record
+                result = _json_safe(handler(params or {}))
+        else:
+            _THREAD_STATE.transaction_outcome = None
+            result = _json_safe(handler(params or {}))
+        # Read while the runtime still holds the target's locks, so no other
+        # command can come between the result and the revision it names.
+        _THREAD_STATE.command_source = _source_of(context)
+        return result
     finally:
+        _THREAD_STATE.task_monitor = previous_monitor
+        _THREAD_STATE.on_begin = previous_begin
         if previous is None:
             if hasattr(_THREAD_STATE, "current_key"):
                 delattr(_THREAD_STATE, "current_key")
@@ -158,9 +194,49 @@ def execute(command, params, key="default"):
             _THREAD_STATE.current_key = previous
 
 
+def _source_of(context):
+    try:
+        return program_metadata(context)
+    except Exception:
+        return None
+
+
+def command_source():
+    """The program and revision the last command ``execute`` ran on this thread left, or None.
+
+    ``{"program": domain path, "revision": ...}``, taken right after the
+    command; the revision is the one ``expected_revision`` compares against.
+    None when the command failed.
+    """
+    return getattr(_THREAD_STATE, "command_source", None)
+
+
+def transaction_outcome():
+    """How the transactions of the last command ``execute`` ran on this thread ended.
+
+    ``unchanged``, ``committed``, ``rolled_back`` or ``unknown`` (see
+    ``ghidra_headless.session.transactions``); None before any command, and
+    for a command run without ``record_transactions``.  The runtime reads it
+    when a write fails, to say what the failure left behind.
+    """
+    record = getattr(_THREAD_STATE, "transaction_record", None)
+    if record is not None:
+        _THREAD_STATE.transaction_outcome = record.outcome()
+        _THREAD_STATE.transaction_record = None
+    return getattr(_THREAD_STATE, "transaction_outcome", None)
+
+
+def begins_itself(command):
+    """Whether ``command`` marks the moment it starts changing the program (``begin_command``) itself."""
+    return "begin_command" in COMMAND_PROFILE.get(command, ())
+
+
 HANDLERS = {
     "initialize": initialize,
     "execute": execute,
+    "transaction_outcome": transaction_outcome,
+    "begins_itself": begins_itself,
+    "command_source": command_source,
     "describe_state": describe_state,
     "execution_state": execution_state,
     "bind_project": bind_project,
@@ -175,6 +251,9 @@ __all__ = [
     "remove_context",
     "clear_contexts",
     "execute",
+    "transaction_outcome",
+    "begins_itself",
+    "command_source",
     "describe_state",
     "execution_state",
     "bind_project",

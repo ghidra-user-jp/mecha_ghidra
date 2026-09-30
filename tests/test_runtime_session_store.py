@@ -211,28 +211,51 @@ def test_ensure_session_reports_not_loaded_program():
     store, _core = _build_store()
     store.target_projects["fw"] = ("/tmp/prj", "sample")
 
-    with pytest.raises(RuntimeError, match="program not loaded"):
+    with pytest.raises(RuntimeError, match="^PROGRAM_NOT_OPEN: target 'fw' has no program loaded$"):
         store.ensure_session("fw")
 
 
-def test_analyzed_load_tracking_by_target_and_domain():
+def test_ensure_session_reports_an_unregistered_target():
     store, _core = _build_store()
 
-    assert not store.is_analyzed_load("a", "/x")
-    store.mark_analyzed_load("a", "/x")
-    store.mark_analyzed_load("a", "/y")
-    store.mark_analyzed_load("b", "/x")
-    assert store.is_analyzed_load("a", "/x")
-    assert store.is_analyzed_load("a", "/y")
-    assert store.is_analyzed_load("b", "/x")
+    for lookup in (store.ensure_session, store.ensure_lock):
+        with pytest.raises(RuntimeError, match="^TARGET_NOT_REGISTERED: target 'fw' is not registered$"):
+            lookup("fw")
 
-    store.clear_analyzed_loads_for_target("a")
-    assert not store.is_analyzed_load("a", "/x")
-    assert not store.is_analyzed_load("a", "/y")
-    assert store.is_analyzed_load("b", "/x")
 
-    store.clear_analyzed_loads()
-    assert not store.is_analyzed_load("b", "/x")
+def test_every_session_object_has_its_own_generation():
+    from ghidra_headless.session import ProgramSession
+
+    first = ProgramSession(None, object(), object())
+    reopened = ProgramSession(None, object(), object())
+    # A reload or reopen of the same program is a new session and a new generation.
+    assert RuntimeSessionStore.session_generation(first) != RuntimeSessionStore.session_generation(reopened)
+    assert RuntimeSessionStore.session_generation(first) == RuntimeSessionStore.session_generation(first)
+
+
+def test_a_session_describes_itself_without_calling_into_ghidra():
+    from types import SimpleNamespace
+
+    from ghidra_headless.session import ProgramSession
+
+    domain_file = SimpleNamespace(path="/main")
+    domain_file.getPathname = lambda: domain_file.path
+    calls = []
+    program = SimpleNamespace(getDomainFile=lambda: calls.append("read") or domain_file)
+    session = ProgramSession(None, program, SimpleNamespace(project_name="sample", project_location="/tmp/prj"))
+    opened = len(calls)
+    # list_targets reads this without the target lock, so it must not reach Ghidra.
+    assert session.to_dict() == {"project_name": "sample", "project_location": "/tmp/prj", "domain_path": "/main"}
+    assert len(calls) == opened
+    # A script can rename the file; the runtime re-reads the path after each run.
+    domain_file.path = "/renamed"
+    session.refresh_domain_path()
+    assert session.to_dict()["domain_path"] == "/renamed"
+    # A closed session still describes the program it held.
+    session.close = None
+    session.program = None
+    session.refresh_domain_path()
+    assert session.to_dict()["domain_path"] == "/renamed"
 
 
 def test_dirty_program_tracking_by_target_and_domain():

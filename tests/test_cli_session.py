@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import signal
+import subprocess
+import sys
+import time
 import types
 
 import pytest
@@ -12,11 +16,50 @@ from ghidra_mcp.contracts.tool_spec import ToolProfile, filter_tool_specs, get_a
 
 # Tool callables bound to a swappable registry (see tests/cli_support.py).
 cli_tools = ToolHarness()
+# A stand-in for the MCP server of an application whose transport is faked.
+_NO_TOOLS = types.SimpleNamespace(bindings={})
+
+
+def _fake_transport(events, failure=None):
+    """Stands in for run_mcp_server: serve, let the background startup finish, then end."""
+
+    def transport(server, *, transport, log_level, startup, **kwargs):
+        events.append("transport")
+        startup.start()
+        assert startup.join(timeout=30)
+        if failure in {"termination", "termination+close"}:
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+        if failure == "transport":
+            raise RuntimeError("transport")
+
+    return transport
+
+
+def _no_jvm_thread_calls(monkeypatch):
+    # The startup's JVM thread housekeeping, which needs a real JVM.
+    monkeypatch.setattr(cli, "_prepare_event_loop_thread", lambda: None)
+    monkeypatch.setattr(cli, "detach_current_thread", lambda: None)
+    monkeypatch.setattr(cli, "redirect_java_stdout_to_stderr", lambda: None)
 
 
 @pytest.mark.parametrize(
     "failure",
-    ["installation", "jvm", "runtime", "auth", "project", "no_targets", "transport", "termination", "close", None],
+    [
+        "installation",
+        "prepare",
+        "jvm",
+        "runtime",
+        "auth",
+        "project",
+        "no_targets",
+        "transport",
+        "termination",
+        "close",
+        "termination+close",
+        None,
+    ],
 )
 def test_main_cleans_script_snapshot_on_every_exit(monkeypatch, tmp_path, failure):
     from ghidra_headless.scripts import providers
@@ -32,11 +75,7 @@ def test_main_cleans_script_snapshot_on_every_exit(monkeypatch, tmp_path, failur
     def step(name):
         def call(*args, **kwargs):
             events.append(name)
-            if name == "transport" and failure == "termination":
-                handler = signal.getsignal(signal.SIGTERM)
-                assert callable(handler)
-                handler(signal.SIGTERM, None)
-            if name == failure:
+            if name == failure or (name == "close" and failure == "termination+close"):
                 raise RuntimeError(name)
 
         return call
@@ -44,16 +83,19 @@ def test_main_cleans_script_snapshot_on_every_exit(monkeypatch, tmp_path, failur
     registry = types.SimpleNamespace(
         register_target=step("project"), has_targets=lambda: failure != "no_targets", close_all=step("close")
     )
-    application = types.SimpleNamespace(registry=registry, script_service=service, mcp=None)
+    application = types.SimpleNamespace(registry=registry, script_service=service, mcp=_NO_TOOLS)
     monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
     monkeypatch.setattr(cli, "_ensure_supported_ghidra_installation", step("installation"))
+    monkeypatch.setattr(cli, "_prepare_pyghidra_headless", step("prepare"))
     monkeypatch.setattr(cli, "_start_pyghidra_headless", step("jvm"))
-    monkeypatch.setattr(cli, "redirect_java_stdout_to_stderr", lambda: None)
+    _no_jvm_thread_calls(monkeypatch)
     monkeypatch.setattr(cli, "_prepare_script_runtime", step("runtime"))
     monkeypatch.setattr(cli, "configure_ghidra_server_auth", step("auth"))
     monkeypatch.setattr(cli, "_core", lambda: object())
-    monkeypatch.setattr(cli, "run_mcp_server", step("transport"))
+    monkeypatch.setattr(cli, "run_mcp_server", _fake_transport(events, failure))
     monkeypatch.setattr(providers, "shutdown", step("providers"))
+    monkeypatch.setattr(cli.jpype, "isJVMStarted", lambda: "jvm" in events)
+    monkeypatch.setattr(cli, "_exit_without_joining_threads", lambda code: events.append(("exit", code)))
     # main updates this environment variable when --ghidra-path is provided.
     monkeypatch.setenv("GHIDRA_INSTALL_DIR", str(tmp_path / "installation"))
     argv = [
@@ -71,17 +113,164 @@ def test_main_cleans_script_snapshot_on_every_exit(monkeypatch, tmp_path, failur
         with pytest.raises(SystemExit) as exc_info:
             cli.main(argv)
         assert exc_info.value.code == 128 + signal.SIGTERM
-    elif failure in {"transport", "close"}:
-        with pytest.raises(RuntimeError, match=failure):
+    elif failure in {"transport", "close", "termination+close"}:
+        with pytest.raises(RuntimeError, match="close" if failure == "termination+close" else failure):
             cli.main(argv)
     else:
         # Startup failures (including a JVM that will not start) end with one logged line and exit code 1.
         assert cli.main(argv) == (0 if failure is None else 1)
+    # Serving starts before the JVM; the checks that need no JVM ran before serving.
+    if "jvm" in events:
+        assert events.index("transport") < events.index("jvm")
     # Nothing to close before the JVM exists; closing would import the core without one.
-    assert events.count("close") == (0 if failure in {"installation", "jvm"} else 1)
-    assert events[-1] == "providers"
+    # A failed startup closes once, and the final cleanup does not close again.
+    before_jvm = {"installation", "prepare", "jvm", "project", "no_targets"}
+    assert events.count("close") == (0 if failure in before_jvm else 1)
+    # After SIGTERM the process ends only once every cleanup step has run, even a failing one.
+    exits = [("exit", 128 + signal.SIGTERM)] if failure in {"termination", "termination+close"} else []
+    assert events[-1 - len(exits) :] == ["providers", *exits]
     assert not snapshot.exists()
     assert signal.getsignal(signal.SIGTERM) == original_handler
+
+
+def _signal_name(signum):
+    return signal.Signals(signum).name
+
+
+@pytest.mark.parametrize("signum", cli.SHUTDOWN_SIGNALS, ids=_signal_name)
+def test_only_the_first_shutdown_signal_interrupts(monkeypatch, signum):
+    repeats = []
+
+    def run_cli(_argv):
+        with pytest.raises(SystemExit) as exc_info:
+            signal.getsignal(signum)(signum, None)
+        assert exc_info.value.code == 128 + signum
+        # A process-group signal can arrive twice; a repeat of any shutdown
+        # signal must not interrupt the cleanup.
+        repeats.extend(signal.getsignal(other)(other, None) for other in cli.SHUTDOWN_SIGNALS)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_cli", run_cli)
+    assert cli.main([]) == 0
+    assert repeats == [None] * len(cli.SHUTDOWN_SIGNALS)
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+def test_a_shutdown_signal_the_parent_ignores_stays_ignored(monkeypatch):
+    seen = {}
+
+    def run_cli(_argv):
+        seen.update((signum, signal.getsignal(signum)) for signum in cli.SHUTDOWN_SIGNALS)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_cli", run_cli)
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        # As under nohup.
+        assert cli.main([]) == 0
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+    assert seen.pop(signal.SIGHUP) is signal.SIG_IGN
+    assert all(callable(handler) for handler in seen.values())
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGQUIT"), reason="POSIX signals")
+def test_sigquit_prints_the_python_stacks_and_the_server_keeps_running():
+    script = """
+import signal
+
+from ghidra_mcp.presentation import cli
+
+
+def run_cli(_argv):
+    signal.raise_signal(signal.SIGQUIT)
+    return 0
+
+
+cli._run_cli = run_cli
+raise SystemExit(cli.main([]))
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "most recent call first" in result.stderr
+
+
+def test_sigterm_inside_the_event_loop_does_not_interrupt_the_callback_it_lands_in(monkeypatch):
+    import asyncio
+
+    delivered = []
+    exits = []
+    monkeypatch.setattr(cli, "_exit_without_joining_threads", exits.append)
+
+    def run_cli(_argv):
+        async def serve():
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            delivered.append(future)
+
+            def deliver():
+                # A worker thread's result arrives just as the signal does. Had the
+                # handler raised here, the future would never be set and shutdown
+                # would wait for its task forever.
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                future.set_result("delivered")
+
+            loop.call_soon(deliver)
+            await future
+            await asyncio.sleep(10)
+
+        asyncio.run(serve())
+        return 0
+
+    monkeypatch.setattr(cli, "_run_cli", run_cli)
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main([])
+    assert exc_info.value.code == 128 + signal.SIGTERM
+    assert delivered[0].result() == "delivered"
+    assert exits == [128 + signal.SIGTERM]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal dispositions")
+@pytest.mark.parametrize("signum", cli.SHUTDOWN_SIGNALS, ids=_signal_name)
+def test_rearm_takes_a_shutdown_signal_back_from_a_native_handler(signum):
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    libc.signal.restype = ctypes.c_void_p
+    libc.signal.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    received = []
+    previous = signal.signal(signum, lambda signum, _frame: received.append(signum))
+    try:
+        # A JVM started without -Xrs does this: a native handler replaces Python's
+        # while signal.getsignal() still reports the Python one. SIG_IGN stands in for it.
+        libc.signal(signum, 1)
+        signal.raise_signal(signum)
+        assert received == []
+        cli._rearm_python_signals()
+        signal.raise_signal(signum)
+        assert received == [signum]
+    finally:
+        signal.signal(signum, previous)
+
+
+def test_exit_after_sigterm_runs_exit_handlers_without_joining_threads(tmp_path):
+    marker = tmp_path / "exit-handlers"
+    script = f"""
+import atexit
+import pathlib
+import threading
+
+from ghidra_mcp.presentation import cli
+
+atexit.register(pathlib.Path({str(marker)!r}).write_text, "ran")
+# Stands in for the stdio transport's stdin reader, which never returns while stdin is open.
+threading.Thread(target=threading.Event().wait).start()
+cli._exit_without_joining_threads(143)
+"""
+    result = subprocess.run([sys.executable, "-c", script], timeout=60)
+    assert result.returncode == 143
+    assert marker.read_text() == "ran"
 
 
 class FakeCoreCommandService:
@@ -399,16 +588,6 @@ def test_parse_session_definition_invalid(text):
         (
             lambda a: a.load_program("fw", "/app"),
             "/app",
-        ),
-        (
-            lambda a: a.import_program(
-                "fw",
-                "/tmp/a.exe",
-                import_mode="raw_binary",
-                language_id="x86:LE:32:default",
-                entry_offset=0,
-            ),
-            "/tmp/a.exe",
         ),
         (
             lambda a: a.save_project_program("fw", domain_path="/app"),
@@ -733,6 +912,22 @@ def test_run_kwargs_for_stdio_transport_are_empty():
     assert run_kwargs_for_transport(transport="stdio", args=args, logger=cli.logger) == {}
 
 
+def test_the_http_listener_is_named_unless_the_caller_listens_elsewhere(caplog):
+    """A detached GUI runtime takes a free port after this, and names that one when it registers."""
+    from ghidra_mcp.presentation.transport import run_kwargs_for_transport
+
+    args = types.SimpleNamespace(log_level="INFO", mcp_host="127.0.0.1", mcp_port=None, mcp_path="/mcp")
+    with caplog.at_level("INFO"):
+        announced = run_kwargs_for_transport(transport="streamable-http", args=args, logger=cli.logger)
+        assert "http://127.0.0.1:8081/mcp" in caplog.text
+        caplog.clear()
+        quiet = run_kwargs_for_transport(transport="streamable-http", args=args, logger=cli.logger, announce=False)
+    assert "Starting MCP" not in caplog.text
+    assert {key: quiet[key] for key in ("host", "port", "streamable_http_path")} == {
+        key: announced[key] for key in ("host", "port", "streamable_http_path")
+    }
+
+
 def test_redirect_java_stdout_to_stderr_swaps_system_out(monkeypatch):
     calls: list[object] = []
 
@@ -894,30 +1089,128 @@ def test_ensure_supported_ghidra_installation_names_a_missing_directory(monkeypa
         cli._ensure_supported_ghidra_installation(str(tmp_path / "missing"))
 
 
-def test_jvm_start_failure_is_reported_without_a_traceback(monkeypatch, tmp_path, caplog):
+def test_bad_installation_is_reported_before_serving(monkeypatch, tmp_path, caplog):
     install_dir = tmp_path / "ghidra"
     install_dir.mkdir()
+    monkeypatch.setenv("GHIDRA_INSTALL_DIR", str(install_dir))
     application = types.SimpleNamespace(
-        registry=types.SimpleNamespace(close_all=lambda: None), script_service=None, mcp=None
+        registry=types.SimpleNamespace(close_all=lambda: None), script_service=None, mcp=_NO_TOOLS
     )
     monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
     monkeypatch.setattr(cli, "_ensure_supported_ghidra_installation", lambda _path: None)
+    monkeypatch.setattr(cli, "run_mcp_server", lambda *args, **kwargs: pytest.fail("served a bad installation"))
 
     def boom(_install_dir):
         raise ValueError("bad Ghidra installation")
 
-    monkeypatch.setattr(cli, "_start_pyghidra_headless", boom)
+    monkeypatch.setattr(cli, "_prepare_pyghidra_headless", boom)
     with caplog.at_level("ERROR"):
         code = cli.main(["--ghidra-path", str(install_dir), "--project-location", str(tmp_path), "--project-name", "t"])
     assert code == 1
     assert "Failed to start the Ghidra JVM: bad Ghidra installation" in caplog.text
 
 
+def test_jvm_failure_after_serving_is_the_answer_to_every_tool_call(monkeypatch, tmp_path, caplog):
+    import asyncio
+
+    from mcp import Client
+
+    monkeypatch.delenv("GHIDRA_INSTALL_DIR", raising=False)
+    monkeypatch.setattr(cli, "_prepare_pyghidra_headless", lambda _path: None)
+    _no_jvm_thread_calls(monkeypatch)
+
+    def no_jdk(_install_dir, _launcher):
+        raise ValueError("Java was not found")
+
+    monkeypatch.setattr(cli, "_start_pyghidra_headless", no_jdk)
+    seen = {}
+
+    def transport(server, *, transport, log_level, startup, **kwargs):
+        startup.start()
+        assert startup.join(timeout=30)
+
+        async def check():
+            async with Client(server) as client:
+                seen["tools"] = len((await client.list_tools()).tools)
+                seen["call"] = await client.call_tool("list_targets", {})
+
+        asyncio.run(check())
+
+    monkeypatch.setattr(cli, "run_mcp_server", transport)
+    with caplog.at_level("ERROR"):
+        code = cli.main(["--project-location", str(tmp_path), "--project-name", "t"])
+    assert code == 1
+    assert "Failed to start the Ghidra JVM: Java was not found" in caplog.text
+    # The catalog is still served, and every call says why nothing can run.
+    assert seen["tools"] > 0
+    assert seen["call"].is_error
+    error = seen["call"].structured_content["error"]
+    assert (error["code"], error["retryable"], error["details"]["stage"]) == ("STARTUP_FAILED", False, "jvm")
+    assert "Java was not found" in error["message"]
+
+
+def test_programs_open_in_the_background_after_metadata_targets_are_registered(monkeypatch, tmp_path):
+    events = []
+
+    class Registry:
+        def register_target(self, name, **_kwargs):
+            events.append(("register", name))
+
+        def create_session(self, name, **kwargs):
+            events.append(("load", name, kwargs["domain_path"]))
+
+        def has_targets(self):
+            return any(event[0] == "register" for event in events)
+
+        def close_all(self):
+            events.append(("close",))
+
+    application = types.SimpleNamespace(registry=Registry(), script_service=None, mcp=_NO_TOOLS)
+    monkeypatch.delenv("GHIDRA_INSTALL_DIR", raising=False)
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
+    monkeypatch.setattr(cli, "_prepare_pyghidra_headless", lambda _path: None)
+    monkeypatch.setattr(cli, "_start_pyghidra_headless", lambda *_args: events.append(("jvm",)))
+    _no_jvm_thread_calls(monkeypatch)
+    monkeypatch.setattr(cli, "_core", lambda: object())
+
+    def transport(server, *, transport, log_level, startup, **kwargs):
+        events.append(("transport",))
+        startup.start()
+        assert startup.join(timeout=30)
+        assert startup.gate.state == "ready"
+
+    monkeypatch.setattr(cli, "run_mcp_server", transport)
+    argv = [
+        "--session",
+        f"name=meta,project_location={tmp_path}/meta.gpr",
+        "--session",
+        f"name=fw,project_location={tmp_path}/fw.gpr,domain_path=/fw",
+        "--project-location",
+        str(tmp_path),
+        "--project-name",
+        "p",
+        "--domain-path",
+        "/main",
+    ]
+    assert cli.main(argv) == 0
+    assert events == [
+        ("register", "meta"),
+        ("transport",),
+        ("jvm",),
+        ("load", "fw", "/fw"),
+        ("load", "default", "/main"),
+        ("close",),
+    ]
+
+
 def test_start_pyghidra_headless_delegates_to_shared_launcher(monkeypatch):
     calls: list[object] = []
-    monkeypatch.setattr(cli, "start_headless_jvm", lambda install_dir: calls.append(install_dir))
-    cli._start_pyghidra_headless("/tmp/ghidra")
-    assert calls == ["/tmp/ghidra"]
+    prepared = object()
+    monkeypatch.setattr(
+        cli, "start_headless_jvm", lambda install_dir, *, launcher=None: calls.append((install_dir, launcher))
+    )
+    cli._start_pyghidra_headless("/tmp/ghidra", prepared)
+    assert calls == [("/tmp/ghidra", prepared)]
 
 
 def test_public_tool_functions_match_declared_specs():
@@ -1063,3 +1356,107 @@ def test_script_queue_timeout_flag_is_validated_and_applied(monkeypatch):
     assert cli._run_cli([*base, "--script-queue-timeout-seconds", "42"]) == 2
     assert applied == [42.0]
     assert get_script_queue_timeout_seconds() == 300.0
+
+
+def test_the_startup_log_counts_every_published_tool(monkeypatch, tmp_path, caplog):
+    import asyncio
+
+    served = []
+    monkeypatch.delenv("GHIDRA_INSTALL_DIR", raising=False)
+    monkeypatch.setattr(cli, "_prepare_pyghidra_headless", lambda _path: None)
+    monkeypatch.setattr(cli, "run_mcp_server", lambda server, **_kwargs: served.append(server))
+    with caplog.at_level("INFO"):
+        cli.main(["--project-location", str(tmp_path), "--project-name", "t"])
+
+    tools = {tool.name for tool in asyncio.run(served[0].list_tools())}
+    # The result-retrieval tools come beside the profile's.
+    assert {"read_result", "search_result"} <= tools
+    assert f"Starting PyGhidra MCP server with {len(tools)} tools" in caplog.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_a_signal_while_shutdown_waits_for_the_startup_still_closes_the_projects(monkeypatch, tmp_path):
+    import threading
+
+    from ghidra_mcp.application.services.script_service import ScriptConfig, ScriptService
+
+    events = []
+    release = threading.Event()
+
+    def step(name):
+        return lambda *args, **kwargs: events.append(name)
+
+    def slow_session(*args, **kwargs):
+        events.append("project")
+        assert release.wait(10)
+
+    def transport(server, *, transport, log_level, startup, **kwargs):
+        # The client goes away while Ghidra is still opening the startup session.
+        startup.start()
+        while "project" not in events:
+            time.sleep(0.01)
+
+    original_stop = cli.BackgroundStartup.stop
+    timers = []
+
+    def stop(self):
+        # SIGTERM arrives while shutdown waits for the step in progress.
+        timers.extend([threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGTERM)), threading.Timer(0.5, release.set)])
+        for timer in timers:
+            timer.start()
+        original_stop(self)
+        events.append("startup stopped")
+
+    registry = types.SimpleNamespace(create_session=slow_session, has_targets=lambda: True, close_all=step("close"))
+    service = ScriptService(None, config=ScriptConfig())
+    application = types.SimpleNamespace(registry=registry, script_service=service, mcp=_NO_TOOLS)
+    monkeypatch.setattr(cli, "build_application", lambda *args, **kwargs: application)
+    monkeypatch.setattr(cli, "_ensure_supported_ghidra_installation", step("installation"))
+    monkeypatch.setattr(cli, "_prepare_pyghidra_headless", step("prepare"))
+    monkeypatch.setattr(cli, "_start_pyghidra_headless", step("jvm"))
+    _no_jvm_thread_calls(monkeypatch)
+    monkeypatch.setattr(cli, "configure_ghidra_server_auth", step("auth"))
+    monkeypatch.setattr(cli, "_core", lambda: object())
+    monkeypatch.setattr(cli, "run_mcp_server", transport)
+    monkeypatch.setattr(cli.BackgroundStartup, "stop", stop)
+    monkeypatch.setattr(cli.jpype, "isJVMStarted", lambda: "jvm" in events)
+    monkeypatch.setattr(cli, "_exit_without_joining_threads", lambda code: events.append(("exit", code)))
+    monkeypatch.setenv("GHIDRA_INSTALL_DIR", str(tmp_path / "installation"))
+    argv = ["--ghidra-path", str(tmp_path / "installation"), "--project-location", str(tmp_path)]
+    # A program opens in the background, so the session is a startup step.
+    argv += ["--project-name", "test", "--domain-path", "/main"]
+    # main() puts this handler back when it returns: a SIGTERM that comes after that
+    # (stop() no longer waiting for the step) fails this test instead of ending pytest.
+    stray = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, _frame: stray.append(signum))
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main(argv)
+    finally:
+        for timer in timers:
+            timer.cancel()
+            timer.join(5)
+        release.set()
+        signal.signal(signal.SIGTERM, previous)
+    assert exc_info.value.code == 128 + signal.SIGTERM and not stray
+    # The signal waited for the projects to close.
+    assert events[-3:] == ["startup stopped", "close", ("exit", 128 + signal.SIGTERM)]
+
+
+def test_a_cleanup_failure_is_logged_before_a_deferred_signal_replaces_it(caplog):
+    from ghidra_mcp.presentation.cli_runtime import defer_shutdown_signals
+
+    delivered = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, _frame: delivered.append(signum))
+    try:
+        with pytest.raises(RuntimeError, match="close failed"):
+            with defer_shutdown_signals():
+                # Nested, as close_all inside the CLI's cleanup: the outer block logs once.
+                with defer_shutdown_signals():
+                    signal.raise_signal(signal.SIGTERM)
+                    assert delivered == []
+                    raise RuntimeError("close failed")
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert delivered == [signal.SIGTERM]
+    assert caplog.text.count("Cleanup failed before the deferred SIGTERM was delivered") == 1

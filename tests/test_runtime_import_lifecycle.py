@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from cli_support import import_and_wait
 from ghidra_mcp.contracts.tool_spec import get_all_tool_specs, get_checkout_required_tool_names
 from ghidra_mcp.presentation.cli_runtime import create_cli_runtime
 from test_runtime_readonly_commands import _start_pyghidra_if_needed, _unwrap_runtime_result
@@ -32,7 +33,7 @@ def bundle():
     try:
         yield runtime
     finally:
-        runtime.target_service.close_all()
+        runtime.registry.close_all()
 
 
 @pytest.mark.parametrize("registered_before", [False, True])
@@ -43,7 +44,8 @@ def test_runtime_open_timeout_preserves_binding_and_allows_retry(bundle, tmp_pat
     api["register_target"](target="owner", project_location=str(tmp_path), project_name="busy")
     binary = tmp_path / "tiny.bin"
     binary.write_bytes(bytes.fromhex("b8 2a 00 00 00 c3"))
-    imported = api["import_program"](
+    imported = import_and_wait(
+        api,
         target="owner",
         binary_path=str(binary),
         import_mode="raw_binary",
@@ -109,7 +111,8 @@ def test_runtime_import_entry_survives_reload(bundle, tmp_path, base_value, nota
     binary = tmp_path / "tiny.bin"
     binary.write_bytes(bytes.fromhex("b8 2a 00 00 00 c3"))
     base_address = notation(base_value)
-    imported = api["import_program"](
+    imported = import_and_wait(
+        api,
         target="entry",
         binary_path=str(binary),
         import_mode="raw_binary",
@@ -167,12 +170,12 @@ def test_runtime_import_base_address_bounds_and_retry(bundle, tmp_path, bits, bo
     )
     if boundary in {"negative", "overflow"}:
         with pytest.raises(Exception, match="VALIDATION_ERROR") as failed:
-            api["import_program"](**arguments, base_address=hex(value))
+            import_and_wait(api, **arguments, base_address=hex(value))
         assert failed.value.domain_error["code"] == "VALIDATION_ERROR"
-        assert "outside the default address space" in str(failed.value.__cause__)
+        assert failed.value.domain_error["details"]["output_created"] is False
         assert _unwrap_runtime_result(api["list_project_programs"](target="range")) == []
         value = 0x1000
-    imported = api["import_program"](**arguments, base_address=hex(value))
+    imported = import_and_wait(api, **arguments, base_address=hex(value))
     for _ in range(2):
         api["load_project_program"](target="range", domain_path=imported["program"])
         program = core_runtime._CONTEXTS["range"].program
@@ -191,7 +194,8 @@ def test_runtime_raw_import_length_matches_remaining_bytes(bundle, tmp_path, off
     data = bytes(range(10))
     binary = tmp_path / "tiny.bin"
     binary.write_bytes(data)
-    imported = api["import_program"](
+    imported = import_and_wait(
+        api,
         target="offset",
         binary_path=str(binary),
         import_mode="raw_binary",
@@ -222,7 +226,8 @@ def test_runtime_raw_import_implicit_length_rejects_offset_at_or_past_eof(bundle
     binary = tmp_path / "tiny.bin"
     binary.write_bytes(bytes(range(10)))
     with pytest.raises(Exception, match="VALIDATION_ERROR"):
-        api["import_program"](
+        import_and_wait(
+            api,
             target="offset",
             binary_path=str(binary),
             import_mode="raw_binary",
@@ -244,7 +249,8 @@ def test_runtime_word_addressed_entry_survives_reload(bundle, tmp_path, notation
     binary = tmp_path / "tiny.bin"
     binary.write_bytes(b"\0\0\0\0")
     # The second PIC instruction is at word address 0x1001 / byte offset 2.
-    imported = api["import_program"](
+    imported = import_and_wait(
+        api,
         target="word",
         binary_path=str(binary),
         import_mode="raw_binary",

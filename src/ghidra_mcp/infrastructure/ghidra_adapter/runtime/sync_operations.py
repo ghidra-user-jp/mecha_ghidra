@@ -10,8 +10,9 @@ from ghidra_headless.errors import HeadlessError, error_code_of
 from ghidra_headless.session import ProjectHandle
 from ghidra_mcp.domain import DomainError, ErrorCode, get_exclusive_checkout_default
 
+from .errors import to_domain_error
 from .session_store import RuntimeSessionStore
-from .sync_active_program import SyncActiveProgramMixin
+from .sync_active_program import AutoCheckout, SyncActiveProgramMixin
 from .sync_identity import SyncIdentityMixin
 from .sync_locking import SyncLockingMixin
 from .sync_postconditions import SyncPostconditionMixin
@@ -199,7 +200,6 @@ class RuntimeSyncOperations(
             raise ValueError("on_conflict must be 'abort', 'discard', or 'keep'")
         with self._target_operation(name):
             self._store.ensure_not_quarantined(name, operation="commit_project_program")
-            auto_checkout_created = False
             handle, resolved_domain_path = self._resolve_sync_target_locked(name, domain_path)
             active_target = self._find_loaded_target_locked(handle=handle, domain_path=resolved_domain_path)
 
@@ -231,147 +231,191 @@ class RuntimeSyncOperations(
                 resolved_domain_path,
                 status=status,
             )
-            if not status.get("is_checked_out"):
-                if auto_checkout and status.get("can_checkout"):
-                    if active_target is not None and self._active_program_is_changed_locked(
-                        active_target,
-                        resolved_domain_path,
-                    ):
-                        raise HeadlessError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
-                    checked_out = handle.checkout_program(
-                        resolved_domain_path,
-                        exclusive=get_exclusive_checkout_default(),
-                    )
-                    if not checked_out:
-                        raise HeadlessError("CHECKOUT_UNAVAILABLE: automatic checkout was refused")
-                    auto_checkout_created = True
-                    self._reload_after_completed_checkout_locked(
-                        handle=handle,
-                        domain_path=resolved_domain_path,
-                        operation="commit_project_program.auto_checkout",
-                    )
-                    handle = self._store.get_target_handle(name)
-                    status = self._read_postcondition_sync_status_locked(
-                        name,
-                        domain_path=resolved_domain_path,
-                        operation="commit_project_program.auto_checkout",
-                    )
-                    status = self._overlay_active_program_sync_status_locked(
-                        active_target,
-                        resolved_domain_path,
-                        status=status,
-                    )
-                    if not status.get("is_checked_out"):
-                        raise self._partial_success_error(
-                            operation="commit_project_program.auto_checkout",
-                            message="automatic checkout returned but post-checkout state is not checked out",
-                        )
-                else:
-                    raise HeadlessError("NOT_CHECKED_OUT: program is not checked out")
+            auto = AutoCheckout()
+            try:
+                return self._commit_locked(
+                    name,
+                    text,
+                    handle=handle,
+                    domain_path=resolved_domain_path,
+                    active_target=active_target,
+                    status=status,
+                    auto_checkout=auto_checkout,
+                    keep_checked_out=keep_checked_out,
+                    conflict_action=conflict_action,
+                    auto=auto,
+                )
+            except Exception as exc:
+                # When the undo fails, the error raised says the checkout may remain.
+                if auto.undoes_after(to_domain_error(exc, operation="commit_project_program")):
+                    self._rollback_auto_checkout_locked(name, auto=auto, failure=exc)
+                raise
 
-            conflict_result = self._handle_commit_conflict_locked(
-                name,
-                resolved_domain_path,
-                active_target=active_target,
-                status=status,
-                conflict_action=conflict_action,
-                auto_checkout_created=auto_checkout_created,
-            )
-            if conflict_result is not None:
-                return conflict_result
-
-            saved_active_program = False
-            if active_target is not None:
-                saved_active_program = self._save_active_program_if_needed_locked(
+    def _commit_locked(
+        self,
+        name: str,
+        text: str,
+        *,
+        handle: ProjectHandle,
+        domain_path: str,
+        active_target: str | None,
+        status: Dict[str, Any],
+        auto_checkout: bool,
+        keep_checked_out: bool,
+        conflict_action: str,
+        auto: AutoCheckout,
+    ) -> Dict[str, Any]:
+        """Check the program out if needed and allowed, then check it in; ``auto`` tracks a checkout made here."""
+        resolved_domain_path = domain_path
+        if not status.get("is_checked_out"):
+            if auto_checkout and status.get("can_checkout"):
+                if active_target is not None and self._active_program_is_changed_locked(
                     active_target,
                     resolved_domain_path,
-                    handle=handle,
+                ):
+                    raise HeadlessError("LOCAL_CHANGES_EXIST: checkout aborted due to local changes")
+                checked_out = handle.checkout_program(
+                    resolved_domain_path,
+                    exclusive=get_exclusive_checkout_default(),
                 )
-                if self._refresh_active_versioned_program_state_locked(
+                if not checked_out:
+                    raise HeadlessError("CHECKOUT_UNAVAILABLE: automatic checkout was refused")
+                auto.pending, auto.domain_path = True, resolved_domain_path
+                self._reload_after_completed_checkout_locked(
+                    handle=handle,
+                    domain_path=resolved_domain_path,
+                    operation="commit_project_program.auto_checkout",
+                )
+                handle = self._store.get_target_handle(name)
+                status = self._read_postcondition_sync_status_locked(
+                    name,
+                    domain_path=resolved_domain_path,
+                    operation="commit_project_program.auto_checkout",
+                )
+                status = self._overlay_active_program_sync_status_locked(
                     active_target,
                     resolved_domain_path,
                     status=status,
-                    save_before_close=False,
-                    force=saved_active_program,
-                ):
-                    handle = self._store.get_target_handle(name)
-            # This refresh still precedes check-in.  Do not label a failure here
-            # as a completed/partial commit: callers may safely retry after the
-            # repository connection recovers because commit_program() has not run.
-            handle, resolved_domain_path = self._resolve_sync_target_locked(
-                name,
+                )
+                if not status.get("is_checked_out"):
+                    raise self._partial_success_error(
+                        operation="commit_project_program.auto_checkout",
+                        message="automatic checkout returned but post-checkout state is not checked out",
+                    )
+            else:
+                raise HeadlessError("NOT_CHECKED_OUT: program is not checked out")
+
+        conflict_result = self._handle_commit_conflict_locked(
+            name,
+            resolved_domain_path,
+            active_target=active_target,
+            status=status,
+            conflict_action=conflict_action,
+            auto=auto,
+        )
+        if conflict_result is not None:
+            return conflict_result
+
+        # This refresh still precedes check-in.  Do not label a failure here
+        # as a completed/partial commit: commit_program() has not run, so the
+        # caller may retry once the repository connection recovers
+        # (commit_project_program undoes an automatic checkout first).
+        saved_active_program = False
+        if active_target is not None:
+            saved_active_program = self._save_active_program_if_needed_locked(
+                active_target,
                 resolved_domain_path,
+                handle=handle,
             )
-            status = self._get_refreshed_sync_status_locked(
-                handle,
-                resolved_domain_path,
-                require_refresh=True,
-            )
-            status = self._overlay_active_program_sync_status_locked(
+            if self._refresh_active_versioned_program_state_locked(
                 active_target,
                 resolved_domain_path,
                 status=status,
-            )
-            conflict_result = self._handle_commit_conflict_locked(
-                name,
-                resolved_domain_path,
-                active_target=active_target,
-                status=status,
-                conflict_action=conflict_action,
-                auto_checkout_created=auto_checkout_created,
-            )
-            if conflict_result is not None:
-                return conflict_result
-            if not status.get("can_checkin"):
-                if not status.get("modified_since_checkout"):
-                    if auto_checkout_created:
-                        status = self._rollback_auto_checkout_locked(
-                            name,
-                            domain_path=resolved_domain_path,
-                        )
-                    return {
-                        "status": "noop",
-                        "reason": "not_modified",
-                        "target": name,
-                        "program": resolved_domain_path,
-                        "checked_out": bool(status.get("is_checked_out")),
-                        "version": status.get("version"),
-                    }
-                if auto_checkout_created:
-                    self._rollback_auto_checkout_locked(name, domain_path=resolved_domain_path)
-                raise HeadlessError("CHECKIN_NOT_ALLOWED: checkin is not allowed")
+                save_before_close=False,
+                force=saved_active_program,
+            ):
+                handle = self._store.get_target_handle(name)
+        handle, resolved_domain_path = self._resolve_sync_target_locked(
+            name,
+            resolved_domain_path,
+        )
+        if auto.pending:
+            auto.domain_path = resolved_domain_path
+        status = self._get_refreshed_sync_status_locked(
+            handle,
+            resolved_domain_path,
+            require_refresh=True,
+        )
+        status = self._overlay_active_program_sync_status_locked(
+            active_target,
+            resolved_domain_path,
+            status=status,
+        )
+        conflict_result = self._handle_commit_conflict_locked(
+            name,
+            resolved_domain_path,
+            active_target=active_target,
+            status=status,
+            conflict_action=conflict_action,
+            auto=auto,
+        )
+        if conflict_result is not None:
+            return conflict_result
+        if not status.get("can_checkin"):
+            if not status.get("modified_since_checkout"):
+                if auto.pending:
+                    status = self._rollback_auto_checkout_locked(name, auto=auto)
+                return {
+                    "status": "noop",
+                    "reason": "not_modified",
+                    "target": name,
+                    "program": resolved_domain_path,
+                    "checked_out": bool(status.get("is_checked_out")),
+                    "version": status.get("version"),
+                }
+            if auto.pending:
+                self._rollback_auto_checkout_locked(name, auto=auto)
+            raise HeadlessError("CHECKIN_NOT_ALLOWED: checkin is not allowed")
 
-            previous_version = status.get("version")
-            previous_latest_version = status.get("latest_version")
-            self._run_sync_operation_for_domain_locked(
-                name,
-                resolved_domain_path,
-                operation=lambda active_handle, active_domain_path: active_handle.commit_program(
-                    active_domain_path,
-                    text,
-                    keep_checked_out=keep_checked_out,
-                ),
-                save_before_close=True,
+        previous_version = status.get("version")
+        previous_latest_version = status.get("latest_version")
+
+        def check_in(active_handle: ProjectHandle, active_domain_path: str):
+            # From here on the check-in may have taken the checkout over.
+            auto.take_over_started = True
+            return active_handle.commit_program(
+                active_domain_path,
+                text,
+                keep_checked_out=keep_checked_out,
             )
-            updated = self._read_postcondition_sync_status_locked(
-                name,
-                domain_path=resolved_domain_path,
-                operation="commit_project_program",
-            )
-            self._verify_commit_postcondition(
-                updated,
-                previous_version=previous_version,
-                previous_latest_version=previous_latest_version,
-            )
-            return {
-                "status": "ok",
-                "target": name,
-                "program": resolved_domain_path,
-                "new_version": updated.get("version"),
-                "checked_out": bool(updated.get("is_checked_out")),
-                "effective_keep_checked_out": bool(updated.get("is_checked_out")),
-                "is_latest_version": bool(updated.get("is_latest_version")),
-            }
+
+        self._run_sync_operation_for_domain_locked(
+            name,
+            resolved_domain_path,
+            operation=check_in,
+            save_before_close=True,
+        )
+        # The check-in took the checkout over.
+        auto.pending = False
+        updated = self._read_postcondition_sync_status_locked(
+            name,
+            domain_path=resolved_domain_path,
+            operation="commit_project_program",
+        )
+        self._verify_commit_postcondition(
+            updated,
+            previous_version=previous_version,
+            previous_latest_version=previous_latest_version,
+        )
+        return {
+            "status": "ok",
+            "target": name,
+            "program": resolved_domain_path,
+            "new_version": updated.get("version"),
+            "checked_out": bool(updated.get("is_checked_out")),
+            "effective_keep_checked_out": bool(updated.get("is_checked_out")),
+            "is_latest_version": bool(updated.get("is_latest_version")),
+        }
 
     def pull_project_program(
         self,
@@ -868,18 +912,20 @@ class RuntimeSyncOperations(
         active_target: str | None,
         status: Dict[str, Any],
         conflict_action: str,
-        auto_checkout_created: bool = False,
+        auto: AutoCheckout,
     ) -> Dict[str, Any] | None:
         if not status.get("can_merge"):
             return None
         if conflict_action == "abort":
-            if auto_checkout_created:
-                self._rollback_auto_checkout_locked(name, domain_path=domain_path)
+            if auto.pending:
+                self._rollback_auto_checkout_locked(name, auto=auto)
             raise HeadlessError(
                 "UNSAFE_MERGE_REQUIRED: remote changes require a merge before check-in; "
                 "pass on_conflict='keep' to preserve the local edits as a .keep copy and follow the latest "
                 "server state, or on_conflict='discard' to drop them"
             )
+        # Keeping or discarding the local copy undoes the checkout itself.
+        auto.take_over_started = True
         if conflict_action == "keep":
             return self._keep_commit_conflict_locked(
                 name,

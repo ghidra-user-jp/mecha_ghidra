@@ -2,9 +2,18 @@
 
 # Tool reference
 
-Use this index to find a tool by task. Consult the client-visible tool schema before calling it. Full arguments, constraints, and error codes are available as MCP resources at `ghidra://docs/tools` and `ghidra://docs/tools/{tool_name}`.
+Use this index to find a tool by task. Consult the client-visible tool schema before calling it. Full arguments, constraints, and error codes are available as MCP resources at `ghidra://docs/tools` and `ghidra://docs/tools/{tool_name}`. `tools/list` gives each tool its full result schema but only a short form of the replies every tool shares (stored-result notices, deferred replies, errors); `ghidra://docs/tools/{tool_name}` has their full shapes.
 
-Most program tools select a `target` (default `default`). The `shared_sync` and `bsim` categories are not exposed by default; enable them through [configuration](configuration.md#tool-exposure).
+Most program tools select a `target` (default `default`). The `shared_sync` and `bsim` categories are not exposed by default; enable them through [configuration](configuration.md#tool-exposure). The `gui` category is exposed with `--backend gui` only, and the GUI backend leaves some tools out (see [the Ghidra GUI](#gui)).
+
+Replies and errors follow the same rules across tools:
+
+- A program tool's reply names where its result came from: `source` holds `target`, `program` (the domain path) and `revision`, taken right after the tool ran. Pass that `revision` as `expected_revision` to reject edits based on a stale read. `source` is also added as a last text block, for clients that show the model only text. `batch_read` names its `program` and `revision` in its one JSON block instead, and the record of a [deferred call](usage.md#long-calls) keeps `source` beside `result`.
+- The text content is the result itself: a string as it is, anything else as compact JSON in one block, a list with one item per line.
+- A failed write says what it left behind in `error.details.output_state`: `absent` (nothing changed; a transient error can be retried), `created` (changes remain, unsaved) or `uncertain` (inspect the program before continuing). `retryable` is true only with `absent`. A project or repository write, such as a save, commit or export, reports `absent` when its error refused the call before any change and `uncertain` otherwise. So does a BSim database write. A BSim tool that runs on the loaded program (`bsim_register_target`, `bsim_update_target_signatures`, `bsim_apply_matches`) reports what its program transactions did, and `uncertain` once it has begun writing the database.
+- Every program write accepts a client UUID as `request_id`. A resend with the same `request_id` and arguments returns the first call's reply, marked `replayed: true`, instead of applying the write again, unless that call failed without changing anything; see `apply_edits` under [symbols and comments](#symbol-comment-edit). A result says `replayed` in a last text block too, an error in its JSON text block; a stored-result notice keeps its two blocks and says it in `structuredContent` only.
+- An error's `code` names the failure, and its `hint` the next call where there is one. A missing function, data type, variable, bookmark, namespace or repository is `NOT_FOUND` and a bad argument `VALIDATION_ERROR` (arguments the input schema rejects, a C declaration that does not parse, an export path that exists or whose directory is missing), both with the reason in `message`; a target with nothing loaded is `PROGRAM_NOT_OPEN`, and an unknown target `TARGET_NOT_REGISTERED`. A failure inside Ghidra is `OPERATION_FAILED` with a sanitized `cause_message`, never `VALIDATION_ERROR`.
+- Every tool declares `readOnlyHint`, `destructiveHint` (true for deletions, byte overwrites, repository operations such as commit and pull, and scripts) and `openWorldHint` (true for the BSim database, the Ghidra Server and scripts).
 
 - [Projects and sessions](#core)
 - [Batch reads](#batch-read)
@@ -15,6 +24,7 @@ Most program tools select a `target` (default `default`). The `shared_sync` and 
 - [Shared-project tools](#shared-sync)
 - [BSim tools](#bsim)
 - [Ghidra scripts](#scripts)
+- [The Ghidra GUI](#gui)
 - [Large-result retrieval](#result-retrieval)
 
 <a id="core"></a>
@@ -27,13 +37,15 @@ See [first analysis](usage.md#first-analysis) for operation order and saving beh
 | --- | --- |
 | `list_targets` | List registered targets and associated project metadata |
 | `create_project` | Create an empty local Ghidra project |
-| `open_program` | Open an existing project program in a new target |
+| `open_program` | Open an existing project program in a new target; it is not analyzed, and `is_analyzed` says whether it already was |
 | `register_target` | Register project metadata to a target without opening a program |
 | `close_session` | Close a target session; `discard_changes=true` closes without saving (also the recovery path after `TARGET_EXECUTION_INVALID`) |
 | `close_session_and_remove_program` | Close a session and remove the program from the project |
 | `list_project_programs` | List programs in the target's opened project |
-| `import_program` | Import a binary or `.gzf` into the project |
-| `load_project_program` | Load an existing program by `domain_path`; loading the program the target already holds reloads it in place, and `version=N` opens a past shared-project version read-only |
+| `import_program` | Import and analyze a binary or `.gzf` as a background job (`analyze_imported=false` skips analysis); the reply waits up to `wait_seconds` and returns the job record |
+| `get_operation` | Read or wait for a job by `operation_id` (or `request_id`) without taking Ghidra locks: an import, analysis or script job, or a call that replied `deferred: true` because it was still running after 40 seconds ([long calls](usage.md#long-calls)). `result` is what the tool returns |
+| `cancel_operation` | Cancel a queued or running import, analysis or script job; a job that has not started changing the program ends at once with `OPERATION_CANCELLED`, a running one rolls back at its next cancellation check |
+| `load_project_program` | Load an existing program by `domain_path`; loading the program the target already holds reloads it in place, and `version=N` opens a past shared-project version read-only. Loading never analyzes: see `is_analyzed` |
 | `save_project_program` | Persist the currently loaded program after edits |
 | `get_program_info` | Language, compiler, image base, md5/sha256, entry points, analysis flag, unsaved changes, undo availability, and a `revision` for change detection |
 | `undo_program_change` / `redo_program_change` | Undo or redo the most recent transactions on the loaded program |
@@ -65,7 +77,7 @@ Optional `fields` (1–32 keys) projects top-level result keys, or row keys for 
 
 Disassembly uses the usual function or address-range selectors and cursor. `fields` selects instruction row keys. Decompilation returns a C string and rejects `fields`; its batch-only `item_timeout_seconds` (default 15, range 1–60) belongs beside `arguments`, not inside it. Standalone decompilation retains its 120-second timeout.
 
-The response is one JSON text block. Overall `status` is `ok` if all items succeeded, `partial` if some succeeded, and `error` if none succeeded. Inspect `succeeded_count`, `failed_count`, `not_run_count`, and ordered `items` containing `id`, `tool`, `status`, and `data` or `error`. Expected query failures continue; unexpected backend failures abort. MCP `isError=true` means no reads succeeded or the entire request failed; a partial result has `isError=false` and still contains failed items.
+The response is one JSON text block. Overall `status` is `ok` if all items succeeded, `partial` if some succeeded, and `error` if none succeeded. Inspect `succeeded_count`, `failed_count`, `not_run_count`, and ordered `items` containing `id`, `tool`, `status`, and `data` or `error`. Expected query failures continue; unexpected backend failures abort. A `NullPointerException` raised inside Ghidra is an item error with `OPERATION_FAILED` and names only its Java class, as a single call reports it. MCP `isError=true` means no reads succeeded or the entire request failed; a partial result has `isError=false` and still contains failed items.
 
 Optional `expected_revision` rejects stale reads before execution. A revision/context change during execution fails the entire batch with `SESSION_CHANGED`, discarding mixed results. `timeout_seconds` (default 10, range 1–60) starts after lock acquisition. Heavy reads also check it while running: decompilation uses the smaller of its item limit and remaining batch time, with a per-call cancellation monitor; disassembly checks during enumeration and conversion. Fewer than one second remaining prevents starting a new decompile. These are cooperative deadlines, not hard interrupts: locks remain held until the call returns. Unstarted requests become `not_run` with reason `time_budget_exhausted`. Stopped timeouts (`DECOMPILE_TIMEOUT` / `READ_TIMEOUT`) and native decompilation failures (`DECOMPILE_FAILED`) are item errors; other reads can continue if time remains. An incomplete disassembly page is not returned as a successful page.
 
@@ -89,12 +101,12 @@ For a C string, read `read_result(result_id, mode="text", path="/items/2/data", 
 | --- | --- |
 | `list_functions` | List functions with size and thunk flag; `filter` narrows by name, `only_default_names=true` lists the still-unnamed `FUN_` functions |
 | `list_namespaces` | List namespaces as `{name, is_class}` (paginated); `classes_only=true` for classes |
-| `decompile_function` | Get C-like pseudocode by function name or address (`address` wins if both are set) |
+| `decompile_function` | Get C-like pseudocode by function name or address (`address` wins if both are set); the first line is a comment with the function's full name and entry address, such as `/* entry @ 00401e46 */` |
 | `disassemble` | Read existing instructions for a function or address range, with pagination |
 | `get_function` | Get a function's signature, parameters, locals, body range, thunk target, and namespace by name or address (`address` wins if both are set) |
 | `create_function` | Create a function at an address |
 | `delete_function` | Delete a function by address |
-| `analyze_program` | Run analysis when the program is marked unanalyzed; `force=true` runs it again |
+| `analyze_program` | Run Ghidra auto-analysis as a background job (`force=true` also reanalyzes an analyzed program); the reply waits up to `wait_seconds` and returns the job record. The result stays unsaved |
 | `get_call_edges` | Read incoming/outgoing calls with call sites; distinguish tail calls, thunk transfers, and unresolved calls |
 
 ### Query results and continuation
@@ -130,6 +142,7 @@ Call edges include caller/callee identities and the instruction address in `call
 | `apply_edits` | Batch function/variable/data renames, types, and comments, with atomic rollback, dry runs, and before/after state |
 | `set_function_prototype` | Set function prototype (function by `function_address` or `function_name`) |
 | `set_local_variable_type` | Set type for local variable/argument (function by `function_address` or `function_name`) |
+| `rename_variable` | Rename a local variable/argument from `old_name` to `new_name` (function by `function_address` or `function_name`). Offered with `--backend gui` only; headless uses the `rename_variable` kind of `apply_edits` |
 | `set_global_data_type` | Set global data type (`clear_mode` optional) |
 | `set_bytes` | Write bytes into memory |
 | `get_comments` | Read every comment slot at an address |
@@ -174,7 +187,9 @@ Default thunks inherit the destination function's namespace. If Ghidra cannot re
 
 The default `atomic=true` commits all edits together or rolls all of them back. `atomic=false` keeps successful items and reports failures individually. `dry_run=true` executes the edits to obtain their actual before/after states, then rolls back; it still requires a writable program and a checkout for a versioned shared file. A dry run can advance the revision even though it leaves no edits behind.
 
-To guard against intervening edits, pass `expected_revision` from the latest `get_program_info` or query response. A successful preview returns the revision to use for applying its edits with `dry_run=false`.
+To guard against intervening edits, pass `expected_revision` from `source.revision` of the reply you based the edits on, or from `get_program_info`. A successful preview returns the revision to use for applying its edits with `dry_run=false`.
+
+To make a resend safe, pass a client UUID as `request_id`. If the reply is lost and the call is sent again with the same `request_id` and arguments, the server returns the first call's reply instead of applying the edits again, marked `replayed: true` in `structuredContent` and in a last text block. While the first call still runs, the resend waits for it and may reply `deferred: true` with the same operation. The same `request_id` with other arguments fails with `REQUEST_ID_CONFLICT`. A call that failed without changing anything (`output_state: absent`) does not keep its `request_id`, unless it was cancelled while waiting for a slot: the next call with it runs. `get_operation(request_id=...)` also finds the call, the latest one with that ID. The records live in server memory only, like job records. Every other program write, and `bsim_apply_matches`, takes `request_id` the same way.
 
 Inspect `status`, `applied_count`, and every item in `results`: `applied`, `partial`, `rolled_back`, `dry_run`, and `dry_run_failed` are batch statuses. Item failures appear inside a normal tool result, so transport success alone does not mean edits were applied. Successful items include `before` and `after`; rolled-back and simulated items are labeled accordingly. Save retained changes with `save_project_program`.
 
@@ -231,7 +246,7 @@ Requires `--add-category bsim` and a database URL. See the [BSim guide](bsim.md)
 | `bsim_update_target_signatures` | Push the loaded program's current function names back to its records |
 | `bsim_delete_executable` | Remove an executable and its function records (`confirm` must repeat the md5 or name) |
 | `bsim_query` | Search the whole program with `scope="program"`, or selected `addresses` / `function_names` with `scope="functions"`; self matches are excluded by default |
-| `bsim_apply_matches` | Rename default-named functions after their best match in one transaction (`dry_run` available) |
+| `bsim_apply_matches` | Rename default-named functions after their best match in one transaction (`dry_run` and `request_id` available) |
 | `bsim_load_matched_executable` | Open the executable behind a match as a new target; `ghidra://` matches need `--bsim-remote-cache-dir` |
 
 <a id="scripts"></a>
@@ -244,9 +259,22 @@ Exposed by the tool profile / category flags like every other category (`--tool-
 | --- | --- |
 | `list_scripts` | Catalog of executable scripts (`script_id` = `<root>:<file name>`; only the top-level files of each root are listed, subdirectories are not, as in the Script Manager) with runtime (`Java` / `Jython` / `PyGhidra`), category, description and availability; `include_bundled=true` adds Ghidra's own scripts when the operator allowed them |
 | `get_script_info` | One script's header metadata and (with `include_source=true`) its source, so its expected `args` can be read before running |
-| `run_script` | Run a script against the loaded program, as the Script Manager would. Pass `source` (the script text; Java is recognised by `public class X extends GhidraScript`, Python by an `# @runtime PyGhidra` / `# @runtime Jython` header, else pass `runtime`) or `script_id` (a catalog script). `args` are positional strings. The run is wrapped in a transaction: committed on success, rolled back on exception or timeout. The result carries `transaction_outcome`, stdout/stderr and Java compiler diagnostics, so a failing script can be corrected and re-run |
+| `run_script` | Run a script against the loaded program, as the Script Manager would, as a background job: the reply waits up to `wait_seconds` and returns the job record. Pass `source` (the script text; Java is recognised by `public class X extends GhidraScript`, Python by an `# @runtime PyGhidra` / `# @runtime Jython` header, else pass `runtime`) or `script_id` (a catalog script). `args` are positional strings. The run is wrapped in a transaction: committed on success, rolled back on exception or timeout. The job's `result` carries `transaction_outcome`, stdout/stderr and Java compiler diagnostics, so a failing script can be corrected and re-run |
 
-Failures roll back: `SCRIPT_FAILED` / `SCRIPT_TIMEOUT` carry `details.transaction_outcome` (`rolled_back`, `unchanged`, `unknown`), captured `stdout` / `stderr` (bounded, with `dropped_bytes`), and for Java `SCRIPT_COMPILE_FAILED` the compiler diagnostics.
+Failures roll back: the job's `operation_error` for `SCRIPT_FAILED` / `SCRIPT_TIMEOUT` carries `details.transaction_outcome` (`rolled_back`, `unchanged`, `unknown`), captured `stdout` / `stderr` (bounded, with `dropped_bytes`), and for Java `SCRIPT_COMPILE_FAILED` the compiler diagnostics. `details.output_state` follows the transaction: `absent` for `rolled_back` or `unchanged`, `created` for `committed` (unsaved), `uncertain` for `unknown` or when `execution_state` is `invalid` (work the script left running may still change the program; the target is quarantined); it covers program changes only, not files or network effects. Large diagnostics move to the result store like any large result: `operation_error.result_id` reads them in full.
+
+<a id="gui"></a>
+
+## The Ghidra GUI
+
+Exposed with `--backend gui` only. See [live sharing with the GUI](gui-live.md) for how they are used. `--backend gui` also offers `rename_variable` from [symbols and comments](#symbol-comment-edit).
+
+| Tool | Use |
+| --- | --- |
+| `get_gui_context` | What the human sees (the CodeBrowsers, the active tool's program, location, function and selection), the targets bound to that program with their revision, and the title of a modal dialog on screen. With Ghidra in the background, the CodeBrowser used last. Changes neither the view nor any target |
+| `show_in_gui` | Show a target's program in a CodeBrowser and move to `address` or to the function `name`. An invalid address or name fails before the view changes. Changes the view only: no edit, save or analysis |
+
+The GUI backend does not offer `import_program`, `analyze_program`, `create_project`, `close_session_and_remove_program`, or the `bsim`, `shared_sync` and `scripts` categories. Among the tools it offers, `apply_edits` with `dry_run` or with decompiling kinds (`rename_variable`, `set_local_variable_type`; use the standalone tools of those names), `version` on `load_project_program`, `discard_changes` on `close_session`, and another project are `GUI_UNSUPPORTED` (see [what is not available](gui-live.md#limits)).
 
 <a id="result-retrieval"></a>
 

@@ -48,16 +48,6 @@ cli_tools = ToolHarness()
             {"address": "0x401100"},
         ),
         (
-            "analyze_program",
-            lambda: cli_tools.analyze_program(target="fw"),
-            {},
-        ),
-        (
-            "analyze_program",
-            lambda: cli_tools.analyze_program(force=True, target="fw"),
-            {"force": True},
-        ),
-        (
             "create_struct",
             lambda: cli_tools.create_struct(
                 name="S",
@@ -199,8 +189,6 @@ def test_mutating_slice_uses_dispatcher(monkeypatch, tool_name, call, expected_a
         ),
         lambda: cli_tools.create_function(address="0x401100", name="manual_fn", target="fw"),
         lambda: cli_tools.delete_function(address="0x401100", target="fw"),
-        lambda: cli_tools.analyze_program(target="fw"),
-        lambda: cli_tools.analyze_program(force=True, target="fw"),
         lambda: cli_tools.create_struct(
             name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"
         ),
@@ -257,8 +245,6 @@ def test_mutating_slice_empty_result_keeps_compatibility(monkeypatch, call):
         ),
         lambda: cli_tools.create_function(address="0x401100", name="manual_fn", target="fw"),
         lambda: cli_tools.delete_function(address="0x401100", target="fw"),
-        lambda: cli_tools.analyze_program(target="fw"),
-        lambda: cli_tools.analyze_program(force=True, target="fw"),
         lambda: cli_tools.create_struct(
             name="S", category="/types", size=4, members=[{"name": "a", "type": "int"}], target="fw"
         ),

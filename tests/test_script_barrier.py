@@ -166,6 +166,130 @@ def test_exclusive_runtime_operations_obey_lock_policy(monkeypatch, entrypoint, 
         pass
 
 
+def test_an_interrupted_writer_stops_waiting_and_removes_its_ticket():
+    barrier = ScriptBarrier()
+    stop = threading.Event()
+    errors = []
+
+    def writer():
+        try:
+            with barrier.write_lock(timeout=30, stop=stop):
+                pytest.fail("an interrupted writer must never acquire")
+        except locks.LockWaitInterrupted as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=writer, daemon=True)
+    with barrier.read_lock():
+        thread.start()
+        deadline = time.monotonic() + 2
+        while not barrier.writer_pending:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        barrier.interrupt(stop)
+        thread.join(2)
+        assert not thread.is_alive() and len(errors) == 1
+        assert barrier.writer_pending is False
+    with barrier.write_lock(timeout=0):
+        pass
+
+
+def test_cancel_operation_stops_a_script_job_waiting_for_the_barrier(monkeypatch):
+    """The only job worker moves on at once; before, it waited out the script queue budget (300 s)."""
+    from ghidra_mcp.application.services.operations import OperationManager
+    from ghidra_mcp.application.services.ports import LoadedProgram
+    from ghidra_mcp.infrastructure.ghidra_adapter.runtime import core_execution
+
+    barrier = ScriptBarrier()
+    monkeypatch.setattr(core_execution, "SCRIPT_BARRIER", barrier)
+    monkeypatch.setattr(locks, "get_script_queue_timeout_seconds", lambda: 30)
+    store = SimpleNamespace(operation_lock=fasteners.ReaderWriterLock())
+    core = core_execution.RuntimeCoreExecution(
+        store=store, checkout_required_commands=set(), normalize_result=lambda result: result
+    )
+
+    class Services:
+        """The target and script services of one loaded program."""
+
+        def project_key(self, target):
+            return "/project::test"
+
+        def prepare_analysis(self, target):
+            return LoadedProgram("/project::test", "/main", 1)
+
+        def analyze_program(self, target, *, force, control):
+            control.check_active()
+            control.begin()
+            return {"analyzed": True, "forced": force}
+
+        def prepare_run(self, target, **arguments):
+            return LoadedProgram("/project::test", "/main", 1)
+
+        def run_script(self, target, *, control, **arguments):
+            control.check_active()
+            return core.call("run_script", {}, target, exclusive=True, control=control)
+
+    services = Services()
+    manager = OperationManager(services, script_service=services)
+    reading, release = threading.Event(), threading.Event()
+
+    def long_read():  # a deferred export or decompile, say
+        with barrier.read_lock():
+            reading.set()
+            release.wait(10)
+
+    reader = threading.Thread(target=long_read, daemon=True)
+    reader.start()
+    assert reading.wait(2)
+    try:
+        script = manager.submit_script("default", source="print(1)")
+        deadline = time.monotonic() + 2
+        while not barrier.writer_pending:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        assert manager.lock_holder("default") == script["operation_id"]
+        cancelled = manager.cancel(script["operation_id"])
+        assert cancelled["operation_error"]["code"] == "OPERATION_CANCELLED"
+        # It ended: a caller told to wait for it would find it finished and retry at once.
+        assert manager.lock_holder("default") is None
+        # The next job runs while the read still holds the barrier.
+        after = manager.wait_for(manager.submit_analysis("default")["operation_id"], 2)
+        assert after["state"] == "succeeded"
+        assert barrier.writer_pending is False
+    finally:
+        release.set()
+        reader.join(5)
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_runtime_availability_waits_for_a_running_script_only_when_asked(monkeypatch, wait):
+    """Job admission reads it with wait=False: its two threads must never wait out a running script."""
+    from ghidra_headless.scripts import providers
+    from ghidra_mcp.application.services.runtime_state import RuntimeState
+    from ghidra_mcp.infrastructure.ghidra_adapter.runtime import script_execution
+    from ghidra_mcp.infrastructure.ghidra_adapter.runtime_backend import RuntimeBackend
+
+    barrier = ScriptBarrier()
+    monkeypatch.setattr(script_execution, "SCRIPT_BARRIER", barrier)
+    monkeypatch.setattr(locks, "get_lock_timeout_seconds", lambda: 0.3)
+    monkeypatch.setattr(providers, "runtime_availability", lambda: {"Java": True})
+    backend = RuntimeBackend(
+        state=RuntimeState(core_accessor=lambda: None, checkout_required_commands=set(), normalize_result=lambda v: v)
+    )
+    release, thread = _hold_writer(barrier)
+    try:
+        started = time.monotonic()
+        with pytest.raises(DomainError) as excinfo:
+            backend.script_runtime_availability(wait=wait)
+        waited = time.monotonic() - started
+    finally:
+        release.set()
+        thread.join(5)
+    assert excinfo.value.code is ErrorCode.LOCK_TIMEOUT
+    assert (waited > 0.2) is wait
+    assert backend.script_runtime_availability(wait=wait) == {"Java": True}
+
+
 def test_bounded_writer_times_out_behind_a_reader_and_removes_its_ticket():
     barrier = ScriptBarrier()
     done = threading.Event()

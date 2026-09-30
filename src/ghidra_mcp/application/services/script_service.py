@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ghidra_mcp.application.locks import LockManager
-from ghidra_mcp.application.services.ports import ScriptRuntimePort
+from ghidra_mcp.application.services.ports import LoadedProgram, OperationControl, ScriptRuntimePort
 from ghidra_mcp.application.services.script_catalog import (
     DEFAULT_MAX_FILES_PER_ROOT,
     ORIGIN_BUNDLED,
@@ -170,13 +170,19 @@ class ScriptService:
             )
         return catalog
 
-    def _refresh_runtime_availability(self, catalog: ScriptCatalog) -> None:
+    def _refresh_runtime_availability(self, catalog: ScriptCatalog, *, wait: bool = True) -> None:
         if self._availability_checked:
             return
         if self._runtime is None:
             return
         try:
-            availability = self._runtime.script_runtime_availability()
+            availability = self._runtime.script_runtime_availability(wait=wait)
+        except DomainError as exc:
+            if not wait and exc.code is ErrorCode.LOCK_TIMEOUT:
+                # A script is running; the job checks again when it runs.
+                return
+            logger.warning("failed to query script runtime availability: %s", exc)
+            return
         except Exception as exc:
             logger.warning("failed to query script runtime availability: %s", exc)
             return
@@ -320,6 +326,38 @@ class ScriptService:
             )
         return entry
 
+    def prepare_run(
+        self,
+        target: str,
+        script_id: str | None = None,
+        *,
+        source: str | None = None,
+        runtime: str | None = None,
+        script_name: str | None = None,
+        args: list[str] | None = None,
+        timeout_seconds: int | None = None,
+        expected_revision: str | None = None,
+    ) -> LoadedProgram:
+        """Check a run_script request and name the program it will run on.
+
+        Everything that refuses a request before it could run is checked here,
+        without Ghidra locks and without writing the inline source, so a
+        background job is accepted only when it can start.  Which runtimes
+        exist is read without waiting for a running script: until it has been
+        read, the job itself checks it.
+        """
+        try:
+            catalog = self._require_enabled()
+            self._refresh_runtime_availability(catalog, wait=False)
+            self._request_head(catalog, script_id, source=source, runtime=runtime, script_name=script_name, stage=False)
+            self._validate_args(args)
+            self._validate_timeout(timeout_seconds)
+            if self._runtime is None:
+                raise DomainError(ErrorCode.SCRIPTS_DISABLED, "script execution has no runtime on this server")
+            return self._runtime.loaded_program(target)
+        except Exception as exc:
+            raise self._to_domain_error(exc, operation="run_script", target=target) from exc
+
     def run_script(
         self,
         target: str,
@@ -331,39 +369,17 @@ class ScriptService:
         args: list[str] | None = None,
         timeout_seconds: int | None = None,
         expected_revision: str | None = None,
+        control: OperationControl,
     ) -> dict[str, Any]:
         inline_dir: Path | None = None
         try:
             catalog = self._require_enabled()
             self._refresh_runtime_availability(catalog)
-            if (script_id is None) == (source is None):
-                raise ValueError("pass exactly one of script_id (catalog script) or source (inline script text)")
-            if source is not None:
-                inline = self._stage_inline_source(catalog, source, runtime=runtime, script_name=script_name)
-                inline_dir = inline["dir"]  # assigned first so the finally-cleanup covers every rejection below
-                request_head = {
-                    "script_id": inline["script_id"],
-                    "script_path": str(inline["path"]),
-                    "script_name": inline["name"],
-                    "runtime": inline["runtime"],
-                    "inline": True,
-                }
-                extra_roots = [str(inline_dir)]
-            else:
-                assert script_id is not None
-                if script_name:
-                    raise ValueError("script_name applies to inline source only")
-                entry = self._resolve_runnable(
-                    self._require_catalog_scripts(catalog), script_id, runtime_override=runtime
-                )
-                request_head = {
-                    "script_id": entry.script_id,
-                    "script_path": str(entry.path),
-                    "script_name": entry.name,
-                    "runtime": entry.runtime,
-                    "inline": False,
-                }
-                extra_roots = []
+            # Assigned first so the finally-cleanup covers every rejection below.
+            request_head, inline_dir = self._request_head(
+                catalog, script_id, source=source, runtime=runtime, script_name=script_name, stage=True
+            )
+            extra_roots = [str(inline_dir)] if inline_dir is not None else []
             request = {
                 **request_head,
                 "args": self._validate_args(args),
@@ -374,8 +390,11 @@ class ScriptService:
                 "snapshot_base": str(catalog.snapshot_base),
                 "snapshot_roots": [str(root.snapshot_dir) for root in catalog.roots.values()] + extra_roots,
             }
-            with self._lock_manager.acquire(target=target, project_key=self._project_key(target)):
-                result = self._runtime.run_script(target, request=request)
+            # A job keeps the project it was accepted for; the runtime refuses a changed one.
+            with self._lock_manager.acquire(target=target, project_key=control.expected_project_key):
+                # The job holds this target's locks from here (OperationManager.lock_holder).
+                control.check_active()
+                result = self._runtime.run_script(target, request=request, control=control)
             result["inline"] = source is not None
             return result
         except Exception as exc:
@@ -384,13 +403,56 @@ class ScriptService:
             if inline_dir is not None:
                 shutil.rmtree(inline_dir, ignore_errors=True)
 
+    def _request_head(
+        self,
+        catalog: ScriptCatalog,
+        script_id: str | None,
+        *,
+        source: str | None,
+        runtime: str | None,
+        script_name: str | None,
+        stage: bool,
+    ) -> tuple[dict[str, Any], Path | None]:
+        """Resolve which script runs; ``stage`` writes an inline source to its private directory."""
+        if (script_id is None) == (source is None):
+            raise ValueError("pass exactly one of script_id (catalog script) or source (inline script text)")
+        if source is not None:
+            inline = self._stage_inline_source(catalog, source, runtime=runtime, script_name=script_name, write=stage)
+            head = {
+                "script_id": inline["script_id"],
+                "script_path": str(inline["path"]) if inline["path"] is not None else None,
+                "script_name": inline["name"],
+                "runtime": inline["runtime"],
+                "inline": True,
+            }
+            return head, inline["dir"]
+        if script_name:
+            raise ValueError("script_name applies to inline source only")
+        entry = self._resolve_runnable(self._require_catalog_scripts(catalog), script_id, runtime_override=runtime)
+        head = {
+            "script_id": entry.script_id,
+            "script_path": str(entry.path),
+            "script_name": entry.name,
+            "runtime": entry.runtime,
+            "inline": False,
+        }
+        return head, None
+
     _JAVA_CLASS_RE = re.compile(r"^\s*public\s+(?:final\s+)?class\s+([A-Za-z_]\w*)\b", re.MULTILINE)
     _NAME_RE = re.compile(r"^[A-Za-z_][\w.-]{0,120}$")
 
     def _stage_inline_source(
-        self, catalog: ScriptCatalog, source: str, *, runtime: str | None, script_name: str | None
+        self,
+        catalog: ScriptCatalog,
+        source: str,
+        *,
+        runtime: str | None,
+        script_name: str | None,
+        write: bool = True,
     ) -> dict[str, Any]:
         """Write client-supplied script text into a private per-run directory and describe it like a catalog entry.
+
+        ``write=False`` only checks the source and describes it, without a directory.
 
         The runtime comes from ``runtime`` when given, else from ``public class X extends GhidraScript`` (Java)
         or a ``# @runtime`` header (Python); a Python script without either is refused as ambiguous.
@@ -443,11 +505,18 @@ class ScriptService:
                 ),
                 details={"runtime": wanted},
             )
+        if not write:
+            return {"dir": None, "path": None, "name": name, "runtime": wanted, "script_id": f"inline:{name}"}
         run_dir = catalog.snapshot_base / "inline" / uuid.uuid4().hex[:12]
         run_dir.mkdir(parents=True, exist_ok=False)
-        os.chmod(run_dir, 0o700)
         path = run_dir / name
-        path.write_bytes(encoded)
+        try:
+            os.chmod(run_dir, 0o700)
+            path.write_bytes(encoded)
+        except BaseException:
+            # The caller removes the directory only once this returns it.
+            shutil.rmtree(run_dir, ignore_errors=True)
+            raise
         return {
             "dir": run_dir,
             "path": path,

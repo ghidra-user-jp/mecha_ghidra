@@ -6,9 +6,25 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from ghidra_headless.bsim_errors import database_error
 from ghidra_headless.errors import HeadlessError
 
 _BSIM_UNIQUE_LOOKUP_LIMIT = 100
+
+
+def _write(database, request, code: str):
+    """Run a request that writes the database, failing with ``code`` however it fails.
+
+    The write may have reached the database, and BsimService never reads a
+    code like this one as an outage worth retrying.
+    """
+    try:
+        response = database.query(request)
+    except Exception as exc:
+        raise HeadlessError(f"{code}: {exc}") from exc
+    if response is None:
+        raise database_error(code, database.getLastError())
+    return response
 
 
 def _iter_java_items(items) -> Iterator[Any]:
@@ -126,9 +142,7 @@ def _load_executable_update_manager(database, query_name_class, source_record):
     query.fillinCategories = True
     response = database.query(query)
     if response is None:
-        last_error = database.getLastError()
-        message = "unknown error" if last_error is None else str(last_error.message)
-        raise HeadlessError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+        raise database_error("BSIM_GET_EXECUTABLE_FAILED", database.getLastError())
     if not bool(response.uniqueexecutable):
         raise LookupError("BSIM_EXECUTABLE_NOT_FOUND")
 
@@ -216,9 +230,7 @@ class BsimJavaBackend:
         database = classes["BSimClientFactory"].buildClient(url, False)
         try:
             if not bool(database.initialize()):
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_DATABASE_INIT_FAILED: {message}")
+                raise database_error("BSIM_DATABASE_INIT_FAILED", database.getLastError())
             yield database
         finally:
             database.close()
@@ -260,9 +272,7 @@ class BsimJavaBackend:
             query = classes["QueryExeCount"]()
             response = database.query(query)
             if response is None:
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_QUERY_FAILED: {message}")
+                raise database_error("BSIM_QUERY_FAILED", database.getLastError())
             return {
                 "status": "ok",
                 "database": str(info.databasename),
@@ -305,11 +315,7 @@ class BsimJavaBackend:
 
             query = classes["InstallCategoryRequest"]()
             query.type_name = category
-            response = database.query(query)
-            if response is None:
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_ADD_EXECUTABLE_CATEGORY_FAILED: {message}")
+            response = _write(database, query, "BSIM_ADD_EXECUTABLE_CATEGORY_FAILED")
             updated_info = response.info or database.getInfo()
             categories = [str(item) for item in _iter_java_items(updated_info.execats)]
             return {
@@ -340,9 +346,7 @@ class BsimJavaBackend:
             query.fillinCategories = True
             response = database.query(query)
             if response is None:
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_QUERY_FAILED: {message}")
+                raise database_error("BSIM_QUERY_FAILED", database.getLastError())
             items = [_executable_to_dict(record) for record in _iter_java_items(response.records)]
             # recordCount reflects the returned page size, not a true total, so a full page
             # means more rows may exist; report that rather than claiming completeness.
@@ -410,9 +414,7 @@ class BsimJavaBackend:
             query.fillinCategories = True
             response = database.query(query)
             if response is None:
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+                raise database_error("BSIM_GET_EXECUTABLE_FAILED", database.getLastError())
 
             # The name filter is a case-insensitive substring (ILIKE) match server-side, so
             # narrow to records whose identity matches exactly before mutating anything.
@@ -439,11 +441,7 @@ class BsimJavaBackend:
 
             update = classes["QueryUpdate"]()
             update.manage = manager
-            update_response = database.query(update)
-            if update_response is None:
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_UPDATE_EXECUTABLE_METADATA_FAILED: {message}")
+            update_response = _write(database, update, "BSIM_UPDATE_EXECUTABLE_METADATA_FAILED")
 
             bad_executables = [_executable_to_dict(record) for record in _iter_java_items(update_response.badexe)]
             bad_functions = [
@@ -481,9 +479,7 @@ class BsimJavaBackend:
             query.fillinCategories = True
             response = database.query(query)
             if response is None:
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_GET_EXECUTABLE_FAILED: {message}")
+                raise database_error("BSIM_GET_EXECUTABLE_FAILED", database.getLastError())
             record = _select_unique_executable_record(_iter_java_items(response.records), name=name)
             executable = _executable_to_dict(record)
 
@@ -491,11 +487,7 @@ class BsimJavaBackend:
             specifier.transfer(record)
             delete = classes["QueryDelete"]()
             delete.addSpecifier(specifier)
-            delete_response = database.query(delete)
-            if delete_response is None:
-                last_error = database.getLastError()
-                message = "unknown error" if last_error is None else str(last_error.message)
-                raise HeadlessError(f"BSIM_DELETE_EXECUTABLE_FAILED: {message}")
+            delete_response = _write(database, delete, "BSIM_DELETE_EXECUTABLE_FAILED")
             deleted = [
                 {
                     "md5": str(item.md5),

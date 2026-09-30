@@ -97,6 +97,7 @@ class HeadlessContext(object):
         if self._transaction_sentinel is not None:
             return
         try:
+            import jpype
             from jpype import JImplements, JOverride
         except Exception:
             return
@@ -134,7 +135,9 @@ class HeadlessContext(object):
             def undoRedoOccurred(self, domain_object):
                 return None
 
-        sentinel = _Sentinel()
+        # Ghidra holds listeners weakly and JPype holds its Java proxy weakly:
+        # keeping the proxy here keeps the sentinel registered across a GC.
+        sentinel = jpype.JObject(_Sentinel(), jpype.JClass("ghidra.framework.model.TransactionListener"))
         try:
             self.program.addTransactionListener(sentinel)
         except Exception:
@@ -188,6 +191,22 @@ def ensure_context():
     return _ensure_context_for_key(key)
 
 
+def current_task_monitor():
+    """The cancellable TaskMonitor the runtime passed to the running command, or None."""
+    return getattr(_THREAD_STATE, "task_monitor", None)
+
+
+def begin_command():
+    """Tell the background job running this command that it now starts changing the program.
+
+    Raises when the job was cancelled or the server is stopping, so the
+    command stops before it changes anything. Outside a job it does nothing.
+    """
+    callback = getattr(_THREAD_STATE, "on_begin", None)
+    if callback is not None:
+        callback()
+
+
 def describe_state(key="default"):
     ctx = _ensure_context_for_key(key)
     return {
@@ -220,6 +239,8 @@ __all__ = [
     "clear_contexts",
     "_ensure_context_for_key",
     "ensure_context",
+    "current_task_monitor",
+    "begin_command",
     "describe_state",
     "execution_state",
     "bind_project",

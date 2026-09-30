@@ -101,3 +101,19 @@ def test_cli_marks_all_languages_unavailable_when_probe_fails(monkeypatch, tmp_p
     cli._prepare_script_runtime(service)
     assert set(unavailable) == set(providers.SUPPORTED_RUNTIMES)
     assert all("swallowed" in reason for reason in unavailable.values())
+
+
+def test_a_shutdown_signal_during_the_probe_is_not_a_probe_failure(monkeypatch, tmp_path, native_probe):
+    def get_instance(_source, _writer):
+        def execute(*_args):
+            # main()'s SIGTERM handler raised while the probe script ran.
+            raise SystemExit(143)
+
+        return SimpleNamespace(execute=execute)
+
+    monkeypatch.setattr(providers, "provider_for", lambda _runtime: SimpleNamespace(getScriptInstance=get_instance))
+    with pytest.raises(SystemExit):
+        runtime_check.probe_exception_propagation(tmp_path)
+    # The server shuts down; nothing is recorded as a verified or failed runtime.
+    assert runtime_check.runtime_check_state()["probe_error"] == "probe did not complete"
+    assert list(tmp_path.iterdir()) == []

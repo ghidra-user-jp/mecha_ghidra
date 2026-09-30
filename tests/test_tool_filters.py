@@ -13,7 +13,12 @@ from ghidra_mcp.contracts.tool_spec import (
 )
 
 ALL_SPECS = get_all_tool_specs()
-ALL_TOOL_NAMES = set(ALL_SPECS)
+# What the headless backend (the default) can publish: everything but the GUI backend's tools
+# (the gui category, and rename_variable, which headless runs as an apply_edits kind only).
+GUI_ONLY_TOOL_NAMES = {"rename_variable"}
+ALL_TOOL_NAMES = {
+    name for name, spec in ALL_SPECS.items() if spec.category_tag is not ToolCategoryTag.GUI
+} - GUI_ONLY_TOOL_NAMES
 DEFAULT_CATEGORIES = {
     ToolCategoryTag.CORE,
     ToolCategoryTag.FUNCTION_ANALYSIS,
@@ -40,7 +45,10 @@ def _manual_selected_names(
     }
     selected.update(enable_tools or set())
     selected.difference_update(disable_tools or set())
-    return selected
+    # A job tool brings its record tools along (filter_tool_specs).
+    if any(ALL_SPECS[name].presenter == "operation" for name in selected - {"get_operation", "cancel_operation"}):
+        selected.update({"get_operation", "cancel_operation"} - (disable_tools or set()))
+    return selected & ALL_TOOL_NAMES
 
 
 @pytest.mark.parametrize(
@@ -135,7 +143,9 @@ def test_default_profile_contains_current_non_shared_sync_tools():
     legacy_default_specs = {
         name
         for name, spec in get_all_tool_specs().items()
-        if spec.category_tag not in {ToolCategoryTag.SHARED_SYNC, ToolCategoryTag.BSIM, ToolCategoryTag.SCRIPTS}
+        if spec.category_tag
+        not in {ToolCategoryTag.SHARED_SYNC, ToolCategoryTag.BSIM, ToolCategoryTag.SCRIPTS, ToolCategoryTag.GUI}
+        and name not in GUI_ONLY_TOOL_NAMES
     }
 
     assert set(default_specs) == legacy_default_specs
@@ -145,7 +155,7 @@ def test_default_profile_contains_current_non_shared_sync_tools():
 
 
 def test_full_profile_exposes_current_tools_without_legacy_names():
-    assert set(filter_tool_specs(profile=ToolProfile.FULL)) == set(ALL_SPECS)
+    assert set(filter_tool_specs(profile=ToolProfile.FULL)) == ALL_TOOL_NAMES
     for name in ("get_callee", "rename_function", "create_session", "bsim_query_function"):
         assert name not in ALL_SPECS
         assert name not in filter_tool_specs(enable_tools=[name])

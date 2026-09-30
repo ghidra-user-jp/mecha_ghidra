@@ -4,6 +4,7 @@ from __future__ import absolute_import, print_function
 
 import pathlib
 
+from ghidra_headless.bsim_errors import database_error
 from ghidra_headless.errors import HeadlessError
 
 BSIM_MATCHED_REF_VERSION = 1
@@ -256,7 +257,10 @@ def _run_query(ctx, params, function_symbols, *, extra_matches_per_function=0):
         return []
     service = SimilarFunctionQueryService(ctx.program)
     try:
-        service.initializeDatabase(bsim_url)
+        try:
+            service.initializeDatabase(bsim_url)
+        except Exception as exc:
+            raise database_error("BSIM_DATABASE_INIT_FAILED", service.getLastError(), fallback=exc) from exc
         query_info = SFQueryInfo(function_symbols)
         query_info.setSimilarityThreshold(float(params.get("similarity_threshold", 0.7)))
         query_info.setSignificanceThreshold(float(params.get("significance_threshold", 0.0)))
@@ -267,9 +271,7 @@ def _run_query(ctx, params, function_symbols, *, extra_matches_per_function=0):
         query.fillinCategories = True
         raw_result = service.queryRaw(query, None, None, ctx.monitor())
         if raw_result is None:
-            error = service.getLastError()
-            message = "unknown error" if error is None else str(error.message)
-            raise HeadlessError("BSIM_QUERY_FAILED: %s" % message)
+            raise database_error("BSIM_QUERY_FAILED", service.getLastError())
         rows = BSimMatchResult.generate(raw_result.result, ctx.program)
         return rows
     finally:

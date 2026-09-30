@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ghidra_mcp.contracts.tool_spec import ToolCategoryTag, ToolSafetyTag, ToolSpec
+from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, JOB_TOOLS, ToolCategoryTag, ToolSpec
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 
 # Fixed order keeps discovery instructions stable across registration order.
@@ -39,7 +39,7 @@ _CAPABILITIES = (
         "set_function_prototype set_local_variable_type set_global_data_type create_struct add_struct_members "
         "delete_data_type remove_struct_members rename_data_type create_enum set_enum_values parse_c_declarations",
     ),
-    ("symbol/comment edits", "apply_edits"),
+    ("symbol/comment edits", "apply_edits rename_variable"),
     ("label creation", "create_label"),
     ("bookmark edits", "add_bookmark delete_bookmark"),
     ("undo/redo", "undo_program_change redo_program_change"),
@@ -65,9 +65,9 @@ def build_server_instructions(*, specs: Mapping[str, ToolSpec], config: ToolPres
         category_specs = [
             spec for spec in specs.values() if spec.category_tag == category and spec.name != "bsim_query"
         ]
-        if any(spec.safety_tag == ToolSafetyTag.READ_ONLY for spec in category_specs):
+        if any(not spec.writes for spec in category_specs):
             capabilities.append(read_label)
-        if any(spec.safety_tag != ToolSafetyTag.READ_ONLY for spec in category_specs):
+        if any(spec.writes for spec in category_specs):
             capabilities.append(write_label)
     if "batch_read" in enabled:
         capabilities.append("batched supported reads")
@@ -79,6 +79,34 @@ def build_server_instructions(*, specs: Mapping[str, ToolSpec], config: ToolPres
         parts.append("No analysis capabilities are advertised for this tool selection; consult the tool catalog.")
     if "list_targets" in enabled:
         parts.append("Start with list_targets to identify the program context.")
+    jobs = [name for name in JOB_TOOLS if name in enabled]
+    if jobs:
+        names = jobs[0] if len(jobs) == 1 else ", ".join(jobs[:-1]) + " and " + jobs[-1]
+        parts.append(
+            f"{names} {'run as background jobs' if len(jobs) > 1 else 'runs as a background job'}: "
+            "while a job is queued or running, call get_operation (it waits server-side), not list_targets. "
+            "Job records are lost on restart; never auto-retry OPERATION_NOT_FOUND."
+        )
+    if "get_operation" in enabled:
+        parts.append(
+            f"A call still running after {DEFER_AFTER_SECONDS:g} s replies deferred=true: get its result with "
+            "get_operation, never by repeating the call."
+        )
+    if "analyze_program" in enabled:
+        parts.append(
+            "Loading never analyzes: run analyze_program when a load or get_program_info reports is_analyzed=false."
+        )
+    if "get_gui_context" in enabled or "show_in_gui" in enabled:
+        # The Ghidra GUI backend (spec §9); each tool is named only when published.
+        gui = ["A human works on the same programs in the Ghidra GUI; their edits appear in your next read."]
+        if "get_gui_context" in enabled:
+            gui.append("When the human refers to what they see, call get_gui_context.")
+        if "show_in_gui" in enabled:
+            gui.append(
+                "Call show_in_gui only when asked to show something or to have a result checked, "
+                "not during ordinary analysis."
+            )
+        parts.append(" ".join(gui))
     if any(spec.include_target for spec in specs.values()):
         parts.append("Pass the intended target across calls; paths refer to the server filesystem.")
     parts.append("Tool details: ghidra://docs/tools and ghidra://docs/tools/{tool_name}.")

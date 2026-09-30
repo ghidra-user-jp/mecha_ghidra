@@ -2,13 +2,40 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from ghidra_mcp.application.locks import LockManager
 from ghidra_mcp.application.services.path_policy import UNRESTRICTED_PATH_POLICY, PathPolicy
-from ghidra_mcp.application.services.ports import TargetRuntimePort
+from ghidra_mcp.application.services.ports import LoadedProgram, OperationControl, TargetRuntimePort
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_mapping import to_domain_error
+
+logger = logging.getLogger(__name__)
+
+
+def _analyzed_after_open(session, info: dict) -> bool | None:
+    """Whether the program just opened is analyzed; None when that cannot be read.
+
+    The program is open by now (the runtime released its locks), so a failed
+    read must not turn the open into a failure the caller would retry.
+    """
+    is_analyzed = getattr(session, "is_analyzed", None)
+    if not callable(is_analyzed):
+        return bool(info.get("is_analyzed", False))
+    try:
+        return bool(is_analyzed())
+    except Exception:
+        logger.warning("Could not read whether the opened program is analyzed", exc_info=True)
+        return None
+
+
+def _gui_dialog(session) -> dict:
+    """With the Ghidra GUI, the modal dialog the open left up (the analysis prompt); nothing headless."""
+    get_handle = getattr(session, "get_project_handle", None)
+    current_modal_dialog = getattr(get_handle() if get_handle is not None else None, "current_modal_dialog", None)
+    return {} if current_modal_dialog is None else {"modal_dialog": current_modal_dialog()}
 
 
 class TargetService:
@@ -39,6 +66,10 @@ class TargetService:
 
     def _project_key(self, target: str) -> str | None:
         return self._runtime.project_lock_key(target)
+
+    def project_key(self, target: str) -> str | None:
+        """The ``location::name`` key of the project ``target`` is bound to, or None."""
+        return self._project_key(target)
 
     def _raise_domain_error(self, exc: Exception, *, operation: str, target: str | None = None) -> None:
         raise self._to_domain_error(exc, operation=operation, target=target) from exc
@@ -90,6 +121,9 @@ class TargetService:
                     "project_location": info.get("project_location", project_location),
                     "project_name": info.get("project_name", project_name),
                     "domain_path": info.get("domain_path", domain_path),
+                    # Opening never analyzes; false tells the caller to run analyze_program.
+                    "is_analyzed": _analyzed_after_open(session, info),
+                    **_gui_dialog(session),
                 }
         except Exception as exc:
             self._raise_domain_error(exc, operation="create_session", target=name)
@@ -140,13 +174,61 @@ class TargetService:
         except Exception as exc:
             self._raise_domain_error(exc, operation="create_repository_cache_project")
 
-    def import_program(self, name: str, binary_path: str, **kwargs):
+    def prepare_import(self, name: str, binary_path: str) -> tuple[str, str]:
+        """Resolve an import request without opening a project.
+
+        Returns the absolute input path and the project key the target is
+        registered to; only registration metadata and the input file are read.
+        """
         try:
-            self._path_policy.validate_import_path(binary_path)
-            with self._lock_manager.acquire(target=name, project_key=self._project_key(name)):
-                return self._runtime.import_program(name, binary_path, **kwargs)
+            try:
+                # absolute(), not resolve(): with a symlinked directory,
+                # "link/../x.bin" must keep naming the file it names today.
+                path = str(Path(binary_path).expanduser().absolute())
+                self._path_policy.validate_import_path(path)
+            except RuntimeError as exc:
+                # Unknown "~user" or a symlink loop: an input problem, reported
+                # without echoing the resolved server path.
+                raise ValueError(f"binary_path cannot be resolved: {exc}") from exc
+            if not Path(path).is_file():
+                raise DomainError(
+                    ErrorCode.VALIDATION_ERROR,
+                    f"Binary is not a file: {path}",
+                    hint="binary_path must name an existing regular file on the server",
+                    details={"field": "binary_path"},
+                )
+            key = self._project_key(name)
+            if key is None:
+                raise DomainError(ErrorCode.TARGET_NOT_REGISTERED, "Target is not registered", details={"target": name})
+            return path, key
         except Exception as exc:
             self._raise_domain_error(exc, operation="import_program", target=name)
+
+    def import_program(self, name: str, binary_path: str, *, control: OperationControl, **options):
+        try:
+            self._path_policy.validate_import_path(binary_path)
+            # A job keeps the project it was accepted for; the runtime refuses a changed one.
+            with self._lock_manager.acquire(target=name, project_key=control.expected_project_key):
+                # The job holds this target's locks from here (OperationManager.lock_holder).
+                control.check_active()
+                return self._runtime.import_program(name, binary_path, control=control, **options)
+        except Exception as exc:
+            self._raise_domain_error(exc, operation="import_program", target=name)
+
+    def prepare_analysis(self, name: str) -> LoadedProgram:
+        """Resolve an analysis request from registry state only, without Ghidra locks."""
+        try:
+            return self._runtime.loaded_program(name)
+        except Exception as exc:
+            self._raise_domain_error(exc, operation="analyze_program", target=name)
+
+    def analyze_program(self, name: str, *, force: bool = False, control: OperationControl):
+        # Like every core command, the analysis takes only the runtime's
+        # target/project locks, not this service's lock manager.
+        try:
+            return self._runtime.analyze_program(name, force=force, control=control)
+        except Exception as exc:
+            self._raise_domain_error(exc, operation="analyze_program", target=name)
 
     def save_project_program(self, name: str, *, domain_path: str | None = None):
         try:

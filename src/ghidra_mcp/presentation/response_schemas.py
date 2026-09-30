@@ -191,8 +191,88 @@ def _large_error_output_schema() -> dict[str, Any]:
     }
 
 
-def wire_output_schema(logical: dict[str, Any], *, batch: bool = False) -> dict[str, Any]:
-    """Cover logical data, retrieval notices and anticipated tool failures.
+# tools/list gives every tool the envelopes below in these short forms: they
+# only tell the replies apart, and repeated in full for every tool they made
+# up four fifths of tools/list.  The docs resources (ghidra://docs/tools/{name})
+# keep the full forms.
+_SHORT_NOTICE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["truncated"],
+    "properties": {"truncated": {"const": True}},
+}
+_SHORT_DEFERRED_REPLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["deferred", "operation"],
+    "properties": {"deferred": {"const": True}, "operation": {"type": "object", "required": ["operation_id"]}},
+}
+_SHORT_PRESENTATION_FAILURE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["presentation_failed"],
+    "properties": {"presentation_failed": {"const": True}},
+}
+_SHORT_ERROR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["error"],
+    "properties": {"error": {"type": "object"}},
+}
+_SHORT_SOURCE_SCHEMA: dict[str, Any] = {"type": "object", "required": ["target", "program", "revision"]}
+
+# The program state a core command's result came from (GhidraMCPServer).
+_SOURCE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["target", "program", "revision"],
+    "properties": {
+        "target": {"type": "string"},
+        "program": {"type": ["string", "null"]},
+        "revision": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
+# A call still running after the deferral wait: get_operation returns its outcome.
+_DEFERRED_REPLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["deferred", "tool", "target", "operation"],
+    "properties": {
+        "deferred": {"const": True},
+        "tool": {"type": "string"},
+        "target": {"type": "string"},
+        "operation": {
+            "type": "object",
+            "required": ["operation_id", "kind", "state"],
+            "properties": {
+                "operation_id": {"type": "string"},
+                "kind": {"type": "string"},
+                "state": {"type": "string"},
+                "poll_after_ms": {"type": "integer"},
+            },
+        },
+        "message": {"type": "string"},
+    },
+}
+
+
+def wire_output_schema(
+    logical: dict[str, Any],
+    *,
+    batch: bool = False,
+    compactable: bool = True,
+    deferrable: bool = False,
+    sourced: bool = False,
+    replayable: bool = False,
+    detailed: bool = True,
+) -> dict[str, Any]:
+    """Cover logical data, retrieval notices, deferred replies and anticipated tool failures.
+
+    ``compactable=False`` omits the stored-result variants for tools whose
+    results are never replaced by a result_id (background-job records).
+    ``deferrable`` adds the reply of a call that outlived the deferral wait.
+    ``sourced`` lets a result carry the program state it came from, beside
+    ``result`` (stored-result notices accept it as additional metadata).
+    ``replayable`` lets a resend's reply say ``replayed: true`` beside it:
+    the first call's reply, returned again because it carried the same request_id.
+    ``detailed=False`` gives every envelope but the logical data its short
+    form, which tools/list publishes; the docs resources publish the full one.
 
     $defs stay at the document root because Pydantic references are absolute
     JSON pointers. Moving only the logical schema into anyOf would break them.
@@ -219,14 +299,29 @@ def wire_output_schema(logical: dict[str, Any], *, batch: bool = False) -> dict[
                 "oneOf": [{"required": ["result_id", "resource_uri"]}, {"required": ["result_unavailable"]}],
             }
         )
-    else:
+    elif compactable and detailed:
         variants.extend(branch["properties"]["structuredContent"] for branch in _large_result_output_schema()["oneOf"])
+    elif compactable:
+        variants.append(_SHORT_NOTICE_SCHEMA)
     # Ordinary values and batch manifests share an explicit result envelope.
     logical_count = 2 if batch else 1
+    envelope_properties = {"source": _SOURCE_SCHEMA if detailed else _SHORT_SOURCE_SCHEMA} if sourced else {}
+    if replayable:
+        envelope_properties["replayed"] = {"const": True}
     variants[:logical_count] = [
-        {"type": "object", "required": ["result"], "properties": {"result": variant}, "additionalProperties": False}
+        {
+            "type": "object",
+            "required": ["result"],
+            "properties": {"result": variant, **envelope_properties},
+            "additionalProperties": False,
+        }
         for variant in variants[:logical_count]
     ]
+    if deferrable:
+        variants.append(_DEFERRED_REPLY_SCHEMA if detailed else _SHORT_DEFERRED_REPLY_SCHEMA)
+    if not detailed:
+        variants.extend([_SHORT_PRESENTATION_FAILURE_SCHEMA, _SHORT_ERROR_SCHEMA])
+        return _schema_document(variants, definitions)
     variants.extend(
         [
             {
@@ -253,6 +348,10 @@ def wire_output_schema(logical: dict[str, Any], *, batch: bool = False) -> dict[
             },
         ]
     )
+    return _schema_document(variants, definitions)
+
+
+def _schema_document(variants: list[dict[str, Any]], definitions: dict[str, Any] | None) -> dict[str, Any]:
     schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "anyOf": variants}
     if definitions:
         schema["$defs"] = definitions

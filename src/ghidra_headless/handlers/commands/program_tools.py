@@ -7,6 +7,8 @@ import pathlib
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.handlers.commands.pagination import normalize_pagination
 from ghidra_headless.handlers.commands.query_support import program_revision
+from ghidra_headless.session.models import program_is_analyzed
+from ghidra_headless.session.write_boundary import write_boundary
 
 MAX_UNDO_STEPS = 100
 MAX_ENTRY_POINTS = 50
@@ -61,9 +63,9 @@ def get_program_info(params, *, ensure_context, safe_call, iter_items):
         "function_count": int(ctx.function_manager.getFunctionCount()),
         "symbol_count": safe_call(ctx.symbol_table, "getNumSymbols"),
         "entry_points": entry_points,
-        # Read only options that exist: getBoolean/getString on a missing option would
+        "is_analyzed": program_is_analyzed(program),
+        # Read only options that exist: getString on a missing option would
         # register it, which is a write and needs a transaction.
-        "is_analyzed": bool(options.contains("Analyzed") and options.getBoolean("Analyzed", False)),
         "created_with_ghidra_version": (
             _text(options.getString("Created With Ghidra Version", None))
             if options.contains("Created With Ghidra Version")
@@ -182,13 +184,7 @@ def undo_program_change(params, *, ensure_context, safe_call, iter_items):
     ctx = ensure_context()
     program = ctx.program
     count = _undo_count(params)
-    undone = []
-    for _ in range(count):
-        if not bool(program.canUndo()):
-            break
-        name = safe_call(program, "getUndoName")
-        program.undo()
-        undone.append(_text(name))
+    undone = [_text(name) for name in write_boundary().undo(program, count, lambda: safe_call(program, "getUndoName"))]
     result = {"status": "ok" if undone else "noop", "undone": undone, "undone_count": len(undone)}
     result.update(_undo_state(program, safe_call, iter_items))
     return result
@@ -199,13 +195,7 @@ def redo_program_change(params, *, ensure_context, safe_call, iter_items):
     ctx = ensure_context()
     program = ctx.program
     count = _undo_count(params)
-    redone = []
-    for _ in range(count):
-        if not bool(program.canRedo()):
-            break
-        name = safe_call(program, "getRedoName")
-        program.redo()
-        redone.append(_text(name))
+    redone = [_text(name) for name in write_boundary().redo(program, count, lambda: safe_call(program, "getRedoName"))]
     result = {"status": "ok" if redone else "noop", "redone": redone, "redone_count": len(redone)}
     result.update(_undo_state(program, safe_call, iter_items))
     return result
@@ -227,8 +217,8 @@ def export_program(params, *, ensure_context, safe_call):
     """Write the loaded program to ``output_path`` as a .gzf archive or raw bytes.
 
     The path policy check happens in the application layer before this runs.
-    A .gzf packs the program's saved state, so unsaved edits are reported but
-    not included; call save_project_program first when they matter.
+    A .gzf packs the program as it is now, unsaved changes included (verified
+    with Ghidra 12.1.3); exporting does not save the project.
     """
     ctx = ensure_context()
     # The application layer has already normalized and validated this path.
@@ -252,6 +242,8 @@ def export_program(params, *, ensure_context, safe_call):
     from java.io import File
 
     exporter = _exporter_for(export_format)
+    # A .gzf locks the program; with the GUI, another transaction may be open (rule 1).
+    write_boundary().wait_until_idle(ctx.program)
     ok = bool(exporter.export(File(str(path)), ctx.program, None, ctx.monitor()))
     log = safe_call(exporter, "getMessageLog")
     messages = None if log is None else str(log).strip() or None

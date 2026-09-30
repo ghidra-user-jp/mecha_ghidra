@@ -4,8 +4,10 @@ import threading
 
 import pytest
 
+from ghidra_headless.errors import HeadlessError
 from ghidra_mcp.application.services.runtime_state import RuntimeState
 from ghidra_mcp.domain import DomainError, ErrorCode
+from ghidra_mcp.domain.error_mapping import to_domain_error
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.core_execution import RuntimeCoreExecution
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.session_store import RuntimeSessionStore
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.sync_operations import RuntimeSyncOperations
@@ -20,7 +22,7 @@ class _DummyCore:
         self.removed: list[str] = []
         self.executed: list[tuple[str, dict, str]] = []
 
-    def execute(self, command: str, params: dict, *, key: str):
+    def execute(self, command: str, params: dict, *, key: str, record_transactions: bool = False):
         self.executed.append((command, params, key))
         return {"status": "ok", "command": command}
 
@@ -1074,6 +1076,217 @@ def test_auto_checkout_rollback_postcondition_mismatch_is_partial_success(
         "operation_completed": True,
         "partial_success": True,
     }
+
+
+class _DisconnectAfterCheckoutHandle(_FakeHandle):
+    """The repository connection drops once the automatic checkout was confirmed, before check-in."""
+
+    failures = 1
+
+    def checkout_program(self, domain_path: str, *, exclusive: bool = False):
+        # The refresh that confirms the checkout still works; the ones after it fail.
+        self.confirmed_at = self.refresh_project_data_calls + 1
+        return super().checkout_program(domain_path, exclusive=exclusive)
+
+    def refresh_project_data(self, *, force: bool = True):
+        super().refresh_project_data(force=force)
+        confirmed_at = getattr(self, "confirmed_at", None)
+        if confirmed_at is not None and self.refresh_project_data_calls > confirmed_at and self.failures:
+            self.failures -= 1
+            raise RuntimeError("java.io.IOException: connection reset")
+
+
+def test_commit_undoes_its_automatic_checkout_when_the_refresh_before_checkin_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_DisconnectAfterCheckoutHandle)
+
+    with pytest.raises(RuntimeError, match="SYNC_REFRESH_FAILED") as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    # The checkout is gone again, so the retryable refresh failure is true: nothing was left behind.
+    assert (handle.checkout_calls, handle.undo_checkout_calls) == (1, 1)
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
+    assert to_domain_error(exc_info.value, operation="commit_project_program").retryable is True
+
+
+def test_commit_that_cannot_confirm_the_undo_of_its_checkout_is_not_retryable(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_DisconnectAfterCheckoutHandle)
+    handle.failures = 100
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    err = exc_info.value
+    assert (err.code, err.retryable) == (ErrorCode.SYNC_OPERATION_FAILED, False)
+    # The undo ran; only the status read that would confirm it failed.
+    assert handle.undo_checkout_calls == 1
+    assert err.details == {
+        "operation": "commit_project_program.rollback_auto_checkout",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+    assert err.message.count("SYNC_OPERATION_FAILED") == 1 and "postcondition status" in err.message
+
+
+class _UnreachableForUndoHandle(_FakeHandle):
+    """The repository goes away before the automatic checkout can be undone."""
+
+    def undo_checkout_program(self, domain_path: str, *, keep: bool = False):  # noqa: ARG002
+        raise HeadlessError("REPOSITORY_CONNECT_FAILED: repository server is unreachable")
+
+
+class _NothingToCheckInHandle(_UnreachableForUndoHandle):
+    """A clean program: once checked out automatically, there is nothing to check in."""
+
+    def checkout_program(self, domain_path: str, *, exclusive: bool = False):
+        checked_out = super().checkout_program(domain_path, exclusive=exclusive)
+        self._status["can_checkin"] = False
+        return checked_out
+
+
+def _assert_checkout_left_is_reported(err: DomainError, handle: _FakeHandle) -> None:
+    # Never "nothing changed" (retryable or a refusal) while the checkout is still there.
+    assert (err.code, err.retryable) == (ErrorCode.SYNC_OPERATION_FAILED, False)
+    assert err.details == {
+        "operation": "commit_project_program.rollback_auto_checkout",
+        "operation_completed": False,
+        "partial_success": True,
+    }
+    assert handle._status["is_checked_out"] is True  # noqa: SLF001
+
+
+def test_a_clean_commit_whose_undo_fails_says_the_checkout_remains(monkeypatch: pytest.MonkeyPatch):
+    """The usual end of an automatic checkout (nothing to check in), with the repository gone at the undo."""
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_NothingToCheckInHandle)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    _assert_checkout_left_is_reported(exc_info.value, handle)
+
+
+def test_a_commit_that_fails_and_cannot_undo_its_checkout_says_it_remains(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_UnreachableForUndoHandle)
+    monkeypatch.setattr(
+        handle,
+        "commit_program",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(HeadlessError("REPOSITORY_CONNECT_FAILED: unreachable")),
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    _assert_checkout_left_is_reported(exc_info.value, handle)
+    assert "REPOSITORY_CONNECT_FAILED" in exc_info.value.message
+
+
+def test_a_checkin_refused_before_it_ran_undoes_the_automatic_checkout(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    monkeypatch.setattr(
+        handle,
+        "commit_program",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(HeadlessError("REPOSITORY_CONNECT_FAILED: unreachable")),
+    )
+
+    with pytest.raises(RuntimeError, match="REPOSITORY_CONNECT_FAILED") as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    # The check-in's own connection check failed first; with the checkout undone, "retry later" is true.
+    assert (handle.checkout_calls, handle.undo_checkout_calls) == (1, 1)
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
+    assert to_domain_error(exc_info.value, operation="commit_project_program").retryable is True
+
+
+def test_a_reopen_failure_while_undoing_the_checkout_keeps_its_own_error(monkeypatch: pytest.MonkeyPatch):
+    sync, store, _core, handle = _build_sync_runtime(
+        monkeypatch, handle_cls=_DisconnectAfterCheckoutHandle, session_cls=_ClosingSession
+    )
+    undo = handle.undo_checkout_program
+
+    def undo_then_lose_the_program(domain_path: str, *, keep: bool = False):
+        undo(domain_path, keep=keep)
+        handle.fail_reopen = True
+
+    monkeypatch.setattr(handle, "undo_checkout_program", undo_then_lose_the_program)
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    # The session is gone: REOPEN_FAILED says so, instead of a repository error that hides it.
+    assert exc_info.value.code == ErrorCode.REOPEN_FAILED
+    assert handle.undo_checkout_calls == 1
+    assert "fw" not in store.sessions
+    # The undo is what completed, not the check-in.
+    assert exc_info.value.details == {
+        "operation": "commit_project_program.rollback_auto_checkout",
+        "operation_completed": True,
+        "partial_success": True,
+    }
+
+
+class _CheckoutsUnreadableBeforeCheckinHandle(_DisconnectAfterCheckoutHandle):
+    """Once the automatic checkout was confirmed, reading the checkouts fails once: neither retryable nor a refusal."""
+
+    lose_checkouts = False
+
+    def refresh_project_data(self, *, force: bool = True):
+        _FakeHandle.refresh_project_data(self, force=force)
+        confirmed_at = getattr(self, "confirmed_at", None)
+        self.lose_checkouts = confirmed_at is not None and self.refresh_project_data_calls == confirmed_at + 1
+
+    def get_sync_status(self, domain_path: str):
+        if self.lose_checkouts:
+            self.lose_checkouts = False
+            raise HeadlessError("SYNC_STATUS_UNAVAILABLE: could not read the checkouts: connection reset")
+        return super().get_sync_status(domain_path)
+
+
+def test_any_failure_before_the_checkin_undoes_the_automatic_checkout(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_CheckoutsUnreadableBeforeCheckinHandle)
+
+    with pytest.raises(RuntimeError, match="SYNC_STATUS_UNAVAILABLE") as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    # Nothing was checked in, so the checkout goes too, although the error does not say nothing changed.
+    assert (handle.checkout_calls, handle.undo_checkout_calls) == (1, 1)
+    assert handle._status["is_checked_out"] is False  # noqa: SLF001
+    assert to_domain_error(exc_info.value, operation="commit_project_program").retryable is False
+
+
+def test_a_checkin_that_may_have_reached_the_server_keeps_the_checkout(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch)
+    monkeypatch.setattr(
+        handle,
+        "commit_program",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("java.io.IOException: broken pipe")),
+    )
+
+    with pytest.raises(RuntimeError, match="broken pipe"):
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    # The check-in had begun: undoing its checkout could drop what it did, so the checkout stays.
+    assert (handle.checkout_calls, handle.undo_checkout_calls) == (1, 0)
+    assert handle._status["is_checked_out"] is True  # noqa: SLF001
+
+
+def test_an_unexplained_undo_failure_still_says_the_checkout_may_remain(monkeypatch: pytest.MonkeyPatch):
+    sync, _store, _core, handle = _build_sync_runtime(monkeypatch, handle_cls=_DisconnectAfterCheckoutHandle)
+    monkeypatch.setattr(
+        handle,
+        "undo_checkout_program",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("java.io.IOException: Not connected to repository server")
+        ),
+    )
+
+    with pytest.raises(DomainError) as exc_info:
+        sync.commit_project_program("fw", "change", auto_checkout=True, domain_path="/main")
+
+    _assert_checkout_left_is_reported(exc_info.value, handle)
+    # It names both: what stopped the commit, and why the undo failed.
+    assert "SYNC_REFRESH_FAILED" in exc_info.value.message
+    assert "Not connected to repository server" in exc_info.value.message
 
 
 def test_add_postcondition_rejects_success_without_versioned_state(monkeypatch: pytest.MonkeyPatch):
@@ -3122,7 +3335,7 @@ def test_command_dirty_state_is_reflected_in_sync_status(
     )
     original_execute = core.execute
 
-    def execute(command, params, *, key):
+    def execute(command, params, *, key, record_transactions=False):
         handle.program_reports_changed = changed_after
         return original_execute(command, params, key=key)
 

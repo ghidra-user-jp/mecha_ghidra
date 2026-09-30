@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from ghidra_headless.handlers.commands.mutating_bsim import (
@@ -275,3 +277,43 @@ def test_category_name_regex_matches_expected_charset():
     assert _CATEGORY_NAME_RE.match("FAMILY") is not None
     assert _CATEGORY_NAME_RE.match("Threat Actor (TA)") is not None
     assert _CATEGORY_NAME_RE.match("bad$name") is None
+
+
+@pytest.mark.parametrize(
+    ("last_error", "message"),
+    [
+        (
+            SimpleNamespace(category="Authentication", message="Could not authenticate with database"),
+            "BSIM_AUTHENTICATION_FAILED: Could not authenticate with database",
+        ),
+        (
+            SimpleNamespace(category="AuthenticationCancelled", message="Authentication cancelled by user"),
+            "BSIM_AUTHENTICATION_FAILED: Authentication cancelled by user",
+        ),
+        (
+            # Ghidra reports an unreachable server as Initialization; BsimService reads the text.
+            SimpleNamespace(category="Initialization", message="Database error on initialization: Connection refused"),
+            "BSIM_DATABASE_INIT_FAILED: Database error on initialization: Connection refused",
+        ),
+        (None, "BSIM_DATABASE_INIT_FAILED: unknown error"),
+    ],
+)
+def test_database_error_names_a_refused_login_by_its_category(last_error, message):
+    from ghidra_headless.bsim_errors import database_error
+
+    error = database_error("BSIM_DATABASE_INIT_FAILED", last_error)
+    assert str(error) == message
+    assert error.code == message.split(":", 1)[0]
+
+
+def test_a_failed_write_query_keeps_its_write_code():
+    from ghidra_headless.errors import HeadlessError
+    from ghidra_mcp.infrastructure.bsim.java_backend import _write
+
+    class Database:
+        def query(self, _request):
+            raise RuntimeError("java.net.SocketTimeoutException: Read timed out")
+
+    with pytest.raises(HeadlessError) as failed:
+        _write(Database(), object(), "BSIM_DELETE_EXECUTABLE_FAILED")
+    assert failed.value.code == "BSIM_DELETE_EXECUTABLE_FAILED"

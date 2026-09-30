@@ -68,7 +68,7 @@ uv run mecha_ghidra \
   --transport stdio
 ```
 
-Configure your MCP client to launch that command using the [client examples](docs/clients.md). After connecting, call `list_project_programs`, load a program with `load_project_program`, then use `list_functions` and `decompile_function`.
+Configure your MCP client to launch that command using the [client examples](docs/clients.md). After connecting, call `list_project_programs`, load a program with `load_project_program`, then use `list_functions` and `decompile_function`. Loading never analyzes: if the load reports `is_analyzed: false`, run `analyze_program` first.
 
 **Starting from a binary file?** Follow [first analysis](docs/usage.md#first-analysis): create a project, import the binary, then load it. Starting the server alone does not create a project or import a file.
 
@@ -82,6 +82,7 @@ Configure your MCP client to launch that command using the [client examples](doc
 | [Tool reference](docs/tools.md) | All tools, grouped by task |
 | [Docker](docs/docker.md) | Build, volumes, first import, ARM64 |
 | [Shared projects](docs/shared-projects.md) | Ghidra Server, checkout/check-in, conflicts, version history |
+| [Live sharing with the GUI](docs/gui-live.md) | `--backend gui`, sharing programs with the Ghidra GUI, how writes work, what is not available |
 | [BSim](docs/bsim.md) | Similarity search, database registration, matched programs |
 | [Troubleshooting and upgrades](docs/troubleshooting.md) | Error codes, common failures, renamed tools |
 | [Development](docs/development.md) | Architecture, tests, native builds, releases |

@@ -11,13 +11,14 @@ from collections.abc import Callable, Iterator
 from typing import Dict, List, Optional
 
 from ghidra_headless.errors import HeadlessError, error_code_of
-from ghidra_headless.session import ProgramSession, ProjectHandle, java_bindings, path_utils
-from ghidra_headless.session.transactions import run_in_transaction
+from ghidra_headless.session import ProgramSession, ProjectHandle, path_utils
 from ghidra_mcp.application.locks import SCRIPT_BARRIER, USE_POLICY_TIMEOUT, acquire_ordered_locks
+from ghidra_mcp.application.services.ports import LoadedProgram, OperationControl
 from ghidra_mcp.domain import DomainError, ErrorCode
 from ghidra_mcp.domain.error_utils import is_project_lock_error
 
-from .session_store import RuntimeSessionStore, bind_session_project
+from .errors import to_domain_error
+from .session_store import RuntimeSessionStore, bind_session_project, format_project_key
 from .sync_reopen import SyncReopenMixin
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,14 @@ _IMPORT_DOMAIN_PATH_PATTERNS = (
     re.compile(r"PROGRAM_CLOSE_FAILED: failed to close imported program (?P<path>/.*?): "),
     re.compile(r"PROGRAM_CLOSE_FAILED: failed to close raw import results for imported program (?P<path>/.*?): "),
 )
+
+
+def _with_gui_dialog(result: Dict[str, object], handle) -> Dict[str, object]:
+    """Add the modal dialog the Ghidra GUI shows after a load, such as its auto-analysis prompt (spec §5.2)."""
+    current_dialog = getattr(handle, "current_modal_dialog", None)
+    if current_dialog is None:
+        return result
+    return {**result, "modal_dialog": current_dialog()}
 
 
 class RuntimeTargetLifecycle(SyncReopenMixin):
@@ -52,7 +61,13 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             )
 
     @contextlib.contextmanager
-    def _target_operation(self, name: str, *, create: bool = False) -> Iterator[None]:
+    def _target_operation(
+        self,
+        name: str,
+        *,
+        create: bool = False,
+        expected_project_key: str | None = None,
+    ) -> Iterator[None]:
         with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
             with self._store.registry_lock.write_lock():
                 lock = (
@@ -67,6 +82,21 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             if project_lock is not None:
                 locks.append(("project", project_lock))
             with acquire_ordered_locks(locks, message_prefix="runtime "):
+                if expected_project_key is not None:
+                    # The one authoritative rebind check: under the target and
+                    # project locks, the binding, the lock objects and the
+                    # project lock actually held must all still be the ones
+                    # admission resolved.
+                    with self._store.registry_lock.read_lock():
+                        bound = self._store.target_projects.get(name)
+                        if (
+                            self._store.locks.get(name) is not lock
+                            or bound is None
+                            or project_key is None
+                            or format_project_key(bound) != expected_project_key
+                            or format_project_key(project_key) != expected_project_key
+                        ):
+                            raise DomainError(ErrorCode.TARGET_REBOUND, "Target project changed before import")
                 yield
 
     def create_session(
@@ -95,7 +125,9 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         project_name: str | None = None,
         overwrite: bool = False,
     ) -> Dict[str, object]:
-        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.write_lock():
+        # Exclusive, but never queued ahead of other calls: while a background
+        # import holds the runtime, this fails fast instead of stalling them.
+        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.bounded_write_lock(purpose="create_project"):
             project_key = ProjectHandle.resolve_project_creation_target(
                 project_location,
                 project_name,
@@ -239,57 +271,23 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 }
 
     def list_targets(self) -> List[Dict[str, Optional[str]]]:
-        with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
-            with self._store.registry_lock.read_lock():
-                names = sorted(set(self._store.target_projects.keys()) | set(self._store.sessions.keys()))
-            results: List[Dict[str, Optional[str]]] = []
-            for name in names:
-                # A target lock can be removed and recreated while this read is
-                # waiting.  Retry until the lock we acquired is still the
-                # registry's lock for this target.
-                while True:
-                    with self._store.registry_lock.read_lock():
-                        lock = self._store.locks.get(name)
-                        target_exists = name in self._store.sessions or name in self._store.target_projects
-                    if lock is None and target_exists:
-                        with self._store.registry_lock.write_lock():
-                            if name in self._store.sessions or name in self._store.target_projects:
-                                lock = self._store.locks.setdefault(name, threading.RLock())
-                    if lock is None:
-                        break
-                    with acquire_ordered_locks(
-                        [("target", lock)],
-                        message_prefix="runtime ",
-                    ):
-                        with self._store.registry_lock.read_lock():
-                            if self._store.locks.get(name) is not lock:
-                                continue
-                            session = self._store.sessions.get(name)
-                            project_key = self._store.target_projects.get(name)
-                        if session is not None:
-                            # ProgramSession.to_dict() reaches into Ghidra.  The
-                            # target lock keeps the session alive without
-                            # holding registry_lock across that external call.
-                            info = session.to_dict()
-                        elif project_key is not None:
-                            info = {
-                                "project_location": project_key[0],
-                                "project_name": project_key[1],
-                                "domain_path": None,
-                            }
-                        else:
-                            info = None
-                        break
-
-                if lock is None:
-                    # The target was removed after the names snapshot, or the
-                    # registry is incomplete.  Do not inspect a session whose
-                    # lifecycle cannot be protected by a target lock.
-                    continue
-                if info is None:
+        # Registry state only. A session describes itself from values captured
+        # when it opened, so this takes no script, runtime, target or project
+        # lock and never calls into Ghidra: it answers at once while a job, a
+        # script or a long call holds those locks.
+        results: List[Dict[str, Optional[str]]] = []
+        with self._store.registry_lock.read_lock():
+            for name in sorted(set(self._store.target_projects) | set(self._store.sessions)):
+                session = self._store.sessions.get(name)
+                project_key = self._store.target_projects.get(name)
+                if session is not None:
+                    info = session.to_dict()
+                elif project_key is not None:
+                    info = {"project_location": project_key[0], "project_name": project_key[1], "domain_path": None}
+                else:
                     continue
                 results.append({"target": name, **info})
-            return results
+        return results
 
     def list_programs(self, name: str):
         with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.read_lock():
@@ -413,6 +411,9 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                     name=name,
                     session=new_session,
                 )
+                # Read before the session replaces the target's: a failure here
+                # rolls the load back instead of following a completed one.
+                analyzed = new_session.is_analyzed()
             except Exception:
                 self._rollback_failed_load_initialization_locked(
                     name=name,
@@ -447,12 +448,14 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 if handle_closed:
                     if self._store.project_handles.get(handle.get_key()) is handle:
                         self._store.project_handles.pop(handle.get_key(), None)
-            return {
+            loaded = {
                 "program": loaded_domain_path,
                 "reloaded": False,
                 "version": requested_version,
                 "read_only": requested_version is not None,
+                "is_analyzed": analyzed,
             }
+            return _with_gui_dialog(loaded, handle)
 
     def _session_matches_load_locked(self, session: ProgramSession, *, domain_path: str, version: int | None) -> bool:
         try:
@@ -465,9 +468,24 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         return (None if current_version is None else int(current_version)) == version
 
     def _reload_current_session_locked(self, name: str, *, domain_path: str, version: int | None) -> Dict[str, object]:
-        """Close and reopen the program the target already holds (unsaved edits are saved first)."""
+        """Close and reopen the program the target already holds (unsaved edits are saved first).
+
+        With the Ghidra GUI backend the target already holds the live program
+        the GUI shows: nothing is saved (the unsaved edits may be the human's)
+        and nothing reopened, unless the human closed its tab; then it opens again.
+        """
         with self._store.registry_lock.read_lock():
             session = self._store.ensure_session(name)
+        handle = session.get_project_handle()
+        if getattr(handle, "live_programs", False) and version is None:
+            if handle.program_is_open(session.get_program()):
+                try:
+                    analyzed = session.is_analyzed()
+                except Exception:
+                    analyzed = None
+                current = {"program": domain_path, "reloaded": False, "version": None, "read_only": False}
+                return _with_gui_dialog({**current, "is_analyzed": analyzed}, handle)
+            return self._reopen_closed_gui_program_locked(name, session, handle, domain_path)
         save_before_close = version is None and self._active_program_is_changed_locked(name, session, domain_path)
         self._run_with_reopened_program_locked(
             name,
@@ -475,19 +493,94 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             save_before_close=save_before_close,
             reopen_version=version,
         )
+        with self._store.registry_lock.read_lock():
+            reopened = self._store.ensure_session(name)
+        try:
+            analyzed = reopened.is_analyzed()
+        except Exception:
+            # The reload completed; a flag that cannot be read now is unknown.
+            logger.warning("Could not read whether the reloaded program %s is analyzed", domain_path, exc_info=True)
+            analyzed = None
         return {
             "program": domain_path,
             "reloaded": True,
             "version": version,
             "read_only": version is not None,
+            "is_analyzed": analyzed,
         }
 
-    def import_program(self, name: str, binary_path: str, **kwargs) -> str:
+    def _reopen_closed_gui_program_locked(self, name: str, session, handle, domain_path: str) -> Dict[str, object]:
+        """The human closed the target's tab: open the program in the GUI again, then move the target to it.
+
+        The new program is opened before the target changes, so an open that
+        fails (a dialog the human cancelled, an error) leaves the expired
+        target as it was, to load again later, instead of unregistering it.
+        """
+        expired = session.get_program()
+        with contextlib.suppress(Exception):  # the expired program's binding; the tab is gone
+            handle.release_program(expired)
+        reopened = handle.open_program(domain_path)
+        try:
+            self._store.core_accessor().initialize(reopened.get_program(), key=name)
+            bind_session_project(self._store.core_accessor, name, reopened)
+        except Exception:
+            with contextlib.suppress(Exception):
+                reopened.close(save=False)
+            raise
+        with self._store.registry_lock.write_lock():
+            self._store.sessions[name] = reopened
+            self._store.clear_dirty_program(name, domain_path)
+        try:
+            analyzed = reopened.is_analyzed()
+        except Exception:
+            analyzed = None
+        loaded = {"program": domain_path, "reloaded": True, "version": None, "read_only": False}
+        return _with_gui_dialog({**loaded, "is_analyzed": analyzed}, handle)
+
+    def loaded_program(self, name: str) -> LoadedProgram:
+        """What a job would run on, read from the registry without Ghidra locks or Java calls.
+
+        Admission may run while a script executes; a Java call from a thread the
+        JVM has not seen yet would look to the script like a thread it started.
+        """
+        with self._store.registry_lock.read_lock():
+            session = self._store.ensure_session(name)
+        read_only_version = getattr(session, "read_only_version", None)
+        if read_only_version is not None:
+            raise HeadlessError(
+                f"READ_ONLY_PROGRAM: target '{name}' holds version {int(read_only_version)} opened read-only; "
+                "load the current version with load_project_program before mutating"
+            )
+        try:
+            project_key = session.get_project_handle().get_key()
+            domain_path = getattr(session, "domain_path", None) or self._store.session_domain_path(session)
+        except RuntimeError:
+            if not self._session_is_closed(session):
+                raise
+            # A reload, checkout or pull is reopening the program right now: retryable.
+            raise HeadlessError(
+                f"SESSION_CHANGED: target '{name}' is being reopened or closed; retry the job"
+            ) from None
+        return LoadedProgram(
+            project_key=format_project_key(project_key),
+            domain_path=domain_path,
+            generation=self._store.session_generation(session),
+        )
+
+    def import_program(
+        self,
+        name: str,
+        binary_path: str,
+        *,
+        control: OperationControl,
+        **kwargs,
+    ) -> str:
         if not binary_path:
             raise ValueError("binary_path is required")
-        with self._target_operation(name):
-            handle = self._store.get_target_handle(name)
+        with self._target_operation(name, expected_project_key=control.expected_project_key):
+            control.check_active()
             binary = pathlib.Path(binary_path)
+            handle = self._store.get_target_handle(name)
             existing_domain_path = self._existing_imported_program_path_locked(handle, binary)
             if existing_domain_path is not None:
                 raise DomainError(
@@ -502,8 +595,17 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                         "existing_domain_path": existing_domain_path,
                     },
                 )
+            # A background import may run long after admission checked the
+            # input; re-check it before the job counts as started.
+            if not binary.is_file():
+                raise ValueError(f"Binary is not a file: {binary_path}")
+            # Cancellation and shutdown stop the analysis through this monitor;
+            # the handle then rolls the half-analyzed program back.
+            monitor = handle.create_cancellable_monitor()
+            control.bind_cancel(monitor.cancel)
             try:
-                domain_file = handle.import_program(binary_path, **kwargs)
+                control.begin()
+                domain_file = handle.import_program(binary_path, monitor=monitor, **kwargs)
             except Exception as exc:
                 mapped = self._partial_import_error(
                     exc,
@@ -512,7 +614,19 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 )
                 if mapped is not None:
                     raise mapped from exc
+                # Establish absence under the same project lock. Merely seeing a
+                # validation/loader exception is not evidence of rollback.
+                try:
+                    output_absent = self._existing_imported_program_path_locked(handle, binary) is None
+                except Exception:
+                    output_absent = False
+                if output_absent:
+                    error = to_domain_error(exc, operation="import_program", target=name)
+                    error.details = {**(error.details or {}), "output_created": False}
+                    raise error from exc
                 raise
+            finally:
+                control.bind_cancel(None)
             with self._store.registry_lock.write_lock():
                 self._store.target_projects[name] = handle.get_key()
             return domain_file.getPathname()
@@ -573,7 +687,10 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             # lock or project binding any more; recovery must still reach the remembered handle.
             # There is no target lock to serialize on, so the whole recovery runs under the
             # runtime-wide exclusive lock and re-checks the state it is about to clear.
-            with SCRIPT_BARRIER.read_lock(), self._store.operation_lock.write_lock():
+            with (
+                SCRIPT_BARRIER.read_lock(),
+                self._store.operation_lock.bounded_write_lock(purpose="close_session(discard_changes=true)"),
+            ):
                 if not self._is_orphan_only_target(name):
                     raise HeadlessError(
                         f"SESSION_CHANGED: target '{name}' changed while recovery was queued; retry",
@@ -669,7 +786,6 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 if name not in self._store.sessions:
                     self._store.locks.pop(name, None)
                     self._store.target_projects.pop(name, None)
-                    self._store.clear_analyzed_loads_for_target(name)
                     self._store.clear_dirty_programs_for_target(name)
 
         with self._store.registry_lock.read_lock():
@@ -700,7 +816,6 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
             self._store.locks.clear()
             self._store.project_locks.clear()
             self._store.target_projects.clear()
-            self._store.clear_analyzed_loads()
             self._store.clear_dirty_programs()
             self._store.project_handles.clear()
         self._store.core_accessor().clear_contexts()
@@ -712,7 +827,7 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         if session is None:
             if not remove_program and target_exists:
                 return
-            raise RuntimeError(f"Session '{name}' does not exist")
+            raise self._store.missing_session_error(name)
         if not discard_changes and self._store.quarantine_state(name) is not None:
             raise HeadlessError(
                 f"TARGET_EXECUTION_INVALID: target '{name}' is quarantined; a normal close would save an "
@@ -788,7 +903,6 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                     if remove_program:
                         self._store.locks.pop(name, None)
                         self._store.target_projects.pop(name, None)
-                        self._store.clear_analyzed_loads_for_target(name)
                         self._store.clear_dirty_programs_for_target(name)
                     else:
                         self._store.target_projects[name] = project_key
@@ -977,7 +1091,6 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
                 with self._store.registry_lock.write_lock():
                     if self._store.sessions.get(name) is session:
                         self._store.sessions.pop(name, None)
-                    self._store.clear_analyzed_loads_for_target(name)
                     self._store.clear_dirty_programs_for_target(name)
                 try:
                     self._store.core_accessor().remove_context(name)
@@ -1040,84 +1153,12 @@ class RuntimeTargetLifecycle(SyncReopenMixin):
         name: str,
         session: ProgramSession,
     ) -> str:
+        # Opening never analyzes: auto-analysis runs only in import and
+        # analyze_program jobs, so a load always returns promptly.
         program = session.get_program()
         self._store.core_accessor().initialize(program, key=name)
         bind_session_project(self._store.core_accessor, name, session)
-        loaded_domain_path = session.to_dict().get("domain_path") or self._store.session_domain_path(session)
-        if getattr(session, "read_only_version", None) is None:
-            # A past version is immutable, so it can neither be analyzed nor saved.
-            self._analyze_program_on_first_load_locked(name=name, domain_path=loaded_domain_path, session=session)
-        return loaded_domain_path
-
-    def _analyze_program_on_first_load_locked(
-        self,
-        *,
-        name: str,
-        domain_path: str,
-        session: ProgramSession,
-    ) -> None:
-        if self._store.is_analyzed_load(name, domain_path):
-            return
-
-        utilities = java_bindings._ghidra_program_utilities()
-        program = session.get_program()
-        should_analyze = bool(utilities.shouldAskToAnalyze(program))
-        if should_analyze:
-            if not self._auto_analysis_allowed_locked(name=name, domain_path=domain_path, session=session):
-                return
-            script_util = java_bindings._ghidra_script_util()
-            script_util.acquireBundleHostReference()
-            try:
-
-                def _analyze():
-                    session.flat_api.analyzeAll(program)
-                    utilities.markProgramAnalyzed(program)
-
-                run_in_transaction(program, "Auto analysis", _analyze)
-                self._save_analyzed_program_locked(session, program)
-            finally:
-                script_util.releaseBundleHostReference()
-        self._store.mark_analyzed_load(name, domain_path)
-
-    @staticmethod
-    def _auto_analysis_allowed_locked(
-        *,
-        name: str,
-        domain_path: str,
-        session: ProgramSession,
-    ) -> bool:
-        handle = session.get_project_handle()
-        try:
-            status = handle.get_sync_status(domain_path)
-        except Exception as exc:
-            logger.warning(
-                "skipping initial auto-analysis for target '%s' because sync status is unavailable: %s",
-                name,
-                exc,
-            )
-            return False
-        if status.get("is_versioned") and not status.get("is_checked_out"):
-            logger.info(
-                "skipping initial auto-analysis for target '%s' because the shared-project program is not checked out",
-                name,
-            )
-            return False
-        if not status.get("is_versioned") and status.get("can_add_to_repository"):
-            logger.info(
-                "skipping initial auto-analysis for target '%s' because the shared-project program "
-                "has not been added to version control",
-                name,
-            )
-            return False
-        return True
-
-    @staticmethod
-    def _save_analyzed_program_locked(session: ProgramSession, program) -> None:
-        handle = session.get_project_handle()
-        try:
-            handle.save_program(program, force=True)
-        except Exception as exc:
-            raise HeadlessError(f"SAVE_FAILED: failed to save analysis results after initial load: {exc}") from exc
+        return session.to_dict().get("domain_path") or self._store.session_domain_path(session)
 
     def _rollback_failed_load_initialization_locked(
         self,

@@ -36,6 +36,7 @@ import jpype
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.scripts import providers, runtime_check
 from ghidra_headless.scripts.capture import BoundedCapture
+from ghidra_headless.session import transactions
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +59,11 @@ class _SharedInterpreter:
 
 _jython = _SharedInterpreter()
 
-OUTCOME_COMMITTED = "committed"
-OUTCOME_UNCHANGED = "unchanged"
-OUTCOME_ROLLED_BACK = "rolled_back"
-OUTCOME_UNKNOWN = "unknown"
+# One vocabulary with the core's own transaction recorder.
+OUTCOME_COMMITTED = transactions.COMMITTED
+OUTCOME_UNCHANGED = transactions.UNCHANGED
+OUTCOME_ROLLED_BACK = transactions.ROLLED_BACK
+OUTCOME_UNKNOWN = transactions.UNKNOWN
 
 
 def _jclass(name: str):
@@ -138,9 +140,33 @@ _HOUSEKEEPING_THREAD_RE = re.compile(
 )
 # Python threads the MCP server itself starts while a script runs: anyio spawns a
 # worker for every message that arrives mid-run (``anyio.to_thread.run_sync``),
-# uvicorn and the stdlib executor name theirs likewise.  Never script work.
-_SERVER_THREAD_RE = re.compile(r"^(AnyIO worker thread|asyncio_\d+|uvicorn|ThreadPoolExecutor-)")
+# which also runs deferred tool calls; the job worker, uvicorn and the stdlib
+# executor name theirs likewise.  Never script work.
+_SERVER_THREAD_RE = re.compile(r"^(AnyIO worker thread|ghidra-jobs$|asyncio_\d+|uvicorn|ThreadPoolExecutor-)")
 THREAD_GRACE_SECONDS = 1.0
+
+
+def attach_server_thread() -> None:
+    """Attach the calling server thread to the JVM under its own name, before its first Java call.
+
+    JPype attaches a thread on its first Java call and names it ``Thread-N``.
+    A script running meanwhile would take that for a thread it started and
+    quarantine its target; under the server thread's name (``_SERVER_THREAD_RE``)
+    the thread watch skips it. Does nothing before the JVM starts or once attached.
+    """
+    import _jpype
+
+    if not jpype.isJVMStarted() or _jpype.isThreadAttachedToJVM():
+        return
+    _jpype.attachThreadAsDaemon()
+    _jclass("java.lang.Thread").currentThread().setName(threading.current_thread().name)
+
+
+def _expected_thread(item: dict[str, Any]) -> bool:
+    """A thread the run did not start: JVM/OSGi housekeeping, or a server thread attached meanwhile."""
+    name = item["name"]
+    return bool(_HOUSEKEEPING_THREAD_RE.match(name) or (item["kind"] == "java" and _SERVER_THREAD_RE.match(name)))
+
 
 _ORIGINAL_THREAD_START = threading.Thread.start
 # Stable token -> Thread for every Python thread a script started, so liveness is
@@ -271,7 +297,7 @@ def describe_new_threads(
     deadline = time.monotonic() + max(0.0, grace_seconds)
     while True:
         found = _live_threads_not_in(before, recorder)
-        stray = [item for item in found if not _HOUSEKEEPING_THREAD_RE.match(item["name"])]
+        stray = [item for item in found if not _expected_thread(item)]
         if not stray or time.monotonic() >= deadline:
             ignored = [item for item in found if item not in stray]
             return {"stray": stray, "ignored": ignored}
@@ -472,8 +498,12 @@ def execute_script(
     timeout_seconds: int = 300,
     output_limit_bytes: int = DEFAULT_OUTPUT_LIMIT,
     snapshot_roots: list[str] | None = None,
+    parent_monitor=None,
 ) -> dict[str, Any]:
     """Run the script and return an outcome dict.  Never raises for script failures.
+
+    ``parent_monitor`` is a background job's cancellable monitor: the script's
+    timeout monitor wraps it, so cancelling the job reaches the script too.
 
     ``status`` is ``ok``, ``error`` or ``timeout``; ``error`` carries the
     normalized failure. Load/compile failures raise ``HeadlessError`` with
@@ -530,6 +560,7 @@ def execute_script(
     setup_error: BaseException | None = None
     monitor = None
     load_ms = duration_ms = 0
+    timed_out = cancelled = False
     # Runtime initialization is complete, but user constructors/static initializers
     # run inside getScriptInstance. Observe them as well as the script body;
     # describe_new_threads filters the known OSGi/compiler housekeeping threads.
@@ -546,7 +577,9 @@ def execute_script(
                 load_ms = int((time.monotonic() - load_started) * 1000)
             if script is None:
                 raise HeadlessError(f"SCRIPT_LOAD_FAILED: provider returned no instance for {script_path}")
-            monitor = timeout_monitor_cls.timeoutIn(int(timeout_seconds), time_unit.SECONDS, task_monitor.DUMMY)
+            monitor = timeout_monitor_cls.timeoutIn(
+                int(timeout_seconds), time_unit.SECONDS, parent_monitor or task_monitor.DUMMY
+            )
             controls = controls_cls(stdout.writer, stderr.writer, monitor)
             script.setScriptArgs(jpype.JArray(jpype.JString)([str(item) for item in (args or [])]))
             started = time.monotonic()
@@ -559,6 +592,12 @@ def execute_script(
                     error = _python_exception_details(exc)
             finally:
                 duration_ms = int((time.monotonic() - started) * 1000)
+                # Read as the script ends: the timer keeps running after it and can
+                # still fire, and cancel the monitor, while the run winds down.
+                with contextlib.suppress(Exception):
+                    timed_out = bool(monitor.didTimeout())
+                with contextlib.suppress(Exception):
+                    cancelled = bool(monitor.isCancelled()) and not timed_out
     except BaseException as exc:
         setup_error = exc
     finally:
@@ -595,13 +634,6 @@ def execute_script(
     # The startup probe verifies that PyGhidra exceptions propagate. Only an
     # exception escaping this execute() is a failure: a parent script may have
     # caught a child's exception and legitimately completed its work.
-    timed_out = False
-    with contextlib.suppress(Exception):
-        timed_out = bool(monitor.didTimeout())
-    cancelled = False
-    with contextlib.suppress(Exception):
-        cancelled = bool(monitor.isCancelled()) and not timed_out
-
     if error is not None and error.get("system_exit") and _exit_code_is_success(error.get("exit_code")):
         error = None
     status = "ok"
@@ -662,8 +694,15 @@ def run_script_with_transaction(
     description: str,
     request: dict[str, Any],
     observe_threads: bool = True,
+    monitor=None,
+    on_start=None,
 ) -> dict[str, Any]:
     """Execute ``request`` inside an outer transaction and classify the result.
+
+    ``on_start`` runs right before the transaction starts, after the checks
+    that refuse a run without touching the program: a background job starts
+    executing there, and may still refuse (cancelled or shutting down).
+    ``monitor`` is that job's cancellable monitor.
 
     Returns the result dict on success (``committed``/``unchanged``) and raises
     ``HeadlessError`` (``SCRIPT_FAILED``/``SCRIPT_TIMEOUT``/``SCRIPT_CANCELLED``)
@@ -685,6 +724,8 @@ def run_script_with_transaction(
     except Exception as exc:
         logger.debug("analysis manager unavailable: %s", exc)
 
+    if on_start is not None:
+        on_start()
     revision_before = _revision(program)
     tx_id = program.startTransaction(description)
     info = program.getCurrentTransactionInfo()
@@ -700,6 +741,7 @@ def run_script_with_transaction(
             timeout_seconds=int(request.get("timeout_seconds") or 300),
             output_limit_bytes=int(request.get("output_limit_bytes") or DEFAULT_OUTPUT_LIMIT),
             snapshot_roots=request.get("snapshot_roots") or [],
+            parent_monitor=monitor,
         )
     except BaseException as exc:
         run_error = exc

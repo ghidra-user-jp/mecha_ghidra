@@ -23,6 +23,13 @@ def _json_size(value, limit):
     return size
 
 
+def _java_class_name(exc):
+    """The Java class of a JPype exception (its type names it in full), else None."""
+    if any(type_.__name__ == "java.lang.Throwable" for type_ in type(exc).__mro__):
+        return type(exc).__name__
+    return None
+
+
 def batch_read(params, *, ensure_context, execute_read, clock=time.monotonic):
     requests = params.get("requests")
     validate_requests(requests)
@@ -94,8 +101,16 @@ def batch_read(params, *, ensure_context, execute_read, clock=time.monotonic):
             except (LookupError, ValueError) as exc:
                 if isinstance(exc, (KeyError, IndexError)):
                     raise
-                code = "NOT_FOUND" if isinstance(exc, LookupError) else "VALIDATION_ERROR"
-                item.update(status="error", error={"code": code, "message": str(exc)})
+                java_class = _java_class_name(exc)
+                if java_class is not None:
+                    # JPype makes NullPointerException a ValueError. It failed
+                    # inside Ghidra, as a single call reports it, and its text
+                    # describes Ghidra's code rather than the arguments.
+                    error = {"code": "OPERATION_FAILED", "message": "Ghidra failed on this read (%s)" % java_class}
+                else:
+                    code = "NOT_FOUND" if isinstance(exc, LookupError) else "VALIDATION_ERROR"
+                    error = {"code": code, "message": str(exc)}
+                item.update(status="error", error=error)
         if item["status"] == "error":
             size = _json_size(item["error"], remaining_bytes)
             if size > remaining_bytes:

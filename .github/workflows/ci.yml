@@ -54,6 +54,186 @@ jobs:
       - name: Compile Python sources
         run: uv run python -m compileall -q src
 
+  docker-image:
+    # Build the image the way docs/docker.md does, then run its default command
+    # end to end: import, analysis and decompilation of Ghidra's own exercise
+    # PE, and the cleanup on each shutdown signal (tests/test_docker_image.py).
+    name: Docker image (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Build the image
+        run: ./build_docker_image.sh --tag mecha_ghidra:ci
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.2
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Test the image
+        env:
+          MECHA_GHIDRA_DOCKER_IMAGE: mecha_ghidra:ci
+        run: uv run pytest -q tests/test_docker_image.py
+
+  gui-acceptance-windows:
+    # The Ghidra GUI backend end to end on a Windows desktop: one GUI session
+    # shared with the tests as the human (tests/test_gui_integration.py), and
+    # the relays with the detached runtimes they start
+    # (tests/test_gui_relay_integration.py), with what only Windows has (G50):
+    # the job objects a client may start its server in, the console's Ctrl+C
+    # and Ctrl+Break, and a client that ends the relay's process tree.
+    # The runner's own job object decides whether a detached runtime can
+    # outlive its client here, so it is recorded before the tests run.
+    name: Ghidra GUI acceptance (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          # JPype 1.5.2 has Windows wheels up to Python 3.13.
+          python-version: "3.13"
+
+      - name: Set up Java
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.2
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Install Ghidra
+        run: |
+          # A Windows checkout may end its lines with CRLF: read the release file without the CRs.
+          tr -d '\r' < scripts/ghidra_release.env > "${RUNNER_TEMP}/ghidra_release.env"
+          . "${RUNNER_TEMP}/ghidra_release.env"
+          cd "${RUNNER_TEMP}"
+          curl -fsSL --retry 3 -o ghidra.zip "${MECHA_GHIDRA_GHIDRA_DIST_URL}"
+          echo "${MECHA_GHIDRA_GHIDRA_DIST_SHA256}  ghidra.zip" | sha256sum -c -
+          python -m zipfile -e ghidra.zip .
+          rm ghidra.zip
+          echo "GHIDRA_INSTALL_DIR=$(cygpath -w "${PWD}/${MECHA_GHIDRA_GHIDRA_DIST_ROOT}")" >> "${GITHUB_ENV}"
+
+      - name: Record the runner's job object and desktop
+        continue-on-error: true
+        run: uv run python tests/windows/runner_environment.py
+
+      - name: Run the GUI unit tests
+        run: >-
+          uv run pytest -q -p no:cacheprovider
+          tests/test_gui_windows.py tests/test_gui_backend_units.py tests/test_gui_backend_exposure.py
+          tests/test_gui_registry.py tests/test_gui_relay.py tests/test_gui_write_boundary.py
+
+      - name: Run the GUI acceptance tests
+        env:
+          GHIDRA_GUI_VALIDATION: "1"
+        run: >-
+          uv run pytest -q -rfE -p no:cacheprovider --basetemp "${RUNNER_TEMP}/gui-it"
+          tests/test_gui_integration.py tests/test_gui_relay_integration.py
+
+      - name: Keep the test logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-acceptance-windows-logs
+          if-no-files-found: ignore
+          retention-days: 7
+          # The logs and check records only: the registry's records hold the runtimes' tokens.
+          path: |
+            ${{ runner.temp }}/gui-it/**/*.log
+            ${{ runner.temp }}/gui-it/**/results.jsonl
+
+  gui-acceptance-ubuntu:
+    # The same acceptance tests on Ubuntu 26.04 under Xvfb, with no desktop
+    # (Wayland, a window manager). Ghidra 12.1 documents JDK 21, and Ubuntu
+    # 26.04 defaults to 25, so its OpenJDK 21 package is installed.
+    # tests/docker/ runs them in a Linux container from a machine without Linux.
+    name: Ghidra GUI acceptance (Ubuntu 26.04)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          # JPype 1.5.2 has Linux wheels up to Python 3.13.
+          python-version: "3.13"
+
+      - name: Install OpenJDK 21, Xvfb and unzip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openjdk-21-jdk xvfb xauth unzip
+          # The package's own java, whatever the runner's other JDKs set /usr/bin/java to.
+          java_home="$(dirname "$(dirname "$(dpkg -L openjdk-21-jre-headless | grep '/bin/java$' | head -n 1)")")"
+          # First on PATH: the relays pass PATH on, and PyGhidra asks the java there which JDK to use.
+          echo "JAVA_HOME=${java_home}" >> "${GITHUB_ENV}"
+          echo "${java_home}/bin" >> "${GITHUB_PATH}"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.2
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Install Ghidra
+        run: |
+          . ./scripts/ghidra_release.env
+          cd "${RUNNER_TEMP}"
+          curl -fsSL --retry 3 -o ghidra.zip "${MECHA_GHIDRA_GHIDRA_DIST_URL}"
+          echo "${MECHA_GHIDRA_GHIDRA_DIST_SHA256}  ghidra.zip" | sha256sum -c -
+          unzip -q ghidra.zip  # keeps the decompiler's execute bit
+          rm ghidra.zip
+          echo "GHIDRA_INSTALL_DIR=${RUNNER_TEMP}/${MECHA_GHIDRA_GHIDRA_DIST_ROOT}" >> "${GITHUB_ENV}"
+
+      - name: Record the JDK Ghidra uses
+        run: |
+          java -version
+          java -cp "${GHIDRA_INSTALL_DIR}/support/LaunchSupport.jar" LaunchSupport "${GHIDRA_INSTALL_DIR}" -jdk_home
+
+      - name: Run the GUI acceptance tests
+        env:
+          GHIDRA_GUI_VALIDATION: "1"
+          DISPLAY: ":99"
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp > "${RUNNER_TEMP}/xvfb.log" 2>&1 &
+          for _ in $(seq 100); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          uv run pytest -q -rfE -p no:cacheprovider --basetemp "${RUNNER_TEMP}/gui-it" \
+            tests/test_gui_integration.py tests/test_gui_relay_integration.py
+
+      - name: Keep the test logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-acceptance-ubuntu-logs
+          if-no-files-found: ignore
+          retention-days: 7
+          # The logs and check records only: the registry's records hold the runtimes' tokens.
+          path: |
+            ${{ runner.temp }}/gui-it/**/*.log
+            ${{ runner.temp }}/gui-it/**/results.jsonl
+            ${{ runner.temp }}/xvfb.log
+
   latest-mcp-sdk:
     # Early warning for the next mcp release: resolve the newest compatible SDK
     # inside the declared range and run the suite against it. Failures here do

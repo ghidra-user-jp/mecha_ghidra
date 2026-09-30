@@ -2,7 +2,6 @@
 
 from __future__ import absolute_import, print_function
 
-import functools
 import os
 from contextlib import nullcontext
 
@@ -30,6 +29,9 @@ from ghidra.program.model.data import (
 
 from ghidra_headless.errors import HeadlessError
 from ghidra_headless.installation import validate_linux_arm64_decompiler_install
+from ghidra_headless.session.analysis import run_auto_analysis
+from ghidra_headless.session.models import program_is_analyzed
+from ghidra_headless.session.write_boundary import write_boundary
 
 
 def _to_int(value, default):
@@ -43,14 +45,7 @@ def _to_int(value, default):
 
 def _txn(ctx, description, func):
     _ensure_checkout_for_versioned_program(ctx)
-    tx_id = ctx.program.startTransaction(description)
-    success = False
-    try:
-        result = func()
-        success = True
-        return result
-    finally:
-        ctx.program.endTransaction(tx_id, success)
+    return write_boundary().write(ctx.program, description, func)
 
 
 def _safe_call(obj, name, *args):
@@ -487,51 +482,28 @@ def _hexdump(memory, start_address, size):
     return "\n".join(lines)
 
 
-@functools.cache
-def _ghidra_program_utilities():
-    from ghidra.program.util import GhidraProgramUtilities
-
-    return GhidraProgramUtilities
-
-
-@functools.cache
-def _ghidra_script_util():
-    from ghidra.app.script import GhidraScriptUtil
-
-    return GhidraScriptUtil
-
-
-def _analyze_program_if_needed(ctx):
-    utilities = _ghidra_program_utilities()
-    if not utilities.shouldAskToAnalyze(ctx.program):
-        return False
-    script_util = _ghidra_script_util()
-    script_util.acquireBundleHostReference()
-    try:
-        ctx.flat_api.analyzeAll(ctx.program)
-        utilities.markProgramAnalyzed(ctx.program)
-    finally:
-        script_util.releaseBundleHostReference()
-    return True
-
-
-def _analyze_program(ctx, force=False):
+def _analyze_program(ctx, force=False, monitor=None):
     _ensure_checkout_for_versioned_program(ctx)
-    utilities = _ghidra_program_utilities()
-    if not force and not utilities.shouldAskToAnalyze(ctx.program):
+    # The same "Analyzed" flag that load responses and get_program_info report as
+    # is_analyzed. shouldAskToAnalyze would also skip a program whose user declined
+    # Ghidra's "analyze now?" prompt for good, leaving is_analyzed false for ever.
+    if not force and program_is_analyzed(ctx.program):
         return False
-    script_util = _ghidra_script_util()
-    script_util.acquireBundleHostReference()
-    try:
+    if monitor is None:
+        flat_api = ctx.flat_api
+    else:
+        # The context's FlatProgramAPI runs with TaskMonitor.DUMMY, which
+        # ignores cancel(); a background job passes a monitor it can cancel.
+        from ghidra.program.flatapi import FlatProgramAPI
 
-        def _analyze():
-            ctx.flat_api.analyzeAll(ctx.program)
-            utilities.markProgramAnalyzed(ctx.program)
-            return True
-
-        _txn(ctx, "Auto analysis", _analyze)
-    finally:
-        script_util.releaseBundleHostReference()
+        flat_api = FlatProgramAPI(ctx.program, monitor)
+    run_auto_analysis(
+        ctx.program,
+        flat_api,
+        monitor=monitor,
+        transaction=lambda description, operation: _txn(ctx, description, operation),
+        cancelled_error="ANALYSIS_CANCELLED: auto-analysis was cancelled before it finished",
+    )
     return True
 
 
@@ -626,7 +598,7 @@ def _decompile_high_function(ctx, function):
         # Do not start a multi-minute auto-analysis as a hidden side effect of a
         # rename/retype call: tell the caller what to run instead.
         try:
-            needs_analysis = bool(_ghidra_program_utilities().shouldAskToAnalyze(ctx.program))
+            needs_analysis = not program_is_analyzed(ctx.program)
         except Exception:
             needs_analysis = False
         if needs_analysis:
@@ -778,9 +750,6 @@ __all__ = [
     "_parse_data_type",
     "_new_java_byte_buffer",
     "_hexdump",
-    "_ghidra_program_utilities",
-    "_ghidra_script_util",
-    "_analyze_program_if_needed",
     "_analyze_program",
     "_decompile_function_object",
     "_decompile_high_function",

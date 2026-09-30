@@ -2,15 +2,61 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import threading
+from collections.abc import Iterator
+from functools import partial
 from typing import Any, Dict
 
 from ghidra_headless.errors import HeadlessError
-from ghidra_mcp.application.locks import SCRIPT_BARRIER, USE_SCRIPT_QUEUE_TIMEOUT, acquire_ordered_locks
+from ghidra_mcp.application.commands import PROGRAM_WRITE_COMMANDS
+from ghidra_mcp.application.locks import (
+    SCRIPT_BARRIER,
+    USE_SCRIPT_QUEUE_TIMEOUT,
+    LockWaitInterrupted,
+    acquire_ordered_locks,
+)
+from ghidra_mcp.application.services.ports import OperationControl
+from ghidra_mcp.domain import DomainError
+from ghidra_mcp.domain.output_state import ABSENT, output_state_for_outcome, with_output_state
 
-from .session_store import RuntimeSessionStore, bind_session_project
+from .errors import to_domain_error
+from .session_store import RuntimeSessionStore, bind_session_project, format_project_key
 
 logger = logging.getLogger(__name__)
+
+
+class _Progress:
+    """Whether a write got past the checks and ran."""
+
+    ran = False
+
+
+@contextlib.contextmanager
+def _script_writer(control: OperationControl | None) -> Iterator[None]:
+    """Hold the script barrier as writer; cancelling the job ends its wait.
+
+    The wait lasts up to the script queue budget (300 s by default): without
+    this, a cancelled job would keep the only job worker waiting that long.
+    """
+    if control is None:
+        with SCRIPT_BARRIER.write_lock(timeout=USE_SCRIPT_QUEUE_TIMEOUT):
+            yield
+        return
+    stop = threading.Event()
+    with contextlib.ExitStack() as held:
+        # Runs at once if the job was cancelled already.
+        control.bind_cancel(partial(SCRIPT_BARRIER.interrupt, stop))
+        try:
+            held.enter_context(SCRIPT_BARRIER.write_lock(timeout=USE_SCRIPT_QUEUE_TIMEOUT, stop=stop))
+        except LockWaitInterrupted:
+            # The cancellation or shutdown that stopped the wait.
+            control.check_active()
+            raise
+        finally:
+            control.bind_cancel(None)
+        yield
 
 
 class RuntimeCoreExecution:
@@ -32,20 +78,52 @@ class RuntimeCoreExecution:
         target: str = "default",
         *,
         exclusive: bool = False,
+        control: OperationControl | None = None,
+    ) -> Any:
+        if control is not None or command not in PROGRAM_WRITE_COMMANDS:
+            return self._call(command, params, target, exclusive=exclusive, control=control)
+        # A write run as a tool call says what its failure left behind, as a
+        # job's record does: nothing before it ran, else what its transactions did.
+        progress = _Progress()
+        try:
+            return self._call(command, params, target, exclusive=exclusive, progress=progress)
+        except Exception as exc:
+            raise self._with_output_state(exc, command, target, ran=progress.ran) from exc
+
+    def _with_output_state(self, exc: Exception, command: str, target: str, *, ran: bool) -> DomainError:
+        state = output_state_for_outcome(self._transaction_outcome()) if ran else ABSENT
+        return with_output_state(to_domain_error(exc, operation=command, target=target), state)
+
+    def _transaction_outcome(self) -> str | None:
+        """How the last command on this thread ended its transactions, if the core can say."""
+        try:
+            return self._store.core_accessor().transaction_outcome()
+        except Exception:
+            return None
+
+    def _call(
+        self,
+        command: str,
+        params: Dict[str, Any] | None,
+        target: str,
+        *,
+        exclusive: bool = False,
+        control: OperationControl | None = None,
+        progress: _Progress | None = None,
     ) -> Any:
         # ``exclusive`` takes the runtime-wide barrier as a writer: script
         # execution mutates process-global state (sys.modules, OSGi bundles,
         # the Jython runtime) that per-target locks do not cover.  The writer
         # waits on the script queue budget, not the general lock timeout: a
         # requested script run should outwait a running analysis, not fail.
-        process_barrier = (
-            SCRIPT_BARRIER.write_lock(timeout=USE_SCRIPT_QUEUE_TIMEOUT) if exclusive else SCRIPT_BARRIER.read_lock()
-        )
+        process_barrier = _script_writer(control) if exclusive else SCRIPT_BARRIER.read_lock()
         runtime_barrier = (
             self._store.operation_lock.write_lock() if exclusive else self._store.operation_lock.read_lock()
         )
         with process_barrier, runtime_barrier:
             with self._store.registry_lock.write_lock():
+                if control is not None and target not in self._store.sessions:
+                    raise self._session_changed(target)
                 session = self._store.ensure_session(target)
                 lock = self._store.ensure_lock(target)
                 project_key = self._store.target_projects.get(target)
@@ -58,10 +136,14 @@ class RuntimeCoreExecution:
             if project_lock is not None:
                 locks.append(("project", project_lock))
             with acquire_ordered_locks(locks, message_prefix="runtime "):
+                if control is not None:
+                    control.check_active()
                 with self._store.registry_lock.write_lock():
                     current_session = self._store.sessions.get(target)
                     if current_session is None:
-                        raise RuntimeError(f"Session '{target}' is not initialized")
+                        if control is not None:
+                            raise self._session_changed(target)
+                        raise self._store.missing_session_error(target)
                     if current_session is not session:
                         raise HeadlessError(
                             f"SESSION_CHANGED: target '{target}' session changed before core command execution"
@@ -75,27 +157,131 @@ class RuntimeCoreExecution:
                         raise HeadlessError(
                             f"SESSION_CHANGED: target '{target}' project changed before core command execution"
                         )
-                self._ensure_target_not_quarantined_locked(command, target)
-                self._ensure_checkout_for_mutating_command_locked(command, target)
-                result = self._store.core_accessor().execute(command, params or {}, key=target)
-                if command in self._checkout_required_commands:
-                    with self._store.registry_lock.read_lock():
-                        session = self._store.sessions.get(target)
-                    if session is not None:
-                        domain_path = self._store.session_domain_path(session)
-                        try:
-                            changed = bool(session.get_program().isChanged())
-                        except Exception as exc:
-                            logger.warning(
-                                "failed to read dirty state after %s on target '%s': %s", command, target, exc
-                            )
-                            changed = True
-                        with self._store.registry_lock.write_lock():
-                            if self._store.sessions.get(target) is session:
-                                # Previews, no-ops and undo can leave a saved program
-                                # unchanged; do not force saves or block sync for them.
-                                self._store.update_unsaved_program(target, domain_path, changed=changed)
-                return self._normalize_result(result)
+                    if control is not None and (
+                        current_project_key is None
+                        or format_project_key(current_project_key) != control.expected_project_key
+                        or (
+                            control.expected_generation is not None
+                            and self._store.session_generation(current_session) != control.expected_generation
+                        )
+                    ):
+                        # Reloaded, reopened or switched while the job waited:
+                        # never run a job on a program the client did not ask for.
+                        raise self._session_changed(target)
+                with self._program_held_locked(session, target):
+                    return self._run_checked_locked(command, params, target, control, progress)
+
+    def _run_checked_locked(
+        self,
+        command: str,
+        params: Dict[str, Any] | None,
+        target: str,
+        control: OperationControl | None,
+        progress: _Progress | None,
+    ) -> Any:
+        self._ensure_target_not_quarantined_locked(command, target)
+        self._ensure_checkout_for_mutating_command_locked(command, target)
+        if progress is not None:
+            progress.ran = True
+        try:
+            result = self._execute_locked(command, params or {}, target, control, record=progress is not None)
+        finally:
+            if command == "run_script":
+                self._refresh_domain_path_locked(target)
+        if control is None:
+            return self._finish_command_locked(command, target, result)
+        try:
+            return self._finish_command_locked(command, target, result)
+        except Exception as exc:
+            # The command's transaction has committed: the job did change the program.
+            error = to_domain_error(exc, operation=command, target=target)
+            error.details = {**(error.details or {}), "output_created": True}
+            raise error from exc
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _program_held_locked(session, target: str) -> Iterator[None]:
+        """With the Ghidra GUI, hold the program for the operation; a closed tab expires the target (spec §5.2)."""
+        hold_program = getattr(session.get_project_handle(), "hold_program", None)
+        if hold_program is None:
+            yield
+            return
+        with hold_program(session.get_program()) as still_open:
+            if not still_open:
+                raise HeadlessError(
+                    f"PROGRAM_NOT_OPEN: target '{target}'s program was closed in the Ghidra GUI; "
+                    "load it again with load_project_program",
+                    details={"reason": "closed_in_gui"},
+                )
+            yield
+
+    def analyze_program(self, name: str, *, force: bool = False, control: OperationControl) -> Any:
+        """Run the analyze_program command for a background job."""
+        return self.call("analyze_program", {"force": True} if force else {}, name, control=control)
+
+    @staticmethod
+    def _session_changed(target: str) -> HeadlessError:
+        return HeadlessError(
+            f"SESSION_CHANGED: target '{target}' was reloaded, closed or switched to another program "
+            "after the job was accepted; the job did not run"
+        )
+
+    def _execute_locked(
+        self,
+        command: str,
+        params: Dict[str, Any],
+        target: str,
+        control: OperationControl | None,
+        *,
+        record: bool = False,
+    ) -> Any:
+        core = self._store.core_accessor()
+        if control is None:
+            if record:
+                return core.execute(command, params, key=target, record_transactions=True)
+            return core.execute(command, params, key=target)
+        # The checkout guard may have reopened the session: use the current one.
+        with self._store.registry_lock.read_lock():
+            session = self._store.ensure_session(target)
+        # Cancellation reaches the command through this monitor; the command
+        # then aborts its transaction, which rolls the half-done work back.
+        monitor = session.get_project_handle().create_cancellable_monitor()
+        control.bind_cancel(monitor.cancel)
+        try:
+            # A command that runs its own checks before changing the program
+            # marks that moment itself (begin_command), so a refusal leaves nothing.
+            if core.begins_itself(command):
+                return core.execute(command, params, key=target, task_monitor=monitor, on_begin=control.begin)
+            control.begin()
+            return core.execute(command, params, key=target, task_monitor=monitor)
+        finally:
+            control.bind_cancel(None)
+
+    def _refresh_domain_path_locked(self, target: str) -> None:
+        # A script may rename or move the program's file, and a rollback does
+        # not undo that; list_targets reports the path captured here.
+        with self._store.registry_lock.read_lock():
+            session = self._store.sessions.get(target)
+        if session is not None:
+            session.refresh_domain_path()
+
+    def _finish_command_locked(self, command: str, target: str, result: Any) -> Any:
+        if command in self._checkout_required_commands:
+            with self._store.registry_lock.read_lock():
+                session = self._store.sessions.get(target)
+            if session is not None:
+                domain_path = self._store.session_domain_path(session)
+                try:
+                    changed = bool(session.get_program().isChanged())
+                except Exception as exc:
+                    logger.warning("failed to read dirty state after %s on target '%s': %s", command, target, exc)
+                    changed = True
+                with self._store.registry_lock.write_lock():
+                    if self._store.sessions.get(target) is session:
+                        # Previews, no-ops and undo can leave a saved program
+                        # unchanged; do not force saves or block sync for them.
+                        self._store.update_unsaved_program(target, domain_path, changed=changed)
+        return self._normalize_result(result)
 
     def _ensure_target_not_quarantined_locked(self, command: str, target: str) -> None:
         """Refuse mutating commands on a target a script run left unverifiable."""
@@ -179,6 +365,10 @@ class RuntimeCoreExecution:
         if session is None:
             return False
         handle = session.get_project_handle()
+        if getattr(handle, "live_programs", False):
+            # The Ghidra GUI owns the program: versioning is the human's, and a reopen to find a remote
+            # version would only reset the target (and fail on the human's unsaved changes).
+            return False
         is_repository = getattr(handle, "is_repository_project", None)
         if callable(is_repository) and not is_repository():
             # canAddToRepository() also returns true for a private local project.
@@ -205,6 +395,9 @@ class RuntimeCoreExecution:
             else:
                 active_handle = self._store.get_or_create_project_handle(project_key)
             reopened = active_handle.open_program(domain_path)
+            # The same unchanged program, reopened only to see the repository's
+            # state: a job accepted before this reopen still asked for it.
+            self._store.carry_generation(session, reopened)
             try:
                 self._store.core_accessor().initialize(reopened.get_program(), key=target)
                 bind_session_project(self._store.core_accessor, target, reopened)
@@ -263,7 +456,6 @@ class RuntimeCoreExecution:
             if handle is not None and self._handle_is_closed(handle):
                 if self._store.project_handles.get(handle.get_key()) is handle:
                     self._store.project_handles.pop(handle.get_key(), None)
-            self._store.clear_analyzed_loads_for_target(target)
             self._store.clear_dirty_programs_for_target(target)
         try:
             self._store.core_accessor().remove_context(target)

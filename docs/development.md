@@ -42,11 +42,15 @@ Start the JVM only through `ghidra_headless.launcher.start_headless_jvm()`, neve
 
 This matters on macOS: MCP 2.x executes handlers in worker threads, and first-time AWT initialization there can wait indefinitely for AppKit's main thread. Setting headless mode after startup is too late. Display-dependent operations must fail with `HEADLESS_UNSUPPORTED`.
 
+The one exception is the GUI backend's startup (`--backend gui`, see [live sharing with the GUI](gui-live.md)). `ghidra_headless.gui.launch.GuiLaunch` starts a display JVM on the main thread with PyGhidra's `GuiPyGhidraLauncher` and runs GhidraRun. On macOS the main thread then stays in AppKit's event loop, so the MCP server runs on another thread. This is the only path that starts a display JVM; the headless backend and the tests keep the `start_headless_jvm()` rule. Use GUI objects on Swing's event thread (EDT) through `ghidra_headless.gui.edt`: `run_on_edt` (with a deadline for the work to start) or `post_to_edt`. They give the calling Python thread Ghidra's class loader; do not call AWT or Swing directly. A thread JPype attaches has no context class loader, and if it is the first to use AWT, the EDT has none either and FlatLaf themes cannot build Ghidra's windows. Never run work of unbounded length on the EDT, such as a decompile or a wait for the human.
+
 ### Programs, transactions, and resources
 
 Open programs using `DomainFile.getDomainObject(project, ...)` and release them with `Program.release(project)`. Do not replace this with `GhidraProject.openProgram`: its permanent batch transaction hides `isChanged()`, prevents undo, and can block `.gzf` exports.
 
 Each mutation needs its own transaction: handlers use `core_helpers._txn`; session/runtime operations use `ghidra_headless.session.transactions.run_in_transaction`. Imported programs can use GhidraProject because they are closed immediately after import. Replacing a program context must release its old decompiler, and failed replacement must preserve the usable context.
+
+Program writes (`_txn`, `apply_edits`, undo and redo) go through the write boundary, `ghidra_headless.session.write_boundary.write_boundary()`. The headless boundary opens the transaction on the calling thread. The GUI backend installs `ghidra_headless.gui.write_boundary.GuiWriteBoundary` instead: it waits for other transactions to close, runs the transaction section on the EDT, and prefixes its name with `Mecha: `. So never decompile inside a transaction, which would freeze the GUI meanwhile: decompile before the section and only update the database inside it (see `rename_variable` and `set_local_variable_type`). Do not add backend branches to the handlers; keep the differences in the project handle (`ghidra_headless.gui.project_handle`), the write boundary and the tool exposure.
 
 For shared commands, the successful repository connection check is trusted for two seconds; version and checkout state are still read fresh on each call. Keep this distinction when changing the synchronization path.
 
@@ -80,9 +84,13 @@ uv run pytest \
   tests/test_runtime_resource_safety.py
 ```
 
-`/bin/ls` is a macOS/Linux example; provide a suitable binary on other hosts. Use disposable test projects for mutating validation. A running MCP server or GUI must not have the same local test project open.
+`/bin/ls` is a macOS/Linux example; provide a suitable binary on other hosts. On Windows the bundled `tests/fixtures/ghidra/WinHelloCPP.exe` does. pytest's `faulthandler` on Windows also reports access violations that the JVM handles itself; `-p no:faulthandler` keeps the output readable. Use disposable test projects for mutating validation. A running MCP server or GUI must not have the same local test project open.
+
+`tests/test_runtime_resource_safety.py` and `tests/test_runtime_script_commands.py` use Ghidra's benign exercise PE bundled in [`tests/fixtures/ghidra`](../tests/fixtures/ghidra/README.md). They need neither `GHIDRA_RUNTIME_BINARY_PATH` nor files under the Git-ignored `samples/` directory, so a fresh clone or worktree does not require copying local samples. The ordinary test suite checks the bundled file's SHA-256 even when real-runtime validation is disabled.
 
 With the same runtime flag, `tests/test_runtime_mcp_transport.py` launches the real CLI in separate processes over stdio and localhost Streamable HTTP. It creates disposable projects and a tiny raw binary, so it does not require `GHIDRA_RUNTIME_BINARY_PATH`. It verifies schemas, mutations, rollback, and large-result retrieval, plus direct HTTP calls without initialization, responses without session IDs, and resource retrieval from a fresh connection.
+
+`tests/test_runtime_import_operations.py` imports the same bundled `WinHelloCPP.exe`, so it needs no sample of your own. Set `GHIDRA_IMPORT_GATE_SECONDS=305` to hold that import's analysis for longer than a 300-second client timeout; the default is 0.
 
 To include Jython, install the Jython extension matching your Ghidra version and set both `GHIDRA_RUNTIME_VALIDATION=1` and `GHIDRA_JYTHON_RUNTIME_VALIDATION=1` when running `tests/test_runtime_script_commands.py` and `tests/test_runtime_mcp_transport.py`. The additional flag fails validation if Jython is unavailable and enables Jython cases over both stdio and HTTP. For isolation, use Java's `-Dapplication.settingsdir=...` setting and install the extension under that settings area's Ghidra extension directory.
 
@@ -96,6 +104,34 @@ To include Jython, install the Jython extension matching your Ghidra version and
 [`validate_bsim_runtime.sh`](../scripts/validate_bsim_runtime.sh) enables the BSim runtime flag and can prompt on a TTY if neither password variable is supplied. Separate project caches may connect to the same repository, but must have different local `.gpr/.rep` paths.
 
 Run `tests/test_runtime_registry_shared_sync_commands.py` for the shared lifecycle, including checkout, commit, updates from a second client, and deletion of test files. BSim category and metadata writes require `GHIDRA_BSIM_MUTATION_VALIDATION=1`; use a disposable database because category definitions remain after the tests.
+
+To check a built image, set `MECHA_GHIDRA_DOCKER_IMAGE` to its tag and run `tests/test_docker_image.py`; it needs Docker but no local Ghidra. The test copies the same exercise PE out of the image, starts the image's default command, and over HTTP imports, analyzes, decompiles, and edits the program. It then checks that `docker stop`, `SIGINT`, and `SIGHUP` each close the projects before the container exits. The CI job `docker-image` builds the `linux/amd64` image with `./build_docker_image.sh` and runs this test.
+
+The GUI backend's acceptance tests are `tests/test_gui_integration.py` (one GUI session) and `tests/test_gui_relay_integration.py` (relays and the runtimes they start). Run them in their own pytest invocation where a display is available (macOS, Windows, or Linux with an X display such as Xvfb):
+
+```bash
+GHIDRA_GUI_VALIDATION=1 \
+GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra \
+uv run pytest tests/test_gui_integration.py tests/test_gui_relay_integration.py
+```
+
+Each scenario runs `tests/gui_driver.py` in its own process, which runs the real CLI on the main thread and, from another thread, calls it over MCP and replays the human's actions as Ghidra commands on the EDT. The project is a copy of one that `tests/gui_project_setup.py` builds headlessly from the bundled exercise PE. Ghidra's settings, cache and temporary files live in the test's directory (`-Dapplication.settingsdir`, `-Dapplication.cachedir`, `-Dapplication.tempdir`), so the tests touch neither the person's projects nor their settings or Ghidra cache; the user agreement is accepted in the test's settings directory only. Ghidra windows open and close several times during the run. In a Docker container, point `--basetemp` at a directory inside the container: on a Docker Desktop bind mount the project lock does not hold between processes, and the lock test cannot pass.
+
+The relay tests start no JVM in pytest: they are MCP clients of relays (`python -c "from ghidra_mcp.cli import main; ..." --backend gui`), which start the runtime as `python -m ghidra_mcp.presentation.gui_runtime`. Every test sets `HOME` and `XDG_STATE_HOME` inside its directory, so the [runtime registry](gui-live.md#registry) is the test's own, and stops the runtimes it saw by pid; the other GUI tests point the registry there as well.
+
+To run the Linux tests from a machine without Linux (a Mac, for one), build `tests/docker/gui-tests.Dockerfile` (the image of `docker-image` plus a display-capable JRE, Xvfb and the test dependencies) and run both files under Xvfb with `tests/docker/run_gui_tests.sh`. The checkout is mounted read-only, and projects and settings stay on the container's own filesystem. On Apple Silicon, build with `DOCKER_PLATFORM=linux/arm64`, as [the Docker guide](docker.md) does.
+
+```bash
+./build_docker_image.sh --tag mecha_ghidra:ci
+docker build --file tests/docker/gui-tests.Dockerfile --build-arg BASE_IMAGE=mecha_ghidra:ci --tag mecha_ghidra:gui-tests .
+docker run --rm --volume "$PWD:/work:ro" mecha_ghidra:gui-tests
+```
+
+On Windows each scenario gets a hidden console of its own, so the Ctrl+C and Ctrl+Break the tests send reach that scenario alone, and the registry's location (`LOCALAPPDATA`) and temporary files (`TEMP`) point into the test's directory too. The MCP Python SDK starts a stdio server on Windows in a job object that forbids breaking away and ends its processes when it closes. So the relay tests run with a client outside the SDK's job (as clients built on libuv, Node or Bun, are), and Windows-only tests (G50) check the SDK's own job, nested jobs, a job that allows breaking away, a client that ends the relay's process tree (as Claude Code does), and Ctrl+C to an HTTP relay. On a slow machine, `GHIDRA_GUI_TEST_TIME_SCALE` (default 1) stretches the tests' own waits (startup, dialogs, building the test project); what the checks accept (the 100 ms G33 lets the EDT alone stall during a decompile, for example) stays the same.
+
+The CI job `gui-acceptance-windows` installs Temurin 21 and Ghidra on a GitHub Windows runner (`windows-2025`) and runs the GUI unit tests and both acceptance test files. Whether a detached runtime can outlive its client depends on the job object the runner runs its steps in, so `tests/windows/runner_environment.py` records that job, and whether the session has a desktop, before the tests. The CI job `gui-acceptance-ubuntu` runs the same acceptance tests on a GitHub Ubuntu 26.04 runner with Ubuntu's OpenJDK 21 package under Xvfb (Ghidra 12.1 documents JDK 21; Ubuntu 26.04 defaults to 25), and records the JDK Ghidra picks before the tests.
+
+A relay (`ghidra_mcp.presentation.gui_relay`) forwards JSON-RPC as it is and reads only its configuration against the runtime's record, which tools a narrower client may see, and what the HTTP routing headers need. From protocol 2026-07-28 on, the runtime checks `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` against the body. The HTTP relay passes on the ones its client sent and answers with the runtime's HTTP status; the stdio relay sends what an HTTP client would (the request's `_meta` version or the one `initialize` settled, the method, and the tool's or resource's name). Whatever the runtime cannot answer, the relay's fallback answers: the MCP server this package builds for the relay's own tools, with a startup gate that refuses every call, so its `initialize`, `tools/list` and error envelopes are the runtime's. It talks to the runtime with `httpx2`, the MCP SDK's HTTP client, without the environment's proxies and without kept-alive connections.
 
 <a id="native-builds"></a>
 

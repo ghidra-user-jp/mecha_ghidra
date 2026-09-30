@@ -7,6 +7,7 @@ import pytest
 
 from ghidra_mcp.application.services.script_service import ScriptConfig, ScriptService
 from ghidra_mcp.domain import DomainError, ErrorCode
+from job_control import JobControl
 
 JAVA = "// Demo script.\n// @category Demo\nimport ghidra.app.script.GhidraScript;\npublic class Demo extends GhidraScript { public void run() {} }\n"
 PYGHIDRA = "# @runtime PyGhidra\nprint('x')\n"
@@ -19,15 +20,20 @@ class FakeRuntime:
         self.availability = availability or {"Java": True, "PyGhidra": True, "Jython": False}
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
-    def script_runtime_availability(self) -> dict[str, bool]:
+    def script_runtime_availability(self, *, wait: bool = True) -> dict[str, bool]:
         return dict(self.availability)
 
-    def run_script(self, name: str, *, request: dict[str, Any]) -> dict[str, Any]:
+    def run_script(self, name: str, *, request: dict[str, Any], control: Any) -> dict[str, Any]:
         self.calls.append(("run", name, request))
         return {"status": "ok", "transaction_outcome": "committed"}
 
     def project_lock_key(self, name: str) -> str | None:
         return None
+
+
+def _run(service: ScriptService, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Run a script as its job would, with the job's control."""
+    return service.run_script(*args, control=JobControl(), **kwargs)
 
 
 def _roots(tmp_path: Path) -> Path:
@@ -63,7 +69,7 @@ def test_disabled_service_refuses_everything_with_scripts_disabled(tmp_path):
             call()
         assert exc.value.code == ErrorCode.SCRIPTS_DISABLED
     with pytest.raises(DomainError) as run_exc:
-        service.run_script("fw", "x")
+        _run(service, "fw", "x")
     assert run_exc.value.code == ErrorCode.SCRIPTS_DISABLED
 
 
@@ -93,10 +99,10 @@ def test_service_without_roots_runs_inline_source_only(tmp_path):
     service.initialize()
     assert service.list_scripts()["total"] == 0
     with pytest.raises(DomainError) as exc:
-        service.run_script("fw", "Demo")
+        _run(service, "fw", "Demo")
     assert exc.value.code == ErrorCode.SCRIPT_NOT_FOUND
     assert "source" in exc.value.message
-    result = service.run_script("fw", source=JAVA_INLINE)
+    result = _run(service, "fw", source=JAVA_INLINE)
     assert result["inline"] is True
     mode, _name, request = runtime.calls[-1]
     assert mode == "run"
@@ -109,18 +115,18 @@ def test_service_without_roots_runs_inline_source_only(tmp_path):
 
 def test_inline_source_runtime_inference_and_validation(tmp_path):
     service, runtime = _service(tmp_path)
-    result = service.run_script("fw", source="# @runtime PyGhidra\nprint(1)\n", script_name="hello")
+    result = _run(service, "fw", source="# @runtime PyGhidra\nprint(1)\n", script_name="hello")
     assert result["inline"] is True
     assert runtime.calls[-1][2]["script_id"] == "inline:hello.py"
     assert runtime.calls[-1][2]["runtime"] == "PyGhidra"
     # explicit runtime beats inference; aliases are accepted
-    service.run_script("fw", source="print(1)\n", runtime="pyghidra")
+    _run(service, "fw", source="print(1)\n", runtime="pyghidra")
     assert runtime.calls[-1][2]["runtime"] == "PyGhidra"
     with pytest.raises(DomainError) as ambiguous:
-        service.run_script("fw", source="print(1)\n")
+        _run(service, "fw", source="print(1)\n")
     assert ambiguous.value.code == ErrorCode.SCRIPT_RUNTIME_AMBIGUOUS
     with pytest.raises(DomainError) as unavailable:
-        service.run_script("fw", source="print 1\n", runtime="Jython")
+        _run(service, "fw", source="print 1\n", runtime="Jython")
     assert unavailable.value.code == ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE
     for bad in (
         dict(source="x", script_id="Demo"),
@@ -131,7 +137,7 @@ def test_inline_source_runtime_inference_and_validation(tmp_path):
         dict(source="# @runtime PyGhidra\n" + "x" * (service.config.max_source_bytes + 1)),
     ):
         with pytest.raises(DomainError) as exc:
-            service.run_script("fw", **bad)
+            _run(service, "fw", **bad)
         assert exc.value.code == ErrorCode.VALIDATION_ERROR, bad
 
 
@@ -163,7 +169,7 @@ def test_get_script_info_returns_source_when_asked(tmp_path):
 
 def test_run_script_builds_the_request_from_the_catalog_entry(tmp_path):
     service, runtime = _service(tmp_path)
-    result = service.run_script("fw", "Demo", args=["a", "b"], timeout_seconds=10)
+    result = _run(service, "fw", "Demo", args=["a", "b"], timeout_seconds=10)
     assert result["inline"] is False
     mode, name, request = runtime.calls[0]
     assert (mode, name) == ("run", "fw")
@@ -173,21 +179,21 @@ def test_run_script_builds_the_request_from_the_catalog_entry(tmp_path):
     assert request["timeout_seconds"] == 10
     assert Path(request["script_path"]).is_relative_to(tmp_path / "snap")
     assert request["snapshot_roots"] == [str(tmp_path / "snap" / "team")]
-    service.run_script("fw", "team:Hello.py")
+    _run(service, "fw", "team:Hello.py")
     assert runtime.calls[-1][2]["runtime"] == "PyGhidra"
 
 
 def test_run_script_rejects_unavailable_and_ambiguous_runtimes(tmp_path):
     service, runtime = _service(tmp_path)
     with pytest.raises(DomainError) as jython:
-        service.run_script("fw", "team:Old.py")
+        _run(service, "fw", "team:Old.py")
     assert jython.value.code == ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE
     assert "Extension" in (jython.value.hint or "")
     with pytest.raises(DomainError) as ambiguous:
-        service.run_script("fw", "team:NoHeader.py")
+        _run(service, "fw", "team:NoHeader.py")
     assert ambiguous.value.code == ErrorCode.SCRIPT_RUNTIME_AMBIGUOUS
     with pytest.raises(DomainError) as missing:
-        service.run_script("fw", "Nope")
+        _run(service, "fw", "Nope")
     assert missing.value.code == ErrorCode.SCRIPT_NOT_FOUND
     assert runtime.calls == []
 
@@ -195,12 +201,12 @@ def test_run_script_rejects_unavailable_and_ambiguous_runtimes(tmp_path):
 def test_run_script_validates_args_and_timeout(tmp_path):
     service, runtime = _service(tmp_path, max_args=1, max_timeout_seconds=600)
     with pytest.raises(DomainError) as too_many:
-        service.run_script("fw", "Demo", args=["a", "b"])
+        _run(service, "fw", "Demo", args=["a", "b"])
     assert too_many.value.code == ErrorCode.VALIDATION_ERROR
     with pytest.raises(DomainError) as too_long:
-        service.run_script("fw", "Demo", timeout_seconds=601)
+        _run(service, "fw", "Demo", timeout_seconds=601)
     assert too_long.value.code == ErrorCode.VALIDATION_ERROR
-    service.run_script("fw", "Demo")
+    _run(service, "fw", "Demo")
     assert len(runtime.calls) == 1
 
 
@@ -209,7 +215,7 @@ def test_run_script_uses_the_snapshot_without_a_content_integrity_gate(tmp_path)
     snapshot = tmp_path / "snap" / "team" / "Hello.py"
     updated = "# @runtime PyGhidra\nprintln('updated')\n"
     snapshot.write_text(updated, encoding="utf-8")
-    service.run_script("fw", "Hello", expected_revision="program-revision")
+    _run(service, "fw", "Hello", expected_revision="program-revision")
     request = runtime.calls[-1][2]
     assert Path(request["script_path"]) == snapshot
     assert Path(request["script_path"]).read_text(encoding="utf-8") == updated
@@ -221,7 +227,7 @@ def test_probe_failure_marks_pyghidra_unavailable(tmp_path):
     service, runtime = _service(tmp_path)
     service.mark_runtime_unavailable("PyGhidra", "propagation_probe_failed")
     with pytest.raises(DomainError) as exc:
-        service.run_script("fw", "team:Hello.py")
+        _run(service, "fw", "team:Hello.py")
     assert exc.value.code == ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE
     assert runtime.calls == []
     assert service.list_scripts()["runtimes"]["PyGhidra"] is False
@@ -236,21 +242,21 @@ def test_config_validation():
 
 def test_catalog_run_accepts_an_explicit_runtime_for_headerless_python(tmp_path):
     service, runtime = _service(tmp_path)
-    result = service.run_script("fw", "team:NoHeader.py", runtime="pyghidra")
+    result = _run(service, "fw", "team:NoHeader.py", runtime="pyghidra")
     assert result["inline"] is False
     assert runtime.calls[-1][2]["runtime"] == "PyGhidra"
     with pytest.raises(DomainError) as jython:
-        service.run_script("fw", "team:NoHeader.py", runtime="Jython")
+        _run(service, "fw", "team:NoHeader.py", runtime="Jython")
     assert jython.value.code == ErrorCode.SCRIPT_RUNTIME_UNAVAILABLE
     for bad in (
         dict(runtime="Java"),  # a .py cannot be Java
         dict(script_name="x.py"),  # inline-only argument
     ):
         with pytest.raises(DomainError) as exc:
-            service.run_script("fw", "team:NoHeader.py", **bad)
+            _run(service, "fw", "team:NoHeader.py", **bad)
         assert exc.value.code == ErrorCode.VALIDATION_ERROR, bad
     with pytest.raises(DomainError) as contradict:
-        service.run_script("fw", "Demo", runtime="PyGhidra")
+        _run(service, "fw", "Demo", runtime="PyGhidra")
     assert contradict.value.code == ErrorCode.VALIDATION_ERROR
 
 
@@ -269,7 +275,7 @@ def test_script_catalog_and_execution_do_not_compute_sha256(tmp_path, monkeypatc
     assert info["catalog_revision"] == revision
     assert "sha256" not in info
     for kwargs in ({"script_id": "Demo"}, {"script_id": "NoHeader", "runtime": "PyGhidra"}, {"source": JAVA_INLINE}):
-        result = service.run_script("fw", **kwargs)
+        result = _run(service, "fw", **kwargs)
         assert "sha256" not in result
         assert "sha256" not in runtime.calls[-1][2]
     inline_root = service.snapshot_base / "inline"
@@ -287,3 +293,53 @@ def test_snapshot_base_is_created_privately_when_unset(tmp_path, monkeypatch):
     assert (base.stat().st_mode & 0o077) == 0
     service.shutdown()
     assert not base.exists()
+
+
+def test_a_script_job_checks_in_once_it_holds_the_service_locks(tmp_path):
+    """From then on OperationManager.lock_holder names the job to a call waiting for those locks."""
+    checked = []
+
+    class Runtime(FakeRuntime):
+        def run_script(self, name: str, *, request: dict[str, Any], control: Any) -> dict[str, Any]:
+            checked.append(control.checked)
+            return super().run_script(name, request=request, control=control)
+
+    service, _runtime = _service(tmp_path, Runtime())
+    _run(service, "fw", "Demo")
+    assert checked == [1]
+
+
+def test_admission_does_not_wait_for_a_running_script_to_read_the_runtimes(tmp_path):
+    from ghidra_mcp.application.services.ports import LoadedProgram
+
+    asked = []
+
+    class Busy(FakeRuntime):
+        def script_runtime_availability(self, *, wait: bool = True) -> dict[str, bool]:
+            asked.append(wait)
+            if not wait:
+                raise DomainError(ErrorCode.LOCK_TIMEOUT, "a script holds the barrier", retryable=True)
+            return super().script_runtime_availability()
+
+        def loaded_program(self, name: str) -> LoadedProgram:
+            return LoadedProgram("/project::test", "/main", 1)
+
+    service, _runtime = _service(tmp_path, Busy())
+    # Admission asks without waiting and accepts; the job, which may wait, reads them.
+    assert service.prepare_run("fw", "Demo").domain_path == "/main"
+    _run(service, "fw", "Demo")
+    assert asked == [False, True]
+
+
+def test_a_failed_inline_write_leaves_no_staging_directory(tmp_path, monkeypatch):
+    service, _runtime = _service(tmp_path)
+    written = []
+
+    def full_disk(self, data):
+        written.append(self)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_bytes", full_disk)
+    with pytest.raises(DomainError):
+        _run(service, "fw", source=PYGHIDRA)
+    assert written and not written[0].parent.exists()

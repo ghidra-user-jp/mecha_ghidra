@@ -6,6 +6,7 @@ import pytest
 
 from ghidra_mcp.application.services import TargetService
 from ghidra_mcp.domain import DomainError, ErrorCode
+from job_control import JobControl
 
 
 class DummyLockManager:
@@ -117,6 +118,7 @@ def test_target_service_lifecycle_and_lock_routing():
         "project_location": "/tmp/prj",
         "project_name": "sample",
         "domain_path": "/main",
+        "is_analyzed": False,
     }
     assert service.list_targets() == [{"target": "fw"}]
     assert service.list_programs("fw") == []
@@ -125,6 +127,7 @@ def test_target_service_lifecycle_and_lock_routing():
         service.import_program(
             "fw",
             "/tmp/a.exe",
+            control=JobControl(),
             import_mode="raw_binary",
             language_id="x86:LE:32:default",
             base_address="0x401000",
@@ -253,7 +256,7 @@ def test_target_service_preserves_domain_error_and_merges_details():
     service = TargetService(Runtime(), lock_manager=DummyLockManager())
 
     with pytest.raises(DomainError) as exc_info:
-        service.import_program("fw", "/tmp/missing.exe")
+        service.import_program("fw", "/tmp/missing.exe", control=JobControl())
 
     err = exc_info.value
     assert err.code == ErrorCode.PROGRAM_NOT_FOUND
@@ -307,7 +310,7 @@ def test_target_service_preserves_program_already_imported_error_details():
     service = TargetService(Runtime(), lock_manager=DummyLockManager())
 
     with pytest.raises(DomainError) as exc_info:
-        service.import_program("fw", "/tmp/sample.exe")
+        service.import_program("fw", "/tmp/sample.exe", control=JobControl())
 
     err = exc_info.value
     assert err.code == ErrorCode.PROGRAM_ALREADY_IMPORTED
@@ -317,3 +320,59 @@ def test_target_service_preserves_program_already_imported_error_details():
         "operation": "import_program",
         "target": "fw",
     }
+
+
+@pytest.mark.parametrize("analyzed", [False, True])
+def test_open_program_reports_whether_the_opened_program_is_analyzed(analyzed):
+    class Session:
+        def to_dict(self):
+            return {"project_location": "/tmp/prj", "project_name": "sample", "domain_path": "/main"}
+
+        def is_analyzed(self):
+            return analyzed
+
+    class Runtime(DummyRuntime):
+        def create_session(self, name, project_location, **kwargs):
+            return Session()
+
+    service = TargetService(Runtime(), lock_manager=DummyLockManager())
+    assert service.create_session("fw", "/tmp/prj", domain_path="/main")["is_analyzed"] is analyzed
+
+
+def test_an_import_job_checks_in_once_it_holds_the_service_locks():
+    """From then on OperationManager.lock_holder names the job to a call waiting for those locks."""
+    held = []
+
+    class Locks(DummyLockManager):
+        def acquire(self, **kwargs):
+            held.append(kwargs)
+            return super().acquire(**kwargs)
+
+    class Runtime(DummyRuntime):
+        def import_program(self, name: str, binary_path: str, **kwargs):  # noqa: ARG002
+            held.append(("runtime", kwargs["control"].checked))
+            return "/imported.bin"
+
+    control = JobControl("/tmp/prj::sample")
+    TargetService(Runtime(), lock_manager=Locks()).import_program("fw", "/tmp/a.exe", control=control)
+    assert held == [{"target": "fw", "project_key": "/tmp/prj::sample"}, ("runtime", 1)]
+
+
+def test_an_open_whose_analysis_flag_cannot_be_read_still_succeeds():
+    """The program is open by then; the caller must not retry an open that happened."""
+
+    class Session:
+        def to_dict(self):
+            return {"project_location": "/tmp/prj", "project_name": "sample", "domain_path": "/main"}
+
+        def is_analyzed(self):
+            raise RuntimeError("the program was closed meanwhile")
+
+    class Runtime(DummyRuntime):
+        def create_session(self, name, project_location, **kwargs):  # noqa: ARG002
+            return Session()
+
+    opened = TargetService(Runtime(), lock_manager=DummyLockManager()).create_session(
+        "fw", "/tmp/prj", project_name="sample", domain_path="/main"
+    )
+    assert opened["domain_path"] == "/main" and opened["is_analyzed"] is None

@@ -68,7 +68,7 @@ uv run mecha_ghidra \
   --transport stdio
 ```
 
-[クライアント設定例](docs/clients.ja.md)に沿って、このコマンドをMCPクライアントから起動します。接続後は `list_project_programs` でプログラムを選び、`load_project_program` で開いてから、`list_functions` や `decompile_function` を使います。
+[クライアント設定例](docs/clients.ja.md)に沿って、このコマンドをMCPクライアントから起動します。接続後は `list_project_programs` でプログラムを選び、`load_project_program` で開いてから、`list_functions` や `decompile_function` を使います。読み込みでは解析しないため、応答が`is_analyzed: false`なら先に`analyze_program`を実行してください。
 
 **バイナリファイルから始める場合：** [最初の解析](docs/usage.ja.md#first-analysis)で、プロジェクト作成 → インポート → 読み込みまで進めてください。サーバーを起動するだけでは、プロジェクトや解析対象は作成されません。
 
@@ -82,6 +82,7 @@ uv run mecha_ghidra \
 | [ツール一覧](docs/tools.ja.md) | 用途別の全ツール一覧 |
 | [Docker](docs/docker.ja.md) | ビルド、保存先、最初のインポート、ARM64 |
 | [共有プロジェクト](docs/shared-projects.ja.md) | Ghidra Server、チェックアウト／チェックイン、競合、履歴 |
+| [GUIでのライブ共有](docs/gui-live.ja.md) | `--backend gui`、GhidraのGUIとの同じProgramの共有、書き込みの扱い、使えない機能 |
 | [BSim](docs/bsim.ja.md) | 類似検索、データベースへの登録、一致したプログラムの読み込み |
 | [トラブルシューティング・移行](docs/troubleshooting.ja.md) | エラーコード、よくある問題、旧ツール名からの移行 |
 | [開発](docs/development.ja.md) | 構成、テスト、ネイティブビルド、リリース |

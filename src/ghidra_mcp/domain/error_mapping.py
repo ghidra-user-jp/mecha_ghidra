@@ -2,7 +2,8 @@
 
 One mapping serves the runtime backend and the application services; callers
 only choose the hint text, the default code, and which codes carry sanitized
-cause details.
+cause details.  A code with its own recovery hint (``error_hints``) gets that
+hint instead of the caller's.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from .error_codes import classify_runtime_error
+from .error_hints import recovery_hint
 from .error_utils import is_project_lock_error, safe_cause_details
 from .errors import DomainError, ErrorCode
 
@@ -20,6 +22,9 @@ DEFAULT_CAUSE_DETAIL_CODES: frozenset[ErrorCode] = frozenset(
         ErrorCode.SYNC_OPERATION_FAILED,
         ErrorCode.PROJECT_LOCKED,
         ErrorCode.HEADLESS_UNSUPPORTED,
+        # Their public text is fixed; the cause says which option, or what the decompiler reported.
+        ErrorCode.PROGRAM_NOT_ANALYZED,
+        ErrorCode.RAW_LOADER_OPTION_UNAVAILABLE,
     }
 )
 
@@ -44,38 +49,53 @@ DETAIL_PRESERVING_CODES: frozenset[ErrorCode] = frozenset(
         ErrorCode.TARGET_EXECUTION_INVALID,
         ErrorCode.TARGET_ORPHAN_UNRELEASED,
         ErrorCode.RUNTIME_DEGRADED,
+        # details.reason says why: closed_in_gui, gui_project_closed (the Ghidra GUI backend).
+        ErrorCode.PROGRAM_NOT_OPEN,
+        ErrorCode.SESSION_NOT_FOUND,
+        # details.lock says which lock timed out (program_transaction: details.transaction is the open one).
+        ErrorCode.LOCK_TIMEOUT,
+        # details.reason (and details.kinds or details.top_undo_name) say what the GUI refused.
+        ErrorCode.GUI_UNSUPPORTED,
+        ErrorCode.GUI_NAVIGATION_FAILED,
+        # details say what differs from the runtime, or whether a call reached it (outcome).
+        ErrorCode.RUNTIME_CONFIG_MISMATCH,
+        ErrorCode.RUNTIME_UNAVAILABLE,
     }
 )
 
 
-def _classify_by_message_shape(message: str) -> ErrorCode | None:
-    """Last-resort heuristics for messages without a ``CODE:`` prefix."""
-
-    if "Session '" in message and ("does not exist" in message or "is not initialized" in message):
-        return ErrorCode.SESSION_NOT_FOUND
-    if "Target '" in message and "is not initialized" in message:
-        return ErrorCode.TARGET_NOT_REGISTERED
-    if (
-        "DomainFile" in message
-        or "failed to resolve domain path" in message
-        or message.startswith(("Program not found:", "Domain file not found:"))
-    ):
-        return ErrorCode.PROGRAM_NOT_FOUND
-    if "CORE_EXECUTOR_UNAVAILABLE" in message:
-        return ErrorCode.CORE_EXECUTOR_UNAVAILABLE
-    return None
+def _has_class(exc: BaseException, simple_name: str) -> bool:
+    # JPype names a Java class in full ("java.awt.HeadlessException").
+    return any(type_.__name__.rsplit(".", 1)[-1] == simple_name for type_ in type(exc).__mro__)
 
 
 def _is_headless_exception(exc: BaseException) -> bool:
-    return any(type_.__name__ == "HeadlessException" for type_ in type(exc).__mro__)
+    return _has_class(exc, "HeadlessException")
+
+
+def _is_java_exception(exc: BaseException) -> bool:
+    # JPype makes some Java exceptions Python ones as well (NullPointerException
+    # is a ValueError, IndexOutOfBoundsException an IndexError); they are
+    # failures inside Ghidra, not a caller's bad argument or missing item.
+    return any(type_.__name__ == "java.lang.Throwable" for type_ in type(exc).__mro__)
+
+
+def _code_by_type(exc: BaseException, default_code: ErrorCode) -> ErrorCode:
+    """The code of a Python exception that our own code raised for a bad argument or a missing item."""
+    if _is_java_exception(exc):
+        return default_code
+    if isinstance(exc, ValueError):
+        return ErrorCode.VALIDATION_ERROR
+    # KeyError and IndexError are programming errors, as batch_read treats them.
+    if isinstance(exc, LookupError) and not isinstance(exc, (KeyError, IndexError)):
+        return ErrorCode.NOT_FOUND
+    return default_code
 
 
 def _is_exclusive_checkout_exception(exc: BaseException) -> bool:
     # ghidra.framework.store.ExclusiveCheckoutException: another project holds an
     # exclusive checkout, so the requested checkout cannot be granted right now.
-    return any(type_.__name__ == "ExclusiveCheckoutException" for type_ in type(exc).__mro__) or (
-        "ExclusiveCheckoutException" in str(exc)
-    )
+    return _has_class(exc, "ExclusiveCheckoutException") or "ExclusiveCheckoutException" in str(exc)
 
 
 def to_domain_error(
@@ -92,9 +112,15 @@ def to_domain_error(
     """Map ``exc`` to a ``DomainError`` tagged with operation/target/domain_path.
 
     A ``DomainError`` passes through with the context merged into its details.
-    Other exceptions are classified by structured code (``HeadlessError.code``
-    or a ``CODE:`` message prefix), then by project-lock detection, then by a
-    few message heuristics, and finally fall back to ``default_code``.
+    Other exceptions are classified, first match wins, by a project another
+    process has locked (the exception's text: retryable PROJECT_LOCKED), by
+    Java's HeadlessException, by an exclusive checkout held elsewhere (its
+    class or text: retryable CHECKOUT_UNAVAILABLE), then by structured code
+    (``HeadlessError.code`` or a ``CODE:`` message prefix), and finally by
+    type (a ValueError is VALIDATION_ERROR and a LookupError NOT_FOUND, which
+    our own checks raise before changing anything) or ``default_code``.  No
+    other text is read: a message that mentions a missing program is no
+    refusal unless it names the code.
     """
 
     keep_none = set(keep_none_details)
@@ -115,7 +141,7 @@ def to_domain_error(
         )
 
     message = str(exc)
-    code = ErrorCode.VALIDATION_ERROR if isinstance(exc, ValueError) else default_code
+    code = _code_by_type(exc, default_code)
     retryable = False
     if is_project_lock_error(exc):
         code = ErrorCode.PROJECT_LOCKED
@@ -132,10 +158,6 @@ def to_domain_error(
         if classification is not None:
             code = classification.code
             retryable = classification.retryable
-        else:
-            heuristic = _classify_by_message_shape(message)
-            if heuristic is not None:
-                code = heuristic
 
     details: dict[str, Any] = {"operation": operation}
     if code in DETAIL_PRESERVING_CODES:
@@ -146,7 +168,13 @@ def to_domain_error(
     if code in set(cause_detail_codes):
         details.update(safe_cause_details(exc))
 
-    return DomainError(code=code, message=message, hint=hint, retryable=retryable, details=details)
+    return DomainError(
+        code=code,
+        message=message,
+        hint=recovery_hint(code, message) or hint,
+        retryable=retryable,
+        details=details,
+    )
 
 
 __all__ = ["DEFAULT_CAUSE_DETAIL_CODES", "DETAIL_PRESERVING_CODES", "to_domain_error"]

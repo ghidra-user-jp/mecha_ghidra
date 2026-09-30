@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
+from binary_fixtures import GHIDRA_EXERCISE_PE
+from cli_support import import_and_wait
 from ghidra_mcp.application.services.path_policy import PathPolicy
 from ghidra_mcp.contracts.tool_spec import get_all_tool_specs, get_checkout_required_tool_names
 from ghidra_mcp.presentation.cli_runtime import create_cli_runtime
@@ -39,7 +40,8 @@ def runtime(tmp_path, monkeypatch, request):
     try:
         api["create_project"](project_location=str(tmp_path), project_name="sample")
         api["register_target"](target="resource_safety", project_location=str(tmp_path), project_name="sample")
-        imported = api["import_program"](
+        imported = import_and_wait(
+            api,
             target="resource_safety",
             binary_path=str(binary),
             import_mode="raw_binary",
@@ -51,7 +53,7 @@ def runtime(tmp_path, monkeypatch, request):
         api["load_project_program"](target="resource_safety", domain_path=imported["program"])
         yield api
     finally:
-        bundle.target_service.close_all()
+        bundle.registry.close_all()
 
 
 def test_runtime_project_name_alias_cannot_overwrite_loaded_project(runtime, tmp_path):
@@ -92,7 +94,8 @@ def test_runtime_raw_import_preserves_decimal_byte_ranges_after_reload(runtime, 
     binary = tmp_path / "range.bin"
     contents = bytes(range(128))
     binary.write_bytes(contents)
-    imported = runtime["import_program"](
+    imported = import_and_wait(
+        runtime,
         target="resource_safety",
         binary_path=str(binary),
         import_mode="raw_binary",
@@ -201,11 +204,10 @@ def test_runtime_auto_import_uses_public_loader_and_releases_results(runtime, mo
             return Results(self.delegate.load())
 
     monkeypatch.setattr(pyghidra, "program_loader", Builder)
-    sample = Path(__file__).resolve().parents[1] / "samples" / "hello.bin"
-    imported = runtime["import_program"](
-        target="resource_safety", binary_path=str(sample), analyze_imported=analyze_imported
+    imported = import_and_wait(
+        runtime, target="resource_safety", binary_path=str(GHIDRA_EXERCISE_PE), analyze_imported=analyze_imported
     )
-    assert imported["program"] == "/hello.bin"
+    assert imported["program"] == "/WinHelloCPP.exe"
     assert len(loaded_programs) == len(closed_results) == 1
     assert detected_formats[0] and detected_formats[0] != "Raw Binary"
     assert loaded_programs[0].isClosed(), "the loader must release its program before a subsequent open"
@@ -213,7 +215,7 @@ def test_runtime_auto_import_uses_public_loader_and_releases_results(runtime, mo
     for _ in range(2):
         runtime["load_project_program"](target="resource_safety", domain_path=imported["program"])
         program = core_runtime._CONTEXTS["resource_safety"].program
-        assert str(program.getName()) == "hello.bin"
+        assert str(program.getName()) == "WinHelloCPP.exe"
         assert str(program.getExecutableFormat()) == detected_formats[0]
         assert int(program.getMemory().getSize()) > 0
         assert program.getCurrentTransactionInfo() is None

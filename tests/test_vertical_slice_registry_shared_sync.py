@@ -36,7 +36,13 @@ cli_tools = ToolHarness()
         (
             "import_program",
             lambda: cli_tools.import_program(target="fw", binary_path="/tmp/app.bin"),
-            {"binary_path": "/tmp/app.bin", "import_mode": "auto", "overlay": False},
+            {
+                "binary_path": "/tmp/app.bin",
+                "wait_seconds": 20,
+                "import_mode": "auto",
+                "overlay": False,
+                "analyze_imported": True,
+            },
             "fw",
         ),
         (

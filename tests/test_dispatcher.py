@@ -41,11 +41,27 @@ class DummyRegistry:
 
     def load_program(self, target, **kwargs):
         self.registry_calls.append(("load_program", {"target": target, **kwargs}))
-        return kwargs["domain_path"]
+        return {"program": kwargs["domain_path"], "is_analyzed": False}
 
     def import_program(self, target, **kwargs):
         self.registry_calls.append(("import_program", {"target": target, **kwargs}))
-        return "/imported.bin"
+        return {
+            "operation_id": "operation",
+            "kind": "import_program",
+            "request_id": kwargs.get("request_id"),
+            "server_instance_id": "server",
+            "target": target,
+            "state": "queued",
+            "phase": "queued",
+            "poll_after_ms": 1000,
+            "created_at": "2026-09-23T00:00:00+00:00",
+            "updated_at": "2026-09-23T00:00:00+00:00",
+            "started_at": None,
+            "finished_at": None,
+            "result": None,
+            "operation_error": None,
+            "replayed": False,
+        }
 
     def save_project_program(self, target, **kwargs):
         self.registry_calls.append(("save_project_program", {"target": target, **kwargs}))
@@ -58,6 +74,7 @@ class DummyRegistry:
             "project_location": kwargs["project_location"],
             "project_name": kwargs.get("project_name"),
             "domain_path": kwargs["domain_path"],
+            "is_analyzed": True,
         }
 
     def close_session(self, target, **kwargs):
@@ -366,22 +383,27 @@ def test_dispatch_tool_routes_import_program_with_raw_binary_kwargs():
     result = dispatch_tool(
         "import_program",
         {
+            "request_id": "81C4EF95-FCED-4C07-89A5-D026EF55BDEE",
             "binary_path": "/tmp/shellcode.bin",
             "import_mode": "raw_binary",
             "language_id": "x86:LE:32:default",
-            "base_address": "0x401000",
+            "base_address": "4198400",
             "entry_offset": 0,
         },
         "firmware",
         registry=registry,
     )
 
-    assert result == {"status": "ok", "target": "firmware", "program": "/imported.bin"}
+    assert result["state"] == "queued" and result["operation_id"] == "operation"
+    assert "program" not in result
+    # request_id and base_address arrive in one canonical spelling.
     assert registry.registry_calls == [
         (
             "import_program",
             {
                 "target": "firmware",
+                "request_id": "81c4ef95-fced-4c07-89a5-d026ef55bdee",
+                "wait_seconds": 20,
                 "binary_path": "/tmp/shellcode.bin",
                 "import_mode": "raw_binary",
                 "language_id": "x86:LE:32:default",
@@ -427,7 +449,7 @@ def test_dispatch_tool_applies_status_program_result_adapter():
         registry=registry,
     )
 
-    assert result == {"status": "ok", "target": "fw", "program": "/folder/app"}
+    assert result == {"status": "ok", "target": "fw", "program": "/folder/app", "is_analyzed": False}
     tool_dispatcher_module.get_tool_spec("load_project_program").output_model.model_validate(result)
 
 
@@ -469,6 +491,7 @@ def test_dispatch_tool_applies_status_target_result_adapter():
         "project_location": "/tmp/sample.gpr",
         "project_name": None,
         "domain_path": "/folder/app",
+        "is_analyzed": True,
     }
 
 
@@ -519,6 +542,8 @@ def test_dispatch_tool_preserves_domain_error_for_create_session():
         "operation": "create_session",
         "cause_type": "RuntimeError",
         "cause_message": "Unable to lock project",
+        # A retryable failure left nothing behind.
+        "output_state": "absent",
     }
 
 
@@ -558,6 +583,8 @@ def test_dispatch_tool_preserves_domain_error_for_close_session():
     assert getattr(exc_info.value, "domain_error")["details"] == {
         "target": "fw",
         "operation": "close_session",
+        # A failed save may have written part of the program.
+        "output_state": "uncertain",
     }
 
 
@@ -599,6 +626,8 @@ def test_dispatch_tool_preserves_domain_error_for_close_remove():
     assert getattr(exc_info.value, "domain_error")["details"] == {
         "target": "fw",
         "operation": "close_session",
+        # A failed save may have written part of the program.
+        "output_state": "uncertain",
     }
 
 
@@ -756,3 +785,120 @@ def test_dispatch_tool_raises_output_validation_error_for_incompatible_result(
 
     with pytest.raises(expected_exc, match=expected_message):
         dispatch_tool(spec_name, raw_args, "fw", registry=BadOutputRegistry())
+
+
+@pytest.mark.parametrize(
+    ("tool", "error", "expected"),
+    [
+        ("create_project", DomainError(ErrorCode.PROJECT_ALREADY_EXISTS, "exists"), "absent"),
+        ("export_program", DomainError(ErrorCode.PATH_NOT_ALLOWED, "outside"), "absent"),
+        ("pull_project_program", DomainError(ErrorCode.SYNC_OPERATION_FAILED, "refresh", retryable=True), "absent"),
+        ("commit_project_program", DomainError(ErrorCode.SYNC_OPERATION_FAILED, "boom"), "uncertain"),
+        # A BSim write the core did not run: its code tells, as for a project write.
+        ("bsim_register_target", DomainError(ErrorCode.BSIM_REGISTER_FAILED, "boom"), "uncertain"),
+        ("bsim_delete_executable", DomainError(ErrorCode.BSIM_EXECUTABLE_AMBIGUOUS, "two"), "absent"),
+        ("bsim_update_executable_metadata", DomainError(ErrorCode.BSIM_DATABASE_INIT_FAILED, "no db"), "absent"),
+        ("bsim_load_matched_executable", DomainError(ErrorCode.BSIM_MATCH_STALE, "md5 differs"), "absent"),
+        # A job tool fails only when it refused the job, which never ran.
+        ("import_program", DomainError(ErrorCode.VALIDATION_ERROR, "missing"), "absent"),
+        ("run_script", DomainError(ErrorCode.OPERATION_QUEUE_FULL, "full", retryable=True), "absent"),
+        ("import_program", DomainError(ErrorCode.IMPORT_IN_PROGRESS, "cancelling", retryable=True), "absent"),
+        ("analyze_program", DomainError(ErrorCode.ANALYSIS_IN_PROGRESS, "queued"), "absent"),
+        # ...unless an earlier import of the name may have left a program.
+        ("import_program", DomainError(ErrorCode.IMPORT_OUTPUT_UNCERTAIN, "no cleanup"), "uncertain"),
+        # cancel_operation's refusals name a job that may well have run: they say nothing about it.
+        ("cancel_operation", DomainError(ErrorCode.VALIDATION_ERROR, "The job has already finished"), None),
+        ("cancel_operation", DomainError(ErrorCode.OPERATION_NOT_FOUND, "No record in this server process"), None),
+        # Reads write nothing; program writes say it themselves.
+        ("list_project_programs", DomainError(ErrorCode.OPERATION_FAILED, "boom"), None),
+        ("bsim_query", DomainError(ErrorCode.BSIM_QUERY_FAILED, "boom"), None),
+        ("get_operation", DomainError(ErrorCode.OPERATION_NOT_FOUND, "gone"), None),
+        ("rename_data_type", DomainError(ErrorCode.OPERATION_FAILED, "boom"), None),
+    ],
+)
+def test_a_failed_project_or_repository_write_says_what_it_left(tool, error, expected):
+    spec = tool_dispatcher_module.get_tool_spec
+    with_state = tool_dispatcher_module._with_output_state
+    stated = with_state(spec(tool), error)
+    assert (stated.details or {}).get("output_state") == expected
+    # retryable stays true only with absent.
+    assert stated.retryable is (error.retryable and expected in (None, "absent"))
+    written = DomainError(ErrorCode.SAVE_FAILED, "x", details={"output_state": "created"})
+    assert with_state(spec("save_project_program"), written).details["output_state"] == "created"
+
+
+@pytest.mark.parametrize(
+    ("tool", "expected"), [("save_project_program", {"output_state": "absent"}), ("get_function", None)]
+)
+def test_the_second_input_check_says_a_refused_write_left_nothing(tool, expected):
+    from ghidra_mcp.presentation.tool_errors import ToolInputError
+
+    class Registry:
+        def call(self, *_args):
+            pytest.fail("invalid request reached executor")
+
+    with pytest.raises(ToolInputError) as raised:
+        dispatch_tool(tool, {"no_such_argument": 1}, "t", registry=Registry())
+    assert raised.value.details == expected
+
+
+def test_every_core_write_tool_reports_what_its_failure_left():
+    """core_execution stamps output_state only for PROGRAM_WRITE_COMMANDS, and the dispatcher skips core tools."""
+    from ghidra_mcp.application.commands import PROGRAM_WRITE_COMMANDS
+    from ghidra_mcp.contracts.tool_spec import ExecutorKind, ToolSafetyTag, get_all_tool_specs
+
+    unstamped = [
+        name
+        for name, spec in get_all_tool_specs().items()
+        if spec.executor_kind == ExecutorKind.CORE_COMMAND
+        and spec.safety_tag != ToolSafetyTag.READ_ONLY
+        and spec.presenter != "operation"
+        and spec.command_or_method not in PROGRAM_WRITE_COMMANDS
+    ]
+    assert unstamped == []
+
+
+def test_every_bsim_tool_reports_its_failures_as_domain_errors():
+    """Without _reports_bsim_errors a BSim failure would reach the client as 'Error executing tool'."""
+    from ghidra_mcp.application.services.bsim_service import BsimService
+    from ghidra_mcp.contracts.tool_spec import ToolCategoryTag, get_all_tool_specs
+
+    methods = [
+        spec.command_or_method for spec in get_all_tool_specs().values() if spec.category_tag == ToolCategoryTag.BSIM
+    ]
+    assert methods
+    assert [name for name in methods if not hasattr(getattr(BsimService, name), "__wrapped__")] == []
+
+
+@pytest.mark.parametrize(
+    ("tool", "lock", "asked"),
+    [
+        ("save_project_program", "target", ("fw", False)),
+        ("save_project_program", "project", ("fw", False)),
+        ("save_project_program", "runtime", ("fw", True)),
+        # No job or deferred call holds these.
+        ("save_project_program", "bsim_load", None),
+        ("save_project_program", None, None),
+        # A tool without a target gets the placeholder "default": its target locks name nothing.
+        ("bsim_load_matched_executable", "target", None),
+        ("bsim_load_matched_executable", "script_barrier", ("fw", True)),
+    ],
+)
+def test_a_lock_timeout_names_a_holder_only_for_locks_a_job_holds(tool, lock, asked):
+    from types import SimpleNamespace
+
+    questions = []
+
+    def lock_holder(target, *, any_target=False):
+        questions.append((target, any_target))
+        return "job-1"
+
+    registry = SimpleNamespace(operations=SimpleNamespace(lock_holder=lock_holder))
+    timeout = DomainError(
+        ErrorCode.LOCK_TIMEOUT, "busy", retryable=True, details={} if lock is None else {"lock": lock}
+    )
+    named = tool_dispatcher_module._name_lock_holder(
+        timeout, registry, tool_dispatcher_module.get_tool_spec(tool), "fw"
+    )
+    assert questions == ([] if asked is None else [asked])
+    assert (named.details.get("operation_id") == "job-1") is (asked is not None)

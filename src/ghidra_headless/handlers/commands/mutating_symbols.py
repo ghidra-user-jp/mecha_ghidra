@@ -128,6 +128,25 @@ def _resolve_function(ctx, address_text, name, *, get_address, find_function_by_
     return function
 
 
+def _modification_number(ctx) -> int:
+    return int(ctx.program.getModificationNumber())
+
+
+def _ensure_unchanged_since(ctx, modification: int) -> None:
+    """Refuse a decompiled view the program has moved past (the GUI's human, or its auto-analysis).
+
+    The decompile runs before the transaction, so a change in between would be
+    overwritten from the stale view: HighFunctionDBUtil renames and retypes
+    variables, and may commit every parameter, from it.  Checked first inside
+    the transaction, so only Mecha's own (still empty) transaction rolls back.
+    """
+    if _modification_number(ctx) != modification:
+        raise HeadlessError(
+            "SESSION_CHANGED: the program changed while the function was decompiled; nothing was applied. "
+            "Read the function again and retry"
+        )
+
+
 def rename_variable(
     params,
     *,
@@ -163,6 +182,7 @@ def rename_variable(
     # Prefer updating high-level symbols (locals and parameters) first.
     high_symbol = None
     high_function = None
+    modification = _modification_number(ctx)
     try:
         high_function = decompile_high_function(ctx, function)
     except Exception:
@@ -182,6 +202,7 @@ def rename_variable(
             if high_symbol is not None:
 
                 def _rename_high():
+                    _ensure_unchanged_since(ctx, modification)
                     if requires_full_param_commit(high_symbol, high_function):
                         high_function_db_util.commitParamsToDatabase(
                             high_function,
@@ -339,37 +360,42 @@ def set_local_variable_type(
 
     data_type = parse_data_type(ctx, type_text)
 
-    def _apply():
+    # Decompile before the transaction, as rename_variable does: the GUI
+    # backend runs the transaction on Swing's event thread (spec §6.2).
+    high_function = None
+    modification = _modification_number(ctx)
+    try:
+        high_function = decompile_high_function(ctx, function)
+    except Exception:
         high_function = None
-        try:
-            high_function = decompile_high_function(ctx, function)
-        except Exception:
-            high_function = None
-        if high_function is not None:
-            local_symbol_map = high_function.getLocalSymbolMap()
-            if local_symbol_map is not None:
-                symbols = local_symbol_map.getSymbols()
-                target_symbol = None
-                while symbols.hasNext():
-                    symbol = symbols.next()
-                    if symbol.getName() == variable_name:
-                        target_symbol = symbol
-                        break
-                if target_symbol is not None:
-                    if requires_full_param_commit(target_symbol, high_function):
-                        high_function_db_util.commitParamsToDatabase(
-                            high_function,
-                            False,
-                            high_function_db_util.ReturnCommitOption.NO_COMMIT,
-                            function.getSignatureSource(),
-                        )
-                    high_function_db_util.updateDBVariable(
-                        target_symbol,
-                        target_symbol.getName(),
-                        data_type,
-                        source_type.USER_DEFINED,
-                    )
-                    return True
+    target_symbol = None
+    if high_function is not None:
+        local_symbol_map = high_function.getLocalSymbolMap()
+        if local_symbol_map is not None:
+            symbols = local_symbol_map.getSymbols()
+            while symbols.hasNext():
+                symbol = symbols.next()
+                if symbol.getName() == variable_name:
+                    target_symbol = symbol
+                    break
+
+    def _apply():
+        if target_symbol is not None:
+            _ensure_unchanged_since(ctx, modification)
+            if requires_full_param_commit(target_symbol, high_function):
+                high_function_db_util.commitParamsToDatabase(
+                    high_function,
+                    False,
+                    high_function_db_util.ReturnCommitOption.NO_COMMIT,
+                    function.getSignatureSource(),
+                )
+            high_function_db_util.updateDBVariable(
+                target_symbol,
+                target_symbol.getName(),
+                data_type,
+                source_type.USER_DEFINED,
+            )
+            return True
         for local in function.getLocalVariables():
             if local.getName() == variable_name:
                 local.setDataType(data_type, source_type.USER_DEFINED)
@@ -465,11 +491,11 @@ def delete_function(params, *, ensure_context, get_address, txn):
     return {"name": name, "entry": str(entry), "deleted": True}
 
 
-def analyze_program(params, *, ensure_context, analyze_program_impl):
+def analyze_program(params, *, ensure_context, analyze_program_impl, current_task_monitor):
     """Run auto-analysis; ``force`` re-runs it on an already analyzed program."""
     ctx = ensure_context()
     force = bool(params.get("force", False))
-    analyzed = analyze_program_impl(ctx, force=force)
+    analyzed = analyze_program_impl(ctx, force=force, monitor=current_task_monitor())
     return {"analyzed": bool(analyzed), "forced": force}
 
 

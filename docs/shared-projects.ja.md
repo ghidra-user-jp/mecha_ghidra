@@ -74,7 +74,7 @@ uv run mecha_ghidra \
 
 1. `list_project_programs` で対象を確認し、`get_project_sync_status(domain_path="/sample.bin")` で状態を読みます。
 2. バージョン管理済みなら `checkout_project_program(domain_path="/sample.bin")` でチェックアウトします。リポジトリ接続済みプロジェクトの未共有ファイルは、先に `add_project_program_to_version_control` で共有管理へ追加します。
-3. `load_project_program(domain_path="/sample.bin")` で開き、`apply_edits` で名前やコメントを編集します。
+3. `load_project_program(domain_path="/sample.bin")` で開き、`apply_edits` で名前やコメントを編集します。読み込みでは解析しません。応答が`is_analyzed: false`なら、先に`analyze_program`を実行します。バックグラウンドのジョブで、手順2のチェックアウトが必要です。解析の結果は、編集と一緒に保存・コミットされます。
 4. `save_project_program` でローカルへ保存し、`commit_project_program` でリポジトリへチェックインします。応答の `committed` を確認してください。
 5. もう一方のキャッシュで最新状態を取得し、GUIのプログラムを再読み込みします。MCPから最新状態へ追従するには `pull_project_program` を使います。
 
@@ -92,7 +92,7 @@ uv run mecha_ghidra \
 | `on_conflict="keep"` でコミット | ローカル編集を `.keep` に退避。`kept_program` と `committed=false` を返し、読み込み中ターゲットは退避コピーへ移る |
 | `on_conflict="discard"` でコミット | 競合するローカル編集を破棄して最新へ追従。`committed=false` |
 | `on_local_changes="discard"` でpull | 破棄可能な古いチェックアウトを解除し、最新バージョンへ追従 |
-| 破棄可能なチェックアウトがなく、pullにマージが必要 | `UNSAFE_MERGE_REQUIRED` |
+| 破棄可能なチェックアウトがなく、pullにマージが必要 | `MERGE_REQUIRED` |
 
 keep/discardの応答が `status="ok"` でも、チェックインしたとは限りません。`committed`、`conflict_kept`、`conflict_discarded` を確認します。競合する編集を統合したい場合は、GUIを使えるGhidra環境で解決してください。
 

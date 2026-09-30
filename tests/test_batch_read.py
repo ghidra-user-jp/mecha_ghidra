@@ -16,6 +16,7 @@ from ghidra_mcp.presentation.doc_resources import tool_docs_detail
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
 from ghidra_mcp.presentation.tool_errors import ToolError
+from ghidra_mcp.presentation.tool_registry import spec_wire_output_schema
 
 
 def request(id="a", tool="get_function", arguments=None, **extra):
@@ -138,6 +139,26 @@ def test_item_errors_continue_and_all_failed_sets_mcp_error():
     assert payload["items"][0]["error"]["code"] == "NOT_FOUND"
     result, payload = call(runtime, requests=[missing])
     assert result.is_error and payload["status"] == "error"
+
+
+def test_a_java_exception_in_one_item_is_a_failure_inside_ghidra():
+    """JPype makes NullPointerException a ValueError; it is not the caller's argument."""
+    throwable = type("java.lang.Throwable", (Exception,), {})
+    npe = type("java.lang.NullPointerException", (throwable, ValueError), {})
+
+    def execute(_tool, args):
+        if args["address"] == "broken":
+            raise npe('Cannot invoke "ghidra.program.model.listing.Function.getBody()" because "f" is null')
+        return {"name": "main"}
+
+    result, payload = call(
+        server(Registry(execute)), requests=[request("broken", arguments={"address": "broken"}), request()]
+    )
+    assert not result.is_error and payload["status"] == "partial"
+    assert payload["items"][0]["error"] == {
+        "code": "OPERATION_FAILED",
+        "message": "Ghidra failed on this read (java.lang.NullPointerException)",
+    }
 
 
 def test_unexpected_backend_failure_is_not_silently_an_item_error():
@@ -301,8 +322,10 @@ def test_documented_batch_schema_matches_actual_response(kind):
     Draft202012Validator(docs["response_text_schema"]).validate(payload)
     Draft202012Validator(docs["large_result_output_schema"]).validate(result.model_dump(mode="json", by_alias=True))
     advertised = next(tool for tool in asyncio.run(runtime.mcp.list_tools()) if tool.name == "batch_read")
-    assert advertised.output_schema == docs["structured_output_schema"]
+    # tools/list carries the short form; the docs resource keeps the full one. Both hold.
+    assert advertised.output_schema == spec_wire_output_schema(get_all_tool_specs()["batch_read"], detailed=False)
     Draft202012Validator(advertised.output_schema).validate(result.structured_content)
+    Draft202012Validator(docs["structured_output_schema"]).validate(result.structured_content)
     assert result.structured_content == {"result": payload}
     assert len(result.content[0].text) <= 2048
 
@@ -354,3 +377,45 @@ def test_invalid_global_limits_fail_before_execution(extra):
     with pytest.raises(ToolError):
         call(server(registry), requests=[request()], **extra)
     assert registry.calls == []
+
+
+def test_a_batch_reply_is_one_block_even_where_program_tools_name_their_source():
+    """batch_read names its program and revision itself; a second source block would break its one-block shape."""
+    runtime = create_mcp_server(
+        specs=get_all_tool_specs(),
+        registry_provider=lambda: Registry(),
+        dispatcher_provider=lambda: dispatch_tool,
+        command_source=lambda: {"program": "/tiny.bin", "revision": "r:0"},
+    )
+    result, payload = call(runtime, requests=[request()])
+    assert not result.is_error and len(result.content) == 1
+    assert "source" not in result.structured_content and payload["status"] == "ok"
+
+
+def test_a_child_tool_the_server_does_not_publish_is_a_validation_error():
+    registry = Registry()
+    specs = {name: spec for name, spec in get_all_tool_specs().items() if name in {"batch_read", "get_function"}}
+    # The input schema lists every batch child; the server publishes only get_function.
+    arguments = {"requests": [request(tool="decompile_function", arguments={"name": "main"})]}
+    result = asyncio.run(
+        server(registry, specs=specs).mcp.handle_call_tool(
+            None, CallToolRequestParams(name="batch_read", arguments=arguments)
+        )
+    )
+    assert result.is_error and not registry.calls
+    error = result.structured_content["error"]
+    assert (error["code"], error["retryable"]) == ("VALIDATION_ERROR", False)
+    assert "decompile_function" in error["message"] and error["hint"]
+
+
+def test_an_inline_batch_over_its_budget_is_a_validation_error():
+    registry = Registry(lambda _tool, _args: {"name": "x" * 5000})
+    arguments = {"requests": [request()], "max_output_chars": 1000}
+    result = asyncio.run(
+        server(registry, config=ToolPresentationConfig(large_result_mode="inline")).mcp.handle_call_tool(
+            None, CallToolRequestParams(name="batch_read", arguments=arguments)
+        )
+    )
+    error = result.structured_content["error"]
+    assert result.is_error and (error["code"], error["retryable"]) == ("VALIDATION_ERROR", False)
+    assert "max_output_chars" in error["message"]

@@ -11,15 +11,18 @@
 | オプション | 既定値 | 用途 |
 | --- | --- | --- |
 | `--transport` | `stdio` | `stdio`、`http`（別名 `streamable-http`） |
+| `--backend` | `headless` | `headless`、`gui`（GhidraのGUIを起動し、そのProjectとProgramを共有する。[GUIでのライブ共有](gui-live.ja.md)） |
 | `--mcp-host` | `127.0.0.1` | HTTPの待ち受けアドレス |
 | `--mcp-port` | `8081` | HTTPのポート |
 | `--mcp-path` | `/mcp` | Streamable HTTPのエンドポイントパス |
 | `--ghidra-path` | `GHIDRA_INSTALL_DIR` | Ghidraのインストール先 |
 | `--log-level` | `INFO` | サーバーのログレベル |
 
+`--backend gui` では、`--project-location` に既存のProjectが要ります。stdioでは、プロセスはそのProjectのGUIのruntimeへの中継になり、runtimeが動いていなければ起動します。HTTPでは、プロセスがそのruntimeになるか、runtimeが既に動いていればその中継になります（[起動](gui-live.ja.md#startup)）。`--ghidra-server-user`、`--ghidra-server-password`、`--ghidra-server-password-env` と、別のProjectを指す `--session` はエラーになり、`--bsim-url`、`--bsim-password`、`--bsim-password-env`、`--bsim-remote-cache-dir`、`--script-root` は効果がありません（[使えない機能](gui-live.ja.md#limits)）。
+
 Streamable HTTP（`--transport http` または `streamable-http`）は、[公式Python SDKの推奨設定](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py)に合わせて `stateless_http=True`、`json_response=True` に固定しています。MCPのセッションIDを発行せず、各要求にJSONで応答します。ステートフルに戻す互換設定はありません。Ghidraのターゲット・プログラムの変更状態・結果キャッシュはHTTP要求をまたいでサーバープロセス内に保持します。`--session` はGhidraのターゲット設定であり、HTTPセッションとは別です。同じ `target` と返された `result_id` を使って処理を続けてください。再起動すると結果キャッシュは消え、稼働中も既存の容量制限が適用されます。
 
-HTTPは最終結果をJSONで返し、SSEによる進捗・keepaliveイベントは送りません。解析時間に合わせてクライアントとリバースプロキシのタイムアウトを設定してください。応答が失われても変更処理は完了している可能性があるため、変更操作を再試行する前に状態を確認します。通信のステートレス化によって、複数プロセス間でGhidraの状態や結果キャッシュが共有されるわけではありません。
+HTTPは最終結果をJSONで返し、SSEによる進捗・keepaliveイベントは送りません。それでも、どの呼び出しも約50秒以内に応答します。ジョブは`wait_seconds`（最大50秒）以内に、それ以外の呼び出しは40秒で終わらなければ`deferred: true`を返してサーバー上で処理を続けます（[長い呼び出し](usage.ja.md#long-calls)）。そのため、よくあるクライアントやリバースプロキシの60秒の期限で足ります。応答が失われても変更処理は完了している可能性があるため、変更操作を再試行する前に状態を確認します。通信のステートレス化によって、複数プロセス間でGhidraの状態や結果キャッシュが共有されるわけではありません。
 
 ローカルHTTPでは[アクセス先を制限した起動例](usage.ja.md#local-setup)を使ってください。MCPエンドポイントにクライアント認証機能は組み込まれていません。Ghidra ServerとBSimのパスワードは各バックエンドの認証用であり、MCPクライアントの認証には使われません。
 
@@ -31,7 +34,7 @@ stdioでは、Ghidraの出力がJSON-RPCへ混入しないように、起動後�
 
 ## ターゲットと同時呼び出し
 
-`--project-location`、必要に応じた `--project-name`、`--target-name`（既定値 `default`）で初期ターゲットを指定します。`--domain-path /folder/program` を付けると起動時にプログラムを開き、省略するとプロジェクト情報だけを登録します。起動にはプロジェクト指定または `--session` が1つ以上必要です。
+`--project-location`、必要に応じた `--project-name`、`--target-name`（既定値 `default`）で初期ターゲットを指定します。`--domain-path /folder/program` を付けると、受付を始めた後にバックグラウンドでプログラムを開き、開き終わるまでツール呼び出しを待たせます。省略するとプロジェクト情報だけを登録します。起動にはプロジェクト指定または `--session` が1つ以上必要です。
 
 起動時に複数のターゲットを登録するには、`--session` を繰り返します。以下は既存プロジェクトを使う例です。
 
@@ -44,9 +47,9 @@ uv run mecha_ghidra \
 
 セッション定義はJSONではなく、カンマ区切りの `key=value` です。値にはカンマを使えません。キーは `name`、`project_location`、任意の `project_name` と `domain_path` です。パスの違いは[プロジェクトの基本](usage.ja.md#project-concepts)を参照してください。
 
-`--lock-timeout-seconds` の既定値は `30` です。使用中のターゲットに対する呼び出しはロックを待ち、待機時間を超えると再試行可能な `LOCK_TIMEOUT` を返します。これは待ち行列での制限であり、解析処理の実行時間制限ではありません。MCPクライアントのタイムアウトは別途設定します。`run_script` の実行中も同じ待機時間が適用されます。スクリプトはプロセス全体のバリアを保持するため、待機時間内に入れなかった他の呼び出しはスクリプトの完了を待たずに再試行可能な `LOCK_TIMEOUT`（`details` に `script_state` と `waited_seconds` を含む）を返し、終了処理もこの時間を超えるとスクリプトを待たずに進みます。スクリプトが実行中の操作の後ろで待機しているだけの間は、他の呼び出しが止められるのは一度に約1秒までです（どのターゲットかを問わず長い読み取りがあれば新しい読み取りは通過します）。待機中のスクリプトがサーバー全体を止めることはありません。
+`--lock-timeout-seconds` の既定値は `30` です。使用中のターゲットに対する呼び出しはロックを待ち、待機時間を超えると再試行可能な `LOCK_TIMEOUT` を返します。これは待ち行列での制限であり、解析処理の実行時間制限ではありません。MCPクライアントのタイムアウトは別途設定します。サーバーはGhidraの起動を待たずに受付を始めるので、起動中に届いたツール呼び出しも最大この時間だけ起動の完了を待ち、超えると `details.lock` が `startup` の `LOCK_TIMEOUT` を返します。この待ち時間は、後述する40秒の先送りやジョブの `wait_seconds` に含めて数えます。例外はバックグラウンドのジョブ（`import_program`・`analyze_program`・`run_script`）です。書き込みを始めるまでは、ロックが空くか、`cancel_operation`で取り消されるか、サーバーが停止するまで待ち続けます（`phase`は`waiting_for_lock`）。この値は40秒未満にしてください。40秒の時点でまだロックを待っている呼び出しは、`LOCK_TIMEOUT`ではなく`deferred: true`を返します。`create_project`はサーバー全体を排他的に使うため、他の操作の実行中は、それらを止めずに最大この時間だけ待ち、空かなければ`LOCK_TIMEOUT`を返します。`run_script` の実行中も同じ待機時間が適用されます。スクリプトはプロセス全体のバリアを保持するため、待機時間内に入れなかった他の呼び出しはスクリプトの完了を待たずに再試行可能な `LOCK_TIMEOUT`（`details` に `script_state` と `waited_seconds` を含む）を返し、終了処理もこの時間を超えるとスクリプトを待たずに進みます。スクリプトが実行中の操作の後ろで待機しているだけの間は、他の呼び出しが止められるのは一度に約1秒までです（どのターゲットかを問わず長い読み取りがあれば新しい読み取りは通過します）。待機中のスクリプトがサーバー全体を止めることはありません。
 
-`--script-queue-timeout-seconds` の既定値は `300` です。`run_script` が実行中の操作の完了を待つ時間で、時間内に開始できなかった実行は、スクリプトを実行せずに再試行可能な `LOCK_TIMEOUT` を返します。要求されたスクリプト実行は30秒で失敗するより実行中の解析を待つべきなので、`--lock-timeout-seconds` とは別に設定します。
+`--script-queue-timeout-seconds` の既定値は `300` です。`run_script`のジョブが、スクリプトを始める前に実行中の操作の完了を1回に待つ時間です。待ちきれなければ再び待ち、開始するか、取り消されるか、サーバーが停止するまで`waiting_for_lock`のままです。ジョブは1件ずつ実行するので、後に投入した取り込み・解析・スクリプトはその後ろで待ちます。`cancel_operation`で取り消せば待ち行列が進みます。スクリプト実行は実行中の解析を待つべきなので、`--lock-timeout-seconds` とは別に設定します。
 
 <a id="file-access"></a>
 
@@ -74,15 +77,15 @@ HTTPでは3種類とも指定してください。起動時の警告は**3種類
 | `readonly` | defaultのカテゴリから、安全性タグが `read_only` のツールだけ |
 | `full` | `shared_sync` と `bsim` を含む全カテゴリ |
 
-指定がなければ `default` です。任意カテゴリは `--add-category shared_sync`、`--add-category bsim` で追加します。
+指定がなければ `default` です。任意カテゴリは `--add-category shared_sync`、`--add-category bsim` で追加します。`--backend gui` では、`gui` カテゴリ（`get_gui_context`、`show_in_gui`）がプロファイルのカテゴリに加わり、`symbol_comment_edit` カテゴリにGUIだけの `rename_variable` が加わります。`--allow-category` でカテゴリを置き換えたときは、`--add-category gui` で加えます。
 
-`readonly` は公開するツールを絞る設定です。プロジェクトの読み取り専用マウントや、読み込み時の解析・保存の禁止は行いません。不変の過去バージョンを調べる場合は、[共有プロジェクトの履歴確認](shared-projects.ja.md#history)を使ってください。
+`readonly` は公開するツールを絞るだけの設定で、プロジェクトを読み取り専用にはしません。不変の過去バージョンを調べる場合は、[共有プロジェクトの履歴確認](shared-projects.ja.md#history)を使ってください。
 
 各ツールは3種類のタグを持ちます。
 
 | タグ | 値 |
 | --- | --- |
-| `category` | 上記 7 カテゴリと `scripts`（[スクリプト実行](#scripts)参照） |
+| `category` | 上記 7 カテゴリ、`scripts`（[スクリプト実行](#scripts)参照）、`gui`（[GUIのツール](gui-live.ja.md#gui-tools)参照） |
 | `safety` | `read_only`、`write`、`destructive_write` |
 | `operation_level` | `basic`、`standard`、`advanced` |
 
@@ -92,6 +95,8 @@ HTTPでは3種類とも指定してください。起動時の警告は**3種類
 2. `--allow-safety` と `--allow-operation-level` で絞ります。同じ種類のallow指定はOR、異なるタグの指定はANDです。
 3. `--enable-tool` でツールを個別追加します。
 4. 最後に `--disable-tool` で除外します。無効化が常に優先されます。
+5. `import_program`・`analyze_program`・`run_script`のどれかが残る場合は、ジョブの結果を読むために `get_operation` も残します。どれかを有効にしたまま `get_operation` を無効化すると起動時エラーになります。ジョブを隠す場合は、`get_operation`と一緒に無効化してください。`cancel_operation`は`get_operation`に従い、`get_operation`がなければ公開されません。`get_operation`がなければ、呼び出しの[先送り](usage.ja.md#long-calls)も行いません。
+6. 最後に、バックエンドが実行できないツールを外します。`headless` では `gui` カテゴリ、`gui` では[GUIで使えないツール](gui-live.ja.md#limits)で、どの指定もこれを覆しません。外したツールが指定で選ばれていた場合は、起動ログに一覧が出ます。
 
 通常の起動コマンドに、目的に応じて以下を追加します。
 
@@ -104,7 +109,7 @@ HTTPでは3種類とも指定してください。起動時の警告は**3種類
 
 正確な引数とエラーコードは `tools/list`、MCPリソースの `ghidra://docs/tools` と `ghidra://docs/tools/{tool_name}` で確認できます。概要は[ツール一覧](tools.ja.md)、削除済みの `--enable-shared-project-sync` については[移行手順](troubleshooting.ja.md#upgrading)を参照してください。
 
-`tools/list` は公開する全ツールの `inputSchema` と `outputSchema` を返します。通常の結果と `read_result`／`search_result`／`batch_read` のデータは `structuredContent.result` に入り、`content` にも従来のテキストを返します。通常結果が配列・文字列・nullでも、この形は共通です。通常ツールの圧縮結果の `result_id` などの参照情報と `error` は、引き続き `structuredContent` の直下に置きます。`batch_read` の参照情報はバッチデータ内の `structuredContent.result` に含みます。出力スキーマはこれらの応答形式を含み、送信前に検証します。ツールドキュメントの `output_schema` は論理値、`structured_output_schema` は送信する構造化出力のスキーマです。
+`tools/list` は公開する全ツールの `inputSchema` と `outputSchema` を返します。通常の結果と `read_result`／`search_result`／`batch_read` のデータは `structuredContent.result` に入り、`content` にも従来のテキストを返します。通常結果が配列・文字列・nullでも、この形は共通です。通常ツールの圧縮結果の `result_id` などの参照情報と `error` は、引き続き `structuredContent` の直下に置きます。`batch_read` の参照情報はバッチデータ内の `structuredContent.result` に含みます。出力スキーマはこれらの応答形式を含み、送信前に検証します。ただし、全ツールに共通する形（圧縮結果の通知、先送りの応答、エラー）は、見分けるのに要る項目だけの短い形です。ツールドキュメントの `output_schema` は論理値、`structured_output_schema` は送信する構造化出力の完全なスキーマです。
 
 取得ツールの応答上限 `max(threshold, 1024)` は、`content` と `structuredContent` の両方を含むツール応答を対象とします。SDKが付けるサーバー情報やJSON-RPCの外側の情報は含みません。構造化出力も収めるため、1回で取得できる文字数・件数は従来より少なくなる場合があります。一方 `batch_read` の `max_output_chars` は[ツール一覧](tools.ja.md#batch-read)のとおり、応答JSONテキスト（`structuredContent` が複製する `content` のテキスト）のみを対象とします。`has_more`／`next_offset_chars`／`next_cursor` で続きを取得してください。
 
@@ -114,7 +119,7 @@ HTTPでは3種類とも指定してください。起動時の警告は**3種類
 
 Ghidra スクリプト（Java、Jython、PyGhidra）はサーバープロセスの OS 権限で動く任意コードです。`scripts` ツールの公開は他のカテゴリと同じ仕組みで決まります（`--tool-profile full`、または他のプロファイルに `--add-category scripts` を足す。既定と readonly のプロファイルには含まれません）。
 
-`run_script` はスクリプト本文（`source`）を直接受け取るので、AI アシスタントなどのクライアントがスクリプトを書いて実行し、診断を読んで書き直す使い方ができます。スクリプトは Ghidra の Script Manager と同じようにサーバー JVM 内で読み込み中のプログラムに対して実行され、トランザクションで包まれます。成功すれば変更はコミットされ、例外やタイムアウトならロールバックされます。結果にはトランザクション終了後に読み取った `transaction_outcome`（`committed` / `unchanged` / `rolled_back` / `unknown`）、捕捉した `stdout` / `stderr`、Java ならコンパイル診断が付きます。トランザクションを開いたまま返す、処理を走らせたまま返すスクリプトはプログラム状態を検証不能にするため、ターゲットを隔離し（`TARGET_EXECUTION_INVALID`、変更系ツールを拒否）、`close_session(discard_changes=true)` と再読み込みまで解除されません。Jython のキャンセルは協調的なもののみです。
+`run_script` はスクリプト本文（`source`）を直接受け取るので、AI アシスタントなどのクライアントがスクリプトを書いて実行し、診断を読んで書き直す使い方ができます。スクリプトは Ghidra の Script Manager と同じようにサーバー JVM 内で読み込み中のプログラムに対して実行され、トランザクションで包まれます。成功すれば変更はコミットされ、例外・タイムアウト・`cancel_operation`ならロールバックされます。実行はバックグラウンドのジョブです（[長い呼び出し](usage.ja.md#long-calls)）。ジョブの結果にはトランザクション終了後に読み取った `transaction_outcome`（`committed` / `unchanged` / `rolled_back` / `unknown`）、捕捉した `stdout` / `stderr`、Java ならコンパイル診断が付きます。トランザクションを開いたまま返す、処理を走らせたまま返すスクリプトはプログラム状態を検証不能にするため、ターゲットを隔離し（`TARGET_EXECUTION_INVALID`、変更系ツールを拒否）、`close_session(discard_changes=true)` と再読み込みまで解除されません。Jython のキャンセルは協調的なもののみです。
 
 | オプション | 効果 |
 | --- | --- |
@@ -122,9 +127,9 @@ Ghidra スクリプト（Java、Jython、PyGhidra）はサーバープロセス�
 
 `META-INF/MANIFEST.MF` があるルートも利用できます。マニフェストと依存関係の処理はGhidraに委ね、ロード・コンパイルに失敗した場合は診断を返します。
 
-スクリプトの内容のハッシュ計算や整合性検査は行いません。`catalog_revision` はカタログを構築するたびに生成する識別子です。`expected_revision` は読み込み中のプログラムが前回の確認から変わっていないかを検査します。他の操作の完了待ちが `--script-queue-timeout-seconds` を超えた `run_script` は、実行を開始せず `LOCK_TIMEOUT` を返します。
+スクリプトの内容のハッシュ計算や整合性検査は行いません。`catalog_revision` はカタログを構築するたびに生成する識別子です。`expected_revision` は読み込み中のプログラムが前回の確認から変わっていないかを検査します。`run_script`のジョブは、他の操作の完了を`--script-queue-timeout-seconds`ずつ待ち、開始できるまで待ち続けます。
 
-固定の上限: `.py` スクリプトには `@runtime Jython` か `@runtime PyGhidra` のヘッダが必要（無ければ `run_script` の `runtime` で指定）、`source` は 256 KiB まで、1 ルートのファイル数は 2000 まで、`timeout_seconds` は既定 300 秒、最大 3600 秒です。タイムアウトはスクリプトのモニタ経由の協調的なキャンセルなので、`monitor.checkCancelled()` 相当を一度も呼ばないループは中断できず、終わるまでランタイム全体のロックを握り続けます（止めるにはサーバー再起動が必要です）。
+固定の上限: `.py` スクリプトには `@runtime Jython` か `@runtime PyGhidra` のヘッダが必要（無ければ `run_script` の `runtime` で指定）、`source` は 256 KiB まで、1 ルートのファイル数は 2000 まで、`timeout_seconds` は既定 300 秒、最大 3600 秒です。タイムアウトと`cancel_operation`はスクリプトのモニタ経由の協調的なキャンセルなので、`monitor.checkCancelled()` 相当を一度も呼ばないループは中断できず、終わるまでランタイム全体のロックとジョブの待ち行列を握り続けます（止めるにはサーバー再起動が必要です）。停止時は、そのようなスクリプトを`--lock-timeout-seconds`だけ待ち、スクリプトが使っていないプロジェクトを閉じて進みます。
 
 ランタイム: JavaとPyGhidraのproviderはGhidraに同梱されています。Python側にはこのプロジェクトで固定した依存を導入してください（[固定したPyGhidraスナップショット](development.ja.md#pyghidraの依存バージョンとスクリプト失敗)参照）。JythonはGhidra Extensionで、`Extensions/Ghidra/ghidra_<version>_Jython.zip` を `Ghidra/Extensions/` に展開して再起動します（Dockerイメージでは済んでいます）。無いランタイムは `list_scripts` で `available=false` になります。起動時の例外伝播チェックが失敗した場合は全言語が使用不可となり、実行を `SCRIPT_RUNTIME_UNAVAILABLE` で拒否します。他の解析ツールは利用できます。
 

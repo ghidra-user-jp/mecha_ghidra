@@ -7,6 +7,7 @@ import pytest
 from ghidra_mcp.application.services.path_policy import UNRESTRICTED_PATH_POLICY, PathPolicy
 from ghidra_mcp.application.services.target_service import TargetService
 from ghidra_mcp.domain import DomainError, ErrorCode
+from job_control import JobControl
 
 
 def test_unrestricted_policy_accepts_any_path(tmp_path):
@@ -106,7 +107,7 @@ def test_target_service_enforces_policy_before_touching_the_runtime(tmp_path):
     )
 
     with pytest.raises(DomainError) as exc_info:
-        service.import_program("fw", str(tmp_path / "evil.bin"))
+        service.import_program("fw", str(tmp_path / "evil.bin"), control=JobControl())
     assert exc_info.value.code == ErrorCode.PATH_NOT_ALLOWED
     assert exc_info.value.details["operation"] == "import_program"
 
@@ -120,7 +121,7 @@ def test_target_service_enforces_policy_before_touching_the_runtime(tmp_path):
         assert exc_info.value.code == ErrorCode.PATH_NOT_ALLOWED
     assert runtime.calls == []
 
-    service.import_program("fw", str(samples / "ok.bin"))
+    service.import_program("fw", str(samples / "ok.bin"), control=JobControl())
     service.register_target("fw", str(projects / "ok.gpr"))
     assert [name for name, _ in runtime.calls] == ["import_program", "register_target"]
 

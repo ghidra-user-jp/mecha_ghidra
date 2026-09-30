@@ -11,6 +11,10 @@ services:
         GHIDRA_DECOMPILER_NATIVES_SHA256: ${GHIDRA_DECOMPILER_NATIVES_SHA256-}
     image: mecha_ghidra:local
     restart: unless-stopped
+    # On stop the server cancels a running analysis (an import or analyze_program
+    # job), rolls the program back and closes the projects; the default 10 s grace
+    # period can cut that short with SIGKILL.
+    stop_grace_period: 120s
     user: "10001:10001"
     ports:
       # Keep the unauthenticated MCP endpoint local by default. Operators who

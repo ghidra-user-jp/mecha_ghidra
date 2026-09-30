@@ -19,7 +19,8 @@ import jpype
 import pyghidra
 import pytest
 
-from cli_support import ToolHarness
+from binary_fixtures import GHIDRA_EXERCISE_PE
+from cli_support import ToolHarness, import_and_wait, run_script_and_wait
 from ghidra_headless.launcher import start_headless_jvm
 from ghidra_mcp import cli
 from ghidra_mcp.application.services.script_service import ScriptConfig
@@ -34,9 +35,6 @@ pytestmark = pytest.mark.skipif(
     not RUNTIME_VALIDATION_ENABLED,
     reason="Run only when GHIDRA_RUNTIME_VALIDATION=1",
 )
-
-ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_BINARY = ROOT / "samples" / "hello.bin"
 
 
 def _cross_runtime_source(runtime, name, body):
@@ -435,7 +433,7 @@ def _domain_error(exc: Exception) -> dict:
 
 def _run(target: str, **kwargs):
     try:
-        return cli_tools.run_script(target=target, **kwargs)
+        return run_script_and_wait(cli_tools, target=target, **kwargs)
     except Exception as exc:  # noqa: BLE001 - re-raised after logging the details
         print(f"[runtime] run_script failed: {exc}: {getattr(exc, 'domain_error', None)}")
         cause = exc.__cause__ or exc.__context__
@@ -452,7 +450,7 @@ def _plate(target: str, address: str):
 
 def _load_sample(target: str, project_dir: Path, project_name: str) -> str:
     cli_tools.register_target(target=target, project_location=str(project_dir), project_name=project_name)
-    imported = cli_tools.import_program(target=target, binary_path=str(SAMPLE_BINARY))
+    imported = import_and_wait(cli_tools, target=target, binary_path=str(GHIDRA_EXERCISE_PE))
     domain_path = imported["program"]
     cli_tools.load_project_program(target=target, domain_path=domain_path)
     return domain_path
@@ -497,55 +495,65 @@ def _nested_script_project(tmp_path: Path, sources: dict[str, str]):
             _release_script_runtime()
 
 
+def _wait_for_phase(record, phase, timeout=5):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while record["phase"] != phase:
+        assert time.monotonic() < deadline, record
+        time.sleep(0.02)
+        record = cli_tools.get_operation(operation_id=record["operation_id"], wait_seconds=0)
+    return record
+
+
 @pytest.mark.parametrize("holder", ["reader", "writer"])
-def test_runtime_queued_script_times_out_without_executing_and_can_be_retried(tmp_path, holder):
-    import threading
+@pytest.mark.parametrize("cancel", [False, True])
+def test_runtime_queued_script_waits_without_executing_until_it_can_start(tmp_path, holder, cancel):
+    import time
 
     from ghidra_mcp.application.locks import SCRIPT_BARRIER
     from ghidra_mcp.domain import configure_script_queue_timeout_seconds, get_script_queue_timeout_seconds
 
-    source = '# @runtime PyGhidra\nsetPlateComment(currentProgram.getMinAddress(), "RETRY_SUCCEEDED")\n'
+    # Each run appends one mark, so the plate counts the runs.
+    source = (
+        "# @runtime PyGhidra\n"
+        "address = currentProgram.getMinAddress()\n"
+        'setPlateComment(address, (getPlateComment(address) or "") + "X")\n'
+    )
     with _nested_script_project(tmp_path, {}) as (target, address):
         # Cache provider availability before another operation owns the barrier:
-        # the queued request must time out at the execution writer itself.
+        # admission must not wait for it.
         cli_tools.app.script_service.list_scripts()
-        before = _plate(target, address)
-        done = threading.Event()
-        results = []
-        errors = []
-
-        def run():
-            try:
-                results.append(_run(target, source=source))
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                done.set()
-
-        thread = threading.Thread(target=run, name="AnyIO worker thread", daemon=True)
+        before = _plate(target, address) or ""
         original_timeout = get_script_queue_timeout_seconds()
+        # Every attempt to enter gives up almost at once; the job keeps waiting anyway.
         configure_script_queue_timeout_seconds(0.05)
         try:
             held_lock = SCRIPT_BARRIER.read_lock() if holder == "reader" else SCRIPT_BARRIER.write_lock()
             with held_lock:
-                thread.start()
-                assert done.wait(2), "queued script ignored the configured lock timeout"
-            thread.join(5)
-            assert not thread.is_alive()
-            assert results == []
-            assert len(errors) == 1
-            error = _domain_error(errors[0])
-            assert error["code"] == "LOCK_TIMEOUT"
-            assert error["retryable"] is True
-            assert error["details"]["lock"] == "script_barrier"
-            assert _plate(target, address) == before
+                record = cli_tools.run_script(target=target, source=source, wait_seconds=0)
+                record = _wait_for_phase(record, "waiting_for_lock")
+                time.sleep(0.3)
+                record = cli_tools.get_operation(operation_id=record["operation_id"], wait_seconds=0)
+                assert (record["state"], record["phase"]) == ("running", "waiting_for_lock")
+                if cancel:
+                    cancelled = cli_tools.cancel_operation(operation_id=record["operation_id"])
+                    assert cancelled["operation_error"]["code"] == "OPERATION_CANCELLED"
+                    assert cancelled["operation_error"]["details"]["output_state"] == "absent"
+            if cancel:
+                # The retry queues behind the cancelled job's worker, which got the
+                # barrier, refused to begin and ran nothing.
+                assert _run(target, source=source)["transaction_outcome"] == "committed"
+                record = cli_tools.get_operation(operation_id=record["operation_id"], wait_seconds=0)
+                assert record["operation_error"]["code"] == "OPERATION_CANCELLED"
+            else:
+                record = cli_tools.get_operation(operation_id=record["operation_id"], wait_seconds=20)
+                assert record["state"] == "succeeded", record
+                assert record["result"]["transaction_outcome"] == "committed"
+            assert _plate(target, address) == before + "X"
             assert list((cli_tools.app.script_service.snapshot_base / "inline").iterdir()) == []
-            result = _run(target, source=source)
-            assert result["transaction_outcome"] == "committed"
-            assert _plate(target, address) == "RETRY_SUCCEEDED"
         finally:
             configure_script_queue_timeout_seconds(original_timeout)
-            thread.join(5)
 
 
 @pytest.mark.parametrize("inline", [False, True])
@@ -823,23 +831,21 @@ def test_runtime_scripts(tmp_path):
         assert cli_tools.get_program_info(target=target)["min_address"] == address
 
         # --- inline source (what an AI client sends): Java inferred from the class, PyGhidra from the header ---
-        result = cli_tools.run_script(
-            target=target, source=JAVA_ADD_PLATE.replace("AddPlate", "InlinePlate"), args=["INLINE"]
-        )
+        result = _run(target, source=JAVA_ADD_PLATE.replace("AddPlate", "InlinePlate"), args=["INLINE"])
         print(f"[runtime] inline java: {result['transaction_outcome']} {result['script_id']}")
         assert result["inline"] is True and result["transaction_outcome"] == "committed"
         assert result["script_id"] == "inline:InlinePlate.java"
         assert _plate(target, address) == "INLINE"
         with pytest.raises(Exception, match="SCRIPT_COMPILE_FAILED") as broken:
-            cli_tools.run_script(target=target, source=JAVA_BROKEN.replace("Broken", "InlineBroken"))
+            _run(target, source=JAVA_BROKEN.replace("Broken", "InlineBroken"))
         assert _domain_error(broken.value)["details"]["script_errors"]
         assert _plate(target, address) == "INLINE"
         if runtimes.get("PyGhidra"):
-            result = cli_tools.run_script(target=target, source=PYGHIDRA_ADD_PLATE, args=["INLINEPY"])
+            result = _run(target, source=PYGHIDRA_ADD_PLATE, args=["INLINEPY"])
             assert result["inline"] is True and result["transaction_outcome"] == "committed"
             assert _plate(target, address) == "INLINEPY"
             with pytest.raises(Exception, match="SCRIPT_FAILED"):
-                cli_tools.run_script(target=target, source=PYGHIDRA_FAIL)
+                _run(target, source=PYGHIDRA_FAIL)
             assert _plate(target, address) == "INLINEPY", "a failing inline script is rolled back"
     finally:
         try:
@@ -861,16 +867,29 @@ currentProgram.getListing().setComment(currentProgram.getMinAddress(), CommentTy
 print("ordinary diagnostic line\\n" * 2000)
 raise RuntimeError("expected diagnostic test failure")
 """
+
+    async def run_job(mcp, target):
+        reply = await mcp.call_tool("run_script", {"target": target, "script_id": "t:LargeDiagnostic.py"})
+        assert "result" in reply.structured_content, reply.structured_content
+        record = reply.structured_content["result"]
+        while record["state"] in {"queued", "running"}:
+            reply = await mcp.call_tool("get_operation", {"operation_id": record["operation_id"], "wait_seconds": 20})
+            record = reply.structured_content["result"]
+        return reply, record
+
     with _nested_script_project(tmp_path, {"LargeDiagnostic.py": source}) as (target, address):
         before = _plate(target, address)
-        result = asyncio.run(
-            cli_tools.app.mcp.call_tool("run_script", {"target": target, "script_id": "t:LargeDiagnostic.py"})
-        )
-        assert result.is_error
-        assert result.structured_content["error"]["code"] == "SCRIPT_FAILED"
-        assert result.structured_content["error"]["details"]["transaction_outcome"] == "rolled_back"
-        assert _call_tool_result_wire_chars(result) <= 12000
-        resource = asyncio.run(cli_tools.app.mcp.read_resource(result.structured_content["resource_uri"]))
+        # The project context rebuilt the application: use its server.
+        mcp = cli_tools.app.mcp
+        reply, record = asyncio.run(run_job(mcp, target))
+        # The call succeeded; the job failed, and its record stays small.
+        assert not reply.is_error and record["state"] == "failed"
+        error = record["operation_error"]
+        assert error["code"] == "SCRIPT_FAILED"
+        assert error["details"]["transaction_outcome"] == "rolled_back"
+        assert error["details"]["output_state"] == "absent"
+        assert _call_tool_result_wire_chars(reply) <= 12000
+        resource = asyncio.run(mcp.read_resource(error["resource_uri"]))
         details = json.loads(resource[0].content)["error"]["details"]
         assert details["stdout"]["text"].count("ordinary diagnostic line") == 2000
         assert details["execution_state"] == "valid"

@@ -15,7 +15,8 @@ import pyghidra
 from ghidra_headless.errors import HeadlessError
 
 from . import java_bindings, path_utils, sync_utils
-from .models import ProgramSession
+from .analysis import run_auto_analysis
+from .models import ProgramSession, program_is_analyzed
 from .transactions import run_in_transaction
 
 logger = logging.getLogger(__name__)
@@ -313,6 +314,11 @@ class ProjectHandle:
     def get_project_name(self) -> str:
         return self.project_name
 
+    @staticmethod
+    def create_cancellable_monitor():
+        """A silent task monitor whose ``cancel()`` stops an import's analysis."""
+        return java_bindings._cancellable_monitor()
+
     def get_key(self) -> tuple[str, str]:
         return self.key
 
@@ -558,7 +564,9 @@ class ProjectHandle:
         entry_address: str | None = None,
         entry_offset: int | None = None,
         analyze_imported: bool | None = None,
+        monitor=None,
     ):
+        """Import ``binary_path``; ``monitor`` (see create_cancellable_monitor) can cancel its analysis."""
         with self._lock:
             if self._closed:
                 raise RuntimeError("Project is already closed")
@@ -592,7 +600,8 @@ class ProjectHandle:
                 raise ValueError(f"Unsupported import_mode: {import_mode}")
             if domain_file is None:
                 raise RuntimeError(f"Failed to add program: {binary_path}")
-            should_analyze = analyze_imported if analyze_imported is not None else (import_mode == "raw_binary")
+            # Analysis is part of an import unless the caller opts out.
+            should_analyze = True if analyze_imported is None else bool(analyze_imported)
             if should_analyze or entry_address is not None or entry_offset is not None:
                 imported_domain_path = domain_file.getPathname()
                 try:
@@ -601,6 +610,7 @@ class ProjectHandle:
                         entry_address=entry_address,
                         entry_offset=entry_offset,
                         analyze_imported=bool(should_analyze),
+                        monitor=monitor,
                     )
                 except Exception as exc:
                     if isinstance(exc, _ImportedProgramCloseError):
@@ -1009,7 +1019,7 @@ class ProjectHandle:
         data = self.project.getProjectData()
         domain_file = data.getFile(domain_path)
         if domain_file is None:
-            raise RuntimeError(f"Domain file not found: {domain_path}")
+            raise HeadlessError(f"PROGRAM_NOT_FOUND: Domain file not found: {domain_path}")
         content_type = None
         was_hijacked = bool(sync_utils._safe_call(domain_file, "isHijacked"))
         try:
@@ -1265,7 +1275,7 @@ class ProjectHandle:
         data = self.project.getProjectData()
         domain_file = data.getFile(domain_path)
         if domain_file is None:
-            raise RuntimeError(f"Program not found: {domain_path}")
+            raise HeadlessError(f"PROGRAM_NOT_FOUND: Program not found: {domain_path}")
         return domain_file
 
     def _import_program_auto_locked(self, path: pathlib.Path, program_dir: str, program_name: str):
@@ -1425,8 +1435,11 @@ class ProjectHandle:
         entry_address: str | None,
         entry_offset: int | None,
         analyze_imported: bool,
+        monitor=None,
     ) -> None:
-        monitor = java_bindings._console_monitor()
+        # Only a monitor handed in by a background import can be cancelled.
+        cancellable = monitor
+        monitor = java_bindings._console_monitor() if monitor is None else monitor
         domain_dir, domain_name = path_utils._parse_domain_path(self.project, domain_path)
         program = self.project.openProgram(domain_dir, domain_name, False)
         if program is None:
@@ -1442,7 +1455,12 @@ class ProjectHandle:
             if entry is not None:
                 self._bootstrap_entry_locked(program, flat_api, entry)
             if analyze_imported:
-                self._analyze_program_locked(program, flat_api)
+                self._analyze_program_locked(program, flat_api, cancellable)
+            # Ghidra's disassembly and function commands stop early on a
+            # cancelled monitor without failing, so a cancelled bootstrap looks
+            # like a success. Never save it: the caller rolls the program back.
+            if cancellable is not None and bool(cancellable.isCancelled()):
+                raise HeadlessError("IMPORT_CANCELLED: import post-processing was cancelled before it finished")
             self.project.save(program)
         except Exception as exc:
             operation_error = exc
@@ -1492,21 +1510,21 @@ class ProjectHandle:
         finally:
             program.endTransaction(tx, committed)
 
-    def _analyze_program_locked(self, program, flat_api) -> None:
-        utilities = java_bindings._ghidra_program_utilities()
-        if not bool(utilities.shouldAskToAnalyze(program)):
+    def _analyze_program_locked(self, program, flat_api, monitor=None) -> None:
+        # The Analyzed flag, as analyze_program and load responses read it: a
+        # .gzf whose owner declined Ghidra's analyze prompt is not analyzed,
+        # though shouldAskToAnalyze would say there is nothing to do.
+        if program_is_analyzed(program):
             return
-        script_util = java_bindings._ghidra_script_util()
-        script_util.acquireBundleHostReference()
-        try:
-
-            def _analyze():
-                flat_api.analyzeAll(program)
-                utilities.markProgramAnalyzed(program)
-
-            run_in_transaction(program, "Auto analysis", _analyze)
-        finally:
-            script_util.releaseBundleHostReference()
+        # A cancelled run raises inside the transaction, and the import's
+        # post-processing failure path then deletes the program.
+        run_auto_analysis(
+            program,
+            flat_api,
+            monitor=monitor,
+            transaction=lambda description, operation: run_in_transaction(program, description, operation),
+            cancelled_error="IMPORT_CANCELLED: analysis was cancelled before it finished",
+        )
 
     def _get_imported_min_address_locked(self, program):
         memory = program.getMemory()

@@ -18,7 +18,7 @@ docker compose logs --tail=100 mecha_ghidra
 
 Connect your [MCP client](clients.md) to `http://127.0.0.1:8081/mcp`. The service starts with target `default` and project metadata only. On a fresh volume, complete the next section before using analysis tools.
 
-`docker compose build` is also supported. The default platform is `linux/amd64`. The image runs as UID/GID `10001:10001`; the port is published on host loopback. Its health check tests TCP connectivity, not whether a program is loaded or a decompilation succeeds.
+`docker compose build` is also supported. The default platform is `linux/amd64`. The image runs as UID/GID `10001:10001`; the port is published on host loopback. Its health check tests TCP connectivity, not whether a program is loaded or a decompilation succeeds. The image sets `JAVA_HOME_OVERRIDE` to its JDK (`/opt/java`), so a start does not spend time on PyGhidra's JDK search, which starts two JVMs: about 0.08 seconds natively and 0.6–0.7 seconds under amd64 emulation.
 
 ## First import
 
@@ -36,7 +36,13 @@ Place the analysis file at `./samples/sample.bin` on the host. These are MCP too
    {"target":"default","binary_path":"/samples/sample.bin"}
    ```
 
-3. `load_project_program` — copy the import response's `program` value into `domain_path`:
+3. `get_operation` — while the returned job's `state` is `queued` or `running`, call it with the job's `operation_id`; each call waits up to 20 seconds. A failed job reports `operation_error.details.output_state`; see [usage](usage.md) for what to do next. Job records are lost when the container restarts, and `docker compose stop` cancels a running analysis and rolls the program back.
+
+   ```json
+   {"operation_id":"<returned-operation-id>"}
+   ```
+
+4. `load_project_program` — copy the successful job's `result.program` into `domain_path`:
 
    ```json
    {"target":"default","domain_path":"/sample.bin"}

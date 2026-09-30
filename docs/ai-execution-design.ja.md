@@ -2,7 +2,22 @@
 
 2026-09-22。基準コミット: `d0eb93b7e210bb527d03ff7c6366f8c31ec31b68`。
 
-**全体は設計案。重いbatch_readのみ実装済み。** 設計開始時に基準コミット、ローカルのMCP Python SDK 2.2.0、公式資料を確認した。第5章の逆コンパイル・逆アセンブル、時間・容量制限、C文字列の取得・検索を独立した変更として実装した。操作記録、ジョブ、source_id、構造化した復帰情報は未実装。現行の利用方法は[ツール一覧](tools.ja.md#batch-read)を参照。第2章は設計開始時の調査記録であり、その他の新しいAPI名・設定値・制限値は提案である。
+2026-09-23追記: importの呼び出し期限超過に対する初版は[import_programの非同期化と結果追跡の設計](import-program-jobs-design.ja.md)を参照。ユーザー指定により、メモリ上のジョブ管理とget_operationだけを追加する小さな設計へ縮小した。SQLite、再起動復旧、キャンセル、汎用executorは初版に含めない。本書の永続OperationStoreや段階順序は将来案であり、import修正の前提ではない。import専用の初版は実装済みで、2026-09-24にレビューを受けて改訂した（サーバー側で待つ照会、`request_id`の任意化、停止時の解析キャンセルなど）。同日、同じジョブ管理を`analyze_program`にも広げた（[解析のジョブ化](analyze-program-jobs-design.ja.md)）。
+
+**全体は設計案。重いbatch_readは実装済みで、ほかは小さな形で一部だけ実装した。** 設計開始時に基準コミット、ローカルのMCP Python SDK 2.2.0、公式資料を確認した。第5章の逆コンパイル・逆アセンブル、時間・容量制限、C文字列の取得・検索を独立した変更として実装した。現行の利用方法は[ツール一覧](tools.ja.md#batch-read)を参照。第2章は設計開始時の調査記録であり、その他の新しいAPI名・設定値・制限値は提案である。
+
+2026-09-25時点で、ほかの段階の一部を、メモリ上だけの小さな形で実装した。永続的なOperationStore、SourceSnapshotとRecoveryの共通型、source_idは未実装のままである。
+
+ジョブの進み具合（Ghidraの`TaskMonitor`のメッセージと割合）は、2026-09-25に調べた時点では簡単に出せない。ジョブに渡している`TaskMonitorAdapter`は進み具合を保存しない。公開されていて進み具合を保存するモニターのうち、`GTaskMonitor`は`addCancelledListener`で`UnsupportedOperationException`を投げる（逆コンパイラが取り消しの通知に使うため、x86の解析が失敗する）。`TaskMonitorComponent`はSwingの部品で、`BasicTaskMonitor`はパッケージ内限定である。Pythonでモニターを実装すると、解析器のループで呼ばれる取り消しの確認や進みの更新が、すべてJavaからPythonへの呼び出しになる。小さなJavaのクラスを同梱するなら実現できる。
+
+| 段階 | 実装したもの |
+| --- | --- |
+| C1〜C3 | 取り込み・解析・スクリプトのジョブ、`cancel_operation`、40秒で先送りする呼び出し（[長い処理のジョブ化](long-operation-jobs-design.ja.md)） |
+| B（一部） | プログラムへの書き込みすべてと`bsim_apply_matches`の`request_id`。同じ要求の再送には最初の応答を`replayed: true`を付けて返し、適用し直さない。何も変えずに失敗した呼び出し（`output_state: absent`、取り消しを除く）はIDを保たず、次にそのIDで来た呼び出しを実行する（2026-09-26。10.3節の注記）。記録はジョブと同じ`OperationManager`に置く |
+| A2（一部） | 同期の書き込みが失敗したときの`details.output_state`（`absent`・`created`・`uncertain`）。コアのコマンドは、開いたトランザクションの結果から決める。プロジェクトやリポジトリへの書き込みは、変更の前に断るエラーか再試行できるエラーなら`absent`、それ以外は`uncertain`とする（2026-09-25） |
+| D（一部） | コアのコマンドの応答の`source`（`target`・`program`・`revision`）。コマンドの直後に、同じロックの中で取る |
+| エラー（2026-09-25） | 見つからないものは`NOT_FOUND`、引数の誤りは`VALIDATION_ERROR`で、どちらもメッセージに理由を残す。プログラム未読み込みは`PROGRAM_NOT_OPEN`、未登録のtargetは`TARGET_NOT_REGISTERED`。コードごとの次の一手を`hint`に入れる（`domain/error_hints.py`） |
+| 応答の本文（2026-09-25） | 文字列ブロックを詰めたJSONにする。リストは1行に1項目の1ブロック。大きな結果として退避するかの判定も、この長さで行う。`decompile_function`の疑似コードは、関数の完全名とエントリーアドレスを書いたコメントの行で始める |
 
 ## 1. 方針
 
@@ -37,7 +52,7 @@ AIが選んだ操作を、対象と状態を取り違えずに実行し、通信
 | revision | `context.generation:Program.getModificationNumber()` | 比較は不透明な値の完全一致。永続する版番号やバイナリhashとして使わない |
 | 変更 | `apply_edits`にbefore/after・atomic・dry run・expected_revisionがある | 再利用し、二重にトランザクションを開始しない |
 | ロック | target/projectロック、operation/registryロック、プロセス全体のscript barrier | 既存の取得順と所有者を維持。ジョブが迂回しない |
-| 初回load | 条件を満たす場合は自動解析・保存する | 単なる読み取りとして扱わない。初版のジョブ対象から除外 |
+| 初回load | 解析しない（2026-09-24から。以前は条件を満たすと自動解析・保存した）。解析は`import_program`と`analyze_program`のジョブで行う | loadは読み取りに近いが、開き直しでセッションの世代が変わる |
 | HTTP | statelessなJSON応答。Ghidra状態と結果cacheはプロセスに保持 | HTTP接続やJSON-RPC IDを操作の識別子にしない |
 | スキーマ | 入出力スキーマを公開し、最終的な構造化出力を検証 | 新しい受付・記録・出典の形も公開スキーマに含める |
 | エラー | DomainErrorはcode・retryable・hint・detailsを保持。汎用fallbackにはmessageだけの応答もある。コード分類だけでは変更の有無は分からない | 実行境界で採取した事実を追加し、想定内エラーとfallbackの両方で保持 |
@@ -467,6 +482,8 @@ terminalな記録がある場合は、未実行の失敗でもsame_requestにし
 `retryable`は既存クライアント向けに残す。ただし、新しい応答では`mode=same_request`の場合だけtrueにする。現行の分類がtrueでも、実行情報から確認や条件解消が必要ならfalseへ狭める。特にSESSION_CHANGEDの無条件再送を促す文言は、この構造と一致するように見直す。フィールドの型・codeを保ち、値の保守的な変更は互換性テストと変更記録に含める。[現行のコード分類](../src/ghidra_mcp/domain/error_codes.py)。
 
 `hint`は同じ構造から作る短い説明とし、構造化した制約と矛盾する「retry」等を別の固定文から付けない。条件の修復、待機、別ツールの選択をサーバーが自動実行する仕組みは作らない。
+
+2026-09-26注記: `request_id`付きのツール呼び出しでは、この節とは逆に、何も変えずに失敗した記録（`output_state: absent`）はIDを保たないことにした。`recovery`は未実装で、再試行できる失敗の返答は`retryable: true`と「再試行する」ヒントしか示さない。それに従って同じIDで送り直すと、同じ失敗がいつまでも返り、一度も実行されなかった。`absent`なら再実行しても二重には適用されない。実行枠を待つ間に取り消した呼び出しはIDを保つ（遅れて届いた同じ要求に、取り消した処理を実行させない）。ジョブも保つ。スクリプトは、`output_state`が示すプログラムの外にも変更を残しうるためである。
 
 ### 10.4 確認用ツールの選び方
 

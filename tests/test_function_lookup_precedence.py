@@ -108,7 +108,8 @@ def test_decompile_function_prefers_address_over_name():
         decompile_function_object=lambda _ctx, function: function.getName(),
     )
 
-    assert result == "by_address"
+    # The first line names the function the address resolved to, and its entry.
+    assert result == "/* by_address @ 0x401000 */\nby_address"
 
 
 def test_rename_function_prefers_address_over_name():
@@ -137,3 +138,17 @@ def test_rename_function_prefers_address_over_name():
         "created_namespaces": [],
     }
     assert address_function.renamed_with is _SourceType.USER_DEFINED
+
+
+def test_decompile_header_keeps_a_name_with_a_comment_end_inside_the_comment():
+    function = _Function("a*/b", "00401000")
+
+    result = decompile_function(
+        {"address": "00401000"},
+        ensure_context=lambda: _Context(function),
+        get_address=lambda _ctx, text: text,
+        find_function_by_name=lambda _ctx, _name: None,
+        decompile_function_object=lambda _ctx, _function: "void f(void) {}",
+    )
+
+    assert result.splitlines()[0] == "/* a*\\/b @ 00401000 */"

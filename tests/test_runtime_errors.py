@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ghidra_headless.errors import HeadlessError
 from ghidra_mcp.domain import ErrorCode
 from ghidra_mcp.infrastructure.ghidra_adapter.runtime.errors import to_domain_error
 
@@ -204,15 +205,15 @@ def test_to_domain_error_marks_pre_operation_sync_refresh_failures_retryable():
         assert err.details and err.details["cause_message"] == message
 
 
-def test_to_domain_error_maps_missing_program_message_prefixes():
+def test_to_domain_error_maps_missing_program_codes():
     cases = (
-        ("Program not found: /main", "get_project_sync_status"),
-        ("Domain file not found: /main", "delete_shared_project_file"),
+        ("PROGRAM_NOT_FOUND: Program not found: /main", "get_project_sync_status"),
+        ("PROGRAM_NOT_FOUND: Domain file not found: /main", "delete_shared_project_file"),
     )
 
     for message, operation in cases:
         err = to_domain_error(
-            RuntimeError(message),
+            HeadlessError(message),
             operation=operation,
             target="fw",
             domain_path="/main",

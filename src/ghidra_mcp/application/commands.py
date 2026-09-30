@@ -77,9 +77,39 @@ CORE_COMMANDS: frozenset[str] = frozenset(
     (*FUNCTION_COMMANDS, *MEMORY_COMMANDS, *SYMBOL_COMMANDS, *DATATYPE_COMMANDS, *BSIM_COMMANDS, *SCRIPT_COMMANDS)
 )
 
+# Core commands that can change the program through its transactions (or its
+# undo history), so a failure can say what it left behind from how they
+# ended.  Jobs (analysis, scripts) report that themselves; export_program
+# writes a file, which transactions do not show.
+PROGRAM_WRITE_COMMANDS: frozenset[str] = frozenset(
+    {
+        "create_function",
+        "delete_function",
+        "undo_program_change",
+        "redo_program_change",
+        "apply_edits",
+        "rename_function",
+        "rename_data",
+        "rename_variable",
+        "set_comment",
+        "create_label",
+        "set_function_prototype",
+        "set_local_variable_type",
+        "set_global_data_type",
+        "set_bytes",
+        "add_bookmark",
+        "delete_bookmark",
+        *DATATYPE_COMMANDS,
+        "bsim_register_target",
+        "bsim_apply_matches",
+        "bsim_update_target_signatures",
+    }
+)
+
 __all__ = [
     "BSIM_COMMANDS",
     "CORE_COMMANDS",
+    "PROGRAM_WRITE_COMMANDS",
     "DATATYPE_COMMANDS",
     "FUNCTION_COMMANDS",
     "MEMORY_COMMANDS",

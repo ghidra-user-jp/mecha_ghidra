@@ -18,7 +18,7 @@ docker compose logs --tail=100 mecha_ghidra
 
 [MCPクライアント](clients.ja.md)の接続先は `http://127.0.0.1:8081/mcp` です。起動時は `default` ターゲットのプロジェクト情報だけを登録します。新しいボリュームでは、解析ツールを使う前に次の手順を実行してください。
 
-`docker compose build` でもビルドできます。既定のプラットフォームは `linux/amd64` です。イメージはUID/GID `10001:10001` で動き、ポートはホストのループバックに公開します。ヘルスチェックはTCP接続を確認するもので、プログラムの読み込みやデコンパイルの成功までは確認しません。
+`docker compose build` でもビルドできます。既定のプラットフォームは `linux/amd64` です。イメージはUID/GID `10001:10001` で動き、ポートはホストのループバックに公開します。ヘルスチェックはTCP接続を確認するもので、プログラムの読み込みやデコンパイルの成功までは確認しません。イメージは `JAVA_HOME_OVERRIDE` にJDKの場所（`/opt/java`）を設定しています。そのため起動時に、PyGhidraがJVMを2回起動してJDKを探す時間（ネイティブで約0.08秒、amd64のエミュレーションで0.6〜0.7秒）がかかりません。
 
 ## 最初のインポート
 
@@ -36,7 +36,13 @@ docker compose logs --tail=100 mecha_ghidra
    {"target":"default","binary_path":"/samples/sample.bin"}
    ```
 
-3. `load_project_program` — インポート応答の `program` を `domain_path` に渡します。
+3. `get_operation` — 返されたジョブの`state`が`queued`または`running`の間は、その`operation_id`を指定して呼びます。1回の呼び出しで最大20秒待ちます。失敗したジョブは`operation_error.details.output_state`を返します。次の操作は[利用方法](usage.ja.md)を参照してください。ジョブの記録はコンテナの再起動で失われます。`docker compose stop`は実行中の解析をキャンセルし、プログラムをロールバックします。
+
+   ```json
+   {"operation_id":"<returned-operation-id>"}
+   ```
+
+4. `load_project_program` — 成功したジョブの`result.program`を`domain_path`に渡します。
 
    ```json
    {"target":"default","domain_path":"/sample.bin"}

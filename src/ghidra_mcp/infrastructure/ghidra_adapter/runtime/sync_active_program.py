@@ -7,10 +7,42 @@ from typing import Any, Dict
 
 from ghidra_headless.errors import HeadlessError, error_code_of
 from ghidra_headless.session import ProjectHandle
+from ghidra_mcp.domain import DomainError
+from ghidra_mcp.domain.output_state import says_nothing_changed
 
+from .errors import to_domain_error
 from .session_store import RuntimeSessionStore
 
 logger = logging.getLogger(__name__)
+
+
+class AutoCheckout:
+    """The checkout commit_project_program made itself, while it is neither undone nor taken over.
+
+    ``take_over_started`` is set once the check-in, or undoing the checkout
+    for a conflict, may have begun: a failure after that may have ended it.
+    """
+
+    def __init__(self) -> None:
+        self.pending = False
+        self.domain_path = ""
+        self.take_over_started = False
+
+    def undoes_after(self, error: DomainError) -> bool:
+        """Whether a commit that failed with ``error`` undoes this checkout.
+
+        An error saying nothing changed must not leave it behind.  Until
+        something takes the checkout over, undoing it loses nothing either: it
+        was made on an unchanged program, under the target's lock.  An error
+        that reports a completed step (the checkout itself, whose program
+        could not be reopened, say) is left as it is, since it describes
+        what is there now.
+        """
+        if not self.pending:
+            return False
+        if says_nothing_changed(error):
+            return True
+        return not self.take_over_started and not (error.details or {}).get("partial_success")
 
 
 class SyncActiveProgramMixin:
@@ -222,20 +254,44 @@ class SyncActiveProgramMixin:
         self,
         name: str,
         *,
-        domain_path: str,
+        auto: AutoCheckout,
+        failure: Exception | None = None,
     ) -> Dict[str, Any]:
-        self._run_sync_operation_for_domain_locked(
-            name,
-            domain_path,
-            operation=lambda active_handle, active_domain_path: active_handle.undo_checkout_program(
-                active_domain_path,
-                keep=False,
-            ),
-            save_before_close=False,
-        )
+        """Undo commit_project_program's automatic checkout, before a refusal or after a ``failure``.
+
+        Tried once.  Every error raised here names the rollback as its
+        operation.  Whenever the checkout may remain, the error says so and is
+        never retryable, so no reply claims that nothing changed while the
+        checkout is still there.
+        """
+        auto.pending = False
+        try:
+            self._run_sync_operation_for_domain_locked(
+                name,
+                auto.domain_path,
+                operation=lambda active_handle, active_domain_path: active_handle.undo_checkout_program(
+                    active_domain_path,
+                    keep=False,
+                ),
+                save_before_close=False,
+            )
+        except Exception as exc:
+            if isinstance(exc, DomainError) and (exc.details or {}).get("partial_success"):
+                # The undo ran and a later step failed (reopening the program, say): that error tells what is left.
+                raise to_domain_error(exc, operation="commit_project_program.rollback_auto_checkout") from exc
+            after = "" if failure is None else f" after {failure}"
+            logger.warning("could not undo the automatic checkout of '%s'%s: %s", name, after, exc)
+            raise self._partial_success_error(
+                operation="commit_project_program.rollback_auto_checkout",
+                message=(
+                    f"the commit stopped{after}, and undoing its automatic checkout failed, "
+                    f"so the program may still be checked out: {exc}"
+                ),
+                operation_completed=False,
+            ) from exc
         updated = self._read_postcondition_sync_status_locked(
             name,
-            domain_path=domain_path,
+            domain_path=auto.domain_path,
             operation="commit_project_program.rollback_auto_checkout",
         )
         if updated.get("is_checked_out"):

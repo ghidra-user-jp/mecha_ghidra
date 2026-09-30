@@ -42,11 +42,15 @@ JVMは `ghidra_headless.launcher.start_headless_jvm()` だけを経由して起�
 
 macOSでは特に重要です。MCP 2.xはワーカースレッドでハンドラを実行するため、そこで初めてAWTを初期化するとAppKitのメインスレッドを待ち続ける場合があります。JVM起動後のheadless設定では間に合いません。表示に依存する操作は `HEADLESS_UNSUPPORTED` で失敗させます。
 
+例外は、GUIのバックエンド（`--backend gui`、[GUIでのライブ共有](gui-live.ja.md)）の起動だけです。`ghidra_headless.gui.launch.GuiLaunch` が、PyGhidraの `GuiPyGhidraLauncher` で表示を使うJVMをメインスレッドで起動し、GhidraRunを実行します。macOSではメインスレッドがそのままAppKitのイベントループに入るので、MCPサーバーは別のスレッドで動かします。表示を使うJVMを起動する経路はこの一か所に限り、headlessのバックエンドとテストには `start_headless_jvm()` の規則をそのまま適用します。GUIのオブジェクトはSwingのイベントスレッド（EDT）で扱い、`ghidra_headless.gui.edt` の `run_on_edt`（開始までの期限付き）か `post_to_edt` を使います。これらは、呼び出したPythonのスレッドにGhidraのクラスローダーを設定します。JPypeが結び付けたスレッドはcontext class loaderを持たず、そのスレッドが最初にAWTを使うとEDTもクラスローダーを持たなくなり、FlatLafのテーマの画面を組み立てられないので、AWTやSwingを直接呼ばないでください。EDTの上では、decompileや人間の操作を待つ処理など、終わるまでの時間が決まらない処理をしないでください。
+
 ### プログラム・トランザクション・リソース
 
 プログラムは `DomainFile.getDomainObject(project, ...)` で開き、`Program.release(project)` で解放します。`GhidraProject.openProgram` に置き換えないでください。永続するバッチトランザクションによって `isChanged()` が見えなくなり、undoが使えず、`.gzf` のエクスポートも妨げられます。
 
 変更ごとにトランザクションが必要です。ハンドラは `core_helpers._txn`、セッション・実行環境側は `ghidra_headless.session.transactions.run_in_transaction` を使います。インポートしたプログラムは直後に閉じるため、GhidraProjectを使えます。コンテキストを交換するときは古いデコンパイラを解放し、交換に失敗したときは利用可能な既存コンテキストを保持します。
+
+プログラムへの書き込み（`_txn`、`apply_edits`、undoとredo）は、`ghidra_headless.session.write_boundary.write_boundary()` の書き込みの境界を通ります。headlessの境界は、呼び出したスレッドでtransactionを開きます。GUIのバックエンドは `ghidra_headless.gui.write_boundary.GuiWriteBoundary` に差し替え、ほかのtransactionが閉じるのを待ってから、transactionの区間をEDTで実行し、名前に `Mecha: ` を付けます。そのため、transactionの中でdecompileしないでください（その間GUIが止まります）。decompileは区間の前に済ませ、区間ではデータベースの更新だけを行います（`rename_variable` と `set_local_variable_type` を参照）。ハンドラにはbackendで分ける分岐を足さず、違いはProjectHandle（`ghidra_headless.gui.project_handle`）、書き込みの境界、ツールの公開の判定に集めます。
 
 共有コマンドでは、成功したリポジトリ接続確認を2秒間再利用します。バージョンとチェックアウト状態は毎回取得します。同期処理を変更するときも、この区別を維持してください。
 
@@ -80,9 +84,13 @@ uv run pytest \
   tests/test_runtime_resource_safety.py
 ```
 
-`/bin/ls` はmacOS/Linuxの例です。ほかの環境では適切なバイナリを指定してください。変更系の検証にはテスト専用のプロジェクトを使います。起動中のMCPサーバーやGUIと同じローカルプロジェクトを開かないでください。
+`/bin/ls` はmacOS/Linuxの例です。ほかの環境では適切なバイナリを指定してください。Windowsでは、同梱の `tests/fixtures/ghidra/WinHelloCPP.exe` を使えます。Windowsのpytestの `faulthandler` は、JVMが自分で処理するアクセス違反も表示するので、`-p no:faulthandler` を付けると出力が読みやすくなります。変更系の検証にはテスト専用のプロジェクトを使います。起動中のMCPサーバーやGUIと同じローカルプロジェクトを開かないでください。
+
+`tests/test_runtime_resource_safety.py` と `tests/test_runtime_script_commands.py` は、[`tests/fixtures/ghidra`](../tests/fixtures/ghidra/README.md) に同梱したGhidraの無害な演習用PEを使います。`GHIDRA_RUNTIME_BINARY_PATH` やGit管理外の `samples/` は不要で、新しいcloneやworktreeへローカルの検体をコピーする必要はありません。実機検証を無効にした通常のテストでも、同梱ファイルのSHA-256を確認します。
 
 `tests/test_runtime_mcp_transport.py` は同じ実機フラグで、実際のCLIを別プロセスとして起動し、stdioとlocalhostのStreamable HTTPを検証します。専用プロジェクトと小さなraw binaryを自動生成するため、`GHIDRA_RUNTIME_BINARY_PATH` は不要です。入出力スキーマ、変更とロールバック、大きな結果の取得に加え、HTTPの初期化なしの呼び出し・セッションIDなしの応答・別接続からのリソース取得を確認します。
+
+`tests/test_runtime_import_operations.py` も同梱した `WinHelloCPP.exe` をインポートします。検体を用意する必要はありません。`GHIDRA_IMPORT_GATE_SECONDS=305` を指定すると、クライアントの300秒のタイムアウトより長く、そのインポートの解析を止めておきます。既定値は0です。
 
 Jythonまで検証する場合は、使用するGhidraと同じバージョンのJython拡張を導入し、`GHIDRA_RUNTIME_VALIDATION=1`に加えて`GHIDRA_JYTHON_RUNTIME_VALIDATION=1`を指定して、`tests/test_runtime_script_commands.py`と`tests/test_runtime_mcp_transport.py`を実行します。この追加フラグではJythonが未導入なら失敗にし、MCPのstdio／HTTPにもJythonのケースを追加します。通常のGhidra設定から分離する場合は、Javaの`-Dapplication.settingsdir=...`で専用の設定領域を使い、その領域のGhidra拡張ディレクトリへインストールします。
 
@@ -96,6 +104,34 @@ Jythonまで検証する場合は、使用するGhidraと同じバージョン�
 [validate_bsim_runtime.sh](../scripts/validate_bsim_runtime.sh)はBSim実機フラグを有効にし、パスワード変数がなければTTYで入力できます。同じリポジトリへ接続する場合も、キャッシュのローカル `.gpr/.rep` パスは分けてください。
 
 共有側のcheckout、commit、別クライアントからの更新取得、試験ファイル削除は `tests/test_runtime_registry_shared_sync_commands.py` で検証します。BSimのカテゴリ・メタデータ変更には `GHIDRA_BSIM_MUTATION_VALIDATION=1` が必要です。カテゴリ定義は試験後も残るため、使い捨てのDBを指定してください。
+
+ビルドしたイメージを確かめるには、`MECHA_GHIDRA_DOCKER_IMAGE` にそのタグを指定して `tests/test_docker_image.py` を実行します。Dockerが必要ですが、手元のGhidraは要りません。試験は同じ演習用のPEをイメージから取り出し、イメージの既定のコマンドで起動して、HTTPでインポート・解析・逆コンパイル・編集をします。そのあと、`docker stop`、`SIGINT`、`SIGHUP` のそれぞれで、コンテナが終わる前にプロジェクトを閉じることを確かめます。CIの `docker-image` ジョブは、`./build_docker_image.sh` で `linux/amd64` のイメージをビルドし、この試験を実行します。
+
+GUIのバックエンドの受け入れ試験は、`tests/test_gui_integration.py`（一つのGUIのセッション）と `tests/test_gui_relay_integration.py`（中継と、中継が起動するruntime）です。画面のある環境（macOS、Windows、またはXvfbなどのXのディスプレイがあるLinux）で、単独のpytestとして実行します。
+
+```bash
+GHIDRA_GUI_VALIDATION=1 \
+GHIDRA_INSTALL_DIR=/absolute/path/to/ghidra \
+uv run pytest tests/test_gui_integration.py tests/test_gui_relay_integration.py
+```
+
+試験は場面ごとに `tests/gui_driver.py` を別プロセスで起動します。そのプロセスは実際のCLIをメインスレッドで動かし、別のスレッドからMCPで呼び出しながら、人間の操作をEDTでのGhidraのコマンドとして再現します。Projectは、`tests/gui_project_setup.py` が同梱の演習用PEからheadlessで作ったものの複製です。Ghidraの設定、キャッシュ、一時ファイルは、`-Dapplication.settingsdir`、`-Dapplication.cachedir`、`-Dapplication.tempdir` で試験のディレクトリの中に置くので、利用者のProject、設定、Ghidraのキャッシュには触れません。使用許諾の同意も、試験の設定の領域にだけ書き込みます。実行中はGhidraのウィンドウが何度か開いて閉じます。Dockerのコンテナで実行するときは、`--basetemp` をコンテナの中のディレクトリにします。Docker Desktopのバインドマウントでは、プロセスの間でProjectのlockが効かず、lockの試験が成り立ちません。
+
+中継の試験では、pytestはJVMを起動しません。試験は中継（`python -c "from ghidra_mcp.cli import main; ..." --backend gui`）のMCPクライアントで、中継がruntimeを `python -m ghidra_mcp.presentation.gui_runtime` で起動します。試験ごとに `HOME` と `XDG_STATE_HOME` を試験のディレクトリの中に向けるので、[runtimeのregistry](gui-live.ja.md#registry)は試験のものになり、試験は自分が見たruntimeをpidで止めます。ほかのGUIの試験も、registryを同じように向けます。
+
+Linuxの試験を、Linuxのない機械（macOSなど）から流すときは、`tests/docker/gui-tests.Dockerfile`（`docker-image` のイメージに、画面を表示できるJRE、Xvfb、試験の依存を足したもの）をビルドし、`tests/docker/run_gui_tests.sh` で両方の試験をXvfbの上で実行します。作業木は読み取り専用でマウントし、Projectと設定の領域はコンテナの中のファイルシステムに置きます。Apple Siliconでは、[Dockerの文書](docker.ja.md)と同じく `DOCKER_PLATFORM=linux/arm64` を付けてビルドします。
+
+```bash
+./build_docker_image.sh --tag mecha_ghidra:ci
+docker build --file tests/docker/gui-tests.Dockerfile --build-arg BASE_IMAGE=mecha_ghidra:ci --tag mecha_ghidra:gui-tests .
+docker run --rm --volume "$PWD:/work:ro" mecha_ghidra:gui-tests
+```
+
+Windowsでは、場面ごとに非表示のコンソールを作り、試験が送るCtrl+CとCtrl+Breakがその場面だけに届くようにします。registryの置き場所（`LOCALAPPDATA`）と一時ファイル（`TEMP`）も、試験のディレクトリに向けます。MCPのPython SDKは、Windowsではstdioのサーバーを、切り離しを許さず、終わるときに中のプロセスを終えるJob Objectの中で起動します。そのため中継の試験は、SDKのJobを外したクライアント（libuvを使うNodeやBunのクライアントと同じ扱い）で行い、SDKのJobのままの動作、入れ子のJob、切り離しを許すJob、中継のプロセスの木を終わらせるクライアント（Claude Codeと同じ動き）、HTTPの中継へのCtrl+Cは、Windowsだけの試験（G50）で確かめます。遅い環境では、`GHIDRA_GUI_TEST_TIME_SCALE`（既定は1）で、試験の側の待ち（起動、画面、試験用のProjectの作成）を伸ばします。判定の基準（G33で、decompileの間にEDTだけが止まってよい100ミリ秒など）は変わりません。
+
+CIの `gui-acceptance-windows` ジョブは、GitHubのWindowsのランナー（`windows-2025`）にTemurin 21とGhidraを入れ、GUIの単体の試験と、両方の受け入れ試験を実行します。切り離したruntimeがクライアントより長く動けるかは、ランナーが手順を動かすJob Objectで決まるので、試験の前に `tests/windows/runner_environment.py` で、そのJobと、画面を持つセッションかを記録します。CIの `gui-acceptance-ubuntu` ジョブは、GitHubのUbuntu 26.04のランナーで、UbuntuのOpenJDK 21のパッケージとXvfbを使って、同じ受け入れ試験を実行します（Ghidra 12.1はJDK 21を求め、Ubuntu 26.04の既定のJDKは25です）。Ghidraが使うJDKは、試験の前に記録します。
+
+中継（`ghidra_mcp.presentation.gui_relay`）はJSON-RPCをそのまま転送し、読むのは、runtimeの記録との設定の照合、ツールの少ないクライアントに見せるツールの絞り込み、HTTPのルーティングのヘッダーに要るものだけです。runtimeは、プロトコルの2026-07-28の版から、`MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` を本文と照合します。HTTPの中継は、クライアントが送ったこれらのヘッダーをそのまま渡し、runtimeが返したHTTPの状態をそのまま返します。stdioの中継は、HTTPのクライアントが送るもの（要求の `_meta` の版か `initialize` で決まった版、メソッド、ツールなどの名前）を付けます。runtimeが答えられないものには、中継の控えのサーバーが答えます。これは、このパッケージが中継のツールに対して作る同じMCPサーバーで、起動のゲートがすべての呼び出しを断るので、`initialize`、`tools/list`、エラーの形がruntimeと同じになります。runtimeとの通信には、MCP SDKのHTTPクライアントの `httpx2` を、環境変数のプロキシを使わず、接続を再利用しない設定で使います。
 
 <a id="native-builds"></a>
 

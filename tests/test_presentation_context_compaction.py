@@ -15,13 +15,13 @@ from ghidra_mcp.contracts.tool_spec import ToolProfile, filter_tool_specs, get_t
 from ghidra_mcp.presentation import cli
 from ghidra_mcp.presentation.config import ToolPresentationConfig
 from ghidra_mcp.presentation.mcp_server import create_mcp_server
+from ghidra_mcp.presentation.result_compaction import result_text
 from ghidra_mcp.presentation.result_resources import (
     ResultResourceStore,
     _call_tool_result_wire_chars,
     _delivered_inline_size,
     _preview_slice,
     _search_stored_result,
-    _serialize_result,
     maybe_compact_tool_result,
 )
 from ghidra_mcp.presentation.tool_dispatcher import dispatch_tool
@@ -1472,7 +1472,8 @@ def test_delivered_inline_size_stops_after_threshold():
         stop_after=150,
     )
 
-    assert measured == 200
+    # The brackets, two quoted items and the ",\n" between them: the rest is never serialized.
+    assert measured == 2 + 2 * 102 + 2
     assert payload.yielded == 2
 
 
@@ -1997,68 +1998,42 @@ def test_cli_exits_on_out_of_range_numeric_flag(flag, value):
 # --- #4: compaction decision must use the delivered (indent=2) size ---
 
 
-def test_compaction_decision_uses_delivered_indent2_size():
+def test_compaction_decision_uses_the_delivered_text_size():
     data = [{"name": f"func_{i}", "addr": f"0x{i:08x}", "note": "n" * 20} for i in range(30)]
-    compact_len = len(json.dumps(data, ensure_ascii=False, default=str))
     delivered = _delivered_inline_size(data, tool_name="list_functions")
-    # The gap is the whole point: FastMCP delivers indent=2, which is larger.
-    assert compact_len < delivered
+    # The text block is compact JSON with one item per line, and nothing else is measured.
+    assert delivered == len(result_text(data)) == len(json.dumps(data, separators=(",", ":"))) + len(data) - 1
 
-    store = ResultResourceStore(max_entries=4)
-    # Threshold sits above the compact size but below the delivered size. Measuring
-    # compact (the old bug) would send this inline over-cap; measuring delivered compacts it.
-    threshold = (compact_len + delivered) // 2
-    result = maybe_compact_tool_result(
-        tool_name="list_functions",
-        target="fw",
-        result=data,
-        config=ToolPresentationConfig(
-            large_result_threshold_chars=threshold,
-            large_result_preview_chars=min(200, threshold),
-        ),
-        store=store,
-    )
-    assert isinstance(result, CallToolResult)
-    assert result.structured_content["truncated"] is True
+    def compact(threshold):
+        return maybe_compact_tool_result(
+            tool_name="list_functions",
+            target="fw",
+            result=data,
+            config=ToolPresentationConfig(
+                large_result_threshold_chars=threshold,
+                large_result_preview_chars=min(200, threshold),
+            ),
+            store=ResultResourceStore(max_entries=4),
+        )
 
-    # Above the delivered size: returned inline, untouched.
-    inline = maybe_compact_tool_result(
-        tool_name="list_functions",
-        target="fw",
-        result=data,
-        config=ToolPresentationConfig(
-            large_result_threshold_chars=delivered + 100,
-            large_result_preview_chars=200,
-        ),
-        store=store,
-    )
-    assert inline is data
+    stored = compact(delivered - 1)
+    assert isinstance(stored, CallToolResult) and stored.structured_content["truncated"] is True
+    assert compact(delivered) is data
 
 
-def test_compaction_decision_uses_raw_string_item_size_for_lists():
-    # FastMCP emits each top-level string as raw text, without the quotes and
-    # escapes used by the compact JSON stored for resource reads. The compact
-    # representation therefore cannot short-circuit the delivered-size probe.
+def test_a_list_of_strings_is_delivered_as_a_json_array():
     data = [f"{idx:09d}" for idx in range(1200)]
-    threshold = 12000
     delivered = _delivered_inline_size(data, tool_name="search_bytes")
 
-    compact_text, *_ = _serialize_result(data, tool_name="search_bytes")
-    old_probe = len(compact_text) - (len(data) + 1)
-    assert delivered == 10800
-    assert old_probe == 13200
-
+    assert delivered == len(result_text(data)) == 1200 * 11 + 1199 * 2 + 2
+    assert json.loads(result_text(data)) == data
     result = maybe_compact_tool_result(
         tool_name="search_bytes",
         target="fw",
         result=data,
-        config=ToolPresentationConfig(
-            large_result_threshold_chars=threshold,
-            large_result_preview_chars=4000,
-        ),
+        config=ToolPresentationConfig(large_result_threshold_chars=delivered, large_result_preview_chars=4000),
         store=ResultResourceStore(max_entries=4),
     )
-
     assert result is data
 
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from cli_support import ToolHarness
+from cli_support import ToolHarness, import_and_wait
 from test_runtime_readonly_commands import (
     _ensure_project_created,
     _resolve_runtime_binary_path,
@@ -50,7 +50,7 @@ def test_import_and_decompile_from_worker_thread_do_not_block(tmp_path: Path):
             cli_tools.register_target(
                 target=target, project_location=str(project_dir), project_name="worker_validation"
             )
-            imported = cli_tools.import_program(target=target, binary_path=binary_path, analyze_imported=True)
+            imported = import_and_wait(cli_tools, target=target, binary_path=binary_path, analyze_imported=True)
             cli_tools.load_project_program(target=target, domain_path=imported["program"])
             functions = cli_tools.list_functions(offset=0, limit=1, target=target)
             outcome["decompiled"] = cli_tools.decompile_function(name=functions[0]["name"], target=target)
