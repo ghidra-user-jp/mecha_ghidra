@@ -37,6 +37,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from mcp import MCPError
 
 from ghidra_mcp.presentation.gui_registry import ProjectRegistry
 
@@ -507,7 +508,11 @@ def test_a_client_with_other_settings_is_refused_or_narrowed(workspace, tmp_path
             mismatch = structured(await session.call_tool("get_program_info", {}))
         async with session_for(workspace, "--tool-profile", "readonly") as session:
             tools = {tool.name for tool in (await session.list_tools()).tools}
-            refused = await session.call_tool("show_in_gui", {})
+            try:
+                await session.call_tool("show_in_gui", {})
+                refused = None
+            except MCPError as exc:  # an unpublished tool is a protocol error, not an isError result
+                refused = exc
             read = await call_when_ready(session, "get_program_info")
         return mismatch, tools, refused, read
 
@@ -515,7 +520,7 @@ def test_a_client_with_other_settings_is_refused_or_narrowed(workspace, tmp_path
     assert mismatch["error"]["code"] == "RUNTIME_CONFIG_MISMATCH"
     assert mismatch["error"]["details"]["differs"] == ["path_policy"]
     assert "show_in_gui" not in tools and "get_program_info" in tools
-    assert refused.is_error and "Unknown or unpublished tool" in json.dumps(refused.model_dump(mode="json"))
+    assert refused is not None and refused.code == -32602 and "Unknown or unpublished tool" in refused.message
     assert read["result"]["name"] == "WinHelloCPP.exe"
     assert len(workspace.runtime_processes()) == 1
 

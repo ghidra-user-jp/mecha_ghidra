@@ -100,6 +100,12 @@ def normalize_server_log_level(level: str | None) -> ServerLogLevel:
 
 
 _FALLBACK_PACKAGE_VERSION = "0.0.0"
+SERVER_TITLE = "Mecha Ghidra"
+SERVER_DESCRIPTION = (
+    "Ghidra analysis for AI agents: decompile, read and edit programs in local Ghidra projects, "
+    "with optional BSim and Ghidra Server support."
+)
+SERVER_WEBSITE_URL = "https://github.com/ghidra-user-jp/mecha_ghidra"
 
 
 def package_version(distribution: str = "mecha_ghidra") -> str:
@@ -161,6 +167,9 @@ class GhidraMCPServer(Server):
         super().__init__(
             "mecha_ghidra",
             version=package_version(),
+            title=SERVER_TITLE,
+            description=SERVER_DESCRIPTION,
+            website_url=SERVER_WEBSITE_URL,
             instructions=instructions,
             on_list_tools=self.handle_list_tools,
             on_call_tool=self.handle_call_tool,
@@ -178,7 +187,9 @@ class GhidraMCPServer(Server):
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None):
         binding = self.bindings.get(name)
         if binding is None:
-            raise ToolError(f"Unknown or unpublished tool: {name}")
+            # The spec (tools, error handling) calls an unknown tool a protocol error; only a tool
+            # that ran, or refused its arguments, answers with an isError result.
+            raise MCPError(code=INVALID_PARAMS, message=f"Unknown or unpublished tool: {name}", data={"name": name})
         spec = self.specs.get(name)
         writes = spec is not None and spec.writes
         try:
@@ -352,6 +363,8 @@ class GhidraMCPServer(Server):
     async def handle_call_tool(self, _context, params):
         try:
             return await self.call_tool(params.name, params.arguments)
+        except MCPError:
+            raise
         except Exception as exc:
             if not isinstance(exc, ToolError):
                 logger.exception("Unexpected failure in tool %s", params.name)

@@ -124,7 +124,9 @@ class TestForwarding:
         listed, refused = relay_run(scenario, runtime=runtime, specs=narrow)
         assert {tool["name"] for tool in listed["result"]["tools"]} == set(narrow) & set(GUI_SPECS)
         assert "show_in_gui" not in narrow
-        assert "Unknown or unpublished tool: show_in_gui" in json.dumps(refused)
+        assert "result" not in refused
+        assert refused["error"]["code"] == -32602
+        assert refused["error"]["message"] == "Unknown or unpublished tool: show_in_gui"
         assert [method for method, _ in runtime.calls] == ["tools/list"]
 
     def test_a_parse_error_and_a_batch(self):

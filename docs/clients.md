@@ -8,6 +8,12 @@ HTTP uses stateless JSON responses, with no MCP session ID or stateful compatibi
 
 With `--backend gui` ([live sharing with the GUI](gui-live.md)) both methods work. Over stdio, the client starts a relay: the first one starts the Ghidra GUI, later ones and other clients share it, and the GUI stays open when the client exits. Add `--backend gui` to the stdio arguments below, as in [the GUI examples](#gui). Over HTTP, connect to the server you started with `--backend gui --transport http`.
 
+## Protocol versions
+
+The server speaks MCP 2026-07-28 (`server/discover`, with the protocol version and capabilities in each request) and still answers clients that begin with the earlier `initialize` handshake. Nothing needs configuring: the client decides. As of September 2026, Claude Code 2.1.282 uses 2026-07-28 over HTTP, and over stdio the earlier handshake unless `MCP_PROTOCOL_NEGOTIATION=auto` is set; Codex and VS Code use the earlier handshake.
+
+Clients differ in what the model sees of a result: Claude Code 2.1.282, for example, passes on `structuredContent` and drops the text block that comes with it. Results carry their data and their instructions in both, including the preview and `read_hint` of a [large result](configuration.md#large-results).
+
 ## Tool discovery
 
 Mecha Ghidra exposes tool definitions through standard `tools/list`. Clients supporting tool search can load the relevant definitions on demand. The server's `instructions` describe binary-analysis tasks and search capabilities using the tools actually enabled by the profile and individual filters: a readonly profile does not advertise editing operations. Optional BSim, repository and script capabilities appear only when their tools are exposed. With the GUI tools exposed, they also say that a human edits the same programs in the GUI and that `show_in_gui` is for when the human asks. Detailed usage stays in tool descriptions and `ghidra://docs/tools/{tool_name}`.

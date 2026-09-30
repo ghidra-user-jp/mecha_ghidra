@@ -26,6 +26,9 @@ AIによる完全自動解析と、人への解析結果・知見の引き継ぎ
 - BSimで過去の解析結果を活用できる
   - 登録済みのバイナリから類似関数を検索
   - 検索先のバイナリを別の解析対象として開き、コードを比較
+- 新旧のMCPクライアントに対応する
+  - MCPの2026-07-28版で話し、`initialize` から始まる従来のクライアントにも応じる
+  - 結果を `structuredContent` とテキストの両方で返し、どちらか一方しかAIに見せないクライアントにも届ける
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture.dark.svg">

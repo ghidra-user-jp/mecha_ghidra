@@ -438,6 +438,14 @@ def _preview_for_budget(
     return preview, preview_desc, continue_offset
 
 
+def _read_hint(entry: StoredToolResult, continue_offset: int) -> str:
+    """How to read the rest of a stored result; both result channels carry it."""
+    return (
+        f"Continue with read_result(result_id='{entry.result_id}', offset_chars={continue_offset}) "
+        f"or find specific content with search_result(result_id='{entry.result_id}', pattern='...')."
+    )
+
+
 def _truncation_notice(
     entry: StoredToolResult,
     preview: str,
@@ -448,10 +456,7 @@ def _truncation_notice(
 ) -> str:
     lines = [
         f"[{display_tool}] result is {entry.size_chars:,} chars; {preview_desc}.",
-        (
-            f"Continue with read_result(result_id='{entry.result_id}', offset_chars={continue_offset}) "
-            f"or find specific content with search_result(result_id='{entry.result_id}', pattern='...')."
-        ),
+        _read_hint(entry, continue_offset),
         f"Clients with MCP resource support can read the full payload at {entry.uri}.",
     ]
     if preview:
@@ -493,11 +498,14 @@ def _build_compacted_result(
         "result_type": display_result_type,
         "item_count": entry.item_count,
         "metadata_truncated": tool_truncated or target_truncated or result_type_truncated,
+        # Some clients (Claude Code, for one) give the model structuredContent and drop the text
+        # block of a result that has one; others give it the text only.  Each channel carries the
+        # preview and how to continue, so neither kind of client is left with metadata alone.
+        "read_hint": _read_hint(entry, continue_offset),
+        "preview": preview,
     }
     return CallToolResult(
         content=[
-            # The preview must live in the text block: many clients only surface
-            # `content` to the model, so structuredContent-only data is invisible.
             TextContent(
                 type="text",
                 text=_truncation_notice(
@@ -563,6 +571,7 @@ def _uncacheable_result(
             "truncated": True,
             "result_unavailable": True,
             "operation_succeeded": True,
+            "notice": message,
             "size_chars": len(text),
             "size_bytes": size_bytes,
             "cache_max_bytes": cache_max_bytes,
@@ -586,24 +595,21 @@ def _presentation_failure_result(tool_name: str, target: str) -> CallToolResult:
         target,
         max_json_chars=_RESULT_METADATA_JSON_CHARS,
     )
+    message = (
+        f"RESULT_PRESENTATION_FAILED: [{display_tool}] completed successfully, "
+        "but its result could not be represented safely. Do not automatically "
+        "retry a side-effecting tool solely to recover this result."
+    )
     return CallToolResult(
         is_error=False,
-        content=[
-            TextContent(
-                type="text",
-                text=(
-                    f"RESULT_PRESENTATION_FAILED: [{display_tool}] completed successfully, "
-                    "but its result could not be represented safely. Do not automatically "
-                    "retry a side-effecting tool solely to recover this result."
-                ),
-            )
-        ],
+        content=[TextContent(type="text", text=message)],
         structured_content={
             "tool": display_tool,
             "target": display_target,
             "operation_succeeded": True,
             "result_unavailable": True,
             "presentation_failed": True,
+            "notice": message,
             "metadata_truncated": tool_truncated or target_truncated,
         },
     )

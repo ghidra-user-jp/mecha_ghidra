@@ -2,7 +2,7 @@
 
 # トラブルシューティング・移行
 
-ツールの失敗はMCPの `isError: true` で返します。ドメインエラーは `structuredContent.error` と同じ内容のJSONテキストに `code`、`message`、`retryable`、`hint`、`details` を保持します。処理の分岐には固定コードを使い、再試行前に部分的に完了した操作がないか `details` を確認してください。入力スキーマが受け付けない引数も `VALIDATION_ERROR` で、スキーマの示す理由を `structuredContent.error.message` に含みます。一括編集の項目別エラーは正常な応答内の `status` と `results` で確認します。大きな結果の取得は[別項目](configuration.ja.md#large-results)を参照してください。
+ツールの失敗はMCPの `isError: true` で返します。サーバーが公開していないツールの呼び出し（名前の誤りや、ツールのプロファイルやフィルターで隠したツール）だけは異なります。ツールが動いていないので、JSON-RPCのエラー `-32602`（`Unknown or unpublished tool`）を返します。`tools/list` と[ツールの公開設定](configuration.ja.md#tool-exposure)を確認してください。ドメインエラーは `structuredContent.error` と同じ内容のJSONテキストに `code`、`message`、`retryable`、`hint`、`details` を保持します。処理の分岐には固定コードを使い、再試行前に部分的に完了した操作がないか `details` を確認してください。入力スキーマが受け付けない引数も `VALIDATION_ERROR` で、スキーマの示す理由を `structuredContent.error.message` に含みます。一括編集の項目別エラーは正常な応答内の `status` と `results` で確認します。大きな結果の取得は[別項目](configuration.ja.md#large-results)を参照してください。
 
 ## 起動・接続の問題
 

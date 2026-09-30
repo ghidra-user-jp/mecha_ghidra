@@ -8,6 +8,12 @@ HTTPはMCPのセッションIDを発行せず、ステートレスなJSON応答�
 
 `--backend gui`（[GUIでのライブ共有](gui-live.ja.md)）では、どちらの接続方式も使えます。stdioでは、クライアントが中継を起動します。最初の中継がGhidraのGUIを起動し、後の中継や別のクライアントはそれを共有し、クライアントが終わってもGUIは開いたまま残ります。下のstdioの引数に `--backend gui` を足します（[GUIの設定の例](#gui)）。HTTPでは、`--backend gui --transport http` で起動したサーバーに接続します。
 
+## プロトコルの版
+
+サーバーは、MCPの2026-07-28版（`server/discover`。要求ごとにプロトコルの版と能力を載せる）で話し、`initialize` から始まる従来のクライアントにも応じます。設定は要りません。どちらで話すかはクライアントが決めます。2026年9月時点で、Claude Code 2.1.282は、HTTPでは2026-07-28版を使い、stdioでは `MCP_PROTOCOL_NEGOTIATION=auto` がなければ従来の方式を使います。CodexとVS Codeは従来の方式を使います。
+
+結果のどこまでがAIに渡るかは、クライアントで異なります。たとえばClaude Code 2.1.282は、`structuredContent` があると、同じ結果のテキストを渡しません。結果は、データと案内を両方に載せています。[大きな結果](configuration.ja.md#large-results)のプレビューと `read_hint` も同じです。
+
 ## ツールの発見
 
 Mecha Ghidraは標準の `tools/list` でツール定義を公開します。ツール検索に対応するクライアントは、必要な定義だけを後から読み込めます。サーバーの `instructions` は、プロファイルと個別フィルターで有効になったツールに基づいて、バイナリ解析の用途と検索する機能を説明します。readonly構成では編集機能を案内せず、BSim・共有リポジトリ・スクリプトも対応ツールの公開時だけ案内します。GUIのツールを公開するときは、人間がGUIで同じProgramを編集していることと、`show_in_gui` は頼まれたときだけ使うことも案内します。詳しい使い方はツール説明と `ghidra://docs/tools/{tool_name}` に置きます。
