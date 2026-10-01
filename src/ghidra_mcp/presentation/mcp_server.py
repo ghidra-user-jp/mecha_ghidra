@@ -238,6 +238,8 @@ class GhidraMCPServer(Server):
                 complete=partial(self.complete_result, name, kwargs),
                 already_waited=waited,
                 progress=progress,
+                # A read whose request goes away is stopped; a write that has started always finishes.
+                cancellable=spec is not None and not spec.writes,
             )
             if isinstance(value, DeferredReply):
                 self._check_output(name, value.result)

@@ -25,6 +25,7 @@ from typing import Any
 import anyio
 from mcp.types import CallToolResult, TextContent
 
+from ghidra_mcp.application.cancellation import CallCancellation, bound
 from ghidra_mcp.application.locks import CallLocks
 from ghidra_mcp.contracts.tool_spec import DEFER_AFTER_SECONDS, OPERATION_WAIT_MAX_SECONDS
 from ghidra_mcp.domain import DomainError, ErrorCode
@@ -70,9 +71,16 @@ class _Call:
         self.recorded: CallToolResult | None = None
         self._release_slot = release_slot
 
-    def run(self, function: Callable[..., Any], kwargs: dict[str, Any], tracked, prepare=None) -> Any:
+    def run(
+        self,
+        function: Callable[..., Any],
+        kwargs: dict[str, Any],
+        tracked,
+        prepare=None,
+        cancellation: CallCancellation | None = None,
+    ) -> Any:
         try:
-            with tracked():
+            with tracked(), bound(cancellation):
                 try:
                     if prepare is not None:
                         prepare()
@@ -151,6 +159,7 @@ class DeferredCalls:
         claimed: dict[str, Any] | None = None,
         defer: bool = True,
         progress: ProgressReporter | None = None,
+        cancellable: bool = False,
     ) -> Any:
         """Return the call's value, or a ``DeferredReply`` when it outlives the wait.
 
@@ -168,6 +177,11 @@ class DeferredCalls:
         Cancellation while waiting for a slot instead finishes the record as
         cancelled without running the tool. A resend gets that failure too.
         ``defer=False`` waits for the call however long it runs.
+
+        ``cancellable`` is for a read: when the request is cancelled while it waits, the call's
+        ``CallCancellation`` is cancelled, so the runtime stops the Ghidra work through its monitor and the
+        read gives its locks back.  A write that has started always finishes, and so does a call that was
+        deferred (its request was answered already).
 
         Waiting for a slot counts against the wait as well: with every slot
         still busy after it, the call does not run and the reply is a
@@ -197,6 +211,7 @@ class DeferredCalls:
             )
         if self._threads is None:
             self._threads = anyio.CapacityLimiter(math.inf)
+        cancellation = CallCancellation() if cancellable else None
         started_at = _now()
         # Its own task, so the wait below can end without cancelling the call:
         # a deferred call runs to completion even if its thread had not started.
@@ -207,21 +222,29 @@ class DeferredCalls:
                 kwargs,
                 partial(operations.tracked_call, call_locks=call_locks),
                 self.prepare_thread,
+                cancellation,
                 limiter=self._threads,
             )
         )
         task.add_done_callback(_consume)
-        # A client that asked for progress hears from the call every second while it waits (progress.py).
-        async with ticking(progress, f"{name}: running"):
-            with anyio.move_on_after(max(0.0, self.defer_after - already_waited) if defer else math.inf):
-                try:
-                    value = await asyncio.shield(task)
-                except Exception:
-                    if call.recorded is None:
-                        raise
-                    value = None
-                # A claimed call's record already holds the reply, completed on the call's thread.
-                return value if call.recorded is None else DeferredReply(call.recorded)
+        try:
+            # A client that asked for progress hears from the call every second while it waits (progress.py).
+            async with ticking(progress, f"{name}: running"):
+                with anyio.move_on_after(max(0.0, self.defer_after - already_waited) if defer else math.inf):
+                    try:
+                        value = await asyncio.shield(task)
+                    except Exception:
+                        if call.recorded is None:
+                            raise
+                        value = None
+                    # A claimed call's record already holds the reply, completed on the call's thread.
+                    return value if call.recorded is None else DeferredReply(call.recorded)
+        except anyio.get_cancelled_exc_class():
+            # The request went away, so nobody reads what the read finds: stop it.  (The deadline above is no
+            # cancellation: it ends in the deferred reply below, and a deferred call runs to its end.)
+            if cancellation is not None:
+                cancellation.cancel()
+            raise
         if claimed is not None:
             if task.done():
                 # It finished just as the wait ended; its record has the outcome too.

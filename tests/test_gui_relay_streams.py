@@ -279,6 +279,47 @@ class TestHttpRelay:
         assert runtime.closed.is_set() and runtime.messages_closed.is_set(), "the runtime's connection stayed open"
 
 
+class TestHttpRelayDisconnect:
+    def test_the_runtime_is_closed_when_the_client_goes_away_before_the_first_message(self):
+        """A call that waits has sent nothing yet: the relay must still notice its client leaving."""
+        runtime = Scripted("wait")
+
+        async def scenario(relay):
+            app = _http_relay_app(relay, path="/mcp", host="127.0.0.1")
+            body = json.dumps(http_call()).encode()
+            scope = {
+                "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1",
+                "method": "POST", "path": "/mcp", "raw_path": b"/mcp", "query_string": b"", "scheme": "http",
+                "server": ("127.0.0.1", 80), "client": ("127.0.0.1", 1),
+                "headers": [
+                    (b"host", b"127.0.0.1"), (b"content-type", b"application/json"), (b"accept", b"text/event-stream"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }  # fmt: skip
+            gone = asyncio.Event()
+            delivered = []
+
+            async def receive():
+                if not delivered:
+                    delivered.append(True)
+                    return {"type": "http.request", "body": body, "more_body": False}
+                await gone.wait()
+                return {"type": "http.disconnect"}
+
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            asyncio.get_running_loop().call_later(0.4, gone.set)  # the client leaves while nothing has come yet
+            with anyio.fail_after(5):
+                await app(scope, receive, send)
+            return sent
+
+        run_relay(scenario, runtime)
+        assert runtime.closed.is_set() and runtime.messages_closed.is_set(), "the runtime's connection stayed open"
+
+
 # ---- a real runtime: the product's HTTP app under uvicorn, reached through RuntimeEndpoint ------------------------
 
 
@@ -382,6 +423,56 @@ class TestStdioRelay:
             process.stdin.close()  # the client ends: the relay finishes what it has and exits
             assert process.wait(10) == 0, process.stderr.read().decode()
             assert process.stdout.read() == b"", "nothing but the messages above was written"
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(5)
+
+    def test_a_cancelled_request_closes_the_runtimes_connection_and_is_never_answered(self, tmp_path):
+        server = Path(__file__).with_name("relay_stdio_server.py")
+        marker = tmp_path / "upstream_closed"
+        process = subprocess.Popen(
+            [sys.executable, str(server), str(marker)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+
+            def send(message):
+                process.stdin.write(json.dumps(message).encode() + b"\n")
+                process.stdin.flush()
+
+            def read():
+                return json.loads(process.stdout.readline())
+
+            send(INIT)
+            read()
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            hanging = call("get_program_info", 8) | {
+                "params": {
+                    "name": "get_program_info",
+                    "arguments": {"hang": True},
+                    "_meta": {"progressToken": "p8"},
+                }
+            }
+            send(hanging)
+            assert read()["method"] == "notifications/progress", "the call is running"
+            send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 8}})
+            deadline = time.monotonic() + 5
+            while not marker.exists():
+                assert time.monotonic() < deadline, "the relay did not close its request to the runtime"
+                time.sleep(0.02)
+            # Another request is answered, and nothing was written for the cancelled one.
+            send(
+                call("get_program_info", 9)
+                | {"params": {"name": "get_program_info", "arguments": {}, "_meta": {"progressToken": "p9"}}}
+            )
+            messages = [read() for _ in range(4)]
+            assert [item.get("id") for item in messages if "id" in item] == [9]
+            process.stdin.close()
+            assert process.wait(10) == 0, process.stderr.read().decode()
+            assert process.stdout.read() == b""
         finally:
             if process.poll() is None:
                 process.kill()

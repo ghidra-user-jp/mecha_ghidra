@@ -192,6 +192,12 @@ No call keeps the client waiting for more than about 50 seconds, so it finishes 
 - `cancel_operation` stops a queued or running job. A job that has not started changing the program ends at once with `OPERATION_CANCELLED`; a running one rolls back at its next cancellation check. A deferred call cannot be cancelled.
 - When the server stops, it cancels running jobs and waits for deferred calls before closing projects. SIGTERM, SIGINT (Ctrl+C) and SIGHUP (a closed terminal or ssh session) all stop it this way, and it exits with 128 plus the signal number. Signals that arrive during this cleanup, including while it waits for a startup step in progress, wait until the projects are closed; SIGKILL skips it.
 
-If the client cancels an ordinary tool call while it is still waiting for an execution slot, the tool does not run. With a `request_id`, its record ends as `failed` with `OPERATION_CANCELLED` and `output_state: absent`; resending that ID returns the cancellation. Use a new ID to retry. A call that has already obtained its slot continues on the server after client cancellation.
+If the client cancels an ordinary tool call while it is still waiting for an execution slot, the tool does not run. With a `request_id`, its record ends as `failed` with `OPERATION_CANCELLED` and `output_state: absent`; resending that ID returns the cancellation. Use a new ID to retry. A call that has already obtained its slot is treated by what it is:
+
+- **A read** (a call that changes nothing, such as `decompile_function`, `search_bytes` or `batch_read`) is stopped through its Ghidra monitor, so it gives its locks back: a decompile stops, and a `batch_read` stops with the item it is on. A read cancelled while it still waits for its locks does not run once it gets them.
+- **A write** that has obtained its slot always finishes.
+- **A job**, and **a call that was deferred** (its request was answered already), go on to the end. `cancel_operation` stops a job.
+
+Over stdio the client cancels with `notifications/cancelled`; over HTTP it closes its connection. With protocol 2026-07-28 the MCP Python SDK's client closes it, but with the earlier handshake it sends `notifications/cancelled`, which a stateless server cannot match to a request: such a read goes on to its end unless the client drops the connection.
 
 The deferral applies only while `get_operation` is published, since it is the only way to read the outcome.

@@ -61,6 +61,22 @@ async def wait_and_collect_progress(client, root):
     assert len(reports) == len(values), "nothing follows the reply"
 
 
+async def cancel_a_running_read(client, root):
+    """Give up on a decompile while it runs: the server stops it, and goes on serving."""
+    call = asyncio.ensure_future(client.call_tool("decompile_function", DECOMPILE))
+    await wait_file(root / "started")
+    call.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await call
+    await wait_file(root / "cancelled", timeout=5)
+    assert not (root / "finished").exists(), "the read was stopped, not run to its end"
+    # The worker slot and the lock are free again.
+    (root / "release").touch()
+    with anyio.fail_after(5):
+        reply = await client.call_tool("decompile_function", DECOMPILE)
+    assert reply.structured_content == {"result": PSEUDOCODE}
+
+
 def test_a_deferred_call_over_stdio(tmp_path):
     params = StdioServerParameters(command=sys.executable, args=[SERVER, str(tmp_path)])
 
@@ -100,6 +116,17 @@ def test_stdio_eof_waits_for_a_deferred_call_before_closing(tmp_path):
     closed = (tmp_path / "shutdown_finished").stat().st_mtime_ns
     # The server stopped serving first, then waited for the call before closing Ghidra.
     assert entered <= finished <= closed
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+def test_cancelling_a_read_stops_it_over_stdio(tmp_path, mode):
+    params = StdioServerParameters(command=sys.executable, args=[SERVER, str(tmp_path), "--defer-after", "8"])
+
+    async def scenario():
+        async with Client(params, mode=mode, read_timeout_seconds=10) as client:
+            await cancel_a_running_read(client, tmp_path)
+
+    asyncio.run(scenario())
 
 
 @contextlib.contextmanager
@@ -154,6 +181,49 @@ def test_a_waiting_call_reports_progress_over_http(tmp_path, mode):
     async def scenario(url):
         async with Client(url, mode=mode, read_timeout_seconds=10) as client:
             await wait_and_collect_progress(client, tmp_path)
+
+    with serving_http(tmp_path, "--defer-after", "8") as url:
+        asyncio.run(scenario(url))
+
+
+def test_cancelling_a_read_stops_it_over_http(tmp_path):
+    """On the 2026-07-28 wire the SDK client cancels a request by closing its connection.
+
+    On the earlier wire it posts notifications/cancelled instead, which a stateless server cannot match to the
+    request, so only a client that closes the connection stops a read there (the next test).
+    """
+
+    async def scenario(url):
+        async with Client(url, read_timeout_seconds=10) as client:
+            await cancel_a_running_read(client, tmp_path)
+
+    with serving_http(tmp_path, "--defer-after", "8") as url:
+        asyncio.run(scenario(url))
+
+
+@pytest.mark.parametrize("wire", ["2026-07-28", "2025-11-25"])
+def test_a_dropped_http_connection_stops_the_read_on_both_wires(tmp_path, wire):
+    import httpx2
+
+    headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": wire}
+    params = {"name": "decompile_function", "arguments": DECOMPILE}
+    if wire == "2026-07-28":
+        headers |= {"Mcp-Method": "tools/call", "Mcp-Name": "decompile_function"}
+        params["_meta"] = {
+            "io.modelcontextprotocol/protocolVersion": wire,
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+
+    async def scenario(url):
+        async with httpx2.AsyncClient(trust_env=False, timeout=30) as client:
+            request = asyncio.ensure_future(client.post(url, json=body, headers=headers))
+            await wait_file(tmp_path / "started")
+            request.cancel()  # httpx closes the connection
+            with contextlib.suppress(asyncio.CancelledError):
+                await request
+            await wait_file(tmp_path / "cancelled", timeout=5)
+        assert not (tmp_path / "finished").exists()
 
     with serving_http(tmp_path, "--defer-after", "8") as url:
         asyncio.run(scenario(url))

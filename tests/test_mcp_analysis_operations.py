@@ -338,3 +338,25 @@ def test_a_job_that_finishes_before_the_first_interval_is_not_reported(jobs):
     reports = Reports(interval=5.0)
     record = record_of(call_with_reports(jobs, "analyze_program", {"target": "default", "wait_seconds": 5}, reports))
     assert record["state"] == "succeeded" and reports.received == []
+
+
+def test_cancelling_the_request_that_waits_for_a_job_leaves_the_job_running(jobs):
+    """Only cancel_operation stops a job: the client that stops waiting for it does not."""
+    request_id = "7d3c2e1a-5b4f-4a6e-9c8d-0f1e2d3c4b5a"
+
+    async def scenario():
+        mcp = jobs.bundle.runtime.mcp
+        task = asyncio.ensure_future(
+            mcp.call_tool("analyze_program", {"target": "default", "wait_seconds": 5, "request_id": request_id})
+        )
+        assert await asyncio.to_thread(jobs.core.entered.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.3)
+        assert not jobs.core.stopped_by_cancel, "the job's monitor must stay uncancelled"
+        jobs.core.release.set()
+        return await mcp.call_tool("get_operation", {"request_id": request_id, "wait_seconds": 5})
+
+    reply = asyncio.run(scenario())
+    assert record_of(reply)["state"] == "succeeded" and len(jobs.core.calls) == 1

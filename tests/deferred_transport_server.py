@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 
+from ghidra_mcp.application.cancellation import current_call_cancellation
 from ghidra_mcp.application.services.operations import OperationManager
 from ghidra_mcp.contracts.tool_spec import get_tool_spec
 from ghidra_mcp.presentation import cli, progress
@@ -30,9 +31,14 @@ class Registry:
         self.operations = OperationManager(Targets())
 
     def call(self, command, params, target):
+        cancellation = current_call_cancellation()
         (self.root / "started").touch()
         deadline = time.monotonic() + 15
         while not (self.root / "release").exists():
+            if cancellation is not None and cancellation.cancelled:
+                # What the runtime does through the call's Ghidra monitor when its request was cancelled.
+                (self.root / "cancelled").touch()
+                raise RuntimeError("the request was cancelled")
             if time.monotonic() > deadline:
                 raise RuntimeError("test did not release the call")
             threading.Event().wait(0.005)

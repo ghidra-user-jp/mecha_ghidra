@@ -41,9 +41,11 @@ class HeadlessContext(object):
         self._decompiler = None
 
     def monitor(self):
-        # ConsoleTaskMonitor prints progress to Java's System.out, which shares
-        # fd 1 with the MCP stdio transport and would corrupt the JSON-RPC stream.
-        return TaskMonitor.DUMMY
+        # The running command's own monitor, if the runtime gave it one: a job's, or a read's that its request
+        # can cancel.  Otherwise a silent one: ConsoleTaskMonitor prints progress to Java's System.out, which
+        # shares fd 1 with the MCP stdio transport and would corrupt the JSON-RPC stream.
+        current = current_task_monitor()
+        return current if current is not None else TaskMonitor.DUMMY
 
     def decompiler(self, factory):
         """Return the shared decompiler, opening one with ``factory`` when needed."""

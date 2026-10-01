@@ -196,7 +196,7 @@ COMMAND_TO_IMPL = {
 
 # command -> dependency profile for keyword argument injection into command impl.
 COMMAND_PROFILE = {
-    "batch_read": ("ensure_context", "execute_read"),
+    "batch_read": ("ensure_context", "execute_read", "current_task_monitor"),
     "get_xrefs": ("ensure_context", "get_address", "iter_items"),
     "get_call_edges": ("ensure_context", "get_address", "find_function_by_name", "iter_items"),
     "disassemble": ("ensure_context", "get_address", "find_function_by_name", "iter_items", "comment_types"),

@@ -38,6 +38,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import anyio
@@ -881,6 +882,9 @@ async def serve_stdio(relay: Relay) -> None:
     ``initialize`` is answered before the next line is read, since the
     protocol version it settles goes with every later request.  Anything else
     that writes to fd 1 goes to stderr instead.
+
+    ``notifications/cancelled`` for a request still in flight ends that request: the relay
+    closes its connection to the runtime, which then cancels the call, and writes no reply.
     """
     wire = os.fdopen(os.dup(1), "wb", buffering=0)
     os.dup2(2, 1)
@@ -895,13 +899,13 @@ async def serve_stdio(relay: Relay) -> None:
     threading.Thread(target=read_stdin, name="relay-stdin", daemon=True).start()
     write_lock = asyncio.Lock()
     pending: set[asyncio.Task] = set()
+    in_flight: dict[Any, asyncio.Task] = {}
 
     async def write(message: Any) -> None:
         async with write_lock:
             wire.write(json.dumps(message).encode() + b"\n")
 
-    async def answer(line: bytes) -> None:
-        message = single_message(line)
+    async def answer(line: bytes, message: dict[str, Any] | None) -> None:
         if message is None:  # a batch, or no JSON-RPC object
             reply = await relay.handle_body(line)
             if reply is not None:
@@ -913,22 +917,31 @@ async def serve_stdio(relay: Relay) -> None:
                 if item is not KEEPALIVE:  # a stdio client needs no ping
                     await write(item)
 
-    def is_initialize(line: bytes) -> bool:
-        with contextlib.suppress(ValueError):
-            message = json.loads(line)
-            return isinstance(message, dict) and message.get("method") == "initialize"
-        return False
+    def forget(request_id: Any, task: asyncio.Task) -> None:
+        pending.discard(task)
+        if in_flight.get(request_id) is task:
+            del in_flight[request_id]
 
     try:
         while (line := await lines.get()) is not None:
             if not line.strip():
                 continue
-            if is_initialize(line):
-                await answer(line)
+            message = single_message(line)
+            if message is not None and message.get("method") == "notifications/cancelled":
+                params = message.get("params")
+                cancelled = in_flight.get(params.get("requestId") if isinstance(params, dict) else None)
+                if cancelled is not None:
+                    cancelled.cancel()
+                continue  # the runtime keeps no request of ours to cancel: nothing to forward
+            if message is not None and message.get("method") == "initialize":
+                await answer(line, message)
                 continue
-            task = asyncio.create_task(answer(line))
+            task = asyncio.create_task(answer(line, message))
             pending.add(task)
-            task.add_done_callback(pending.discard)
+            request_id = message.get("id") if message is not None and "method" in message else None
+            if request_id is not None:
+                in_flight[request_id] = task
+            task.add_done_callback(partial(forget, request_id))
         if pending:
             await asyncio.wait(pending, timeout=5)
     finally:
@@ -949,6 +962,32 @@ _EVENT_STREAM_HEADERS = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
+
+
+CLIENT_GONE = object()
+DISCONNECT_POLL_SECONDS = 0.25
+
+
+async def until_disconnected(request, work):
+    """What ``await work()`` returns, or ``CLIENT_GONE`` if the HTTP client disconnects first.
+
+    Starlette tells an endpoint nothing of a disconnect while it waits, only a streaming response.
+    """
+    outcome: list[Any] = []
+    async with anyio.create_task_group() as group:
+
+        async def watch() -> None:
+            while not await request.is_disconnected():
+                await anyio.sleep(DISCONNECT_POLL_SECONDS)
+            group.cancel_scope.cancel()
+
+        async def run() -> None:
+            outcome.append(await work())
+            group.cancel_scope.cancel()
+
+        group.start_soon(watch)
+        group.start_soon(run)
+    return outcome[0] if outcome else CLIENT_GONE
 
 
 def _event(message: Any) -> bytes:
@@ -992,20 +1031,30 @@ def _http_relay_app(relay: Relay, *, path: str, host: str):
         # stream, from the first notification on, like the runtime's own.  A client of protocol 2026-07-28
         # or later reads the status too (400 for an unsupported version).
         stack = contextlib.AsyncExitStack()
-        try:
+
+        async def first_message():
             reply = await stack.enter_async_context(relay.open(message, routing))
             messages = reply.messages.__aiter__()
             first = await anext(messages, None)
             while first is KEEPALIVE:
                 first = await anext(messages, None)
-            if first is None or "method" not in first:
-                await stack.aclose()
-                if first is None:
-                    return Response(status_code=202)
-                return Response(json.dumps(first), status_code=reply.status, media_type="application/json")
+            return reply, messages, first
+
+        try:
+            found = await until_disconnected(request, first_message)
         except BaseException:
             await stack.aclose()
             raise
+        if found is CLIENT_GONE:
+            # The runtime's connection closes with the relay's, and the runtime cancels the call.
+            await stack.aclose()
+            return Response(status_code=499)
+        reply, messages, first = found
+        if first is None or "method" not in first:
+            await stack.aclose()
+            if first is None:
+                return Response(status_code=202)
+            return Response(json.dumps(first), status_code=reply.status, media_type="application/json")
 
         async def events():
             try:
