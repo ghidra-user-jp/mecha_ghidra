@@ -14,7 +14,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 from mcp.types import CallToolResult, TextContent
 
 from ghidra_headless.handlers.commands.batch_read import batch_read
@@ -32,7 +32,7 @@ from ghidra_mcp.presentation.result_errors import present_tool_error
 from ghidra_mcp.presentation.result_store import ResultResourceStore
 from ghidra_mcp.presentation.result_tools import build_result_tools
 from ghidra_mcp.presentation.tool_binding import complete_tool_result, error_result
-from ghidra_mcp.presentation.tool_registry import build_tool_object
+from ghidra_mcp.presentation.tool_registry import build_tool_object, spec_wire_output_schema
 
 
 def published_schema(tool_name: str) -> dict:
@@ -84,6 +84,46 @@ def test_uncacheable_result_matches_published_schema():
 @pytest.mark.parametrize("tool", ["decompile_function", "batch_read", "run_script"])
 def test_presentation_failure_result_matches_published_schema(tool):
     validate(published_schema(tool), _presentation_failure_result(tool, "fw"))
+
+
+def _uncacheable():
+    return _uncacheable_result(
+        tool_name="decompile_function",
+        target="fw",
+        text="x" * 4000,
+        size_bytes=4000,
+        mime_type="text/x-c",
+        result_type="string",
+        item_count=None,
+        cache_max_bytes=100,
+        cache_max_memory_bytes=None,
+    )
+
+
+def _stored():
+    entry = stored_entry(ResultResourceStore())
+    return _build_compacted_result(entry, preview=entry.text[:40], preview_desc="first 40 chars", continue_offset=40)
+
+
+@pytest.mark.parametrize(
+    ("build", "field"),
+    [
+        (_stored, "preview"),
+        (_stored, "read_hint"),
+        (_uncacheable, "notice"),
+        (lambda: _presentation_failure_result("decompile_function", "fw"), "notice"),
+    ],
+    ids=["stored-preview", "stored-read-hint", "too-large-notice", "presentation-failure-notice"],
+)
+def test_the_documented_schema_requires_what_structured_content_must_carry(build, field):
+    """Clients that read structuredContent only need these fields (spec: the two result channels agree)."""
+    schema = spec_wire_output_schema(get_tool_spec("decompile_function"))
+    result = build()
+    validate(schema, result)
+    assert isinstance(result.structured_content[field], str) and result.structured_content[field]
+    del result.structured_content[field]
+    with pytest.raises(ValidationError):
+        validate(schema, result)
 
 
 # --- result_errors -----------------------------------------------------------
@@ -215,7 +255,7 @@ def test_batch_result_with_omitted_summaries_matches_published_schema(cache_max_
 
 @pytest.mark.parametrize("tool", ["list_targets", "batch_read", "run_script"])
 def test_error_result_matches_published_schema(tool):
-    validate(published_schema(tool), error_result(f"Unknown or unpublished tool: {tool}"))
+    validate(published_schema(tool), error_result(f"Error executing tool {tool}"))
 
 
 def test_error_result_matches_result_tool_schemas():

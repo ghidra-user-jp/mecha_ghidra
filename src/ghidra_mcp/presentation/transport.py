@@ -87,12 +87,21 @@ def _apply_log_level(args: Any) -> None:
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper(), logging.INFO))
 
 
-def streamable_http_run_kwargs(*, args: Any, logger: logging.Logger, announce: bool = True) -> dict[str, Any]:
+def streamable_http_run_kwargs(
+    *, args: Any, logger: logging.Logger, announce: bool = True, streaming: bool = True
+) -> dict[str, Any]:
     """HTTP listener and public ``Server.streamable_http_app`` options.
 
     ``announce=False`` leaves out the line that names the listener, for a
     caller that listens elsewhere (a detached GUI runtime takes a free
     loopback port and names it once it has registered).
+
+    ``streaming=True`` lets a response be a Server-Sent Events stream.  For a request of
+    protocol 2026-07-28 the SDK commits to one only when the handler has something to
+    say before its result (a progress notification) or runs longer than its ping
+    interval; every other response is one JSON body.  A client that begins with
+    ``initialize`` gets every response as a stream.  ``streaming=False`` always answers
+    with JSON.
     """
 
     _apply_log_level(args)
@@ -100,25 +109,24 @@ def streamable_http_run_kwargs(*, args: Any, logger: logging.Logger, announce: b
     port = args.mcp_port or DEFAULT_HTTP_PORT
     path = normalize_streamable_http_path(args.mcp_path)
     if announce:
-        logger.info("Starting MCP in stateless Streamable HTTP mode (JSON responses): http://%s:%s%s", host, port, path)
+        logger.info("Starting MCP in stateless Streamable HTTP mode: http://%s:%s%s", host, port, path)
     return {
         "host": host,
         "port": port,
         "streamable_http_path": path,
-        # Official Python SDK's recommended Streamable HTTP configuration.
         # Application state (Ghidra targets and result cache) outlives requests.
         "stateless_http": True,
-        "json_response": True,
+        "json_response": not streaming,
         "transport_security": transport_security_for_host(host=host, logger=logger),
     }
 
 
 def run_kwargs_for_transport(
-    *, transport: str, args: Any, logger: logging.Logger, announce: bool = True
+    *, transport: str, args: Any, logger: logging.Logger, announce: bool = True, streaming: bool = True
 ) -> dict[str, Any]:
     normalized = normalize_transport(transport)
     if normalized == "streamable-http":
-        return streamable_http_run_kwargs(args=args, logger=logger, announce=announce)
+        return streamable_http_run_kwargs(args=args, logger=logger, announce=announce, streaming=streaming)
     if normalized == "stdio":
         return {}
     raise ValueError(f"Unsupported transport: {transport}")

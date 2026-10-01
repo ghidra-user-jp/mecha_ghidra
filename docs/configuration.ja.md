@@ -20,9 +20,9 @@
 
 `--backend gui` では、`--project-location` に既存のProjectが要ります。stdioでは、プロセスはそのProjectのGUIのruntimeへの中継になり、runtimeが動いていなければ起動します。HTTPでは、プロセスがそのruntimeになるか、runtimeが既に動いていればその中継になります（[起動](gui-live.ja.md#startup)）。`--ghidra-server-user`、`--ghidra-server-password`、`--ghidra-server-password-env` と、別のProjectを指す `--session` はエラーになり、`--bsim-url`、`--bsim-password`、`--bsim-password-env`、`--bsim-remote-cache-dir`、`--script-root` は効果がありません（[使えない機能](gui-live.ja.md#limits)）。
 
-Streamable HTTP（`--transport http` または `streamable-http`）は、[公式Python SDKの推奨設定](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py)に合わせて `stateless_http=True`、`json_response=True` に固定しています。MCPのセッションIDを発行せず、各要求にJSONで応答します。ステートフルに戻す互換設定はありません。Ghidraのターゲット・プログラムの変更状態・結果キャッシュはHTTP要求をまたいでサーバープロセス内に保持します。`--session` はGhidraのターゲット設定であり、HTTPセッションとは別です。同じ `target` と返された `result_id` を使って処理を続けてください。再起動すると結果キャッシュは消え、稼働中も既存の容量制限が適用されます。
+Streamable HTTP（`--transport http` または `streamable-http`）は、[公式Python SDKの設定例](https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/snippets/servers/streamable_config.py)が勧める `stateless_http=True` に固定しています。MCPのセッションIDは発行せず、ステートフルに戻す互換設定もありません。Ghidraのターゲット・プログラムの変更状態・結果キャッシュはHTTP要求をまたいでサーバープロセス内に保持します。`--session` はGhidraのターゲット設定であり、HTTPセッションとは別です。同じ `target` と返された `result_id` を使って処理を続けてください。再起動すると結果キャッシュは消え、稼働中も既存の容量制限が適用されます。
 
-HTTPは最終結果をJSONで返し、SSEによる進捗・keepaliveイベントは送りません。それでも、どの呼び出しも約50秒以内に応答します。ジョブは`wait_seconds`（最大50秒）以内に、それ以外の呼び出しは40秒で終わらなければ`deferred: true`を返してサーバー上で処理を続けます（[長い呼び出し](usage.ja.md#long-calls)）。そのため、よくあるクライアントやリバースプロキシの60秒の期限で足ります。応答が失われても変更処理は完了している可能性があるため、変更操作を再試行する前に状態を確認します。通信のステートレス化によって、複数プロセス間でGhidraの状態や結果キャッシュが共有されるわけではありません。
+応答は、JSONの本文1つか、結果より先に送るものがあるときの `text/event-stream` です。2026-07-28版では、クライアントが `progressToken` を付けて呼び出しが待つとき（1秒ごとに進捗通知。[長い呼び出し](usage.ja.md#long-calls)）と、呼び出しが15秒を超えて続くとき（15秒ごとにkeepaliveのコメント）に限って、イベントストリームになります。すぐ終わる呼び出しは、JSONのままです。`initialize` から始まるクライアントには、どの応答もイベントストリームで返り、ほかに送るものがなければ結果だけが入ります。そのためクライアントは、MCPの仕様のとおり `application/json` と `text/event-stream` の両方を受け付ける必要があります。`application/json` だけを受け付けるクライアントには `406` を返します。どの呼び出しも約50秒以内に応答します。ジョブは`wait_seconds`（最大50秒）以内に、それ以外の呼び出しは40秒で終わらなければ`deferred: true`を返してサーバー上で処理を続けます（[長い呼び出し](usage.ja.md#long-calls)）。そのため、よくあるクライアントやリバースプロキシの60秒の期限で足ります。応答が失われても変更処理は完了している可能性があるため、変更操作を再試行する前に状態を確認します。通信のステートレス化によって、複数プロセス間でGhidraの状態や結果キャッシュが共有されるわけではありません。
 
 ローカルHTTPでは[アクセス先を制限した起動例](usage.ja.md#local-setup)を使ってください。MCPエンドポイントにクライアント認証機能は組み込まれていません。Ghidra ServerとBSimのパスワードは各バックエンドの認証用であり、MCPクライアントの認証には使われません。
 
@@ -155,9 +155,11 @@ Ghidra スクリプト（Java、Jython、PyGhidra）はサーバープロセス�
 
 `search_result(result_id, pattern, context_chars, max_matches)` は正規表現で検索します。スニペットは最大100件、前後の文脈は片側最大2,000文字です。一致位置はそのまま `read_result` に渡せます。`max_matches=0` ではスニペットを返さず最大10,000件まで数えます。全件数として扱う前に `scan_truncated` を確認してください。
 
+プレビューと続きの読み方は、テキストと `structuredContent`（`preview`、`read_hint`）の両方に載せます。AIにどちらか一方しか渡さないクライアントがあるためです。下の予算は両方を合わせて数えるので、応答全体はしきい値に収まります。
+
 テキストのプレビューは可能な場合に行境界で終えます。JSONは収まる項目を完全な形で返しますが、先頭部分へのフォールバックでは有効なJSONにならない場合があります。リスト・マップにはプレビュー上限の4分の1まで、`CallToolResult` 全体には2分の1までを使い、応答の付加情報に応じてさらに縮めます。空リストと閾値以下の結果はそのまま返します。ページ付き結果では、先頭数件の `items` と元の `has_more` / `next_cursor` を表示します。`preview_kind=summary` は合成表示で、全文の接頭辞ではありません。生テキストを読む場合は `continue_offset_chars`（この場合0）から取得してください。
 
-結果がキャッシュに収まらなくても、ツール自体の処理は成功しています。短くなる場合は `RESULT_TOO_LARGE` を返し、全文を後から取得できません。それより短い場合は全文を含む応答を維持します。キャッシュからの追い出しやサーバー再起動でもIDは使えなくなります。**出力を取り直すために変更系ツールを自動で再実行しないでください。** 安全だと分かっている読み取り操作は、検索範囲やキャッシュ容量を調整してから明示的に再実行します。
+結果がキャッシュに収まらなくても、ツール自体の処理は成功しています。短くなる場合は `RESULT_TOO_LARGE`（`structuredContent.notice` にも同じ文）を返し、全文を後から取得できません。それより短い場合は全文を含む応答を維持します。キャッシュからの追い出しやサーバー再起動でもIDは使えなくなります。**出力を取り直すために変更系ツールを自動で再実行しないでください。** 安全だと分かっている読み取り操作は、検索範囲やキャッシュ容量を調整してから明示的に再実行します。
 
 大きなドメインエラーも、短くなる場合には診断全文を保存します。`isError=true`、エラーコード、実行・トランザクション状態は維持し、`result_id` から元のエラー全体を取得できます。キャッシュに収まらない場合は `result_unavailable=true` を返します。小さいエラーと `inline` モードの応答形式は従来どおりです。
 

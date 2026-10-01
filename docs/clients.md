@@ -4,9 +4,15 @@
 
 Choose one connection method per client. **HTTP** connects to a server you start separately; **stdio** lets the client start and stop its own server process. For HTTP, complete [local setup](usage.md#local-setup) or [Docker setup](docker.md) first.
 
-HTTP uses stateless JSON responses, with no MCP session ID or stateful compatibility option. See [transport configuration](configuration.md#transports) for application state and timeout behavior.
+HTTP is stateless, with no MCP session ID or stateful compatibility option. A reply is JSON, or an event stream while a call reports progress, so the client must accept both, as the MCP specification requires. See [transport configuration](configuration.md#transports) for application state and timeout behavior.
 
 With `--backend gui` ([live sharing with the GUI](gui-live.md)) both methods work. Over stdio, the client starts a relay: the first one starts the Ghidra GUI, later ones and other clients share it, and the GUI stays open when the client exits. Add `--backend gui` to the stdio arguments below, as in [the GUI examples](#gui). Over HTTP, connect to the server you started with `--backend gui --transport http`.
+
+## Protocol versions
+
+The server speaks MCP 2026-07-28 (`server/discover`, with the protocol version and capabilities in each request) and still answers clients that begin with the earlier `initialize` handshake. Nothing needs configuring: the client decides. As of September 2026, Claude Code 2.1.282 uses 2026-07-28 over HTTP, and over stdio the earlier handshake unless `MCP_PROTOCOL_NEGOTIATION=auto` is set; Codex and VS Code use the earlier handshake.
+
+Clients differ in what the model sees of a result: Claude Code 2.1.282, for example, passes on `structuredContent` and drops the text block that comes with it. Results carry their data and their instructions in both, including the preview and `read_hint` of a [large result](configuration.md#large-results).
 
 ## Tool discovery
 

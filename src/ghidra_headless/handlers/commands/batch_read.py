@@ -30,7 +30,7 @@ def _java_class_name(exc):
     return None
 
 
-def batch_read(params, *, ensure_context, execute_read, clock=time.monotonic):
+def batch_read(params, *, ensure_context, execute_read, current_task_monitor=None, clock=time.monotonic):
     requests = params.get("requests")
     validate_requests(requests)
     timeout = params.get("timeout_seconds", 10)
@@ -41,6 +41,8 @@ def batch_read(params, *, ensure_context, execute_read, clock=time.monotonic):
     if params.get("expected_revision") not in (None, metadata["revision"]):
         raise HeadlessError("SESSION_CHANGED: program changed before batch_read")
     deadline = clock() + timeout
+    # The monitor its request can cancel (None when nothing can): the batch stops at the next item.
+    call_monitor = current_task_monitor() if current_task_monitor is not None else None
     items = []
     # Leave room for identities, statuses and bounded errors even when data
     # exhausts the payload budget. Native allocation itself is not bounded here.
@@ -49,6 +51,8 @@ def batch_read(params, *, ensure_context, execute_read, clock=time.monotonic):
     )
     result_exhausted = False
     for request in requests:
+        if call_monitor is not None and call_monitor.isCancelled():
+            raise HeadlessError("OPERATION_CANCELLED: the request was cancelled during batch_read")
         # A GUI/background edit is not excluded by the MCP target lock.
         if ensure_context() is not ctx or program_revision(ctx) != metadata["revision"]:
             raise HeadlessError("SESSION_CHANGED: program changed during batch_read; discard all results")
@@ -64,7 +68,7 @@ def batch_read(params, *, ensure_context, execute_read, clock=time.monotonic):
                     item_deadline = deadline
                     if request["tool"] == "decompile_function":
                         item_deadline = min(deadline, now + request.get("item_timeout_seconds", 15))
-                    budget = ReadBudget(item_deadline, clock=clock)
+                    budget = ReadBudget(item_deadline, clock=clock, parent=call_monitor)
                     data = execute_read(request["tool"], request["arguments"], budget=budget)
                     budget.check("DECOMPILE_TIMEOUT" if request["tool"] == "decompile_function" else "READ_TIMEOUT")
                 else:

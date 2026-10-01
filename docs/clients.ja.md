@@ -4,9 +4,15 @@
 
 クライアントごとに接続方式を1つ選びます。**HTTP**は別途起動したサーバーへ接続し、**stdio**はクライアントがサーバープロセスを起動・終了します。HTTPの場合は、先に[ローカル導入](usage.ja.md#local-setup)または[Docker導入](docker.ja.md)を済ませてください。
 
-HTTPはMCPのセッションIDを発行せず、ステートレスなJSON応答を返します。ステートフルに戻す互換設定はありません。解析状態とタイムアウトの扱いは[接続方式の設定](configuration.ja.md#transports)を参照してください。
+HTTPはステートレスで、MCPのセッションIDを発行せず、ステートフルに戻す互換設定もありません。応答はJSONか、呼び出しが進捗を知らせる間のイベントストリームなので、クライアントはMCPの仕様のとおり両方を受け付ける必要があります。解析状態とタイムアウトの扱いは[接続方式の設定](configuration.ja.md#transports)を参照してください。
 
 `--backend gui`（[GUIでのライブ共有](gui-live.ja.md)）では、どちらの接続方式も使えます。stdioでは、クライアントが中継を起動します。最初の中継がGhidraのGUIを起動し、後の中継や別のクライアントはそれを共有し、クライアントが終わってもGUIは開いたまま残ります。下のstdioの引数に `--backend gui` を足します（[GUIの設定の例](#gui)）。HTTPでは、`--backend gui --transport http` で起動したサーバーに接続します。
+
+## プロトコルの版
+
+サーバーは、MCPの2026-07-28版（`server/discover`。要求ごとにプロトコルの版と能力を載せる）で話し、`initialize` から始まる従来のクライアントにも応じます。設定は要りません。どちらで話すかはクライアントが決めます。2026年9月時点で、Claude Code 2.1.282は、HTTPでは2026-07-28版を使い、stdioでは `MCP_PROTOCOL_NEGOTIATION=auto` がなければ従来の方式を使います。CodexとVS Codeは従来の方式を使います。
+
+結果のどこまでがAIに渡るかは、クライアントで異なります。たとえばClaude Code 2.1.282は、`structuredContent` があると、同じ結果のテキストを渡しません。結果は、データと案内を両方に載せています。[大きな結果](configuration.ja.md#large-results)のプレビューと `read_hint` も同じです。
 
 ## ツールの発見
 

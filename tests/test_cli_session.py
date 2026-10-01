@@ -863,7 +863,7 @@ def test_configure_mcp_for_streamable_http():
     assert run_kwargs["port"] == 9090
     assert run_kwargs["streamable_http_path"] == "/custom"
     assert run_kwargs["stateless_http"] is True
-    assert run_kwargs["json_response"] is True
+    assert run_kwargs["json_response"] is False, "a waiting call with a progress token answers as an event stream"
     security = run_kwargs["transport_security"]
     assert security.enable_dns_rebinding_protection is True
     assert "127.0.0.1:*" in security.allowed_hosts

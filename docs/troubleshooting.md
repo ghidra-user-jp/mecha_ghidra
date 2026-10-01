@@ -2,7 +2,7 @@
 
 # Troubleshooting and upgrades
 
-Tool failures set MCP `isError: true`. Domain errors retain `code`, `message`, `retryable`, `hint`, and `details` under `structuredContent.error` and in matching JSON text. Branch on stable codes and inspect partial completion in `details` before retrying. An argument the input schema refuses is `VALIDATION_ERROR` too, with the schema's reason in `structuredContent.error.message`. Batch-edit item failures use `status` and `results` in a normal response. Large-result availability is handled [separately](configuration.md#large-results).
+Tool failures set MCP `isError: true`. A call to a tool the server does not publish (a misspelled name, or a tool hidden by the tool profile or filters) is different: no tool ran, so the reply is a JSON-RPC error `-32602` (`Unknown or unpublished tool`); check `tools/list` and the [tool exposure](configuration.md#tool-exposure) options. Domain errors retain `code`, `message`, `retryable`, `hint`, and `details` under `structuredContent.error` and in matching JSON text. Branch on stable codes and inspect partial completion in `details` before retrying. An argument the input schema refuses is `VALIDATION_ERROR` too, with the schema's reason in `structuredContent.error.message`. Batch-edit item failures use `status` and `results` in a normal response. Large-result availability is handled [separately](configuration.md#large-results).
 
 ## Startup and connection
 
