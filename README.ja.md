@@ -29,6 +29,7 @@ AIによる完全自動解析と、人への解析結果・知見の引き継ぎ
 - 新旧のMCPクライアントに対応する
   - MCPの2026-07-28版で話し、`initialize` から始まる従来のクライアントにも応じる
   - 結果を `structuredContent` とテキストの両方で返し、どちらか一方しかAIに見せないクライアントにも届ける
+  - 公式のMCP conformanceスイートをCIで流す：2026-07-28版の必須37件のうち33件が通る。残りの4件は、この版が非推奨にしたsamplingかrootsに依存する（[詳細](docs/development.ja.md#mcp-conformance)）
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture.dark.svg">

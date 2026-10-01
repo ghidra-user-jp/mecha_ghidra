@@ -29,6 +29,7 @@ A Ghidra MCP server that supports fully automated AI analysis and the handoff of
 - Work with current and earlier MCP clients
   - Speak MCP 2026-07-28, and still answer clients that begin with the earlier `initialize` handshake
   - Return each result in both `structuredContent` and the text block, for clients that show the model only one of them
+  - Run the official MCP conformance suite in CI: 33 of its 37 required 2026-07-28 scenarios pass, and the other four depend on sampling or roots, which that revision deprecates ([details](docs/development.md#mcp-conformance))
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture.dark.svg">

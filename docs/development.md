@@ -60,11 +60,15 @@ The supported range is `mcp>=2.2.0,<3`. Register `on_list_tools`, `on_call_tool`
 
 Use `jpype.JClass` for Java classes and `Thread.threadId()` for thread identifiers. Raw imports use public `BinaryLoader` metadata through a read-only `FileByteProvider`; do not use reflection into `ProgramLoader` or the deprecated `RandomAccessByteProvider`. Encode integer file offsets and lengths with `hex()` because Ghidra's `HexLong` options parse even unprefixed strings as hexadecimal.
 
+<a id="mcp-conformance"></a>
+
 ### MCP conformance
 
 `tests/mcp_conformance/` runs the official [conformance suite](https://github.com/modelcontextprotocol/conformance) against the server. The suite calls tools, resources and prompts by fixed names, so `server.py` serves the product's real tools and HTTP options (stateless Streamable HTTP, the Host and Origin checks) together with the suite's fixtures from `fixtures.py`. The fixtures exist only in that test server: the product never publishes them, and no CLI option turns them on. The product's own tools run against an empty registry there, so no Ghidra is needed.
 
 `tests/test_mcp_conformance.py` checks the fixtures in process. With `MECHA_CONFORMANCE=1` it also runs the suite, which needs Node and the pinned npm package `@modelcontextprotocol/conformance` (the version is in `tests/mcp_conformance/run.py`; `MECHA_CONFORMANCE_COMMAND` replaces the command, for example with a wrapper around an offline npm cache). `run.py` runs the required scenarios of 2026-07-28 and of 2025-11-25 against `expected-failures-<revision>.yml`: the run fails on a scenario that fails and is not listed, and on a listed one that passes. The baselines list only what is deliberately not adopted, each with its reason: what 2026-07-28 deprecates or removes (sampling, roots, logging, resource subscriptions) and what a stateless server cannot do in the earlier protocol (a request from the server to the client). The suite counts them as failures all the same. CI's `conformance` job runs `run.py` on every pull request and push to `main`, with the Node.js of the runner.
+
+Results with suite `0.2.0-alpha.11`: of the 37 required scenarios of 2026-07-28, 33 pass. The four that do not are `input-required-result-basic-sampling`, `-basic-list-roots`, `-multiple-input-requests` and `-capability-check`: they ask the server to request sampling or roots, or both, which 2026-07-28 deprecates. Of the 30 required scenarios of 2025-11-25, 21 pass, one passes with a warning (`server-sse-multiple-streams`: stateless HTTP issues no session ID) and eight fail; all nine are listed with their reasons in `expected-failures-2025-11-25.yml`. The suite does not score the Tasks scenarios of 2026-07-28. Update these numbers, and the line in the README, when the pinned suite version changes.
 
 ### PyGhidra dependency and script failures
 
