@@ -57,7 +57,7 @@ def test_run_with_retry_retries_until_success():
 def test_linux_release_build_defaults_to_ubuntu_2204_compatible_container():
     source = SCRIPT.read_text(encoding="utf-8")
 
-    assert 'DOCKER_IMAGE="${DOCKER_IMAGE:-eclipse-temurin:21-jdk-jammy}"' in source
+    assert 'DOCKER_IMAGE="${DOCKER_IMAGE:-eclipse-temurin:25-jdk-jammy}"' in source
 
 
 def test_release_workflow_checks_ubuntu_2204_and_omits_body_checksums():
@@ -73,32 +73,27 @@ def test_release_workflow_checks_ubuntu_2204_and_omits_body_checksums():
     assert "sha256sum" not in body_step
 
 
-def test_ghidra_1214_release_builds_all_missing_native_platforms():
+def test_ghidra_release_builds_all_missing_native_platforms():
     release_env = RELEASE_ENV.read_text(encoding="utf-8")
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
-    assert "MECHA_GHIDRA_GHIDRA_VERSION=12.1.4" in release_env
-    assert "MECHA_GHIDRA_GHIDRA_RELEASE_TAG=Ghidra_12.1.4_build" in release_env
-    assert "MECHA_GHIDRA_GHIDRA_DIST_FILENAME=ghidra_12.1.4_PUBLIC_20260921.zip" in release_env
+    assert "MECHA_GHIDRA_GHIDRA_VERSION=12.2" in release_env
+    assert "MECHA_GHIDRA_GHIDRA_RELEASE_TAG=Ghidra_12.2_build" in release_env
+    assert "MECHA_GHIDRA_GHIDRA_DIST_FILENAME=ghidra_12.2_PUBLIC_20261016.zip" in release_env
     assert (
-        "MECHA_GHIDRA_GHIDRA_DIST_SHA256=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
+        "MECHA_GHIDRA_GHIDRA_DIST_SHA256=2c2cd776db3c1f6a097ba418922378ac3649cadd5e844a6f5f088ae628a7be67"
         in release_env
     )
-    assert "MECHA_GHIDRA_DECOMPILER_NATIVES_RELEASE_TAG=v1.0.0" in release_env
-    assert "MECHA_GHIDRA_RELEASE_NATIVE_ASSET_RUN_ID=35679647311" in release_env
-    assert "MECHA_GHIDRA_RELEASE_NATIVE_ASSET_SOURCE_COMMIT=1a41e4e" in release_env
-    assert (
-        "MECHA_GHIDRA_DECOMPILER_NATIVES_SHA256="
-        "3a8de764a310c7542442978da1cd9cb463861ce9fb345275f2a00c60cdb5c7c6" in release_env
+    assert "MECHA_GHIDRA_DECOMPILER_NATIVES_RELEASE_TAG=v1.1.0" in release_env
+    assert "Ghidra_12.2_build/ghidra_12.2_PUBLIC_20261016.zip" in dockerfile
+    assert "v1.1.0/ghidra_decompiler_natives_all.zip" in dockerfile
+    native_hash = next(
+        line.split("=", 1)[1]
+        for line in release_env.splitlines()
+        if line.startswith("MECHA_GHIDRA_DECOMPILER_NATIVES_SHA256=")
     )
-    assert (
-        "MECHA_GHIDRA_RELEASE_PATCHED_GHIDRA_SHA256="
-        "997d27abc2c1a707e63e45d5ded9b6f67d3e48ed5b574841de61002bf1a4a3bd" in release_env
-    )
-    assert "Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip" in dockerfile
-    assert "v1.0.0/ghidra_decompiler_natives_all.zip" in dockerfile
-    assert "3a8de764a310c7542442978da1cd9cb463861ce9fb345275f2a00c60cdb5c7c6" in dockerfile
+    assert f"ARG GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64_DEFAULT={native_hash}" in dockerfile
     assert "github-token: ${{ github.token }}" in workflow
     assert "run-id: ${{ steps.native_asset_source.outputs.run_id }}" in workflow
     assert "Pin tag release to the verified native archives" in workflow
