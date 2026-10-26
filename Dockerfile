@@ -1,4 +1,8 @@
+FROM eclipse-temurin:25-jdk-jammy AS jdk
+
 FROM python:3.12-slim-trixie
+
+COPY --from=jdk /opt/java/openjdk /opt/jdk
 
 ARG TARGETPLATFORM=linux/amd64
 ARG TARGETARCH
@@ -7,12 +11,15 @@ ARG GHIDRA_DIST_URL
 ARG GHIDRA_DIST_SHA256
 ARG GHIDRA_DECOMPILER_NATIVES_URL
 ARG GHIDRA_DECOMPILER_NATIVES_SHA256
-ARG GHIDRA_DIST_URL_AMD64_DEFAULT=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip
-ARG GHIDRA_DIST_SHA256_AMD64_DEFAULT=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db
-ARG GHIDRA_DECOMPILER_NATIVES_URL_ARM64_DEFAULT=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v1.0.0/ghidra_decompiler_natives_all.zip
-ARG GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64_DEFAULT=3a8de764a310c7542442978da1cd9cb463861ce9fb345275f2a00c60cdb5c7c6
+ARG GHIDRA_DIST_URL_AMD64_DEFAULT=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.2_build/ghidra_12.2_PUBLIC_20261016.zip
+ARG GHIDRA_DIST_SHA256_AMD64_DEFAULT=2c2cd776db3c1f6a097ba418922378ac3649cadd5e844a6f5f088ae628a7be67
+ARG GHIDRA_DECOMPILER_NATIVES_URL_ARM64_DEFAULT=https://github.com/ghidra-user-jp/mecha_ghidra/releases/download/v1.1.0/ghidra_decompiler_natives_all.zip
+ARG GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64_DEFAULT
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    JAVA_HOME=/opt/jdk \
+    JAVA_HOME_OVERRIDE=/opt/jdk \
+    PATH=/opt/jdk/bin:${PATH} \
     GHIDRA_INSTALL_DIR=/opt/ghidra \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy
@@ -32,7 +39,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    openjdk-21-jdk-headless \
     unzip \
  && rm -rf /var/lib/apt/lists/*
 
@@ -94,13 +100,6 @@ WORKDIR /app
 # Dependencies first: a source edit must not invalidate the pyghidra/mcp layer.
 COPY pyproject.toml uv.lock README.md LICENSE /app/
 RUN uv sync --frozen --no-install-project --no-dev
-
-# PyGhidra finds a JDK by starting two JVMs (java -version and LaunchSupport)
-# at every server start unless JAVA_HOME_OVERRIDE names one.  Link the JDK
-# installed above at a path that does not depend on the architecture.
-RUN ln -s "$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")" /opt/java \
- && test -x /opt/java/bin/java
-ENV JAVA_HOME_OVERRIDE=/opt/java
 
 COPY src /app/src
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

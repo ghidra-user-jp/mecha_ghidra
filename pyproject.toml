@@ -30,11 +30,7 @@ dependencies = [
     "mcp>=2.2.0,<3",
     # The MCP SDK's own HTTP client; the Ghidra GUI backend's relays forward with it.
     "httpx2>=2.5.0,<3",
-    # Published metadata stays installable from PyPI. The exception propagation
-    # fix the scripts tools need (ghidra#9288) is only in the unreleased 3.2
-    # snapshot pinned under [tool.uv.sources]; on an older PyGhidra the startup
-    # probe (runtime_check) marks every script runtime unavailable.
-    "pyghidra>=3.1.0",
+    "pyghidra>=3.2.0",
     "fasteners>=0.19",
     "pydantic>=2.11,<3",
     "regex>=2024.4.16",
@@ -56,15 +52,6 @@ where = ["src"]
 
 [tool.uv]
 managed = true
-
-[tool.uv.sources]
-# Unreleased PyGhidra 3.2 snapshot (upstream commit 263160cf) with the script
-# exception propagation fix (ghidra#9288). uv.lock records its SHA-256. Not part
-# of the wheel metadata, so PyPI publishing and plain pip installs keep working.
-# Remove this entry (and raise the pyghidra lower bound above) once a PyPI
-# release contains the fix; the snapshot also reports version 3.2.0, so the
-# bound must change in the same commit.
-pyghidra = { url = "https://github.com/NationalSecurityAgency/ghidra/archive/263160cf57db21a9e25f1e0a8bc42fde5b8824eb.tar.gz", subdirectory = "Ghidra/Features/PyGhidra/src/main/py" }
 
 [project.optional-dependencies]
 test = [
