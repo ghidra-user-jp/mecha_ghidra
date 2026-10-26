@@ -56,9 +56,19 @@ macOSでは特に重要です。MCP 2.xはワーカースレッドでハンド�
 
 ### MCP SDK
 
-対応範囲は `mcp>=2.2.0,<3` です。公式の低レベル `Server` に `on_list_tools`、`on_call_tool`、リソース用ハンドラーを登録し、`mcp.types.Tool` で入出力スキーマを明示します。SDKの関数メタデータは上書きしません。入力はPydanticのstrictモデル、送信する `structuredContent` はJSON Schemaで検証します。同期処理はワーカースレッドへ渡します。HTTPは `Server.streamable_http_app(stateless_http=True, json_response=True, ...)`、stdioは `stdio_server()` と `Server.run()` を使います。CIの `latest-mcp-sdk` が範囲内の最新版を検証し、Dependabotが `mcp`／`mcp-types` の更新をまとめます。
+対応範囲は `mcp>=2.2.0,<3` です。公式の低レベル `Server` に `on_list_tools`、`on_call_tool`、リソース用ハンドラーを登録し、`mcp.types.Tool` で入出力スキーマを明示します。SDKの関数メタデータは上書きしません。入力はPydanticのstrictモデル、送信する `structuredContent` はJSON Schemaで検証します。同期処理はワーカースレッドへ渡します。HTTPは `Server.streamable_http_app(stateless_http=True, json_response=False, ...)` で、応答がイベントストリーム（進捗通知）になれるようにします。中継が自分のツール用に持つプロセス内の代役は、JSONのままです。stdioは `stdio_server()` と `Server.run()` を使います。CIの `latest-mcp-sdk` が範囲内の最新版を検証し、Dependabotが `mcp`／`mcp-types` の更新をまとめます。
 
 Javaクラスは `jpype.JClass`、スレッドIDは `Thread.threadId()` を使います。raw importのオプションは読み取り専用の `FileByteProvider` と `BinaryLoader` の公開APIで取得します。`ProgramLoader` の非公開メソッドへのリフレクションや、非推奨の `RandomAccessByteProvider` は使いません。Ghidraの `HexLong` オプションは接頭辞がなくても16進数として解釈するため、整数のファイルオフセットと長さは `hex()` で渡します。
+
+<a id="mcp-conformance"></a>
+
+### MCPのconformance
+
+`tests/mcp_conformance/` は、公式の[conformanceスイート](https://github.com/modelcontextprotocol/conformance)をサーバーに対して流します。スイートは、決まった名前でツール、リソース、プロンプトを呼びます。そのため `server.py` は、製品の実物のツールとHTTPの設定（ステートレスなStreamable HTTP、HostとOriginの検査）に、`fixtures.py` のスイート用の見本を足して提供します。見本はこの試験用のサーバーにだけあります。製品は見本を公開せず、CLIのオプションでも有効にできません。製品のツールは、ここでは空のregistryに対して動くので、Ghidraは要りません。
+
+`tests/test_mcp_conformance.py` は、見本をプロセスの中で検査します。`MECHA_CONFORMANCE=1` を付けると、スイートも流します。これにはNodeと、版を固定したnpmのパッケージ `@modelcontextprotocol/conformance` が要ります（版は `tests/mcp_conformance/run.py` にあります。`MECHA_CONFORMANCE_COMMAND` で、実行するコマンドを替えられます。たとえばオフラインのnpmのキャッシュを使う包みです）。`run.py` は、2026-07-28版と2025-11-25版の必須のシナリオを、`expected-failures-<版>.yml` とあわせて流します。一覧にない失敗があるか、一覧にあるのに通ったときに、失敗になります。一覧には、意図して採らないものだけを、理由つきで載せています。2026-07-28版が非推奨にした、または削除したもの（sampling、roots、logging、リソースの購読）と、従来のプロトコルでステートレスなサーバーにはできないこと（サーバーからクライアントへの要求）です。スイートは、それらも失敗として数えます。CIの `conformance` ジョブが、プルリクエストとmainへのpushのたびに、ランナーのNode.jsで `run.py` を流します。
+
+スイート `0.2.0-alpha.11` での結果は次のとおりです。2026-07-28版の必須37件のうち、33件が通ります。通らない4件は、`input-required-result-basic-sampling`、`-basic-list-roots`、`-multiple-input-requests`、`-capability-check` です。サーバーにsamplingかrootsの要求（または両方）を求めるもので、2026-07-28版はそれらを非推奨にしています。2025-11-25版の必須30件のうち、21件が通り、1件が警告つきで通り（`server-sse-multiple-streams`：ステートレスなHTTPはセッションIDを出さない）、8件が通りません。この9件は、理由とともに `expected-failures-2025-11-25.yml` にあります。2026-07-28版のTasksのシナリオは、スイートが採点しません。固定したスイートの版を上げるときは、この数字と、READMEの1行を見直します。
 
 ### PyGhidraの依存バージョンとスクリプト失敗
 

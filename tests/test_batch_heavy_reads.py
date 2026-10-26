@@ -258,3 +258,74 @@ def test_decoded_item_size_is_bounded_before_loading(monkeypatch):
     monkeypatch.setattr(result_json, "_MAX_TEXT_ITEM_CHARS", 1024)
     with pytest.raises(ToolError, match="decode budget"):
         asyncio.run(runtime.mcp.call_tool("read_result", {"result_id": result["result_id"], "path": "/items/0/data"}))
+
+
+class CallMonitor:
+    """The cancellable monitor of a whole call, as the runtime passes it to a read."""
+
+    def __init__(self):
+        self.cancelled = threading.Event()
+
+    def cancel(self):
+        self.cancelled.set()
+
+    def isCancelled(self):  # noqa: N802 - Ghidra TaskMonitor API
+        return self.cancelled.is_set()
+
+
+def test_a_reads_monitor_is_cancelled_as_soon_as_the_calls_monitor_is():
+    import time
+
+    parent, read = CallMonitor(), CallMonitor()
+    with ReadBudget(time.monotonic() + 30, parent=parent).monitor(lambda: read):
+        assert not read.cancelled.wait(0.2), "nothing was cancelled yet"
+        parent.cancel()
+        assert read.cancelled.wait(2), "the read must stop when its call is cancelled"
+    assert not [t for t in threading.enumerate() if t.name == "read-budget"], "the watcher ends with the read"
+
+
+def test_the_deadline_still_cancels_a_read_that_has_a_calls_monitor():
+    import time
+
+    parent, read = CallMonitor(), CallMonitor()
+    with ReadBudget(time.monotonic() + 0.1, parent=parent).monitor(lambda: read):
+        assert read.cancelled.wait(2)
+    assert not parent.isCancelled(), "a read's deadline is not the call's cancellation"
+
+
+def test_a_batch_stops_at_the_next_item_once_its_call_is_cancelled():
+    ctx = context()
+    monitor = CallMonitor()
+    seen = []
+
+    def read(tool, args, **kwargs):
+        seen.append(args)
+        monitor.cancel()  # the client goes away while the first item runs
+        return "int f(void) {}"
+
+    with pytest.raises(HeadlessError, match="OPERATION_CANCELLED"):
+        batch_module.batch_read(
+            {"requests": [request("a", tool="decompile_function"), request("b", tool="decompile_function")]},
+            ensure_context=lambda: ctx,
+            execute_read=read,
+            current_task_monitor=lambda: monitor,
+        )
+    assert len(seen) == 1, "the second item must not run"
+
+
+def test_the_items_of_a_batch_share_the_calls_monitor_as_their_budgets_parent():
+    ctx = context()
+    monitor = CallMonitor()
+    parents = []
+
+    def read(tool, args, *, budget):
+        parents.append(budget.parent)
+        return "int f(void) {}"
+
+    batch_module.batch_read(
+        {"requests": [request("a", tool="decompile_function")]},
+        ensure_context=lambda: ctx,
+        execute_read=read,
+        current_task_monitor=lambda: monitor,
+    )
+    assert parents == [monitor]

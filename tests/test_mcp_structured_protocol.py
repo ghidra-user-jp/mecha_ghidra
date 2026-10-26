@@ -115,9 +115,38 @@ def test_protocol_errors_are_structured_and_do_not_execute_tools():
                 assert result.is_error
                 validate_result(tools, name, result)
                 assert result.structured_content["error"]["message"]
-            result = await client.call_tool("run_script", {"source": "pass"})
-            assert result.is_error and "unpublished" in result.content[0].text
         assert registry.calls == []
+
+    asyncio.run(check())
+
+
+def test_an_unpublished_tool_is_a_protocol_error_not_a_tool_result():
+    """The spec sorts an unknown tool with protocol errors (-32602); an isError result is for a tool that ran."""
+
+    async def check():
+        registry = Registry()
+        async with Client(runtime(registry).mcp) as client:
+            for name in ("run_script", "no_such_tool"):
+                with pytest.raises(MCPError) as raised:
+                    await client.call_tool(name, {"source": "pass"})
+                assert raised.value.code == -32602
+                assert name in raised.value.message and "unpublished" in raised.value.message
+                assert raised.value.data == {"name": name}
+        assert registry.calls == []
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+def test_the_server_names_itself_for_clients_that_list_servers(mode):
+    """server/discover (2026-07-28) and initialize (older clients) carry the same identity."""
+
+    async def check():
+        async with Client(runtime(Registry()).mcp, mode=mode) as client:
+            info = client.server_info
+            assert info is not None and (info.name, info.title) == ("mecha_ghidra", "Mecha Ghidra")
+            assert info.website_url == "https://github.com/ghidra-user-jp/mecha_ghidra"
+            assert info.description and len(info.description) < 200
 
     asyncio.run(check())
 

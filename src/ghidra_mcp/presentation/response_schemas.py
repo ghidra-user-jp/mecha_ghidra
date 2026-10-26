@@ -62,6 +62,8 @@ def _large_result_output_schema() -> dict[str, Any]:
             "result_type",
             "item_count",
             "metadata_truncated",
+            "read_hint",
+            "preview",
         ],
         "properties": {
             "tool": {"type": "string"},
@@ -80,6 +82,8 @@ def _large_result_output_schema() -> dict[str, Any]:
             "result_type": {"type": "string"},
             "item_count": item_count_schema,
             "metadata_truncated": {"type": "boolean"},
+            "read_hint": {"type": "string"},
+            "preview": {"type": "string"},
         },
         # Permit additive metadata without invalidating doc-driven clients.
         "additionalProperties": True,
@@ -99,6 +103,7 @@ def _large_result_output_schema() -> dict[str, Any]:
             "result_type",
             "item_count",
             "metadata_truncated",
+            "notice",
         ],
         "properties": {
             "tool": {"type": "string"},
@@ -106,6 +111,7 @@ def _large_result_output_schema() -> dict[str, Any]:
             "truncated": {"const": True, "type": "boolean"},
             "result_unavailable": {"const": True, "type": "boolean"},
             "operation_succeeded": {"const": True, "type": "boolean"},
+            "notice": {"type": "string"},
             "size_chars": {"type": "integer", "minimum": 0},
             "size_bytes": {"type": "integer", "minimum": 0},
             "cache_max_bytes": {"type": "integer", "minimum": 1},
@@ -152,12 +158,13 @@ def _large_result_output_schema() -> dict[str, Any]:
         "description": (
             "CallToolResult transport shapes used when resource-mode large-result "
             "compaction is enabled. A cacheable logical output is represented by "
-            "retrieval metadata and a resource link; a result entry larger than "
+            "retrieval metadata (with the preview and read_hint, which the text "
+            "block repeats) and a resource link; a result entry larger than "
             "the whole cache is represented by a successful RESULT_TOO_LARGE notice "
-            "only when that notice is smaller than the inline result. Otherwise the "
-            "logical output remains inline. The notice explicitly reports the "
-            "unavailable output without marking the already-completed operation as "
-            "failed. output_schema "
+            "(also in text) only when that notice is smaller than the inline result. "
+            "Otherwise the logical output remains inline. The notice explicitly "
+            "reports the unavailable output without marking the already-completed "
+            "operation as failed. output_schema "
             "continues to describe the logical tool result."
         ),
         "type": "object",
@@ -326,13 +333,21 @@ def wire_output_schema(
         [
             {
                 "type": "object",
-                "required": ["tool", "target", "operation_succeeded", "result_unavailable", "presentation_failed"],
+                "required": [
+                    "tool",
+                    "target",
+                    "operation_succeeded",
+                    "result_unavailable",
+                    "presentation_failed",
+                    "notice",
+                ],
                 "properties": {
                     "tool": {"type": "string"},
                     "target": {"type": "string"},
                     "operation_succeeded": {"const": True},
                     "result_unavailable": {"const": True},
                     "presentation_failed": {"const": True},
+                    "notice": {"type": "string"},
                 },
             },
             {

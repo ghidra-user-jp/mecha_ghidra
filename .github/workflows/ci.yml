@@ -84,6 +84,47 @@ jobs:
           MECHA_GHIDRA_DOCKER_IMAGE: mecha_ghidra:ci
         run: uv run pytest -q tests/test_docker_image.py
 
+  conformance:
+    # The official MCP conformance suite (@modelcontextprotocol/conformance, its version pinned in
+    # tests/mcp_conformance/run.py) against the server's own HTTP stack with the suite's fixtures,
+    # for protocol 2026-07-28 and 2025-11-25. expected-failures-<revision>.yml lists what is
+    # deliberately not adopted; the job fails on any other failure, and on a listed one that passes.
+    # The runner's Node.js runs the suite; the fixtures exist only under tests/ (no Ghidra needed).
+    name: MCP conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.2
+
+      - name: Install dev dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Record the Node.js version
+        run: |
+          node --version
+          npm --version
+
+      - name: Run the conformance suite
+        run: uv run python tests/mcp_conformance/run.py --output-dir "${RUNNER_TEMP}/conformance"
+
+      - name: Keep the suite's results of a failed run
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conformance-results
+          if-no-files-found: ignore
+          retention-days: 7
+          path: ${{ runner.temp }}/conformance/**
+
   gui-acceptance-windows:
     # The Ghidra GUI backend end to end on a Windows desktop: one GUI session
     # shared with the tests as the human (tests/test_gui_integration.py), and

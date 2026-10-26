@@ -72,6 +72,8 @@ AIが `load_project_program` や `open_program` でProgramを読み込むと、G
 
 AIのtargetは、人間が見ているタブ、ウィンドウ、カーソルに追従しません。人間が別のタブに切り替えても、AIの呼び出しは読み込んだProgramに対して行われます。人間がタブを閉じると、そのtargetは失効し、以後の呼び出しは `PROGRAM_NOT_OPEN`（`details.reason="closed_in_gui"`）を返します。`load_project_program` で読み込み直せます。人間がこのサーバーのProjectを閉じるか別のProjectを開くと、このサーバーのtargetはすべて使えなくなり、以後の呼び出しは `SESSION_NOT_FOUND`（`details.reason="gui_project_closed"`）を返します。同じProjectを開き直しても戻らないので、Ghidraを終えてからサーバーを起動し直します。実行中の呼び出しは、Mechaが呼び出しの間だけProgramを保持するので、その途中でタブが閉じられても最後まで動き、終わった後にProgramが閉じます。
 
+クライアントによる呼び出しの取り消しは、中継を通ってruntimeに届き、読み取りは、直接つないだクライアントのときと同じように止まります（[長い呼び出し](usage.ja.md#long-calls)）。stdioでは、中継が `notifications/cancelled` を受けると、runtimeへの要求を閉じます。クライアントのプロトコルの版は問いません。HTTPでは、クライアントの接続が閉じたときに、中継が要求を閉じます。接続を閉じずに `notifications/cancelled` で取り消すクライアント（従来の接続でのPython SDKのクライアントがそうです）では、接続が開いたままなので、読み取りは続きます。
+
 MCPクライアントの接続を切っても、GUIとtargetはサーバーに残ります。クライアントを再起動して接続し直すと、同じtargetで作業を続けられます。
 
 未解析のProgramが現在のタブになると、Ghidraは自動解析の確認の画面を出します。Mechaはこの画面に答えず、人間の選択に任せます。読み込みの応答と `get_gui_context` の `modal_dialog` に、表示中の画面の題名が入ります。画面が出ている間も、読み取りは続けられます。読み込みでGhidraが先に尋ねるとき（checkoutの確認、強制終了の後の復旧など）は、人間が答えるまで待ちます。40秒を過ぎた呼び出しは先送り（`deferred: true`）の応答になり、結果は `get_operation` で受け取れます（[長い呼び出し](usage.ja.md#long-calls)）。

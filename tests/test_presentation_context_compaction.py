@@ -348,7 +348,6 @@ def test_large_string_result_returns_preview_resource_link_and_readable_resource
     assert meta["tool"] == "decompile_function"
     assert meta["target"] == "fw"
     assert meta["mime_type"] == "text/x-c"
-    assert "preview" not in meta
     assert meta["resource_uri"].endswith(meta["result_id"])
     assert result.content[1].mime_type == "text/x-c"
 
@@ -364,6 +363,40 @@ def test_large_string_result_returns_preview_resource_link_and_readable_resource
     assert f"search_result(result_id='{meta['result_id']}'" in notice
     preview = notice.split("----- preview -----\n", 1)[1]
     assert preview == full_text[: meta["preview_chars"]]
+    # Some clients (Claude Code, for one) give the model structuredContent only: it carries the same
+    # preview and the same instruction to continue, so those clients are not left with metadata alone.
+    assert meta["preview"] == preview
+    assert meta["read_hint"] in notice
+    assert meta["read_hint"].startswith(
+        f"Continue with read_result(result_id='{meta['result_id']}', offset_chars={meta['preview_chars']})"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param('int main(void) { return "quoted\\"; }\n' * 3000, id="text-with-escapes"),
+        pytest.param([{"address": f"0x{index:08x}", "name": f'fn "{index}"'} for index in range(3000)], id="list"),
+        pytest.param({f"key{index}": {"value": "x" * 40} for index in range(800)}, id="dict"),
+    ],
+)
+def test_both_channels_carry_the_preview_and_stay_within_the_response_budget(payload):
+    config = ToolPresentationConfig()
+    result = maybe_compact_tool_result(
+        tool_name="decompile_function",
+        target="fw",
+        result=payload,
+        config=config,
+        store=ResultResourceStore(),
+    )
+
+    assert isinstance(result, CallToolResult) and result.structured_content["truncated"] is True
+    meta = result.structured_content
+    notice = result.content[0].text
+    assert meta["preview"] and meta["preview"] == notice.split("----- preview -----\n", 1)[1]
+    assert meta["preview_chars"] == len(meta["preview"])
+    # The preview is in the text and in structuredContent, and the whole wire form still fits.
+    assert _call_tool_result_wire_chars(result) <= config.large_result_threshold_chars
 
 
 def test_unicode_payload_round_trips_with_utf8_cache_accounting():
@@ -912,6 +945,8 @@ def test_partial_preparation_failure_returns_safe_completed_notice():
     assert result.structured_content["operation_succeeded"] is True
     assert result.structured_content["result_unavailable"] is True
     assert result.structured_content["presentation_failed"] is True
+    assert result.structured_content["notice"] == result.content[0].text
+    assert "Do not automatically retry" in result.structured_content["notice"]
 
 
 def test_compaction_normalizes_unpaired_unicode_surrogates():
@@ -1270,6 +1305,8 @@ def test_payload_over_cache_budget_returns_successful_unavailable_result():
     assert payload not in result.content[0].text
     assert "RESULT_TOO_LARGE" in result.content[0].text
     assert "Do not re-run a non-idempotent tool" in result.content[0].text
+    # The clients that drop the text still learn that the tool ran and must not be run again.
+    assert result.structured_content["notice"] == result.content[0].text
 
 
 def test_uncacheable_output_does_not_report_a_completed_mutation_as_failed():

@@ -1,0 +1,20 @@
+# The required server scenarios of 2025-11-25 (the initialize handshake) that this server is known not to
+# pass, and why. The suite counts every one of them as a failure; this file only keeps the run from failing
+# on them (and fails it if one starts to pass, so the entry is removed).
+server:
+  # Logging is deprecated in 2026-07-28 (SEP-2577) and is not adopted.
+  - logging-set-level
+  - tools-call-with-logging
+  # Sampling is deprecated in 2026-07-28 (SEP-2577), and these calls need a request from the server to the client.
+  - tools-call-sampling
+  # A request from the server to the client needs a stream to send it on; stateless JSON responses have none.
+  # From 2026-07-28 on, the input-required result replaces it, and the 2026-07-28 scenarios pass.
+  - tools-call-elicitation
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+  # resources/subscribe is removed in 2026-07-28 (SEP-2575), and notifications need a stream.
+  - resources-subscribe
+  - resources-unsubscribe
+  # A warning, which the baseline check counts as a failure: stateless HTTP issues no session ID
+  # (docs/configuration.md, Transports), and the scenario wants one.
+  - server-sse-multiple-streams

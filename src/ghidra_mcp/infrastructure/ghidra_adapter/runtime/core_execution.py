@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any, Dict
 
 from ghidra_headless.errors import HeadlessError
+from ghidra_mcp.application.cancellation import CallCancellation, current_call_cancellation
 from ghidra_mcp.application.commands import PROGRAM_WRITE_COMMANDS
 from ghidra_mcp.application.locks import (
     SCRIPT_BARRIER,
@@ -237,6 +238,9 @@ class RuntimeCoreExecution:
     ) -> Any:
         core = self._store.core_accessor()
         if control is None:
+            cancellation = current_call_cancellation()
+            if cancellation is not None and not record:
+                return self._execute_cancellable_locked(core, command, params, target, cancellation)
             if record:
                 return core.execute(command, params, key=target, record_transactions=True)
             return core.execute(command, params, key=target)
@@ -256,6 +260,26 @@ class RuntimeCoreExecution:
             return core.execute(command, params, key=target, task_monitor=monitor)
         finally:
             control.bind_cancel(None)
+
+    def _execute_cancellable_locked(
+        self, core, command: str, params: Dict[str, Any], target: str, cancellation: CallCancellation
+    ) -> Any:
+        """Run a read whose request can still cancel it: its Ghidra monitor stops the work.
+
+        Only reads reach here (``DeferredCalls``), so a stopped read leaves nothing behind.  A read whose request
+        was cancelled while it waited for its locks does not run at all.
+        """
+        if cancellation.cancelled:
+            raise HeadlessError(f"OPERATION_CANCELLED: the request was cancelled before {command} ran")
+        with self._store.registry_lock.read_lock():
+            session = self._store.ensure_session(target)
+        monitor = session.get_project_handle().create_cancellable_monitor()
+        # Runs at once if the request was cancelled in the meantime.
+        unregister = cancellation.register(monitor.cancel)
+        try:
+            return core.execute(command, params, key=target, task_monitor=monitor)
+        finally:
+            unregister()
 
     def _refresh_domain_path_locked(self, target: str) -> None:
         # A script may rename or move the program's file, and a rollback does
