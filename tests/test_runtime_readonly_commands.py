@@ -238,6 +238,16 @@ def test_runtime_readonly_commands_all_success(tmp_path):
                 target=target, edits=[{"kind": "rename_data", "address": data_address, "new_name": data_label}]
             )
         )
+        # A data label is not necessarily an export (for example the PE header
+        # Ghidra 12.2 defines at the image base). Seed an exported data symbol
+        # explicitly so this check does not depend on analyzer ordering.
+        transaction_id = program.startTransaction("Export runtime validation data")
+        committed = False
+        try:
+            program.getSymbolTable().addExternalEntryPoint(program.getAddressFactory().getAddress(data_address))
+            committed = True
+        finally:
+            program.endTransaction(transaction_id, committed)
 
         bytes_dump = _unwrap_runtime_result(cli_tools.get_bytes(address=address, size=16, target=target))
         pattern = _derive_search_pattern_from_hexdump(bytes_dump)

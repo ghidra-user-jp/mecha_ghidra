@@ -177,14 +177,14 @@ jobs:
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
 
       - name: Make scripts executable
         run: chmod +x scripts/build_decompiler_natives.sh scripts/build_linux_arm64_decompiler.sh
 
       - name: Build decompiler overlay
         env:
-          DOCKER_IMAGE: eclipse-temurin:21-jdk-jammy
+          DOCKER_IMAGE: eclipse-temurin:25-jdk-jammy
         run: ./scripts/build_decompiler_natives.sh --platform "${{ matrix.platform }}" "${{ matrix.build_mode }}" --no-patched-dist --output-dir dist
 
       - name: Verify overlay contents
@@ -369,6 +369,11 @@ jobs:
           test -n "${sdist_path}"
           sdist_name="$(basename "${sdist_path}")"
           cat > release-body.md <<EOF
+          ## Ghidra compatibility
+
+          Targets Ghidra ${MECHA_GHIDRA_GHIDRA_VERSION}. JDK 25 or newer is required.
+          Uses the official PyGhidra 3.2.0 release or newer, including script exception propagation.
+
           ## Python package
 
           This release includes the tested \`mecha_ghidra\` source distribution built from this tag.

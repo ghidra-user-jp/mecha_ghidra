@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -311,14 +312,17 @@ def run(coroutine):
 # ---- the tests -----------------------------------------------------------------------------------
 
 
-_line_queues: dict[int, queue.Queue] = {}
+_line_queues: weakref.WeakKeyDictionary[object, queue.Queue] = weakref.WeakKeyDictionary()
 
 
 def _lines_of(stream) -> queue.Queue:
     """Windows cannot select() on a pipe: a thread reads the stream's lines (None at its end)."""
-    lines = _line_queues.get(id(stream))
+    # Closed streams can be collected and their ids reused by later tests.
+    # Keep the queue tied to the stream itself so a new pipe never inherits
+    # an earlier pipe's EOF or empty queue.
+    lines = _line_queues.get(stream)
     if lines is None:
-        lines = _line_queues[id(stream)] = queue.Queue()
+        lines = _line_queues[stream] = queue.Queue()
 
         def pump() -> None:
             for line in iter(stream.readline, b""):

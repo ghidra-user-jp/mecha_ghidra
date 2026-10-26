@@ -13,8 +13,8 @@ DEFAULT_OUTPUT_DIR="${REPO_ROOT}/dist"
 DEFAULT_UPSTREAM_REF="${MECHA_GHIDRA_GHIDRA_RELEASE_TAG}"
 # Build Linux release binaries against the oldest supported userspace rather
 # than the GitHub runner's libc. The Temurin Jammy image is multi-arch and
-# already supplies JDK 21 without raising the generated binaries' glibc floor.
-DOCKER_IMAGE="${DOCKER_IMAGE:-eclipse-temurin:21-jdk-jammy}"
+# already supplies JDK 25 without raising the generated binaries' glibc floor.
+DOCKER_IMAGE="${DOCKER_IMAGE:-eclipse-temurin:25-jdk-jammy}"
 OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
 WORK_DIR=""
 UPSTREAM_REF="${GHIDRA_UPSTREAM_REF:-${DEFAULT_UPSTREAM_REF}}"
@@ -288,7 +288,7 @@ if [[ "${USE_DOCKER}" == "1" ]]; then
       apt-get update
       build_packages=(ca-certificates curl git unzip zip tar build-essential bison flex file python3)
       if ! command -v java >/dev/null 2>&1 || ! command -v javac >/dev/null 2>&1; then
-        build_packages+=(openjdk-21-jdk-headless)
+        build_packages+=(openjdk-25-jdk-headless)
       fi
       apt-get install -y --no-install-recommends "${build_packages[@]}"
       exec bash /workspace/scripts/build_decompiler_natives.sh "$@"' \

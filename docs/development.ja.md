@@ -62,7 +62,7 @@ Javaクラスは `jpype.JClass`、スレッドIDは `Thread.threadId()` を使�
 
 ### PyGhidraの依存バージョンとスクリプト失敗
 
-PyGhidraは上流コミット [`263160cf57db21a9e25f1e0a8bc42fde5b8824eb`](https://github.com/NationalSecurityAgency/ghidra/commit/263160cf57db21a9e25f1e0a8bc42fde5b8824eb) に固定しています。パッケージのバージョン表記は3.2.0ですが、**未リリースのスナップショット**です。2026-09-20時点でPyPIの最新版は3.1.0で、スクリプトの例外を握りつぶします（[上流Issue](https://github.com/NationalSecurityAgency/ghidra/issues/9288)）。このスナップショットでは例外が伝播するため、非公開runnerへのローカルパッチを撤去しました。この固定は `pyproject.toml` の `[tool.uv.sources]` にあり、`uv sync`/`uv run`（およびDockerイメージ）に適用され、`uv.lock` にSHA-256を記録します。公開メタデータ側は `pyghidra>=3.1.0` のみを要求するため、PyPIからのインストールと公開は可能です。修正を含まないPyPI版PyGhidraでは起動時プローブが全スクリプトランタイムを利用不可（`SCRIPT_RUNTIME_UNAVAILABLE`）にし、他のツールは動作します。初回の `uv sync` ではGhidraのソースアーカイブを取得します。修正を含むリリースが出たら、sourcesのエントリ削除と下限バージョンの引き上げを同じコミットで行ってください（スナップショットも3.2.0を名乗るため）。
+PyGhidraは正式版3.2.0以上を使用します。正式版3.2.0にはスクリプト例外の伝播修正（[上流Issue](https://github.com/NationalSecurityAgency/ghidra/issues/9288)）が含まれるため、`uv sync`・Docker・公開パッケージの依存指定をPyPI版へ統一しました。ソースアーカイブの上書き指定は不要です。起動時プローブは引き続き各スクリプトランタイムを検査し、互換性のないランタイムを利用不可（`SCRIPT_RUNTIME_UNAVAILABLE`）にします。
 
 PyPI公開はリリース対象外です。リポジトリとリリース添付物での配布には、この検証済みコミット固定を維持します。PyGhidraの正式版を待つことはv1.0の公開条件に含めません。依存を更新するときはlockfileを更新し、以下の実機・パッケージ検証を再実行してください。ローカルwheelとリポジトリからのインストールは、この依存で検証済みです。
 
@@ -129,7 +129,7 @@ docker run --rm --volume "$PWD:/work:ro" mecha_ghidra:gui-tests
 
 Windowsでは、場面ごとに非表示のコンソールを作り、試験が送るCtrl+CとCtrl+Breakがその場面だけに届くようにします。registryの置き場所（`LOCALAPPDATA`）と一時ファイル（`TEMP`）も、試験のディレクトリに向けます。MCPのPython SDKは、Windowsではstdioのサーバーを、切り離しを許さず、終わるときに中のプロセスを終えるJob Objectの中で起動します。そのため中継の試験は、SDKのJobを外したクライアント（libuvを使うNodeやBunのクライアントと同じ扱い）で行い、SDKのJobのままの動作、入れ子のJob、切り離しを許すJob、中継のプロセスの木を終わらせるクライアント（Claude Codeと同じ動き）、HTTPの中継へのCtrl+Cは、Windowsだけの試験（G50）で確かめます。遅い環境では、`GHIDRA_GUI_TEST_TIME_SCALE`（既定は1）で、試験の側の待ち（起動、画面、試験用のProjectの作成）を伸ばします。判定の基準（G33で、decompileの間にEDTだけが止まってよい100ミリ秒など）は変わりません。
 
-CIの `gui-acceptance-windows` ジョブは、GitHubのWindowsのランナー（`windows-2025`）にTemurin 21とGhidraを入れ、GUIの単体の試験と、両方の受け入れ試験を実行します。切り離したruntimeがクライアントより長く動けるかは、ランナーが手順を動かすJob Objectで決まるので、試験の前に `tests/windows/runner_environment.py` で、そのJobと、画面を持つセッションかを記録します。CIの `gui-acceptance-ubuntu` ジョブは、GitHubのUbuntu 26.04のランナーで、UbuntuのOpenJDK 21のパッケージとXvfbを使って、同じ受け入れ試験を実行します（Ghidra 12.1はJDK 21を求め、Ubuntu 26.04の既定のJDKは25です）。Ghidraが使うJDKは、試験の前に記録します。
+CIの `gui-acceptance-windows` ジョブは、GitHubのWindowsのランナー（`windows-2025`）にTemurin 25とGhidraを入れ、GUIの単体の試験と、両方の受け入れ試験を実行します。切り離したruntimeがクライアントより長く動けるかは、ランナーが手順を動かすJob Objectで決まるので、試験の前に `tests/windows/runner_environment.py` で、そのJobと、画面を持つセッションかを記録します。CIの `gui-acceptance-ubuntu` ジョブは、GitHubのUbuntu 26.04のランナーで、Temurin 25とXvfbを使って、同じ受け入れ試験を実行します（Ghidra 12.2にはJDK 25以上が必要です）。Ghidraが使うJDKは、試験の前に記録します。
 
 中継（`ghidra_mcp.presentation.gui_relay`）はJSON-RPCをそのまま転送し、読むのは、runtimeの記録との設定の照合、ツールの少ないクライアントに見せるツールの絞り込み、HTTPのルーティングのヘッダーに要るものだけです。runtimeは、プロトコルの2026-07-28の版から、`MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` を本文と照合します。HTTPの中継は、クライアントが送ったこれらのヘッダーをそのまま渡し、runtimeが返したHTTPの状態をそのまま返します。stdioの中継は、HTTPのクライアントが送るもの（要求の `_meta` の版か `initialize` で決まった版、メソッド、ツールなどの名前）を付けます。runtimeが答えられないものには、中継の控えのサーバーが答えます。これは、このパッケージが中継のツールに対して作る同じMCPサーバーで、起動のゲートがすべての呼び出しを断るので、`initialize`、`tools/list`、エラーの形がruntimeと同じになります。runtimeとの通信には、MCP SDKのHTTPクライアントの `httpx2` を、環境変数のプロキシを使わず、接続を再利用しない設定で使います。
 
