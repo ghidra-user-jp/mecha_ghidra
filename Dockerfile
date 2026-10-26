@@ -2,7 +2,7 @@ FROM eclipse-temurin:25-jdk-jammy AS jdk
 
 FROM python:3.12-slim-trixie
 
-COPY --from=jdk /opt/java/openjdk /opt/jdk
+COPY --from=jdk /opt/java/openjdk /opt/java
 
 ARG TARGETPLATFORM=linux/amd64
 ARG TARGETARCH
@@ -17,9 +17,9 @@ ARG GHIDRA_DECOMPILER_NATIVES_URL_ARM64_DEFAULT=https://github.com/ghidra-user-j
 ARG GHIDRA_DECOMPILER_NATIVES_SHA256_ARM64_DEFAULT=
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    JAVA_HOME=/opt/jdk \
-    JAVA_HOME_OVERRIDE=/opt/jdk \
-    PATH=/opt/jdk/bin:${PATH} \
+    JAVA_HOME=/opt/java \
+    JAVA_HOME_OVERRIDE=/opt/java \
+    PATH=/opt/java/bin:${PATH} \
     GHIDRA_INSTALL_DIR=/opt/ghidra \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy
